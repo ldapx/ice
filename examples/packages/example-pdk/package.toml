@@ -1,0 +1,15 @@
+[package]
+schema_version = 1
+name = "example.pdk"
+version = "1.0.0"
+description = "Minimal example PDK for ICE package tests"
+license = "MIT"
+
+[provides]
+pdk = true
+symbols = true
+models = true
+layout = true
+
+[trust]
+trusted = false

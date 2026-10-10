@@ -1,0 +1,23 @@
+# Build and generated tooling state
+build/
+.xmake/
+.cache/
+
+# Generated package-manager artifacts
+ice.lock
+.ice/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+
+# IDE and editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db

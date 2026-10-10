@@ -1,0 +1,13 @@
+[package]
+schema_version = 1
+name = "example.lib"
+version = "1.0.0"
+description = "Minimal example symbol and model library"
+license = "MIT"
+
+[dependencies]
+"example.pdk" = ">=1.0.0"
+
+[provides]
+symbols = true
+models = true

@@ -1,0 +1,15 @@
+[symbol]
+name = "inverter"
+artwork = "inverter.svg"
+
+[[pin]]
+name = "A"
+x = 0
+y = 0
+direction = "input"
+
+[[pin]]
+name = "Y"
+x = 20
+y = 0
+direction = "output"
