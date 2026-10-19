@@ -104,11 +104,17 @@ struct Rect {
     bool valid() const;
 };
 
+struct LayoutPoint {
+    Coordinate x = 0;
+    Coordinate y = 0;
+};
+
 struct Shape {
     ObjectId id = 0;
     ObjectId layer = 0;
     std::optional<ObjectId> net;
     Rect rectangle;
+    std::vector<LayoutPoint> polygon;
 };
 
 struct Port {

@@ -86,10 +86,12 @@ std::vector<Diagnostic> Project::validate() const {
         for (const auto& [shapeId, shape] : cell.shapes) {
             if (!layers.contains(shape.layer))
                 result.push_back({Diagnostic::Severity::error, "layout.shape.layer", "Shape references a missing layer", shapeId});
-            if (!shape.rectangle.valid())
+            if ((!shape.polygon.empty() && shape.polygon.size() < 3) ||
+                (shape.polygon.empty() && !shape.rectangle.valid()))
                 result.push_back({Diagnostic::Severity::error, "layout.shape.geometry", "Shape rectangle must have positive dimensions", shapeId});
-            if (!onGrid(shape.rectangle.x) || !onGrid(shape.rectangle.y) ||
-                !onGrid(shape.rectangle.width) || !onGrid(shape.rectangle.height))
+            if (shape.polygon.empty() &&
+                (!onGrid(shape.rectangle.x) || !onGrid(shape.rectangle.y) ||
+                 !onGrid(shape.rectangle.width) || !onGrid(shape.rectangle.height)))
                 result.push_back({Diagnostic::Severity::error, "layout.shape.grid", "Shape geometry is off-grid", shapeId});
         }
         for (const auto& [portId, port] : cell.ports) {
@@ -148,6 +150,11 @@ std::string Project::serialize() const {
             json s = {{"id", sid}, {"layer", shape.layer}, {"rectangle", json::object()}};
             if (shape.net) s["net"] = *shape.net;
             put(s["rectangle"], shape.rectangle);
+            if (!shape.polygon.empty()) {
+                s["polygon"] = json::array();
+                for (const auto& point : shape.polygon)
+                    s["polygon"].push_back({{"x", point.x}, {"y", point.y}});
+            }
             c["shapes"].push_back(s);
         }
         for (const auto& [pid, port] : cell.ports) {
@@ -213,7 +220,10 @@ Project Project::deserialize(const std::string& text) {
         for (const auto& c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
             for (const auto& s : c.at("shapes")) {
-                Shape shape{s.at("id"), s.at("layer"), s.contains("net") ? std::optional<ObjectId>(s.at("net")) : std::nullopt, Rect{s.at("rectangle").at("x"), s.at("rectangle").at("y"), s.at("rectangle").at("width"), s.at("rectangle").at("height")}};
+                Shape shape{s.at("id"), s.at("layer"), s.contains("net") ? std::optional<ObjectId>(s.at("net")) : std::nullopt, Rect{s.at("rectangle").at("x"), s.at("rectangle").at("y"), s.at("rectangle").at("width"), s.at("rectangle").at("height")}, {}};
+                if (s.contains("polygon"))
+                    for (const auto& point : s.at("polygon"))
+                        shape.polygon.push_back({point.at("x"), point.at("y")});
                 cell.shapes.emplace(shape.id, shape);
             }
             for (const auto& port : c.at("ports")) cell.ports.emplace(port.at("id"), Port{port.at("id"), port.at("name"), port.at("layer"), Rect{port.at("rectangle").at("x"), port.at("rectangle").at("y"), port.at("rectangle").at("width"), port.at("rectangle").at("height")}});

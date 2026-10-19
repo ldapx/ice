@@ -52,5 +52,9 @@ void moveRectangle(Project& project, ObjectId cellId, ObjectId shapeId, Coordina
     auto& shape = require(cell.shapes, shapeId, "layout.shape", "Shape does not exist");
     shape.rectangle.x += dx;
     shape.rectangle.y += dy;
+    for (auto& point : shape.polygon) {
+        point.x += dx;
+        point.y += dy;
+    }
 }
 } // namespace ice
