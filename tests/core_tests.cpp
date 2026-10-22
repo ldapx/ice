@@ -5,6 +5,7 @@
 #include "icelib/packages.hpp"
 #include "icelib/plugins.hpp"
 #include "icelib/simulation.hpp"
+#include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -171,6 +172,74 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     CHECK(serialized == ice::serializeLockfile(lock));
     CHECK(serialized.find("content_hash = \"sha256:") != std::string::npos);
     std::filesystem::remove_all(repositoryRoot);
+}
+
+TEST_CASE("file symbol library loads and validates") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-symbols-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "resistor.svg") << "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 8\">"
+                                            "<path d=\"M0 4h32\" stroke=\"black\"/></svg>";
+    std::ofstream(root / "resistor.toml")
+        << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\ncategory = \"Passive\"\n"
+           "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
+           "\n[[pin]]\nname = \"2\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
+    const auto symbols = ice::SymbolLibrary::load(root);
+    CHECK(symbols.size() == 1);
+    CHECK(symbols.front().name == "Resistor");
+    CHECK(symbols.front().category == "Passive");
+    CHECK(symbols.front().svg.find("<svg") != std::string::npos);
+    CHECK(symbols.front().pins.size() == 2);
+    CHECK(symbols.front().pins.front().direction == ice::PinDirection::left);
+    CHECK(symbols.front().pins.back().direction == ice::PinDirection::right);
+
+    const auto missing = root / "missing";
+    std::filesystem::create_directories(missing);
+    std::ofstream(missing / "broken.toml") << "[symbol]\nname = \"Broken\"\nartwork = \"absent.svg\"\n"
+                                              "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(missing), ice::ProjectError);
+
+    const auto scripted = root / "scripted";
+    std::filesystem::create_directories(scripted);
+    std::ofstream(scripted / "evil.svg") << "<svg><script>alert(1)</script></svg>";
+    std::ofstream(scripted / "evil.toml") << "[symbol]\nname = \"Evil\"\nartwork = \"evil.svg\"\n"
+                                             "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(scripted), ice::ProjectError);
+
+    const auto fractional = root / "fractional";
+    std::filesystem::create_directories(fractional);
+    std::ofstream(fractional / "resistor.svg") << "<svg viewBox=\"0 0 32 8\"></svg>";
+    std::ofstream(fractional / "resistor.toml") << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\n"
+                                                   "\n[[pin]]\nname = \"1\"\nx = -16.5\ny = 0\ndirection = \"inout\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(fractional), ice::ProjectError);
+
+    const auto duplicated = root / "duplicated";
+    std::filesystem::create_directories(duplicated);
+    std::ofstream(duplicated / "resistor.svg") << "<svg viewBox=\"0 0 32 8\"></svg>";
+    std::ofstream(duplicated / "resistor.toml") << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\n"
+                                                   "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
+                                                   "\n[[pin]]\nname = \"1\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(duplicated), ice::ProjectError);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("shipped file symbol library loads") {
+    const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
+    const auto symbols = ice::SymbolLibrary::load(libraryRoot);
+    CHECK(symbols.size() == 7);
+    std::map<std::string, std::size_t> pinCounts;
+    for (const auto &symbol : symbols) {
+        CHECK(!symbol.svg.empty());
+        CHECK(!symbol.pins.empty());
+        pinCounts[symbol.name] = symbol.pins.size();
+    }
+    CHECK(pinCounts["Resistor"] == 2);
+    CHECK(pinCounts["Capacitor"] == 2);
+    CHECK(pinCounts["Diode"] == 2);
+    CHECK(pinCounts["Voltage Source"] == 2);
+    CHECK(pinCounts["Ground"] == 1);
+    CHECK(pinCounts["Op Amp"] == 3);
+    CHECK(pinCounts["NMOS"] == 4);
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {

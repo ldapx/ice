@@ -3,11 +3,13 @@
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/simulation.hpp"
+#include "icelib/symbols.hpp"
 
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -103,44 +105,36 @@ struct SymbolDefinition {
     std::vector<ice::Pin> pins;
 };
 
-const std::vector<SymbolDefinition> &symbolLibrary() {
-    static const std::vector<SymbolDefinition> definitions = {
-        {"Resistor",
-         "Passive",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h20l8-15 16 30 16-30 16 30 8-15h20' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "1", -60, 0}, {0, "2", 60, 0}}},
-        {"Capacitor",
-         "Passive",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h45M75 30h45M45 10v40M75 10v40' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "1", -60, 0}, {0, "2", 60, 0}}},
-        {"Diode",
-         "Semiconductor",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h35l25-25v50L35 30h85M85 10v50' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "A", -60, 0}, {0, "K", 60, 0}}},
-        {"Voltage Source",
-         "Sources",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h35M85 30h35M60 5v50M45 20h30M60 12v16' fill='none' stroke='black' "
-         "stroke-width='4'/><circle cx='60' cy='30' r='25' fill='none' stroke='black' stroke-width='4'/></svg>",
-         {{0, "+", -60, 0}, {0, "-", 60, 0}}},
-        {"Ground",
-         "Power",
-         "<svg viewBox='0 0 80 60'><path d='M40 0v25M10 25h60M20 35h40M30 45h20' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "GND", 0, 0}}},
-        {"Op Amp",
-         "Analog",
-         "<svg viewBox='0 0 120 100'><path d='M20 5v90l90-45zM0 30h20M0 70h20M110 50h10' fill='none' stroke='black' "
-         "stroke-width='4'/><path d='M30 25h12M36 19v12M30 65h12' stroke='black' stroke-width='3'/></svg>",
-         {{0, "+", -60, -20}, {0, "-", -60, 20}, {0, "out", 60, 0}}},
-        {"NMOS",
-         "Transistor",
-         "<svg viewBox='0 0 100 120'><path d='M50 0v35M50 85v35M50 35v50M20 35v50M0 45h20M0 75h20M50 60h50' "
-         "fill='none' stroke='black' stroke-width='4'/></svg>",
-         {{0, "G", -50, 0}, {0, "S", 0, 60}, {0, "D", 0, -60}}},
+std::filesystem::path symbolLibraryDirectory() {
+    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+    std::vector<std::filesystem::path> candidates = {
+        std::filesystem::path(appDir) / "symbols",
+        std::filesystem::path(appDir) / ".." / "symbols",
+#ifdef ICE_SOURCE_DIR
+        std::filesystem::path(ICE_SOURCE_DIR) / "symbols",
+#endif
+        std::filesystem::path("symbols"),
+        std::filesystem::path("/usr/share/ice/symbols"),
     };
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        if (std::filesystem::is_directory(candidate, status) && !status)
+            return candidate;
+    }
+    throw ice::ProjectError("symbol.library", "Symbol library directory not found (searched app dir, ./symbols, "
+                                              "/usr/share/ice/symbols)");
+}
+
+std::vector<SymbolDefinition> genericSymbolLibrary() {
+    std::vector<SymbolDefinition> definitions;
+    for (auto &fileSymbol : ice::SymbolLibrary::load(symbolLibraryDirectory())) {
+        SymbolDefinition definition;
+        definition.name = QString::fromStdString(fileSymbol.name);
+        definition.category = QString::fromStdString(fileSymbol.category);
+        definition.svg = QString::fromStdString(fileSymbol.svg);
+        definition.pins = std::move(fileSymbol.pins);
+        definitions.push_back(std::move(definition));
+    }
     return definitions;
 }
 
@@ -172,8 +166,7 @@ const std::vector<SymbolDefinition> &ihpSymbolLibrary() {
     return definitions;
 }
 
-const SymbolDefinition *findSymbolDefinition(const QString &name) {
-    const auto &library = symbolLibrary();
+const SymbolDefinition *findSymbolDefinition(const std::vector<SymbolDefinition> &library, const QString &name) {
     const auto it =
         std::find_if(library.begin(), library.end(), [&](const auto &symbol) { return symbol.name == name; });
     return it == library.end() ? nullptr : &*it;
@@ -578,12 +571,13 @@ class LayoutCanvas : public QGraphicsView {
 
 class SymbolLibraryDialog : public QDialog {
   public:
-    explicit SymbolLibraryDialog(bool ihpEnabled, QWidget *parent = nullptr) : QDialog(parent) {
+    explicit SymbolLibraryDialog(std::vector<SymbolDefinition> generic, bool ihpEnabled, QWidget *parent = nullptr)
+        : QDialog(parent), generic_(std::move(generic)) {
         setWindowTitle(QStringLiteral("Symbol Library"));
         resize(520, 420);
         auto *layout = new QVBoxLayout(this);
         list_ = new QListWidget;
-        for (const auto &symbol : symbolLibrary())
+        for (const auto &symbol : generic_)
             list_->addItem(symbol.category + QStringLiteral(" / ") + symbol.name);
         if (ihpEnabled)
             for (const auto &symbol : ihpSymbolLibrary())
@@ -596,13 +590,14 @@ class SymbolLibraryDialog : public QDialog {
         list_->setCurrentRow(0);
     }
     const SymbolDefinition &selected() const {
-        if (list_->currentRow() < static_cast<int>(symbolLibrary().size()))
-            return symbolLibrary().at(list_->currentRow());
-        return ihpSymbolLibrary().at(list_->currentRow() - static_cast<int>(symbolLibrary().size()));
+        if (list_->currentRow() < static_cast<int>(generic_.size()))
+            return generic_.at(list_->currentRow());
+        return ihpSymbolLibrary().at(list_->currentRow() - static_cast<int>(generic_.size()));
     }
 
   private:
     QListWidget *list_ = nullptr;
+    std::vector<SymbolDefinition> generic_;
 };
 
 // Item data roles used to identify schematic canvas items.
@@ -1636,22 +1631,22 @@ class DocumentWindow : public QMainWindow {
         if (!accepted || name.trimmed().isEmpty())
             return;
         try {
+            const auto generic = genericSymbolLibrary();
+            const auto *sourceDefinition = findSymbolDefinition(generic, QStringLiteral("Voltage Source"));
+            if (!sourceDefinition)
+                throw ice::ProjectError("symbol.library", "Symbol library does not provide a Voltage Source symbol");
             project_->execute("create schematic", [&](ice::Project &project) {
                 const auto cell = ice::createSchematicCell(project, name.trimmed().toStdString());
-                const auto *sourceDefinition = findSymbolDefinition(QStringLiteral("Voltage Source"));
                 const auto symbol =
-                    ice::addSymbol(project, cell, "Voltage Source",
-                                   sourceDefinition ? sourceDefinition->svg.toStdString() : std::string{});
+                    ice::addSymbol(project, cell, "Voltage Source", sourceDefinition->svg.toStdString());
                 auto &source = project.schematicCells.at(cell).symbols.at(symbol);
-                if (sourceDefinition) {
-                    for (auto pin : sourceDefinition->pins) {
-                        pin.id = project.nextId();
-                        pin.direction = pin.x < 0   ? ice::PinDirection::left
-                                        : pin.x > 0 ? ice::PinDirection::right
-                                        : pin.y > 0 ? ice::PinDirection::up
-                                                    : ice::PinDirection::down;
-                        source.pins.push_back(std::move(pin));
-                    }
+                for (auto pin : sourceDefinition->pins) {
+                    pin.id = project.nextId();
+                    pin.direction = pin.x < 0   ? ice::PinDirection::left
+                                    : pin.x > 0 ? ice::PinDirection::right
+                                    : pin.y > 0 ? ice::PinDirection::up
+                                                : ice::PinDirection::down;
+                    source.pins.push_back(std::move(pin));
                 }
                 ice::addSchematicInstance(project, cell, symbol, "V1", 0, 0);
             });
@@ -1915,15 +1910,15 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create a project and schematic first."));
             return;
         }
-        SymbolLibraryDialog dialog(ihpTechnologyActive_, this);
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        const auto &definition = dialog.selected();
-        const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
-                                ? activeSchematicId_
-                                : project_->project().schematicCells.begin()->first;
-        const auto scenePosition = schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center());
         try {
+            SymbolLibraryDialog dialog(genericSymbolLibrary(), ihpTechnologyActive_, this);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            const auto definition = dialog.selected();
+            const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
+                                    ? activeSchematicId_
+                                    : project_->project().schematicCells.begin()->first;
+            const auto scenePosition = schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center());
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId =
                     ice::addSymbol(project, cellId, definition.name.toStdString(), definition.svg.toStdString());
@@ -2262,7 +2257,10 @@ class DocumentWindow : public QMainWindow {
             auto *artwork = new QGraphicsSvgItem;
             artwork->setSharedRenderer(renderer);
             artwork->setParentItem(group);
-            artwork->setPos(-60, -35);
+            // Center artwork of any size on the symbol origin; pins are
+            // defined relative to the artwork center (see symbols/*.toml).
+            const auto artworkSize = renderer->defaultSize();
+            artwork->setPos(-artworkSize.width() / 2.0, -artworkSize.height() / 2.0);
             artwork->setFlag(QGraphicsItem::ItemIsSelectable, false);
             artwork->setData(0, QStringLiteral("symbol-artwork"));
             auto *tint = new QGraphicsColorizeEffect(artwork);
@@ -2273,7 +2271,7 @@ class DocumentWindow : public QMainWindow {
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
             label->setDefaultTextColor(Qt::black);
-            label->setPos(-45, 38);
+            label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
             label->setData(0, QStringLiteral("symbol-label"));
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);

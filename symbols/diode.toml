@@ -1,0 +1,16 @@
+[symbol]
+name = "Diode"
+artwork = "diode.svg"
+category = "Semiconductor"
+
+[[pin]]
+name = "A"
+x = -21
+y = 0
+direction = "input"
+
+[[pin]]
+name = "K"
+x = 21
+y = 0
+direction = "output"

@@ -27,6 +27,7 @@ target("ice")
     set_kind("binary")
     add_files("src/ice/main.cpp")
     add_deps("icelib")
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_includedirs("include", "/usr/include/qt6", "/usr/include/qt6/QtCore",
                     "/usr/include/qt6/QtGui", "/usr/include/qt6/QtWidgets",
                     "/usr/include/qt6/QtSvg", "/usr/include/qt6/QtSvgWidgets")
@@ -57,6 +58,7 @@ target("doctest")
     add_files("tests/*.cpp")
     add_deps("icelib")
     add_includedirs("include")
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
 
 target("icepy")
     set_kind("shared")

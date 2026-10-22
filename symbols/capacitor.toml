@@ -1,0 +1,16 @@
+[symbol]
+name = "Capacitor"
+artwork = "capacitor.svg"
+category = "Passive"
+
+[[pin]]
+name = "1"
+x = -11
+y = 0
+direction = "inout"
+
+[[pin]]
+name = "2"
+x = 11
+y = 0
+direction = "inout"

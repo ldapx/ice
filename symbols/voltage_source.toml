@@ -1,0 +1,16 @@
+[symbol]
+name = "Voltage Source"
+artwork = "voltage_source.svg"
+category = "Sources"
+
+[[pin]]
+name = "+"
+x = 0
+y = 32
+direction = "output"
+
+[[pin]]
+name = "-"
+x = 0
+y = -32
+direction = "input"

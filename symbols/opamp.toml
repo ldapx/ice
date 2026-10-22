@@ -1,0 +1,22 @@
+[symbol]
+name = "Op Amp"
+artwork = "opamp.svg"
+category = "Analog"
+
+[[pin]]
+name = "+"
+x = -53
+y = 31
+direction = "input"
+
+[[pin]]
+name = "-"
+x = -53
+y = -22
+direction = "input"
+
+[[pin]]
+name = "OUT"
+x = 53
+y = 4
+direction = "output"

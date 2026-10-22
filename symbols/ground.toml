@@ -1,0 +1,10 @@
+[symbol]
+name = "Ground"
+artwork = "ground.svg"
+category = "Power"
+
+[[pin]]
+name = "GND"
+x = 0
+y = 7
+direction = "inout"

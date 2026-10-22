@@ -1,0 +1,28 @@
+[symbol]
+name = "NMOS"
+artwork = "nmos.svg"
+category = "Transistor"
+
+[[pin]]
+name = "G"
+x = -32
+y = 11
+direction = "input"
+
+[[pin]]
+name = "D"
+x = 32
+y = 13
+direction = "inout"
+
+[[pin]]
+name = "S"
+x = 32
+y = -11
+direction = "inout"
+
+[[pin]]
+name = "B"
+x = 32
+y = 0
+direction = "inout"

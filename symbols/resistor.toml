@@ -1,0 +1,16 @@
+[symbol]
+name = "Resistor"
+artwork = "resistor.svg"
+category = "Passive"
+
+[[pin]]
+name = "1"
+x = -16
+y = 0
+direction = "inout"
+
+[[pin]]
+name = "2"
+x = 16
+y = 0
+direction = "inout"
