@@ -1,6 +1,7 @@
 # ICE
 
 <div class="ice-hero">
+<img class="ice-logo" src="_static/logo.png" alt="ICE logo" />
 <div class="ice-hero-name">ICE</div>
 <div class="ice-hero-text">A programmable integrated-circuit design environment</div>
 <div class="ice-hero-tagline">Schematic, layout, simulation, and AI-assisted automation on one canonical core — <code>icelib</code>.</div>

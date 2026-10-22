@@ -33,6 +33,8 @@ html_theme = "furo"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_title = "ICE"
+html_logo = "logo.png"
+html_favicon = "logo.png"
 html_theme_options = {
     "light_css_variables": {
         "color-brand-primary": "#42b883",
