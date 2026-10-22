@@ -1,8 +1,8 @@
-<p align="center">
-  <img src=".github/logo.png" alt="ICE logo" width="200">
-</p>
 
-# ICE
+# <img src=".github/logo.png" width="64"> <sup>**ICE**</sup>
+<sup><sub>
+**IC E**DA - **I**ntegrated **C**ircuits **E**lectronics Design Automation
+</sub></sup>
 
 ICE is an open-source, extensible integrated-circuit design environment for
 schematic capture, IC layout, analog simulation, analysis, automated layout,
