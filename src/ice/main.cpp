@@ -40,6 +40,7 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -256,6 +257,61 @@ std::string simulationSummary(const ice::SimulationResult &result) {
     return output.str();
 }
 
+// KLayout-style layer appearance: distinct outline color plus a fill pattern
+// so overlapping layers stay distinguishable on a white canvas.
+struct LayerStyle {
+    QColor color;
+    Qt::BrushStyle pattern = Qt::SolidPattern;
+};
+
+const std::vector<QColor> &layerPalette() {
+    static const std::vector<QColor> palette = {
+        QColor("#3366cc"), QColor("#cc0000"), QColor("#109618"), QColor("#ff9900"),
+        QColor("#990099"), QColor("#0099c6"), QColor("#dd4477"), QColor("#66aa00"),
+        QColor("#b82e2e"), QColor("#316395"), QColor("#994499"), QColor("#22aa99"),
+    };
+    return palette;
+}
+
+const std::vector<Qt::BrushStyle> &layerPatterns() {
+    static const std::vector<Qt::BrushStyle> patterns = {
+        Qt::SolidPattern, Qt::BDiagPattern, Qt::FDiagPattern,  Qt::DiagCrossPattern, Qt::HorPattern,
+        Qt::VerPattern,   Qt::CrossPattern, Qt::Dense4Pattern, Qt::Dense5Pattern,
+    };
+    return patterns;
+}
+
+LayerStyle layerStyleForIndex(std::size_t index, bool visible) {
+    if (!visible)
+        return {QColor(130, 130, 130), Qt::NoBrush};
+    const auto &palette = layerPalette();
+    const auto &patterns = layerPatterns();
+    const QColor color = palette[index % palette.size()];
+    const Qt::BrushStyle pattern = patterns[(index / palette.size()) % patterns.size()];
+    return {color, pattern};
+}
+
+std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project) {
+    std::map<ice::ObjectId, LayerStyle> styles;
+    std::size_t index = 0;
+    for (const auto &[id, layer] : project.layers)
+        styles.emplace(id, layerStyleForIndex(index++, layer.visible));
+    return styles;
+}
+
+QPixmap layerPreviewIcon(const LayerStyle &style) {
+    QPixmap pixmap(36, 18);
+    pixmap.fill(Qt::white);
+    QPainter painter(&pixmap);
+    painter.setPen(QPen(style.color, 1));
+    if (style.pattern != Qt::NoBrush)
+        painter.setBrush(QBrush(style.color, style.pattern));
+    else
+        painter.setBrush(Qt::NoBrush);
+    painter.drawRect(1, 1, 33, 15);
+    return pixmap;
+}
+
 class LayoutCanvas : public QGraphicsView {
   public:
     enum class Tool { select, rectangle };
@@ -269,7 +325,7 @@ class LayoutCanvas : public QGraphicsView {
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setBackgroundBrush(QColor(QStringLiteral("#20252b")));
+        setBackgroundBrush(QColor(QStringLiteral("#ffffff")));
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
     }
 
@@ -291,21 +347,41 @@ class LayoutCanvas : public QGraphicsView {
         const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawGrid)));
         const qreal normalized = rawGrid / magnitude;
         const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
-        const qreal grid = magnitude * factor;
-        const int left = static_cast<int>(std::floor(exposed.left() / grid));
-        const int right = static_cast<int>(std::ceil(exposed.right() / grid));
-        const int top = static_cast<int>(std::floor(exposed.top() / grid));
-        const int bottom = static_cast<int>(std::ceil(exposed.bottom() / grid));
+        const qreal major = magnitude * factor;
+        const int left = static_cast<int>(std::floor(exposed.left() / major));
+        const int right = static_cast<int>(std::ceil(exposed.right() / major));
+        const int top = static_cast<int>(std::floor(exposed.top() / major));
+        const int bottom = static_cast<int>(std::ceil(exposed.bottom() / major));
         if (right - left > 500 || bottom - top > 500)
             return;
-        painter.setPen(QPen(QColor(QStringLiteral("#343b43")), 0));
+        // Minor subdivisions like the schematic grid (5x per major step).
+        // Cosmetic 1px pens so lines stay visible at any zoom; scene-unit
+        // widths would shrink to sub-pixel sizes when zoomed out.
+        const qreal minor = major / 5.0;
+        const bool drawMinor = (right - left) * 5 + (bottom - top) * 5 <= 5000;
+        if (drawMinor) {
+            QPen minorPen(QColor(QStringLiteral("#e1e1e1")));
+            minorPen.setCosmetic(true);
+            minorPen.setWidth(1);
+            painter.setPen(minorPen);
+            const auto minorLeft = std::floor(exposed.left() / minor) * minor;
+            const auto minorTop = std::floor(exposed.top() / minor) * minor;
+            for (qreal x = minorLeft; x <= exposed.right(); x += minor)
+                painter.drawLine(QPointF(x, exposed.top()), QPointF(x, exposed.bottom()));
+            for (qreal y = minorTop; y <= exposed.bottom(); y += minor)
+                painter.drawLine(QPointF(exposed.left(), y), QPointF(exposed.right(), y));
+        }
+        QPen majorPen(QColor(QStringLiteral("#b4b4b4")));
+        majorPen.setCosmetic(true);
+        majorPen.setWidth(1);
+        painter.setPen(majorPen);
         for (int x = left; x <= right; ++x)
-            painter.drawLine(QPointF(x * grid, exposed.top()), QPointF(x * grid, exposed.bottom()));
+            painter.drawLine(QPointF(x * major, exposed.top()), QPointF(x * major, exposed.bottom()));
         for (int y = top; y <= bottom; ++y)
-            painter.drawLine(QPointF(exposed.left(), y * grid), QPointF(exposed.right(), y * grid));
+            painter.drawLine(QPointF(exposed.left(), y * major), QPointF(exposed.right(), y * major));
     }
 
-    void setLayerColors(const std::map<ice::ObjectId, QColor> &colors) { layerColors_ = colors; }
+    void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) { layerStyles_ = styles; }
     void setContentRect(const QRectF &bounds) {
         Q_UNUSED(bounds);
         scene()->setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
@@ -325,7 +401,7 @@ class LayoutCanvas : public QGraphicsView {
 
   protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override {
-        painter->fillRect(rect, QColor(QStringLiteral("#20252b")));
+        painter->fillRect(rect, QColor(QStringLiteral("#ffffff")));
         drawGrid(*painter, rect, transform().m11());
     }
 
@@ -343,7 +419,7 @@ class LayoutCanvas : public QGraphicsView {
 
         const qreal left = 14.0;
         const qreal bottom = viewport()->height() - 16.0;
-        const QColor color(QStringLiteral("#d8dee6"));
+        const QColor color(QStringLiteral("#333a42"));
         QPen pen(color);
         pen.setWidthF(2.0);
         painter.setPen(pen);
@@ -495,7 +571,7 @@ class LayoutCanvas : public QGraphicsView {
     std::function<void(ice::ObjectId, QPointF)> shapeMoved_;
     std::function<void(std::vector<ice::ObjectId>)> deleted_;
     std::function<void()> changed_;
-    std::map<ice::ObjectId, QColor> layerColors_;
+    std::map<ice::ObjectId, LayerStyle> layerStyles_;
     qreal zoom_ = 1.0;
     QPointF centerScene_;
 };
@@ -1187,14 +1263,21 @@ class LayersPanel : public QWidget {
         layout->addWidget(heading(QStringLiteral("Layers")));
         list_ = new QListWidget;
         list_->setAccessibleName(QStringLiteral("Layer visibility"));
-        layout->addWidget(list_);
-        layout->addStretch();
+        list_->setIconSize(QSize(36, 18));
+        list_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        layout->addWidget(list_, 1);
+        setMinimumWidth(190);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     }
 
     void setProject(const ice::Project &project) {
         list_->clear();
+        const auto styles = layerStylesFor(project);
         for (const auto &[id, layer] : project.layers) {
-            auto *item = new QListWidgetItem(QString::fromStdString(layer.name), list_);
+            const auto style = styles.contains(id) ? styles.at(id) : LayerStyle{QColor("#777777"), Qt::SolidPattern};
+            auto *item = new QListWidgetItem(
+                QIcon(layerPreviewIcon(style)),
+                QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer.name)).arg(layer.number), list_);
             item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
             item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
@@ -1469,19 +1552,18 @@ class DocumentWindow : public QMainWindow {
     }
 
     void openLayoutInterchange() {
-        const auto path =
-            QFileDialog::getOpenFileName(this, QStringLiteral("Open GDS/OASIS Layout"), QString(),
-                                         QStringLiteral("GDSII Stream (*.gds *.gdsii);;ICE layout JSON (*.json);;OASIS "
-                                                        "(unsupported) (*.oas *.oasis);;All files (*)"));
+        const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Open GDS/OASIS Layout"), QString(),
+                                                       QStringLiteral("GDSII Stream (*.gds *.gdsii);;OASIS "
+                                                                      "(unsupported) (*.oas *.oasis);;All files (*)"));
         if (path.isEmpty())
             return;
         try {
             const auto suffix = QFileInfo(path).suffix().toLower();
             if (suffix == QStringLiteral("oas") || suffix == QStringLiteral("oasis"))
                 throw ice::ProjectError("interchange.oasis", "Binary OASIS import is not supported yet");
-            setProject(suffix == QStringLiteral("gds") || suffix == QStringLiteral("gdsii")
-                           ? ice::LayoutInterchange::importGds(path.toStdString())
-                           : ice::LayoutInterchange::importGdsSubset(path.toStdString()));
+            if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
+                throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
+            setProject(ice::LayoutInterchange::importGds(path.toStdString()));
             projectPath_.clear();
             statusBar()->showMessage(QStringLiteral("Layout interchange opened"));
         } catch (const ice::ProjectError &error) {
@@ -1503,7 +1585,7 @@ class DocumentWindow : public QMainWindow {
         const auto path =
             QFileDialog::getSaveFileName(this, QStringLiteral("Save GDS/OASIS Layout"),
                                          QString::fromStdString(project_->project().layoutCells.at(cellId).name),
-                                         QStringLiteral("GDSII Stream (*.gds *.gdsii);;ICE layout JSON (*.json);;OASIS "
+                                         QStringLiteral("GDSII Stream (*.gds *.gdsii);;OASIS "
                                                         "(unsupported) (*.oas *.oasis);;All files (*)"));
         if (path.isEmpty())
             return;
@@ -1511,10 +1593,9 @@ class DocumentWindow : public QMainWindow {
             const auto suffix = QFileInfo(path).suffix().toLower();
             if (suffix == QStringLiteral("oas") || suffix == QStringLiteral("oasis"))
                 throw ice::ProjectError("interchange.oasis", "Binary OASIS export is not supported yet");
-            if (suffix == QStringLiteral("gds") || suffix == QStringLiteral("gdsii"))
-                ice::LayoutInterchange::exportGds(project_->project(), cellId, path.toStdString());
-            else
-                ice::LayoutInterchange::exportGdsSubset(project_->project(), cellId, path.toStdString());
+            if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
+                throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
+            ice::LayoutInterchange::exportGds(project_->project(), cellId, path.toStdString());
             statusBar()->showMessage(QStringLiteral("Layout interchange saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -1720,28 +1801,26 @@ class DocumentWindow : public QMainWindow {
             cellIt = project.layoutCells.begin();
             activeLayoutId_ = cellIt->first;
         }
-        std::map<ice::ObjectId, QColor> colors;
-        const std::vector<QColor> palette = {QColor("#36a3eb"), QColor("#e58b2a"), QColor("#65c466"), QColor("#bd72d0"),
-                                             QColor("#e2d34f")};
-        std::size_t colorIndex = 0;
-        for (const auto &[id, layer] : project.layers)
-            colors[id] = layer.visible ? palette[colorIndex++ % palette.size()] : QColor(90, 90, 90, 60);
-        layoutCanvas_->setLayerColors(colors);
+        const auto styles = layerStylesFor(project);
+        layoutCanvas_->setLayerStyles(styles);
         for (const auto &[id, shape] : cellIt->second.shapes) {
-            const auto layerColor = colors.contains(shape.layer) ? colors.at(shape.layer) : QColor("#777777");
+            const auto style =
+                styles.contains(shape.layer) ? styles.at(shape.layer) : LayerStyle{QColor("#777777"), Qt::SolidPattern};
+            const QPen pen(style.color, 1);
+            QBrush brush(QColor(style.color.red(), style.color.green(), style.color.blue(), 110), style.pattern);
+            if (style.pattern == Qt::NoBrush)
+                brush = QBrush(Qt::NoBrush);
             QGraphicsItem *item = nullptr;
             if (shape.polygon.size() >= 3) {
                 QPolygonF polygon;
                 for (const auto &point : shape.polygon)
                     polygon << QPointF(point.x, -point.y);
-                item = layoutCanvas_->scene()->addPolygon(
-                    polygon, QPen(layerColor, 1),
-                    QBrush(QColor(layerColor.red(), layerColor.green(), layerColor.blue(), 90)));
+                item = layoutCanvas_->scene()->addPolygon(polygon, pen, brush);
             } else {
-                item = layoutCanvas_->scene()->addRect(
-                    QRectF(shape.rectangle.x, -shape.rectangle.y - shape.rectangle.height, shape.rectangle.width,
-                           shape.rectangle.height),
-                    QPen(layerColor, 1), QBrush(QColor(layerColor.red(), layerColor.green(), layerColor.blue(), 90)));
+                item = layoutCanvas_->scene()->addRect(QRectF(shape.rectangle.x,
+                                                              -shape.rectangle.y - shape.rectangle.height,
+                                                              shape.rectangle.width, shape.rectangle.height),
+                                                       pen, brush);
             }
             item->setData(0, QVariant::fromValue<qulonglong>(id));
             item->setFlag(QGraphicsItem::ItemIsSelectable);
@@ -2840,7 +2919,7 @@ class DocumentWindow : public QMainWindow {
                 });
             view = layoutCanvas_;
         }
-        view->setBackgroundBrush(QColor(QStringLiteral("#20252b")));
+        view->setBackgroundBrush(QColor(QStringLiteral("#ffffff")));
         view->setAlignment(Qt::AlignCenter);
         view->setAccessibleName(title);
         splitter->addWidget(view);

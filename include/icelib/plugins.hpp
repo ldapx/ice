@@ -34,17 +34,17 @@ struct PluginRecord {
 };
 
 class PluginManager {
-public:
-    static PluginManifest readManifest(const std::filesystem::path& root);
-    void discover(const std::filesystem::path& root);
-    void initialize(const std::string& name);
-    void enable(const std::string& name);
-    void disable(const std::string& name);
-    void unload(const std::string& name);
-    const PluginRecord& get(const std::string& name) const;
-    const std::map<std::string, PluginRecord>& records() const noexcept;
+  public:
+    static PluginManifest readManifest(const std::filesystem::path &root);
+    void discover(const std::filesystem::path &root);
+    void initialize(const std::string &name);
+    void enable(const std::string &name);
+    void disable(const std::string &name);
+    void unload(const std::string &name);
+    const PluginRecord &get(const std::string &name) const;
+    const std::map<std::string, PluginRecord> &records() const noexcept;
 
-private:
+  private:
     std::map<std::string, PluginRecord> records_;
 };
 

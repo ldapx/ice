@@ -10,12 +10,17 @@ target("icelib")
     add_files("src/icelib/*.cpp")
     add_includedirs("include", {public = true})
     add_cxxflags("-fPIC", {public = true})
+    -- Keep warnings on first-party code; third-party headers are included
+    -- via system paths so -Werror is intentionally not enabled.
+    -- Missing-field-init is intentional for aggregate construction of domain structs.
+    add_cxxflags("-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers")
     add_packages("spdlog", "nlohmann_json")
+    -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
+    -- TODO: replace hardcoded /usr paths with packaged deps or pkg-config checks.
     add_includedirs("/usr/include/toml++", "/usr/include")
     add_linkdirs("/usr/lib")
     add_links("crypto")
     add_includedirs("/usr/include/ngspice")
-    add_linkdirs("/usr/lib")
     add_links("ngspice")
 
 target("ice")
@@ -72,10 +77,13 @@ task("test")
 
 task("format")
     on_run(function ()
-        os.exec("clang-format -i include/**/*.hpp src/**/*.cpp tests/**/*.cpp")
+        for _, file in ipairs(os.files("include/**.hpp|src/**.cpp|tests/**.cpp")) do
+            os.exec("clang-format -i " .. file)
+        end
     end)
 
 task("docs")
     on_run(function ()
-        print("Documentation sources are the Markdown files in the repository root.")
+        os.exec("sphinx-build -b html docs docs/_build")
     end)
+    set_menu {usage = "Build the Sphinx documentation site"}

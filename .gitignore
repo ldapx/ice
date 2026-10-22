@@ -2,6 +2,7 @@
 build/
 .xmake/
 .cache/
+docs/_build/
 
 # Generated package-manager artifacts
 ice.lock

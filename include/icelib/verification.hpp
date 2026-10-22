@@ -43,24 +43,24 @@ struct VerificationReport {
 };
 
 class VerificationAdapter {
-public:
+  public:
     virtual ~VerificationAdapter() = default;
-    virtual VerificationReport run(const Project& project, std::optional<ObjectId> cell = std::nullopt) = 0;
+    virtual VerificationReport run(const Project &project, std::optional<ObjectId> cell = std::nullopt) = 0;
 };
 
 class LocalVerificationAdapter final : public VerificationAdapter {
-public:
-    VerificationReport run(const Project& project, std::optional<ObjectId> cell = std::nullopt) override;
+  public:
+    VerificationReport run(const Project &project, std::optional<ObjectId> cell = std::nullopt) override;
 };
 
 class VerificationScheduler {
-public:
-    std::future<VerificationReport> schedule(const Project& project, std::shared_ptr<VerificationAdapter> adapter,
+  public:
+    std::future<VerificationReport> schedule(const Project &project, std::shared_ptr<VerificationAdapter> adapter,
                                              std::optional<ObjectId> cell = std::nullopt);
 };
 
-std::string serializeVerificationReport(const VerificationReport& report);
+std::string serializeVerificationReport(const VerificationReport &report);
 std::string verificationSeverityName(VerificationSeverity severity);
-SimulationRequest applyParasitics(const SimulationRequest& request, const VerificationReport& report);
+SimulationRequest applyParasitics(const SimulationRequest &request, const VerificationReport &report);
 
 } // namespace ice

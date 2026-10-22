@@ -23,11 +23,11 @@ struct Diagnostic {
 };
 
 class ProjectError : public std::runtime_error {
-public:
+  public:
     ProjectError(std::string code, std::string message);
-    const std::string& code() const noexcept;
+    const std::string &code() const noexcept;
 
-private:
+  private:
     std::string code_;
 };
 
@@ -142,7 +142,7 @@ struct LayoutCell {
 };
 
 class Project {
-public:
+  public:
     static constexpr int schemaVersion = 1;
 
     std::string identity;
@@ -157,42 +157,42 @@ public:
     Coordinate snap(Coordinate value) const;
     std::vector<Diagnostic> validate() const;
     std::string serialize() const;
-    static Project deserialize(const std::string& text);
-    void save(const std::filesystem::path& path) const;
-    static Project load(const std::filesystem::path& path);
+    static Project deserialize(const std::string &text);
+    void save(const std::filesystem::path &path) const;
+    static Project load(const std::filesystem::path &path);
 };
 
 class SelectionModel {
-public:
+  public:
     void select(ObjectId id, std::vector<ObjectId> related = {});
     void clear();
     std::optional<ObjectId> primary() const noexcept;
-    const std::vector<ObjectId>& related() const noexcept;
+    const std::vector<ObjectId> &related() const noexcept;
 
-private:
+  private:
     std::optional<ObjectId> primary_;
     std::vector<ObjectId> related_;
 };
 
 class ProjectSession {
-public:
+  public:
     using Observer = std::function<void()>;
 
     explicit ProjectSession(Project project = {});
-    Project& project() noexcept;
-    const Project& project() const noexcept;
+    Project &project() noexcept;
+    const Project &project() const noexcept;
     bool dirty() const noexcept;
     void markDirty();
     void subscribe(Observer observer);
     void beginTransaction(std::string label);
     void commitTransaction();
     void rollbackTransaction();
-    void execute(std::string label, const std::function<void(Project&)>& mutation);
+    void execute(std::string label, const std::function<void(Project &)> &mutation);
     bool undo();
     bool redo();
-    void save(const std::filesystem::path& path);
+    void save(const std::filesystem::path &path);
 
-private:
+  private:
     Project project_;
     std::vector<Project> undo_;
     std::vector<Project> redo_;

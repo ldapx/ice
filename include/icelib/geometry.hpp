@@ -10,7 +10,7 @@ namespace ice {
 struct Point {
     Coordinate x = 0;
     Coordinate y = 0;
-    bool operator==(const Point&) const = default;
+    bool operator==(const Point &) const = default;
 };
 
 using Polygon = std::vector<Point>;
@@ -19,20 +19,20 @@ using MultiPolygon = std::vector<Polygon>;
 enum class BooleanOperation { union_, difference, intersection, xor_ };
 
 class GeometryKernel {
-public:
-    MultiPolygon booleanOp(const MultiPolygon& subject, const MultiPolygon& clip, BooleanOperation operation) const;
-    MultiPolygon offset(const MultiPolygon& subject, Coordinate delta) const;
-    MultiPolygon cleanup(const MultiPolygon& subject) const;
-    static bool valid(const Polygon& polygon);
-    static Rect bounds(const Polygon& polygon);
+  public:
+    MultiPolygon booleanOp(const MultiPolygon &subject, const MultiPolygon &clip, BooleanOperation operation) const;
+    MultiPolygon offset(const MultiPolygon &subject, Coordinate delta) const;
+    MultiPolygon cleanup(const MultiPolygon &subject) const;
+    static bool valid(const Polygon &polygon);
+    static Rect bounds(const Polygon &polygon);
 };
 
 class Clipper2Adapter final : public GeometryKernel {
-public:
-    MultiPolygon unionPolygons(const MultiPolygon& left, const MultiPolygon& right) const;
-    MultiPolygon difference(const MultiPolygon& left, const MultiPolygon& right) const;
-    MultiPolygon intersection(const MultiPolygon& left, const MultiPolygon& right) const;
-    MultiPolygon xorPolygons(const MultiPolygon& left, const MultiPolygon& right) const;
+  public:
+    MultiPolygon unionPolygons(const MultiPolygon &left, const MultiPolygon &right) const;
+    MultiPolygon difference(const MultiPolygon &left, const MultiPolygon &right) const;
+    MultiPolygon intersection(const MultiPolygon &left, const MultiPolygon &right) const;
+    MultiPolygon xorPolygons(const MultiPolygon &left, const MultiPolygon &right) const;
 };
 
 struct Transform {
@@ -50,13 +50,13 @@ struct ArraySpec {
 };
 
 class SpatialIndex {
-public:
+  public:
     void clear();
     void insert(ObjectId id, Rect bounds);
     void remove(ObjectId id);
     std::vector<ObjectId> query(Rect bounds) const;
 
-private:
+  private:
     struct Entry {
         ObjectId id;
         Rect bounds;
@@ -64,7 +64,7 @@ private:
     std::vector<Entry> entries_;
 };
 
-MultiPolygon transformArray(const MultiPolygon& geometry, const Transform& transform, const ArraySpec& array);
+MultiPolygon transformArray(const MultiPolygon &geometry, const Transform &transform, const ArraySpec &array);
 std::string booleanOperationName(BooleanOperation operation);
 
 } // namespace ice

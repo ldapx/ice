@@ -1,9 +1,10 @@
 #include "icelib/core.hpp"
 #include "icelib/geometry.hpp"
-#include "icelib/simulation.hpp"
-#include "icelib/packages.hpp"
 #include "icelib/interchange.hpp"
+#include "icelib/operations.hpp"
+#include "icelib/packages.hpp"
 #include "icelib/plugins.hpp"
+#include "icelib/simulation.hpp"
 #include "icelib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -51,7 +52,7 @@ TEST_CASE("project serialization and transactions are deterministic") {
     ice::ProjectSession session(roundTrip);
     bool notified = false;
     session.subscribe([&] { notified = true; });
-    session.execute("rename", [](ice::Project& value) { value.name = "changed"; });
+    session.execute("rename", [](ice::Project &value) { value.name = "changed"; });
     CHECK(session.dirty());
     CHECK(notified);
     CHECK(session.project().name == "changed");
@@ -59,7 +60,7 @@ TEST_CASE("project serialization and transactions are deterministic") {
     CHECK(session.project().name == "demo");
     CHECK(session.redo());
     CHECK(session.project().name == "changed");
-    CHECK_THROWS_AS(session.execute("invalid", [](ice::Project& value) { value.grid = 0; }), ice::ProjectError);
+    CHECK_THROWS_AS(session.execute("invalid", [](ice::Project &value) { value.grid = 0; }), ice::ProjectError);
     CHECK(session.project().grid == 1);
 }
 
@@ -92,6 +93,11 @@ TEST_CASE("selection, cross-probing, and grid snapping are stable") {
     project.grid = 10;
     CHECK(project.snap(14) == 10);
     CHECK(project.snap(16) == 20);
+    CHECK(project.snap(-14) == -10);
+    CHECK(project.snap(-16) == -20);
+    CHECK(project.snap(0) == 0);
+    CHECK(project.snap(5) == 10);
+    CHECK(project.snap(-5) == 0);
 
     ice::SelectionModel selection;
     selection.select(42, {7, 8});
@@ -102,12 +108,46 @@ TEST_CASE("selection, cross-probing, and grid snapping are stable") {
     CHECK(selection.related().empty());
 }
 
+TEST_CASE("schematic instance parameters survive serialization") {
+    ice::Project project;
+    project.identity = "params";
+    project.name = "params";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto symbolId = ice::addSymbol(project, cellId, "resistor");
+    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
+    project.schematicCells.at(cellId).instances.at(instanceId).parameters.push_back({project.nextId(), "r", "1k"});
+    CHECK(project.validate().empty());
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.serialize() == serialized);
+    const auto &restored = roundTrip.schematicCells.at(cellId).instances.at(instanceId).parameters;
+    CHECK(restored.size() == 1);
+    CHECK(restored.front().name == "r");
+    CHECK(restored.front().value == "1k");
+}
+
+TEST_CASE("geometry transforms match Qt rotation convention") {
+    const ice::Point point{10, 0};
+    CHECK((ice::Transform{0, 0, ice::Orientation::r0}.apply(point) == ice::Point{10, 0}));
+    CHECK((ice::Transform{0, 0, ice::Orientation::r90}.apply(point) == ice::Point{0, 10}));
+    CHECK((ice::Transform{0, 0, ice::Orientation::r180}.apply(point) == ice::Point{-10, 0}));
+    CHECK((ice::Transform{0, 0, ice::Orientation::r270}.apply(point) == ice::Point{0, -10}));
+}
+
 TEST_CASE("ngspice simulation reports missing netlists explicitly") {
     ice::SimulationRequest request;
     ice::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(1));
     CHECK(result.state == ice::JobState::failed);
     CHECK(result.error.find("netlist") != std::string::npos);
+
+    ice::SimulationRequest unsupported = request;
+    unsupported.netlist = {"* test", ".end"};
+    unsupported.analysis = "ac";
+    auto rejected = runner.run(unsupported, std::chrono::seconds(1));
+    CHECK(rejected.state == ice::JobState::failed);
+    CHECK(rejected.error.find("unsupported") != std::string::npos);
+    CHECK(!rejected.input_fingerprint.empty());
 }
 
 TEST_CASE("package manifests and lockfiles are reproducible") {
@@ -118,7 +158,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
         << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
-        << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = \">=1.0.0\"\n\n[provides]\nmodels = true\nsymbols = true\n";
+        << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
+           "\">=1.0.0\"\n\n[provides]\nmodels = true\nsymbols = true\n";
     auto packageRoot = repositoryRoot / "example-lib";
     auto package = ice::PackageManager::readManifest(packageRoot);
     CHECK(package.name == "example.lib");
@@ -143,9 +184,9 @@ TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {
     auto shape = project.nextId();
     layout.shapes.emplace(shape, ice::Shape{shape, layer, std::nullopt, {0, 0, 10, 10}});
     project.layoutCells.emplace(cell, layout);
-    auto path = std::filesystem::temp_directory_path() / "ice-layout-subset.json";
-    ice::LayoutInterchange::exportGdsSubset(project, cell, path);
-    auto imported = ice::LayoutInterchange::importGdsSubset(path);
+    auto path = std::filesystem::temp_directory_path() / "ice-layout.gds";
+    ice::LayoutInterchange::exportGds(project, cell, path);
+    auto imported = ice::LayoutInterchange::importGds(path);
     CHECK(imported.layoutCells.size() == 1);
     auto report = ice::LocalVerificationAdapter().run(project);
     CHECK(report.drc.empty());
@@ -162,6 +203,11 @@ TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {
     ice::PluginManager plugins;
     plugins.discover(pluginRoot);
     plugins.initialize("test-plugin");
+    plugins.enable("test-plugin");
+    CHECK(plugins.get("test-plugin").state == ice::PluginState::enabled);
+    plugins.disable("test-plugin");
+    CHECK(plugins.get("test-plugin").state == ice::PluginState::disabled);
+    // Disabled plugins can be re-enabled without re-initialization.
     plugins.enable("test-plugin");
     CHECK(plugins.get("test-plugin").state == ice::PluginState::enabled);
     plugins.disable("test-plugin");

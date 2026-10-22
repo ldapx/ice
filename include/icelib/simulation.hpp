@@ -8,6 +8,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -49,41 +50,42 @@ struct SimulationProgress {
 };
 
 class CancellationToken {
-public:
+  public:
     void cancel() noexcept;
     bool cancelled() const noexcept;
 
-private:
+  private:
     std::atomic_bool cancelled_ = false;
 };
 
-using ProgressCallback = std::function<void(const SimulationProgress&)>;
+using ProgressCallback = std::function<void(const SimulationProgress &)>;
 
 class SimulatorAdapter {
-public:
+  public:
     virtual ~SimulatorAdapter() = default;
-    virtual SimulationResult run(const SimulationRequest& request, const CancellationToken& token,
-                                 const ProgressCallback& progress) = 0;
+    virtual SimulationResult run(const SimulationRequest &request, const CancellationToken &token,
+                                 const ProgressCallback &progress) = 0;
 };
 
 class NgspiceSimulator final : public SimulatorAdapter {
-public:
-    SimulationResult run(const SimulationRequest& request, const CancellationToken& token,
-                         const ProgressCallback& progress) override;
+  public:
+    SimulationResult run(const SimulationRequest &request, const CancellationToken &token,
+                         const ProgressCallback &progress) override;
 };
 
 class SimulationRunner {
-public:
+  public:
     explicit SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter = std::make_shared<NgspiceSimulator>());
-    SimulationResult run(const SimulationRequest& request, std::chrono::milliseconds timeout,
-                         const ProgressCallback& progress = {});
+    SimulationResult run(const SimulationRequest &request, std::chrono::milliseconds timeout,
+                         const ProgressCallback &progress = {});
     std::future<SimulationResult> runAsync(SimulationRequest request, std::chrono::milliseconds timeout,
-                                            ProgressCallback progress = {});
+                                           ProgressCallback progress = {});
     void cancel() noexcept;
 
-private:
+  private:
     std::shared_ptr<SimulatorAdapter> adapter_;
     std::shared_ptr<CancellationToken> activeToken_;
+    mutable std::mutex tokenMutex_;
 };
 
 struct SweepParameter {
@@ -97,16 +99,16 @@ struct ExperimentPoint {
 };
 
 class Experiment {
-public:
+  public:
     void addParameter(std::string name, std::vector<double> values);
-    std::vector<ExperimentPoint> run(const SimulationRequest& base, std::chrono::milliseconds timeout,
-                                     const ProgressCallback& progress = {}) const;
+    std::vector<ExperimentPoint> run(const SimulationRequest &base, std::chrono::milliseconds timeout,
+                                     const ProgressCallback &progress = {}) const;
 
-private:
+  private:
     std::vector<SweepParameter> parameters_;
 };
 
 std::string jobStateName(JobState state);
-std::string serializeSimulationResult(const SimulationResult& result);
+std::string serializeSimulationResult(const SimulationResult &result);
 
 } // namespace ice

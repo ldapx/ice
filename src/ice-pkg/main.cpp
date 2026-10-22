@@ -1,15 +1,14 @@
 #include "icelib/core.hpp"
 #include "icelib/packages.hpp"
-#include <iostream>
 #include <filesystem>
-int main(int argc, char** argv) {
+#include <iostream>
+int main(int argc, char **argv) {
     if (argc > 1 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "version")) {
         std::cout << ice::version() << "\n";
         return 0;
     }
     if (argc < 2 || std::string(argv[1]) == "--help") {
-        std::cout << "ice-pkg " << ice::version()
-                  << "\nUsage: ice-pkg <manifest|hash|install|resolve|verify> ...\n";
+        std::cout << "ice-pkg " << ice::version() << "\nUsage: ice-pkg <manifest|hash|install|resolve|verify> ...\n";
         return 0;
     }
     try {
@@ -17,7 +16,7 @@ int main(int argc, char** argv) {
         if (command == "manifest" && argc == 3) {
             auto package = ice::PackageManager::readManifest(argv[2]);
             std::cout << package.name << " " << package.version << "\n";
-            for (const auto& capability : ice::PackageManager::capabilities(package))
+            for (const auto &capability : ice::PackageManager::capabilities(package))
                 std::cout << "capability: " << capability << "\n";
             return 0;
         }
@@ -59,8 +58,11 @@ int main(int argc, char** argv) {
             return 0;
         }
         throw ice::ProjectError("package.arguments", "Invalid package-manager command or arguments");
-    } catch (const ice::ProjectError& error) {
+    } catch (const ice::ProjectError &error) {
         std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";
         return 2;
+    } catch (const std::exception &error) {
+        std::cerr << "error[internal]: " << error.what() << "\n";
+        return 3;
     }
 }

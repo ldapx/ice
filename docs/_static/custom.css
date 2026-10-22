@@ -1,0 +1,96 @@
+/* ICE docs theme — brand palette borrowed from xmake-docs (VitePress).
+   xmake-docs uses --vp-c-brand-1 #4acf93, --vp-c-brand-2 #42d392,
+   --vp-c-brand-3 #42b883, 300px sidebar, 8px rounded buttons. */
+
+:root {
+  --ice-brand-1: #4acf93;
+  --ice-brand-2: #42d392;
+  --ice-brand-3: #42b883;
+  --ice-brand-soft: #e6f6ee;
+}
+
+/* Hero block on the index page (mirrors the xmake-docs home hero). */
+.ice-hero {
+  padding: 3rem 0 1.5rem;
+}
+
+.ice-hero-name {
+  font-size: 2.6rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  background: -webkit-linear-gradient(120deg, #42d392 30%, #41d1ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.ice-hero-text {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-top: 0.25rem;
+}
+
+.ice-hero-tagline {
+  font-size: 1.05rem;
+  color: var(--color-foreground-muted);
+  margin-top: 0.5rem;
+}
+
+.ice-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.ice-hero-actions a {
+  display: inline-block;
+  padding: 0.55rem 1.25rem;
+  border-radius: 8px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+
+.ice-hero-actions a.ice-btn-brand {
+  background: var(--ice-brand-3);
+  color: #fff;
+}
+
+.ice-hero-actions a.ice-btn-brand:hover {
+  background: var(--ice-brand-2);
+  color: #000;
+}
+
+.ice-hero-actions a.ice-btn-alt {
+  border-color: var(--color-background-border);
+  color: inherit;
+}
+
+/* Feature cards (mirrors the xmake-docs home features grid). */
+.ice-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 2rem 0;
+}
+
+.ice-feature {
+  border: 1px solid var(--color-background-border);
+  border-radius: 12px;
+  padding: 20px;
+  background: var(--color-background-secondary);
+}
+
+.ice-feature .ice-feature-title {
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+/* Sidebar width parity with xmake-docs (300px). */
+@media (min-width: 82em) {
+  .sidebar-drawer {
+    width: 300px;
+  }
+}
