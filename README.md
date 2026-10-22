@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/logo.png" alt="ICE logo" width="200">
+</p>
+
 # ICE
 
 ICE is an open-source, extensible integrated-circuit design environment for
