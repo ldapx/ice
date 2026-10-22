@@ -4,6 +4,8 @@
 **IC E**DA - **I**ntegrated **C**ircuits **E**lectronics Design Automation
 </sub></sup>
 
+![screenshot](.github/screenshot_1.png)
+
 ICE is an open-source, extensible integrated-circuit design environment for
 schematic capture, IC layout, analog simulation, analysis, automated layout,
 and programmable design workflows.
