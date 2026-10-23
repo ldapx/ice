@@ -4,7 +4,9 @@
 #include <cctype>
 #include <map>
 #include <set>
+#include <initializer_list>
 #include <sstream>
+#include <string_view>
 
 namespace ice {
 namespace {
@@ -21,13 +23,17 @@ std::string lower(std::string text) {
     return text;
 }
 
-// Reads an instance parameter by name (case-insensitive), else the sole
-// parameter, else empty.
-std::string parameterValue(const SchematicInstance &instance, const std::string &wanted) {
+// Reads an instance parameter by one of the accepted names (case-insensitive),
+// else the sole parameter, else empty. Passive/source symbols name their value
+// by quantity (resistance, capacitance, ...), so callers pass a fallback list.
+std::string parameterValue(const SchematicInstance &instance,
+                           std::initializer_list<std::string_view> wanted) {
     std::string fallback;
     for (const auto &parameter : instance.parameters) {
-        if (lower(parameter.name) == lower(wanted))
-            return parameter.value;
+        const auto name = lower(parameter.name);
+        for (const auto &candidate : wanted)
+            if (name == lower(std::string(candidate)))
+                return parameter.value;
         if (fallback.empty())
             fallback = parameter.value;
     }
@@ -220,14 +226,28 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             continue;
         }
 
-        std::string value = parameterValue(instance, "value");
-        if (value.empty()) {
-            value = element == 'R'   ? "1k"
-                    : element == 'C' ? "1n"
-                    : element == 'L' ? "1u"
-                    : element == 'D' ? "Dmodel"
-                                     : "1";
-            note("missing value parameter for " + instance.name + ", using " + value);
+        const std::string value = [&] {
+            switch (element) {
+            case 'R':
+                return parameterValue(instance, {"resistance", "value"});
+            case 'C':
+                return parameterValue(instance, {"capacitance", "value"});
+            case 'L':
+                return parameterValue(instance, {"inductance", "value"});
+            case 'V':
+                return parameterValue(instance, {"voltage", "value"});
+            default:
+                return parameterValue(instance, {"value"});
+            }
+        }();
+        std::string resolved = value;
+        if (resolved.empty()) {
+            resolved = element == 'R'   ? "1k"
+                       : element == 'C' ? "1n"
+                       : element == 'L' ? "1u"
+                       : element == 'D' ? "Dmodel"
+                                        : "1";
+            note("missing value parameter for " + instance.name + ", using " + resolved);
         }
 
         // Instance names commonly already carry the element letter (V1, R1);
@@ -239,11 +259,11 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             designator.insert(designator.begin(), prefix);
         out << designator << " ";
         if (element == 'D')
-            out << value << " "; // diode: D<name> <node+> <node-> <model>
+            out << resolved << " "; // diode: D<name> <node+> <node-> <model>
         for (const auto &node : nodes)
             out << node << " ";
         if (element != 'D')
-            out << value << " ";
+            out << resolved << " ";
         out << "\n";
     }
 

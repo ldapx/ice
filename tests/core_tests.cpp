@@ -212,7 +212,11 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     ice::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
     ice::addSchematicInstance(project, cellId, weirdId, "X1", 0, 0);
     cell.instances.at(source).parameters.push_back({project.nextId(), "value", "PULSE(0 1 1n 1n 1n 100n 200n)"});
-    cell.instances.at(resistor).parameters.push_back({project.nextId(), "value", "1k"});
+    cell.instances.at(resistor).parameters.push_back({project.nextId(), "resistance", "2k"});
+
+    const auto inductorId = makeSymbol("Inductor", {"1", "2"});
+    const auto inductor = ice::addSchematicInstance(project, cellId, inductorId, "L1", 0, 0);
+    cell.instances.at(inductor).parameters.push_back({project.nextId(), "inductance", "3u"});
 
     // V1: + -> out, - -> 0 ; R1: 1 -> out, 2 -> 0 ; X1: a -> out, b -> 0.
     const auto netId = project.nextId();
@@ -234,7 +238,9 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
 
     // Voltage source and resistor are wired out/0 with their values.
     CHECK(joined.find("V1 out 0 PULSE") != std::string::npos);
-    CHECK(joined.find("R1 out 0 1k") != std::string::npos);
+    // Quantity-named parameters (resistance, inductance) feed the value slot.
+    CHECK(joined.find("R1 out 0 2k") != std::string::npos);
+    CHECK(joined.find("L1 0 0 3u") != std::string::npos);
     // The unsupported symbol is dropped and reported, not silently netlisted:
     // it appears only in a comment, never as a live X-element.
     CHECK(joined.find("\nX1") == std::string::npos);
@@ -317,18 +323,31 @@ TEST_CASE("file symbol library loads and validates") {
                                                    "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
                                                    "\n[[pin]]\nname = \"1\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
     CHECK_THROWS_AS(ice::SymbolLibrary::load(duplicated), ice::ProjectError);
+
+    const auto nameless = root / "nameless";
+    std::filesystem::create_directories(nameless);
+    std::ofstream(nameless / "resistor.svg") << "<svg viewBox=\"0 0 32 8\"></svg>";
+    std::ofstream(nameless / "resistor.toml")
+        << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\ncategory = \"Passive\"\n"
+           "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
+           "\n[[pin]]\nname = \"2\"\nx = 16\ny = 0\ndirection = \"inout\"\n"
+           "\n[[parameter]]\nname = \"\"\nvalue = \"1k\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(nameless), ice::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("shipped file symbol library loads") {
     const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
     const auto symbols = ice::SymbolLibrary::load(libraryRoot);
-    CHECK(symbols.size() == 7);
+    CHECK(symbols.size() == 8);
     std::map<std::string, std::size_t> pinCounts;
+    std::map<std::string, std::string> defaultValues;
     for (const auto &symbol : symbols) {
         CHECK(!symbol.svg.empty());
         CHECK(!symbol.pins.empty());
         pinCounts[symbol.name] = symbol.pins.size();
+        for (const auto &parameter : symbol.defaultParameters)
+            defaultValues[symbol.name] = parameter.name + "=" + parameter.value;
     }
     CHECK(pinCounts["Resistor"] == 2);
     CHECK(pinCounts["Capacitor"] == 2);
@@ -337,6 +356,12 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(pinCounts["Ground"] == 1);
     CHECK(pinCounts["Op Amp"] == 3);
     CHECK(pinCounts["NMOS"] == 4);
+    CHECK(pinCounts["Inductor"] == 2);
+    // Passive and source symbols seed a quantity-named default parameter.
+    CHECK(defaultValues["Resistor"] == "resistance=1k");
+    CHECK(defaultValues["Capacitor"] == "capacitance=1n");
+    CHECK(defaultValues["Inductor"] == "inductance=1u");
+    CHECK(defaultValues["Voltage Source"] == "voltage=1");
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {

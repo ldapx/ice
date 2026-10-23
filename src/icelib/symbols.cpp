@@ -80,6 +80,7 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
         FileSymbol symbol;
         std::string artworkFile;
         std::vector<Pin> pins;
+        std::vector<Parameter> defaultParameters;
         try {
             auto table = toml::parse_file(sidecar.string());
             const auto *header = table["symbol"].as_table();
@@ -116,6 +117,26 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
                 pin.direction = pinSideFromPosition(pin.x, pin.y);
                 pins.push_back(std::move(pin));
             }
+            const auto *parameterList = table["parameter"].as_array();
+            if (parameterList) {
+                for (const auto &item : *parameterList) {
+                    const auto *parameterTable = item.as_table();
+                    if (!parameterTable)
+                        throw ProjectError("symbol.parameter",
+                                           "Parameter entry must be a table: " + sidecar.string());
+                    Parameter parameter;
+                    parameter.name = (*parameterTable)["name"].value_or(std::string{});
+                    parameter.value = (*parameterTable)["value"].value_or(std::string{});
+                    if (parameter.name.empty())
+                        throw ProjectError("symbol.parameter", "Parameter name is required: " + sidecar.string());
+                    for (const auto &existing : defaultParameters)
+                        if (existing.name == parameter.name)
+                            throw ProjectError("symbol.parameter",
+                                               "Duplicate parameter name '" + parameter.name +
+                                                   "': " + sidecar.string());
+                    defaultParameters.push_back(std::move(parameter));
+                }
+            }
         } catch (const ProjectError &) {
             throw;
         } catch (const std::exception &error) {
@@ -129,6 +150,7 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
             readTextFile(sidecar.parent_path() / artworkFile, "symbol.artwork", "Symbol artwork file is missing");
         rejectUnsafeArtwork(symbol.svg, sidecar.parent_path() / artworkFile);
         symbol.pins = std::move(pins);
+        symbol.defaultParameters = std::move(defaultParameters);
         symbols.push_back(std::move(symbol));
     }
     for (std::size_t i = 0; i < symbols.size(); ++i)

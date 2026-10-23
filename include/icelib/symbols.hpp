@@ -16,6 +16,9 @@ struct FileSymbol {
     std::string category;
     std::string svg;
     std::vector<Pin> pins;
+    // Optional default parameters the sidecar seeds into every instance placed
+    // from this symbol (ids are assigned by the project at placement time).
+    std::vector<Parameter> defaultParameters;
 };
 
 // Loads a file-based schematic symbol library from a directory containing
@@ -32,7 +35,14 @@ struct FileSymbol {
 // x = -16
 // y = 0
 // direction = "inout"
+//
+// [[parameter]]
+// name = "resistance"
+// value = "1k"
 // ```
+//
+// Optional `[[parameter]]` entries seed default instance parameters whenever a
+// symbol is placed; users can edit them later in the properties panel.
 //
 // Pin coordinates are integers in symbol units with the origin at the artwork
 // center (Qt places the artwork centered on the symbol origin). `direction`

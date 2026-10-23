@@ -103,6 +103,9 @@ struct SymbolDefinition {
     QString category;
     QString svg;
     std::vector<ice::Pin> pins;
+    // Default instance parameters seeded by the symbol sidecar (e.g. the
+    // resistance of a resistor); placed instances copy them at drop time.
+    std::vector<ice::Parameter> parameters;
 };
 
 std::filesystem::path symbolLibraryDirectory() {
@@ -133,6 +136,7 @@ std::vector<SymbolDefinition> genericSymbolLibrary() {
         definition.category = QString::fromStdString(fileSymbol.category);
         definition.svg = QString::fromStdString(fileSymbol.svg);
         definition.pins = std::move(fileSymbol.pins);
+        definition.parameters = std::move(fileSymbol.defaultParameters);
         definitions.push_back(std::move(definition));
     }
     return definitions;
@@ -1912,7 +1916,14 @@ class DocumentWindow : public QMainWindow {
                                                 : ice::PinDirection::down;
                     source.pins.push_back(std::move(pin));
                 }
-                ice::addSchematicInstance(project, cell, symbol, "V1", 0, 0);
+                const auto instanceId = ice::addSchematicInstance(project, cell, symbol, "V1", 0, 0);
+                // Seed default parameters (voltage) like interactive placement
+                // does, so the starter source is immediately configurable.
+                auto &sourceInstance = project.schematicCells.at(cell).instances.at(instanceId);
+                for (auto parameter : sourceDefinition->parameters) {
+                    parameter.id = project.nextId();
+                    sourceInstance.parameters.push_back(std::move(parameter));
+                }
             });
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Schematic created"));
@@ -2195,9 +2206,17 @@ class DocumentWindow : public QMainWindow {
                                                 : ice::PinDirection::down;
                     symbol.pins.push_back(std::move(pin));
                 }
-                ice::addSchematicInstance(project, cellId, symbolId, definition.name.toStdString(),
-                                          static_cast<ice::Coordinate>(scenePosition.x()),
-                                          static_cast<ice::Coordinate>(-scenePosition.y()));
+                const auto instanceId = ice::addSchematicInstance(
+                    project, cellId, symbolId, definition.name.toStdString(),
+                    static_cast<ice::Coordinate>(scenePosition.x()),
+                    static_cast<ice::Coordinate>(-scenePosition.y()));
+                // Seed the symbol's default parameters (resistance, capacitance,
+                // ...) so they are editable in the properties panel right away.
+                auto &placedInstance = project.schematicCells.at(cellId).instances.at(instanceId);
+                for (auto parameter : definition.parameters) {
+                    parameter.id = project.nextId();
+                    placedInstance.parameters.push_back(std::move(parameter));
+                }
             });
             refreshProject();
         } catch (const ice::ProjectError &error) {

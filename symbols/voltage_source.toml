@@ -14,3 +14,7 @@ name = "-"
 x = 0
 y = -32
 direction = "input"
+
+[[parameter]]
+name = "voltage"
+value = "1"

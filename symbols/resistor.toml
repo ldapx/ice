@@ -14,3 +14,7 @@ name = "2"
 x = 16
 y = 0
 direction = "inout"
+
+[[parameter]]
+name = "resistance"
+value = "1k"

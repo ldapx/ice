@@ -1,0 +1,20 @@
+[symbol]
+name = "Inductor"
+artwork = "inductor.svg"
+category = "Passive"
+
+[[pin]]
+name = "1"
+x = -16
+y = 0
+direction = "inout"
+
+[[pin]]
+name = "2"
+x = 16
+y = 0
+direction = "inout"
+
+[[parameter]]
+name = "inductance"
+value = "1u"
