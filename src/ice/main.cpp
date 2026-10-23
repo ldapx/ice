@@ -941,6 +941,19 @@ class SchematicCanvas : public QGraphicsView {
         QGraphicsView::mouseDoubleClickEvent(event);
     }
 
+    void wheelEvent(QWheelEvent *event) override {
+        if (!event->modifiers().testFlag(Qt::ControlModifier) || event->angleDelta().y() == 0) {
+            QGraphicsView::wheelEvent(event);
+            return;
+        }
+
+        const qreal currentZoom = transform().m11();
+        const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+        const qreal newZoom = std::clamp(currentZoom * factor, qreal(0.05), qreal(100.0));
+        scale(newZoom / currentZoom, newZoom / currentZoom);
+        event->accept();
+    }
+
     void mouseReleaseEvent(QMouseEvent *event) override {
         if (panning_ && event->button() == Qt::MiddleButton) {
             panning_ = false;
