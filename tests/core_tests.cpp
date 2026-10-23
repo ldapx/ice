@@ -151,6 +151,103 @@ TEST_CASE("ngspice simulation reports missing netlists explicitly") {
     CHECK(!rejected.input_fingerprint.empty());
 }
 
+TEST_CASE("ngspice fetches the vectors named by the request signals") {
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.step = 1e-9;
+    request.stop = 200e-9;
+    request.netlist = {"V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
+                       "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
+    request.probeSignals = {"N15"};
+    ice::SimulationRunner runner;
+    auto result = runner.run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(!result.time.empty());
+    CHECK(result.traces.size() == 1);
+    if (!result.traces.empty()) {
+        CHECK(result.traces[0].name == "N15");
+        CHECK(result.traces[0].values.size() == result.time.size());
+    }
+}
+
+TEST_CASE("a run with no resolvable signal names fails with a clear error") {
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.step = 1e-9;
+    request.stop = 200e-9;
+    request.netlist = {"V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
+                       "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
+    request.probeSignals = {"nope"};
+    ice::SimulationRunner runner;
+    auto result = runner.run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::failed);
+    CHECK(result.error.find("nope") != std::string::npos);
+}
+
+TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
+    ice::Project project;
+    project.identity = "net";
+    project.name = "net";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    auto &cell = project.schematicCells.at(cellId);
+
+    auto makeSymbol = [&](const std::string &name, std::vector<std::string> pinNames) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = cell.symbols.at(symbolId);
+        for (const auto &pinName : pinNames) {
+            const auto pinId = project.nextId();
+            symbol.pins.push_back({pinId, pinName, 0, 0});
+        }
+        return symbolId;
+    };
+    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) { return cell.symbols.at(symbolId).pins.at(index).id; };
+
+    const auto sourceId = makeSymbol("Voltage Source", {"+", "-"});
+    const auto resistorId = makeSymbol("Resistor", {"1", "2"});
+    const auto groundId = makeSymbol("Ground", {"GND"});
+    const auto weirdId = makeSymbol("Mystery Widget", {"a", "b"});
+
+    const auto source = ice::addSchematicInstance(project, cellId, sourceId, "V1", 0, 0);
+    const auto resistor = ice::addSchematicInstance(project, cellId, resistorId, "R1", 0, 0);
+    ice::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
+    ice::addSchematicInstance(project, cellId, weirdId, "X1", 0, 0);
+    cell.instances.at(source).parameters.push_back({project.nextId(), "value", "PULSE(0 1 1n 1n 1n 100n 200n)"});
+    cell.instances.at(resistor).parameters.push_back({project.nextId(), "value", "1k"});
+
+    // V1: + -> out, - -> 0 ; R1: 1 -> out, 2 -> 0 ; X1: a -> out, b -> 0.
+    const auto netId = project.nextId();
+    cell.nets.emplace(netId,
+                      ice::Net{netId, "out", {pinIdOf(sourceId, 0), pinIdOf(resistorId, 0), pinIdOf(weirdId, 0)}});
+    const auto groundNetId = project.nextId();
+    cell.nets.emplace(groundNetId,
+                      ice::Net{groundNetId, "", {pinIdOf(sourceId, 1), pinIdOf(resistorId, 1), pinIdOf(groundId, 0),
+                                                  pinIdOf(weirdId, 1)}});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    const auto joined = [&] {
+        std::string text;
+        for (const auto &line : netlist)
+            text += line + "\n";
+        return text;
+    }();
+
+    // Voltage source and resistor are wired out/0 with their values.
+    CHECK(joined.find("V1 out 0 PULSE") != std::string::npos);
+    CHECK(joined.find("R1 out 0 1k") != std::string::npos);
+    // The unsupported symbol is dropped and reported, not silently netlisted:
+    // it appears only in a comment, never as a live X-element.
+    CHECK(joined.find("\nX1") == std::string::npos);
+    CHECK(joined.find("unsupported: X1 Mystery Widget") != std::string::npos);
+    bool reportedUnsupported = false;
+    for (const auto &noteText : notes)
+        if (noteText.find("unsupported") != std::string::npos)
+            reportedUnsupported = true;
+    CHECK(reportedUnsupported);
+    // No trailing .end: the simulator adapter appends it.
+    CHECK(joined.find(".end") == std::string::npos);
+}
+
 TEST_CASE("package manifests and lockfiles are reproducible") {
     auto repositoryRoot = std::filesystem::temp_directory_path() / "ice-package-test";
     std::filesystem::remove_all(repositoryRoot);

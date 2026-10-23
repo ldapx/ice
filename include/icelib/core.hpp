@@ -141,6 +141,26 @@ struct LayoutCell {
     std::map<ObjectId, LayoutInstance> instances;
 };
 
+struct SimulationGraph {
+    ObjectId id = 0;
+    std::string name;
+    std::string xAxis = "Time (s)";
+    std::string yAxis = "Voltage (V)";
+    std::vector<std::string> nodes;
+};
+
+struct SimulationItem {
+    ObjectId id = 0;
+    std::string name;
+    ObjectId schematic = 0;
+    std::string simulator = "ngspice";
+    std::string analysis = "transient";
+    double stop = 1.0;
+    double step = 0.01;
+    std::string directives;
+    std::vector<SimulationGraph> graphs;
+};
+
 class Project {
   public:
     static constexpr int schemaVersion = 1;
@@ -152,6 +172,7 @@ class Project {
     std::map<ObjectId, SchematicCell> schematicCells;
     std::map<ObjectId, Layer> layers;
     std::map<ObjectId, LayoutCell> layoutCells;
+    std::map<ObjectId, SimulationItem> simulations;
 
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;

@@ -1,5 +1,6 @@
 #include "icelib/simulation.hpp"
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <future>
@@ -42,6 +43,8 @@ std::string fingerprintRequest(const SimulationRequest &request) {
     mix(reinterpret_cast<const char *>(&request.step), sizeof(request.step));
     for (const auto &line : request.netlist)
         mixString(line);
+    for (const auto &signal : request.probeSignals)
+        mixString(signal);
     std::ostringstream text;
     text << std::hex << std::setw(16) << std::setfill('0') << hash;
     return "fnv1a64:" + text.str();
@@ -97,34 +100,78 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         return result;
     }
     auto *time = ngGet_Vec_Info(const_cast<char *>("time"));
-    auto *output = ngGet_Vec_Info(const_cast<char *>("v(out)"));
-    if (time == nullptr || output == nullptr || time->v_realdata == nullptr || output->v_realdata == nullptr ||
-        time->v_length <= 0 || output->v_length <= 0) {
+    if (time == nullptr || time->v_realdata == nullptr || time->v_length <= 0) {
         result.state = JobState::failed;
-        result.error = "ngspice did not produce time and v(out) vectors";
+        result.error = "ngspice did not produce a time vector";
         return result;
     }
-    const int count = std::min(time->v_length, output->v_length);
-    auto trace = SimulationTrace{"v(out)", {}};
-    trace.values.reserve(static_cast<std::size_t>(count));
-    result.time.reserve(static_cast<std::size_t>(count));
-    for (int index = 0; index < count; ++index) {
+
+    // A signal may be given as "out", "v(out)", "N15" or "v(N15)"; ngspice
+    // stores node voltages under the "v(<node>)" spelling, so normalize before
+    // looking it up. An empty signal list falls back to the legacy "v(out)".
+    const auto voltageVectorName = [](const std::string &signal) {
+        std::string name = signal;
+        for (auto &character : name)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        if (name.rfind("v(", 0) == 0 && name.size() >= 3 && name.back() == ')')
+            return name;
+        return "v(" + name + ")";
+    };
+
+    std::vector<std::string> wanted = request.probeSignals;
+    if (wanted.empty())
+        wanted.push_back("out");
+
+    std::vector<std::string> missing;
+    const int timeCount = time->v_length;
+    result.time.reserve(static_cast<std::size_t>(timeCount));
+    for (int index = 0; index < timeCount; ++index) {
         if (token.cancelled()) {
             result.state = JobState::cancelled;
             result.error = "simulation cancelled";
             return result;
         }
         result.time.push_back(time->v_realdata[index]);
-        trace.values.push_back(output->v_realdata[index]);
-        if (progress && (index % 64 == 0 || index + 1 == count)) {
-            const double fraction = static_cast<double>(index + 1) / static_cast<double>(count);
-            progress({fraction, "ngspice transient analysis running"});
-        }
     }
-    result.traces.push_back(std::move(trace));
-    result.state = JobState::succeeded;
+
+    for (const auto &signal : wanted) {
+        if (signal.empty())
+            continue;
+        const auto vectorName = voltageVectorName(signal);
+        auto *vector = ngGet_Vec_Info(const_cast<char *>(vectorName.c_str()));
+        if (vector == nullptr || vector->v_realdata == nullptr || vector->v_length <= 0) {
+            missing.push_back(signal);
+            continue;
+        }
+        const int count = std::min(timeCount, vector->v_length);
+        auto trace = SimulationTrace{signal, {}};
+        trace.values.reserve(static_cast<std::size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            if (token.cancelled()) {
+                result.state = JobState::cancelled;
+                result.error = "simulation cancelled";
+                return result;
+            }
+            trace.values.push_back(vector->v_realdata[index]);
+        }
+        result.traces.push_back(std::move(trace));
+    }
+
+    if (result.traces.empty()) {
+        result.state = JobState::failed;
+        std::string listed;
+        for (const auto &signal : wanted) {
+            if (!listed.empty())
+                listed += ", ";
+            listed += signal;
+        }
+        result.error = "ngspice did not produce the requested vectors (" + listed +
+                       ") — check the graph's Nodes/signals match the schematic's nets";
+        return result;
+    }
     if (progress)
         progress({1.0, "ngspice transient analysis complete"});
+    result.state = JobState::succeeded;
     return result;
 }
 

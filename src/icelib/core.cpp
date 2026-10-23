@@ -68,6 +68,11 @@ ObjectId Project::nextId() {
         for (const auto &[instanceId, instance] : cell.instances)
             update(instanceId);
     }
+    for (const auto &[id, sim] : simulations) {
+        update(id);
+        for (const auto &graph : sim.graphs)
+            update(graph.id);
+    }
     return highest + 1;
 }
 
@@ -238,6 +243,26 @@ std::string Project::serialize() const {
                                       {"orientation", orientationName(instance.orientation)}});
         j["layout_cells"].push_back(c);
     }
+    j["simulations"] = json::array();
+    for (const auto &[id, sim] : simulations) {
+        json s = {{"id", id},
+                  {"name", sim.name},
+                  {"schematic", sim.schematic},
+                  {"simulator", sim.simulator},
+                  {"analysis", sim.analysis},
+                  {"stop", sim.stop},
+                  {"step", sim.step},
+                  {"directives", sim.directives},
+                  {"graphs", json::array()}};
+        for (const auto &graph : sim.graphs) {
+            s["graphs"].push_back({{"id", graph.id},
+                                   {"name", graph.name},
+                                   {"x_axis", graph.xAxis},
+                                   {"y_axis", graph.yAxis},
+                                   {"nodes", graph.nodes}});
+        }
+        j["simulations"].push_back(s);
+    }
     return j.dump(2) + "\n";
 }
 
@@ -336,6 +361,32 @@ Project Project::deserialize(const std::string &text) {
                 cell.instances.emplace(i.at("id"), LayoutInstance{i.at("id"), i.at("cell"), i.at("name"), i.at("x"),
                                                                   i.at("y"), parseOrientation(i.at("orientation"))});
             p.layoutCells.emplace(cell.id, std::move(cell));
+        }
+        if (j.contains("simulations")) {
+            for (const auto &s : j.at("simulations")) {
+                SimulationItem sim;
+                sim.id = s.at("id");
+                sim.name = s.at("name");
+                sim.schematic = s.value("schematic", ObjectId{0});
+                sim.simulator = s.value("simulator", std::string{"ngspice"});
+                sim.analysis = s.value("analysis", std::string{"transient"});
+                sim.stop = s.value("stop", 1.0);
+                sim.step = s.value("step", 0.01);
+                sim.directives = s.value("directives", std::string{});
+                if (s.contains("graphs")) {
+                    for (const auto &g : s.at("graphs")) {
+                        SimulationGraph graph;
+                        graph.id = g.at("id");
+                        graph.name = g.value("name", std::string{"Graph"});
+                        graph.xAxis = g.value("x_axis", std::string{"Time (s)"});
+                        graph.yAxis = g.value("y_axis", std::string{"Voltage (V)"});
+                        if (g.contains("nodes"))
+                            graph.nodes = g.at("nodes").get<std::vector<std::string>>();
+                        sim.graphs.push_back(std::move(graph));
+                    }
+                }
+                p.simulations.emplace(sim.id, std::move(sim));
+            }
         }
         auto diagnostics = p.validate();
         if (!diagnostics.empty())

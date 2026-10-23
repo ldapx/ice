@@ -25,6 +25,11 @@ struct SimulationRequest {
     std::string simulator = "ngspice";
     std::string simulator_version = "1";
     std::vector<std::string> netlist;
+    // Node/signal names to fetch and return as traces (e.g. "N15", "out",
+    // "v(out)"). Empty means the adapter falls back to "v(out)".
+    // Named `probeSignals` (not `signals`) because Qt defines `signals` as a
+    // macro and this struct is read from Qt translation units.
+    std::vector<std::string> probeSignals;
 };
 
 struct SimulationTrace {

@@ -1127,6 +1127,34 @@ class SimulationPlot : public QWidget {
 
     void setResult(const ice::SimulationResult &result) {
         result_ = result;
+        // If the graph declares a node list, only keep traces matching it.
+        if (!graph_.nodes.empty()) {
+            ice::SimulationResult filtered;
+            filtered.analysis = result.analysis;
+            filtered.simulator = result.simulator;
+            filtered.simulator_version = result.simulator_version;
+            filtered.state = result.state;
+            filtered.error = result.error;
+            filtered.time = result.time;
+            for (const auto &trace : result.traces) {
+                const auto traceName = QString::fromStdString(trace.name).trimmed().toLower();
+                for (const auto &node : graph_.nodes) {
+                    const auto nodeName = QString::fromStdString(node).trimmed().toLower();
+                    if (!nodeName.isEmpty() && traceName.contains(nodeName)) {
+                        filtered.traces.push_back(trace);
+                        break;
+                    }
+                }
+            }
+            // Fall back to the full result when nothing matched.
+            if (!filtered.traces.empty())
+                result_ = std::move(filtered);
+        }
+        update();
+    }
+
+    void setGraph(const ice::SimulationGraph &graph) {
+        graph_ = graph;
         update();
     }
 
@@ -1143,9 +1171,19 @@ class SimulationPlot : public QWidget {
         const QRectF plot = rect().adjusted(58, 18, -20, -42);
         painter.setPen(QPen(QColor("#8d98a5"), 1));
         painter.drawRect(plot);
-        painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter,
-                         result_.traces.empty() ? QStringLiteral("No simulation trace")
-                                                : QStringLiteral("Simulation traces"));
+        const QString title =
+            graph_.name.empty()
+                ? (result_.traces.empty() ? QStringLiteral("No simulation trace")
+                                          : QStringLiteral("Simulation traces"))
+                : QString::fromStdString(graph_.name);
+        painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter, title);
+        // Axis labels come from the graph definition.
+        painter.setPen(QPen(QColor("#aeb8c2"), 1));
+        painter.drawText(QRectF(58, plot.top() - 16, 160, 14), Qt::AlignLeft,
+                         QString::fromStdString(graph_.yAxis));
+        painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 22, 200, 14), Qt::AlignRight,
+                         QString::fromStdString(graph_.xAxis));
+        painter.setPen(QPen(QColor("#8d98a5"), 1));
         if (result_.time.empty() || result_.traces.empty())
             return;
 
@@ -1187,6 +1225,7 @@ class SimulationPlot : public QWidget {
 
   private:
     ice::SimulationResult result_;
+    ice::SimulationGraph graph_;
 };
 
 class ProjectPanel : public QWidget {
@@ -1263,6 +1302,216 @@ class ProjectPanel : public QWidget {
     QListWidget *layerList_ = nullptr;
     bool showLayoutHierarchy_ = true;
 };
+
+// ---------------------------------------------------------------------------
+// SimulationPanel – left-panel tree of all simulations (mirrors ProjectPanel)
+// ---------------------------------------------------------------------------
+class SimulationPanel : public QWidget {
+  public:
+    // Emitted when the user selects a simulation or one of its graphs.
+    // simulationId == 0 means no selection; graphId == 0 means no specific graph.
+    using SelectionCallback = std::function<void(ice::ObjectId simulationId, ice::ObjectId graphId)>;
+
+    explicit SimulationPanel(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(2);
+        layout->addWidget(heading(QStringLiteral("Simulations")));
+
+        tree_ = new QTreeWidget;
+        tree_->setHeaderHidden(true);
+        tree_->setAccessibleName(QStringLiteral("Simulations list"));
+        tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+        layout->addWidget(tree_, 1);
+
+        auto *buttonRow = new QWidget;
+        auto *buttonLayout = new QHBoxLayout(buttonRow);
+        buttonLayout->setContentsMargins(4, 0, 4, 4);
+        addButton_ = new QPushButton(QStringLiteral("+"));
+        addButton_->setToolTip(QStringLiteral("Add simulation"));
+        addButton_->setFixedWidth(32);
+        deleteButton_ = new QPushButton(QStringLiteral("−"));
+        deleteButton_->setToolTip(QStringLiteral("Delete selected simulation"));
+        deleteButton_->setFixedWidth(32);
+        deleteButton_->setEnabled(false);
+        buttonLayout->addWidget(addButton_);
+        buttonLayout->addWidget(deleteButton_);
+        buttonLayout->addStretch();
+        layout->addWidget(buttonRow);
+
+        connect(tree_, &QTreeWidget::currentItemChanged, this,
+                [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
+                    const bool hasSelection = current != nullptr;
+                    deleteButton_->setEnabled(hasSelection);
+                    if (onSelection_)
+                        onSelection_(currentSimulationId(), currentGraphId());
+                });
+        connect(tree_, &QTreeWidget::customContextMenuRequested, this,
+                [this](const QPoint &pos) { showContextMenu(pos); });
+    }
+
+    void setOnAddClicked(std::function<void()> cb) {
+        connect(addButton_, &QPushButton::clicked, this, [cb = std::move(cb)] { cb(); });
+    }
+    void setOnDeleteClicked(std::function<void()> cb) {
+        connect(deleteButton_, &QPushButton::clicked, this, [cb = std::move(cb)] { cb(); });
+    }
+    void setOnAddGraph(std::function<void(ice::ObjectId)> cb) { onAddGraph_ = std::move(cb); }
+    void setOnDeleteGraph(std::function<void(ice::ObjectId, ice::ObjectId)> cb) {
+        onDeleteGraph_ = std::move(cb);
+    }
+    void setOnSelection(SelectionCallback cb) { onSelection_ = std::move(cb); }
+
+    // Rebuild the tree from the project's simulations map.
+    void setProject(const ice::Project &project) {
+        const ice::ObjectId prevSimId = currentSimulationId();
+        const ice::ObjectId prevGraphId = currentGraphId();
+        {
+            // Block signals so a rebuild never re-fires the selection callback
+            // for every intermediate state; it fires once at the end instead.
+            QSignalBlocker blocker(tree_);
+            tree_->clear();
+            for (const auto &[id, sim] : project.simulations) {
+                auto *item = new QTreeWidgetItem(tree_, {QString::fromStdString(sim.name)});
+                item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                // Properties, mirroring the hierarchy panels' style.
+                std::string schematicName = "(none)";
+                if (sim.schematic != 0) {
+                    if (const auto cell = project.schematicCells.find(sim.schematic);
+                        cell != project.schematicCells.end())
+                        schematicName = cell->second.name;
+                }
+                // Property rows keep the simulation id so selecting one keeps
+                // the simulation active in the editor.
+                auto addPropertyRow = [&](const QString &text) {
+                    auto *row = new QTreeWidgetItem(item, {text});
+                    row->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                    row->setFlags(Qt::ItemIsEnabled);
+                };
+                addPropertyRow(QStringLiteral("Schematic: %1")
+                                   .arg(QString::fromStdString(schematicName)));
+                addPropertyRow(QStringLiteral("Simulator: %1")
+                                   .arg(QString::fromStdString(sim.simulator)));
+                addPropertyRow(QStringLiteral("Analysis: %1")
+                                   .arg(QString::fromStdString(sim.analysis)));
+                addPropertyRow(QStringLiteral("Stop time / end: %1")
+                                   .arg(QString::number(sim.stop, 'g', 6)));
+                addPropertyRow(QStringLiteral("Step / increment: %1")
+                                   .arg(QString::number(sim.step, 'g', 6)));
+                // Graphs sub-tree.
+                auto *graphsItem = new QTreeWidgetItem(item, {QStringLiteral("Graphs (%1)").arg(sim.graphs.size())});
+                graphsItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                graphsItem->setFlags(Qt::ItemIsEnabled);
+                for (const auto &graph : sim.graphs) {
+                    auto *graphItem =
+                        new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
+                    graphItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                    graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
+                    graphItem->setToolTip(0, QStringLiteral("X: %1  Y: %2")
+                                                 .arg(QString::fromStdString(graph.xAxis),
+                                                      QString::fromStdString(graph.yAxis)));
+                }
+            }
+            tree_->expandAll();
+            // Restore previous selection if still present.
+            if (prevSimId != 0)
+                selectSimulation(prevSimId, prevGraphId);
+        }
+        deleteButton_->setEnabled(tree_->currentItem() != nullptr);
+        if (onSelection_)
+            onSelection_(currentSimulationId(), currentGraphId());
+    }
+
+    void clear() {
+        tree_->clear();
+        deleteButton_->setEnabled(false);
+        if (onSelection_)
+            onSelection_(0, 0);
+    }
+
+    ice::ObjectId currentSimulationId() const {
+        auto *item = tree_->currentItem();
+        if (!item)
+            return 0;
+        // Graph items and property items live under a simulation item; the
+        // simulation id is stored on every selectable row.
+        if (item->data(0, Qt::UserRole).isValid())
+            return static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        return 0;
+    }
+
+    ice::ObjectId currentGraphId() const {
+        auto *item = tree_->currentItem();
+        if (!item || !item->data(0, Qt::UserRole + 1).isValid())
+            return 0;
+        return static_cast<ice::ObjectId>(item->data(0, Qt::UserRole + 1).toULongLong());
+    }
+
+    // Select the item matching the given simulation/graph id (0 = deselect).
+    void selectSimulation(ice::ObjectId id, ice::ObjectId graphId = 0) {
+        for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+            auto *item = tree_->topLevelItem(i);
+            if (static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong()) != id)
+                continue;
+            QTreeWidgetItem *target = item;
+            if (graphId != 0) {
+                for (int g = 0; g < item->childCount(); ++g) {
+                    auto *graphsNode = item->child(g);
+                    for (int c = 0; graphsNode && c < graphsNode->childCount(); ++c) {
+                        auto *graphItem = graphsNode->child(c);
+                        if (static_cast<ice::ObjectId>(graphItem->data(0, Qt::UserRole + 1).toULongLong()) ==
+                            graphId) {
+                            target = graphItem;
+                            break;
+                        }
+                    }
+                }
+            }
+            tree_->setCurrentItem(target);
+            return;
+        }
+        tree_->setCurrentItem(nullptr);
+    }
+
+  private:
+    void showContextMenu(const QPoint &pos) {
+        auto *clicked = tree_->itemAt(pos);
+        if (!clicked)
+            return;
+        // Find the simulation item owning the clicked row (property and graph
+        // rows carry the simulation id too, but walk up as a safety net).
+        QTreeWidgetItem *simItem = clicked;
+        while (simItem && !simItem->data(0, Qt::UserRole).isValid())
+            simItem = simItem->parent();
+        if (!simItem)
+            return;
+        const auto simId = static_cast<ice::ObjectId>(simItem->data(0, Qt::UserRole).toULongLong());
+        // A graph row additionally carries its graph id.
+        const ice::ObjectId graphId =
+            clicked->data(0, Qt::UserRole + 1).isValid()
+                ? static_cast<ice::ObjectId>(clicked->data(0, Qt::UserRole + 1).toULongLong())
+                : 0;
+        QMenu menu(this);
+        auto *addGraphAction = menu.addAction(QStringLiteral("Add graph…"));
+        QAction *deleteGraphAction = nullptr;
+        if (graphId != 0)
+            deleteGraphAction = menu.addAction(QStringLiteral("Delete this graph"));
+        const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+        if (chosen == addGraphAction && onAddGraph_)
+            onAddGraph_(simId);
+        else if (chosen == deleteGraphAction && onDeleteGraph_ && graphId != 0)
+            onDeleteGraph_(simId, graphId);
+    }
+
+    QTreeWidget *tree_ = nullptr;
+    QPushButton *addButton_ = nullptr;
+    QPushButton *deleteButton_ = nullptr;
+    SelectionCallback onSelection_;
+    std::function<void(ice::ObjectId)> onAddGraph_;
+    std::function<void(ice::ObjectId, ice::ObjectId)> onDeleteGraph_;
+};
+
+
 
 class LayersPanel : public QWidget {
   public:
@@ -1624,8 +1873,10 @@ class DocumentWindow : public QMainWindow {
         simulationOutput_->setPlainText(QStringLiteral("No project open."));
         schematicSelector_->clear();
         simulationPlot_->clear();
-        simulationList_->clear();
-        simulationEntries_.clear();
+        if (simulationPanel_)
+            simulationPanel_->clear();
+        activeSimulationId_ = 0;
+        rebuildGraphTabs({});
         setWindowTitle(QStringLiteral("ICE"));
         updateSelectionStatus();
         statusBar()->showMessage(QStringLiteral("Ready — no project open"));
@@ -2037,87 +2288,461 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    // ── Simulation management ────────────────────────────────────────────────
+
+    // Build (or rebuild) graphTabs_ from a SimulationItem's graphs vector.
+    void rebuildGraphTabs(const std::vector<ice::SimulationGraph> &graphs) {
+        // Preserve the current tab index so we can restore it.
+        const int prevIndex = graphTabs_ ? graphTabs_->currentIndex() : 0;
+        if (!graphTabs_)
+            return;
+        // Remove all tabs except the first (which holds simulationPlot_).
+        // We always keep simulationPlot_ alive; additional tabs use fresh plots.
+        while (graphTabs_->count() > 0) {
+            const int last = graphTabs_->count() - 1;
+            QWidget *widget = graphTabs_->widget(last);
+            graphTabs_->removeTab(last);
+            if (widget != simulationPlot_)
+                widget->deleteLater();
+        }
+
+        if (graphs.empty()) {
+            // Show a single empty plot labelled "Graph 1".
+            simulationPlot_->clear();
+            simulationPlot_->setGraph({});
+            graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
+            return;
+        }
+        for (std::size_t i = 0; i < graphs.size(); ++i) {
+            SimulationPlot *plot = (i == 0) ? simulationPlot_ : new SimulationPlot;
+            plot->clear();
+            plot->setGraph(graphs[i]);
+            const auto tabName = QString::fromStdString(graphs[i].name);
+            const auto idx = graphTabs_->addTab(plot, tabName);
+            graphTabs_->tabBar()->setTabData(idx, QVariant::fromValue<qulonglong>(graphs[i].id));
+        }
+        const int restored = (prevIndex >= 0 && prevIndex < graphTabs_->count()) ? prevIndex : 0;
+        graphTabs_->setCurrentIndex(restored);
+    }
+
+    // Called when the SimulationPanel selection changes.
+    void loadSimulationById(ice::ObjectId id, ice::ObjectId graphId = 0) {
+        const bool sameSimulation = (id == activeSimulationId_);
+        activeSimulationId_ = id;
+        if (!project_ || id == 0) {
+            rebuildGraphTabs({});
+            return;
+        }
+        const auto &sims = project_->project().simulations;
+        auto it = sims.find(id);
+        if (it == sims.end()) {
+            rebuildGraphTabs({});
+            return;
+        }
+        const auto &sim = it->second;
+
+        // Block signals so we don't re-save while populating.
+        QSignalBlocker b1(schematicSelector_), b2(simulatorSelector_),
+            b3(analysisSelector_), b4(stopTime_), b5(stepTime_), b6(directiveEditor_);
+
+        const auto schIdx = schematicSelector_->findData(QVariant::fromValue<qulonglong>(sim.schematic));
+        if (schIdx >= 0)
+            schematicSelector_->setCurrentIndex(schIdx);
+        simulatorSelector_->setCurrentIndex(
+            simulatorSelector_->findData(QString::fromStdString(sim.simulator)));
+        analysisSelector_->setCurrentIndex(
+            analysisSelector_->findData(QString::fromStdString(sim.analysis)));
+        stopTime_->setValue(sim.stop);
+        stepTime_->setValue(sim.step);
+        directiveEditor_->setPlainText(QString::fromStdString(sim.directives));
+
+        // Avoid rebuilding the graph tabs (and losing plot results) when the
+        // selection did not actually change, e.g. after a property commit.
+        if (!sameSimulation)
+            rebuildGraphTabs(sim.graphs);
+        if (graphId != 0)
+            selectGraphTab(graphId);
+    }
+
+    // Switch the graph tab widget to the tab holding the given graph id.
+    void selectGraphTab(ice::ObjectId graphId) {
+        if (!graphTabs_ || graphId == 0)
+            return;
+        for (int i = 0; i < graphTabs_->count(); ++i) {
+            if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong()) == graphId) {
+                graphTabs_->setCurrentIndex(i);
+                return;
+            }
+        }
+    }
+
+    // Write form fields back into the active SimulationItem.
+    void commitSimulationProperties() {
+        if (!project_ || activeSimulationId_ == 0)
+            return;
+        project_->execute("edit simulation properties", [this](ice::Project &project) {
+            auto it = project.simulations.find(activeSimulationId_);
+            if (it == project.simulations.end())
+                return;
+            auto &sim = it->second;
+            sim.schematic =
+                static_cast<ice::ObjectId>(schematicSelector_->currentData().toULongLong());
+            sim.simulator = simulatorSelector_->currentData().toString().toStdString();
+            sim.analysis = analysisSelector_->currentData().toString().toStdString();
+            sim.stop = stopTime_->value();
+            sim.step = stepTime_->value();
+            sim.directives = directiveEditor_->toPlainText().toStdString();
+        });
+    }
+
+    // Add a new SimulationItem to the project.
+    void addSimulation() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Add Simulation"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        bool ok = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Add Simulation"),
+                                  QStringLiteral("Simulation name:"), QLineEdit::Normal,
+                                  QStringLiteral("sim1"), &ok);
+        if (!ok || name.trimmed().isEmpty())
+            return;
+        ice::ObjectId newId = 0;
+        project_->execute("add simulation", [&](ice::Project &project) {
+            newId = project.nextId();
+            ice::SimulationItem sim;
+            sim.id = newId;
+            sim.name = name.trimmed().toStdString();
+            // Default to first schematic if available.
+            if (!project.schematicCells.empty())
+                sim.schematic = project.schematicCells.begin()->first;
+            // Add one default graph. nextId() still returns newId here because
+            // the simulation is not in the map yet, so allocate newId + 1.
+            ice::SimulationGraph graph;
+            graph.id = newId + 1;
+            graph.name = "Graph 1";
+            sim.graphs.push_back(std::move(graph));
+            project.simulations.emplace(newId, std::move(sim));
+        });
+        simulationPanel_->setProject(project_->project());
+        simulationPanel_->selectSimulation(newId);
+        statusBar()->showMessage(QStringLiteral("Simulation added"));
+    }
+
+    // Delete the currently selected SimulationItem.
+    void deleteSimulation() {
+        if (!project_ || activeSimulationId_ == 0)
+            return;
+        const auto id = activeSimulationId_;
+        const auto res = QMessageBox::question(
+            this, QStringLiteral("Delete Simulation"),
+            QStringLiteral("Delete this simulation and all its graphs?"),
+            QMessageBox::Yes | QMessageBox::No);
+        if (res != QMessageBox::Yes)
+            return;
+        project_->execute("delete simulation", [id](ice::Project &project) {
+            project.simulations.erase(id);
+        });
+        activeSimulationId_ = 0;
+        simulationPanel_->setProject(project_->project());
+        rebuildGraphTabs({});
+        statusBar()->showMessage(QStringLiteral("Simulation deleted"));
+    }
+
+    // Add a new graph to the given SimulationItem.
+    void addGraph(ice::ObjectId simId) {
+        if (!project_ || simId == 0)
+            return;
+        bool ok = false;
+        std::size_t graphCount = 0;
+        if (const auto it = project_->project().simulations.find(simId);
+            it != project_->project().simulations.end())
+            graphCount = it->second.graphs.size();
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Add Graph"),
+                                  QStringLiteral("Graph name:"), QLineEdit::Normal,
+                                  QStringLiteral("Graph %1").arg(graphCount + 1), &ok);
+        if (!ok || name.trimmed().isEmpty())
+            return;
+        ice::ObjectId newGraphId = 0;
+        project_->execute("add graph", [&](ice::Project &project) {
+            auto it = project.simulations.find(simId);
+            if (it == project.simulations.end())
+                return;
+            ice::SimulationGraph graph;
+            graph.id = project.nextId();
+            newGraphId = graph.id;
+            graph.name = name.trimmed().toStdString();
+            it->second.graphs.push_back(std::move(graph));
+        });
+        if (newGraphId == 0)
+            return;
+        // Refresh the panel tree, select the simulation and the new graph tab.
+        simulationPanel_->setProject(project_->project());
+        activeSimulationId_ = 0; // force rebuild on next load
+        loadSimulationById(simId, newGraphId);
+        statusBar()->showMessage(QStringLiteral("Graph added"));
+    }
+
+    // Delete the given graph from the given SimulationItem.
+    void deleteGraph(ice::ObjectId simId, ice::ObjectId graphId) {
+        if (!project_ || simId == 0 || graphId == 0)
+            return;
+        const auto simIt = project_->project().simulations.find(simId);
+        if (simIt == project_->project().simulations.end())
+            return;
+        // Don't delete the last graph.
+        if (simIt->second.graphs.size() <= 1) {
+            QMessageBox::information(this, QStringLiteral("Delete Graph"),
+                                     QStringLiteral("A simulation must have at least one graph."));
+            return;
+        }
+        const auto res = QMessageBox::question(this, QStringLiteral("Delete Graph"),
+                                               QStringLiteral("Delete this graph?"),
+                                               QMessageBox::Yes | QMessageBox::No);
+        if (res != QMessageBox::Yes)
+            return;
+        project_->execute("delete graph", [simId, graphId](ice::Project &project) {
+            auto it = project.simulations.find(simId);
+            if (it == project.simulations.end())
+                return;
+            auto &graphs = it->second.graphs;
+            graphs.erase(std::remove_if(graphs.begin(), graphs.end(),
+                                        [graphId](const ice::SimulationGraph &g) { return g.id == graphId; }),
+                         graphs.end());
+        });
+        // Rebuild tabs from the surviving graphs and refresh the panel tree.
+        const auto &updatedSim = project_->project().simulations.at(simId);
+        rebuildGraphTabs(updatedSim.graphs);
+        simulationPanel_->setProject(project_->project());
+        statusBar()->showMessage(QStringLiteral("Graph deleted"));
+    }
+
+    // Delete the currently visible graph tab.
+    void deleteCurrentGraph() {
+        if (!project_ || activeSimulationId_ == 0 || !graphTabs_)
+            return;
+        const int tabIdx = graphTabs_->currentIndex();
+        if (tabIdx < 0)
+            return;
+        const auto graphId =
+            static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
+        deleteGraph(activeSimulationId_, graphId);
+    }
+
+    // Edit the current graph's name, axis labels, and node list.
+    void editGraph() {
+        if (!project_ || activeSimulationId_ == 0 || !graphTabs_)
+            return;
+        const int tabIdx = graphTabs_->currentIndex();
+        if (tabIdx < 0)
+            return;
+        const auto graphId =
+            static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
+        const auto simId = activeSimulationId_;
+        const auto &sim = project_->project().simulations.at(simId);
+        const auto git = std::find_if(sim.graphs.begin(), sim.graphs.end(),
+                                      [graphId](const ice::SimulationGraph &g) { return g.id == graphId; });
+        if (git == sim.graphs.end())
+            return;
+        const auto &currentGraph = *git;
+
+        // Build a small dialog for editing name/axes/nodes.
+        QDialog dlg(this);
+        dlg.setWindowTitle(QStringLiteral("Edit Graph"));
+        dlg.resize(380, 240);
+        auto *dlgLayout = new QVBoxLayout(&dlg);
+        auto *form = new QFormLayout;
+        auto *nameEdit = new QLineEdit(QString::fromStdString(currentGraph.name));
+        auto *xAxisEdit = new QLineEdit(QString::fromStdString(currentGraph.xAxis));
+        auto *yAxisEdit = new QLineEdit(QString::fromStdString(currentGraph.yAxis));
+        auto *nodesEdit = new QLineEdit(
+            QString::fromStdString([&] {
+                std::string joined;
+                for (std::size_t i = 0; i < currentGraph.nodes.size(); ++i) {
+                    if (i) joined += ", ";
+                    joined += currentGraph.nodes[i];
+                }
+                return joined;
+            }()));
+        nodesEdit->setPlaceholderText(QStringLiteral("e.g. v(out), v(in)  (comma-separated)"));
+        form->addRow(QStringLiteral("Graph name:"), nameEdit);
+        form->addRow(QStringLiteral("X axis label:"), xAxisEdit);
+        form->addRow(QStringLiteral("Y axis label:"), yAxisEdit);
+        form->addRow(QStringLiteral("Nodes / signals:"), nodesEdit);
+        dlgLayout->addLayout(form);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        dlgLayout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+
+        const auto newName = nameEdit->text().trimmed();
+        const auto newXAxis = xAxisEdit->text().trimmed();
+        const auto newYAxis = yAxisEdit->text().trimmed();
+        // Parse nodes: split by commas, trim each entry.
+        std::vector<std::string> newNodes;
+        for (const auto &part : nodesEdit->text().split(',', Qt::SkipEmptyParts))
+            if (const auto trimmed = part.trimmed(); !trimmed.isEmpty())
+                newNodes.push_back(trimmed.toStdString());
+
+        project_->execute("edit graph", [simId, graphId, newName, newXAxis, newYAxis,
+                                         newNodes](ice::Project &project) {
+            auto it = project.simulations.find(simId);
+            if (it == project.simulations.end())
+                return;
+            for (auto &g : it->second.graphs) {
+                if (g.id != graphId)
+                    continue;
+                g.name = newName.toStdString();
+                g.xAxis = newXAxis.toStdString();
+                g.yAxis = newYAxis.toStdString();
+                g.nodes = newNodes;
+                break;
+            }
+        });
+        // Rebuild tabs to reflect new name and refresh the panel tree.
+        const auto &updatedSim = project_->project().simulations.at(simId);
+        rebuildGraphTabs(updatedSim.graphs);
+        simulationPanel_->setProject(project_->project());
+        // Restore to the same graph (by id).
+        for (int i = 0; i < graphTabs_->count(); ++i) {
+            if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong()) == graphId) {
+                graphTabs_->setCurrentIndex(i);
+                break;
+            }
+        }
+        statusBar()->showMessage(QStringLiteral("Graph updated"));
+    }
+
+    // Refresh the active graph's plot (called when switching tabs).
+    void refreshGraphPlot() {
+        // Result display is driven by runSimulation; here just ensure the plot widget is visible.
+        if (graphTabs_ && graphTabs_->currentWidget())
+            graphTabs_->currentWidget()->update();
+    }
+
     void runSimulation() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Run Simulation"),
                                      QStringLiteral("Create or open a project first."));
             return;
         }
+        // If no simulation is selected, offer to create one.
+        if (activeSimulationId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Run Simulation"),
+                                     QStringLiteral("Select or add a simulation first."));
+            return;
+        }
         simulationOutput_->setPlainText(QStringLiteral("Running simulation..."));
         documents_->setCurrentWidget(simulationPage_);
         QApplication::processEvents();
-        ice::SimulationRequest request;
-        request.analysis = analysisSelector_->currentData().toString().toStdString();
-        request.simulator = simulatorSelector_->currentData().toString().toStdString();
-        request.stop = stopTime_->value();
-        request.step = stepTime_->value();
-        for (const auto &line : directiveEditor_->toPlainText().split('\n'))
-            if (!line.trimmed().isEmpty())
-                request.netlist.push_back(line.toStdString());
-        const auto selectedCell = schematicSelector_->currentText();
-        if (request.netlist.empty())
-            request.netlist.push_back("* ICE schematic simulation: " + selectedCell.toStdString());
 
+        const auto &sim = project_->project().simulations.at(activeSimulationId_);
+        ice::SimulationRequest request;
+        request.analysis = sim.analysis;
+        request.simulator = sim.simulator;
+        request.stop = sim.stop;
+        request.step = sim.step;
+        // The circuit comes from the schematic the simulation points at, so
+        // Run simulates what you drew instead of hand-typed directives. The
+        // directives box is reserved for model cards / .include lines.
+        const auto &project = project_->project();
+        const auto cellId = sim.schematic != 0 && project.schematicCells.contains(sim.schematic)
+                                ? sim.schematic
+                                : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
+        QStringList netlistNotes;
+        if (cellId != 0) {
+            std::vector<std::string> notes;
+            const auto lines = ice::buildSchematicNetlist(project, cellId, &notes);
+            for (const auto &line : lines)
+                request.netlist.push_back(line);
+            for (const auto &noteText : notes)
+                netlistNotes << QString::fromStdString(noteText);
+        }
+        for (const auto &line : directiveEditor_->toPlainText().split('\n')) {
+            const auto trimmed = line.trimmed();
+            // Skip analysis/control directives the runner already handles from
+            // the simulation properties; keep model cards and includes.
+            const bool isControlDirective =
+                trimmed.startsWith('.') &&
+                (trimmed.startsWith(QStringLiteral(".tran"), Qt::CaseInsensitive) ||
+                 trimmed.startsWith(QStringLiteral(".dc"), Qt::CaseInsensitive) ||
+                 trimmed.startsWith(QStringLiteral(".ac"), Qt::CaseInsensitive) ||
+                 trimmed.startsWith(QStringLiteral(".op"), Qt::CaseInsensitive) ||
+                 trimmed.startsWith(QStringLiteral(".end"), Qt::CaseInsensitive));
+            if (trimmed.isEmpty() || isControlDirective)
+                continue;
+            request.netlist.push_back(trimmed.toStdString());
+        }
+        const auto selectedCell = QString::fromStdString(
+            cellId != 0 ? project.schematicCells.at(cellId).name : std::string{});
+        // The active graph's Nodes/signals tell the adapter which vectors to
+        // fetch back from ngspice, so editing a graph's Nodes changes what the
+        // run returns and plots.
+        ice::ObjectId activeGraphId = 0;
+        if (graphTabs_ && graphTabs_->currentIndex() >= 0)
+            activeGraphId = static_cast<ice::ObjectId>(
+                graphTabs_->tabBar()->tabData(graphTabs_->currentIndex()).toULongLong());
+        const auto graphIt = std::find_if(
+            sim.graphs.begin(), sim.graphs.end(),
+            [activeGraphId](const ice::SimulationGraph &graph) { return graph.id == activeGraphId; });
+        if (graphIt != sim.graphs.end())
+            request.probeSignals = graphIt->nodes;
+
+        // Parse .tran from directives for convenience.
         const auto directive = directiveEditor_->toPlainText().trimmed();
         const auto tokens = directive.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
         if (!tokens.isEmpty() && tokens.front().compare(QStringLiteral(".tran"), Qt::CaseInsensitive) == 0 &&
             tokens.size() >= 3) {
-            bool stopOk = false;
-            bool stepOk = false;
+            bool stopOk = false, stepOk = false;
             const auto stop = tokens.at(1).toDouble(&stopOk);
             const auto step = tokens.at(2).toDouble(&stepOk);
             if (stopOk && stepOk && stop > 0.0 && step > 0.0) {
                 request.analysis = "transient";
                 request.stop = stop;
                 request.step = step;
-                analysisSelector_->setCurrentIndex(analysisSelector_->findData(QStringLiteral("transient")));
-                stopTime_->setValue(stop);
-                stepTime_->setValue(step);
             }
         }
 
         const auto result =
             ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
+
         std::ostringstream output;
         output << "State: " << ice::jobStateName(result.state) << "\n"
                << "Analysis: " << result.analysis << "\n"
                << "Simulator: " << result.simulator << " " << result.simulator_version << "\n";
+        if (!request.netlist.empty()) {
+            output << "Netlist:\n";
+            for (const auto &netlistLine : request.netlist)
+                output << "  " << netlistLine << "\n";
+        }
+        for (const auto &noteText : netlistNotes)
+            output << "Note: " << noteText.toStdString() << "\n";
         if (!result.error.empty())
             output << "Error: " << result.error << "\n";
-        if (!result.time.empty()) {
-            output << "Samples: " << result.time.size() << "\n";
-            const auto &trace = result.traces.front();
-            output << "Trace: " << trace.name << "\n";
-            output << "First sample: " << trace.values.front() << "\n";
-            output << "Last sample: " << trace.values.back() << "\n";
+        if (!result.time.empty() && !result.traces.empty()) {
+            output << "Samples: " << result.time.size() << "\n"
+                   << "Trace: " << result.traces.front().name << "\n"
+                   << "First sample: " << result.traces.front().values.front() << "\n"
+                   << "Last sample: " << result.traces.front().values.back() << "\n";
         }
         simulationOutput_->setPlainText(QString::fromStdString(output.str()));
-        simulationPlot_->setResult(result);
-        const auto entryName =
-            QStringLiteral("%1 — %2").arg(schematicSelector_->currentText(), QString::fromStdString(result.analysis));
-        SimulationEntry entry{entryName, schematicSelector_->currentData().toULongLong(), request, result};
-        simulationEntries_.push_back(std::move(entry));
-        simulationList_->addItem(entryName);
-        simulationList_->setCurrentRow(simulationList_->count() - 1);
+
+        // Show result in the currently active graph tab.
+        if (graphTabs_) {
+            auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->currentWidget());
+            if (plot)
+                plot->setResult(result);
+        }
         statusBar()->showMessage(QStringLiteral("Simulation finished"));
     }
 
-    void loadSimulationEntry(int row) {
-        if (row < 0 || row >= static_cast<int>(simulationEntries_.size()))
-            return;
-        const auto &entry = simulationEntries_[static_cast<std::size_t>(row)];
-        const auto schematicIndex = schematicSelector_->findData(QVariant::fromValue<qulonglong>(entry.schematicId));
-        if (schematicIndex >= 0)
-            schematicSelector_->setCurrentIndex(schematicIndex);
-        simulatorSelector_->setCurrentIndex(
-            simulatorSelector_->findData(QString::fromStdString(entry.request.simulator)));
-        analysisSelector_->setCurrentIndex(analysisSelector_->findData(QString::fromStdString(entry.request.analysis)));
-        stopTime_->setValue(entry.request.stop);
-        stepTime_->setValue(entry.request.step);
-        directiveEditor_->setPlainText(QString::fromStdString(joinNetlist(entry.request.netlist)));
-        simulationOutput_->setPlainText(QString::fromStdString(simulationSummary(entry.result)));
-        simulationPlot_->setResult(entry.result);
-    }
+    // (Kept for clarity; new code no longer calls this but the slot name is wired in older code)
+    void loadSimulationEntry(int /*row*/) {}
 
     void refreshProject() {
         if (!project_)
@@ -2161,6 +2786,9 @@ class DocumentWindow : public QMainWindow {
                 if (layoutCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
                     layoutCellTabs_->setCurrentIndex(index);
         }
+        // Refresh simulation panel.
+        if (simulationPanel_)
+            simulationPanel_->setProject(project);
     }
 
     void refreshSimulationSchematics() {
@@ -2676,13 +3304,24 @@ class DocumentWindow : public QMainWindow {
 
         simulationPage_ = new QWidget;
         auto *simulationLayout = new QVBoxLayout(simulationPage_);
+        simulationLayout->setContentsMargins(0, 0, 0, 0);
+        simulationLayout->setSpacing(0);
         auto *simulationSplit = new QSplitter(Qt::Horizontal);
-        simulationList_ = new QListWidget;
-        simulationList_->setMinimumWidth(180);
-        simulationSplit->addWidget(simulationList_);
-        auto *simulationControls = new QWidget;
-        auto *simulationControlsLayout = new QVBoxLayout(simulationControls);
-        auto *simulationForm = new QFormLayout;
+
+        // ── Left panel: SimulationPanel (hierarchy-like tree) ────────────
+        simulationPanel_ = new SimulationPanel;
+        simulationPanel_->setMinimumWidth(180);
+        simulationPanel_->setMaximumWidth(280);
+        simulationSplit->addWidget(simulationPanel_);
+
+        // ── Right: simulation editor (properties + graph tabs) ───────────
+        auto *simEditor = new QWidget;
+        auto *simEditorLayout = new QVBoxLayout(simEditor);
+        simEditorLayout->setContentsMargins(4, 4, 4, 4);
+
+        // Properties form – links to the selected SimulationItem fields
+        auto *simPropsGroup = new QGroupBox(QStringLiteral("Simulation Properties"));
+        auto *simulationForm = new QFormLayout(simPropsGroup);
         schematicSelector_ = new QComboBox;
         simulatorSelector_ = new QComboBox;
         simulatorSelector_->addItem(QStringLiteral("ngspice"), QStringLiteral("ngspice"));
@@ -2699,31 +3338,96 @@ class DocumentWindow : public QMainWindow {
         stepTime_->setRange(1e-12, 1e9);
         stepTime_->setDecimals(9);
         stepTime_->setValue(0.01);
+        directiveEditor_ = new QPlainTextEdit;
+        directiveEditor_->setPlainText(QStringLiteral(".tran 1.0 0.01"));
+        directiveEditor_->setPlaceholderText(QStringLiteral("SPICE directives, for example: .tran 1.0 0.01"));
+        directiveEditor_->setMaximumHeight(80);
         simulationForm->addRow(QStringLiteral("Schematic"), schematicSelector_);
         simulationForm->addRow(QStringLiteral("Simulator"), simulatorSelector_);
         simulationForm->addRow(QStringLiteral("Analysis"), analysisSelector_);
         simulationForm->addRow(QStringLiteral("Stop time / end"), stopTime_);
         simulationForm->addRow(QStringLiteral("Step / increment"), stepTime_);
-        simulationControlsLayout->addLayout(simulationForm);
-        directiveEditor_ = new QPlainTextEdit;
-        directiveEditor_->setPlainText(QStringLiteral(".tran 1.0 0.01"));
-        directiveEditor_->setPlaceholderText(QStringLiteral("SPICE directives, for example: .tran 1.0 0.01"));
-        directiveEditor_->setMaximumHeight(100);
-        simulationControlsLayout->addWidget(new QLabel(QStringLiteral("SPICE directives")));
-        simulationControlsLayout->addWidget(directiveEditor_);
-        auto *runButton = new QPushButton(QStringLiteral("Run simulation"));
-        simulationControlsLayout->addWidget(runButton);
+        simulationForm->addRow(QStringLiteral("SPICE directives"), directiveEditor_);
+        simEditorLayout->addWidget(simPropsGroup);
+
+        // Graph tabs area
+        auto *graphHeader = new QWidget;
+        auto *graphHeaderLayout = new QHBoxLayout(graphHeader);
+        graphHeaderLayout->setContentsMargins(0, 4, 0, 0);
+        graphHeaderLayout->addWidget(heading(QStringLiteral("Graphs")));
+        auto *addGraphButton_ = new QPushButton(QStringLiteral("+"));
+        addGraphButton_->setToolTip(QStringLiteral("Add graph to this simulation"));
+        addGraphButton_->setFixedWidth(32);
+        auto *deleteGraphButton_ = new QPushButton(QStringLiteral("−"));
+        deleteGraphButton_->setToolTip(QStringLiteral("Delete current graph"));
+        deleteGraphButton_->setFixedWidth(32);
+        auto *editGraphButton_ = new QPushButton(QStringLiteral("✎"));
+        editGraphButton_->setToolTip(QStringLiteral("Edit graph name, axes, and nodes"));
+        editGraphButton_->setFixedWidth(32);
+        graphHeaderLayout->addWidget(addGraphButton_);
+        graphHeaderLayout->addWidget(deleteGraphButton_);
+        graphHeaderLayout->addWidget(editGraphButton_);
+        graphHeaderLayout->addStretch();
+        simEditorLayout->addWidget(graphHeader);
+
+        graphTabs_ = new QTabWidget;
+        graphTabs_->setDocumentMode(true);
+        graphTabs_->setTabsClosable(false);
         simulationPlot_ = new SimulationPlot;
-        simulationControlsLayout->addWidget(simulationPlot_, 1);
+        graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
+        simEditorLayout->addWidget(graphTabs_, 1);
+
+        // Run button + output
+        auto *runButton = new QPushButton(QStringLiteral("Run simulation"));
+        simEditorLayout->addWidget(runButton);
         simulationOutput_ = new QPlainTextEdit;
         simulationOutput_->setReadOnly(true);
-        simulationOutput_->setMaximumHeight(130);
+        simulationOutput_->setMaximumHeight(110);
         simulationOutput_->setPlaceholderText(QStringLiteral("Simulation status and result summary"));
-        simulationControlsLayout->addWidget(simulationOutput_);
-        simulationSplit->addWidget(simulationControls);
+        simEditorLayout->addWidget(simulationOutput_);
+
+        simulationSplit->addWidget(simEditor);
         simulationLayout->addWidget(simulationSplit, 1);
-        connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
-        connect(simulationList_, &QListWidget::currentRowChanged, this, &DocumentWindow::loadSimulationEntry);
+
+        // ── Wire SimulationPanel ─────────────────────────────────────────
+        simulationPanel_->setOnAddClicked([this] { addSimulation(); });
+        simulationPanel_->setOnDeleteClicked([this] { deleteSimulation(); });
+        simulationPanel_->setOnSelection(
+            [this](ice::ObjectId simId, ice::ObjectId graphId) { loadSimulationById(simId, graphId); });
+        simulationPanel_->setOnAddGraph([this](ice::ObjectId simId) { addGraph(simId); });
+        simulationPanel_->setOnDeleteGraph(
+            [this](ice::ObjectId simId, ice::ObjectId graphId) { deleteGraph(simId, graphId); });
+
+        // ── Wire properties form → save back to project ──────────────────
+        auto saveSimProps = [this] { commitSimulationProperties(); };
+        connect(schematicSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [saveSimProps] { saveSimProps(); });
+        connect(simulatorSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [saveSimProps] { saveSimProps(); });
+        connect(analysisSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, saveSimProps] {
+            const auto analysis = analysisSelector_->currentData().toString();
+            if (analysis == QStringLiteral("transient"))
+                directiveEditor_->setPlainText(
+                    QStringLiteral(".tran %1 %2").arg(stopTime_->value()).arg(stepTime_->value()));
+            else if (analysis == QStringLiteral("dc"))
+                directiveEditor_->setPlainText(QStringLiteral(".dc V1 0 1 0.01"));
+            else if (analysis == QStringLiteral("ac"))
+                directiveEditor_->setPlainText(QStringLiteral(".ac dec 10 1 1e6"));
+            else
+                directiveEditor_->setPlainText(QStringLiteral(".op"));
+            saveSimProps();
+        });
+        connect(stopTime_, &QDoubleSpinBox::editingFinished, this, [saveSimProps] { saveSimProps(); });
+        connect(stepTime_, &QDoubleSpinBox::editingFinished, this, [saveSimProps] { saveSimProps(); });
+        connect(directiveEditor_, &QPlainTextEdit::textChanged, this, [saveSimProps] { saveSimProps(); });
+
+        // ── Wire graph buttons ────────────────────────────────────────────
+        connect(addGraphButton_, &QPushButton::clicked, this, [this] { addGraph(activeSimulationId_); });
+        connect(deleteGraphButton_, &QPushButton::clicked, this, [this] { deleteCurrentGraph(); });
+        connect(editGraphButton_, &QPushButton::clicked, this, [this] { editGraph(); });
+        connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
+
+        // ── Wire schematic / layout tabs ─────────────────────────────────
         connect(schematicCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (index < 0)
                 return;
@@ -2736,18 +3440,8 @@ class DocumentWindow : public QMainWindow {
             activeLayoutId_ = layoutCellTabs_->tabBar()->tabData(index).toULongLong();
             refreshLayout();
         });
-        connect(analysisSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
-            const auto analysis = analysisSelector_->currentData().toString();
-            if (analysis == QStringLiteral("transient"))
-                directiveEditor_->setPlainText(
-                    QStringLiteral(".tran %1 %2").arg(stopTime_->value()).arg(stepTime_->value()));
-            else if (analysis == QStringLiteral("dc"))
-                directiveEditor_->setPlainText(QStringLiteral(".dc V1 0 1 0.01"));
-            else if (analysis == QStringLiteral("ac"))
-                directiveEditor_->setPlainText(QStringLiteral(".ac dec 10 1 1e6"));
-            else
-                directiveEditor_->setPlainText(QStringLiteral(".op"));
-        });
+
+        connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
         documents->addTab(simulationPage_, QStringLiteral("Simulation"));
         documents->addTab(placeholder(QStringLiteral("Verification results"),
                                       QStringLiteral("DRC, LVS, PEX, diagnostics, and provenance")),
@@ -3009,13 +3703,6 @@ class DocumentWindow : public QMainWindow {
         statusBar()->addPermanentWidget(selectionStatus_);
     }
 
-    struct SimulationEntry {
-        QString name;
-        ice::ObjectId schematicId = 0;
-        ice::SimulationRequest request;
-        ice::SimulationResult result;
-    };
-
     ProjectPanel *projectPanel_ = nullptr;
     ProjectPanel *schematicHierarchy_ = nullptr;
     ProjectPanel *layoutHierarchy_ = nullptr;
@@ -3039,10 +3726,11 @@ class DocumentWindow : public QMainWindow {
     QDoubleSpinBox *stepTime_ = nullptr;
     QPlainTextEdit *directiveEditor_ = nullptr;
     SimulationPlot *simulationPlot_ = nullptr;
-    QListWidget *simulationList_ = nullptr;
+    SimulationPanel *simulationPanel_ = nullptr;
+    QTabWidget *graphTabs_ = nullptr;
+    ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
-    std::vector<SimulationEntry> simulationEntries_;
     QList<QAction *> commands_;
     bool ihpTechnologyActive_ = false;
 };
