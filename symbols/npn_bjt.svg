@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="78" height="76" viewBox="2486.00 544.00 78.00 76.00"><g transform="matrix(8 0 0 8 0 0)"><title id="title375">Orr NPN BJT</title><g
+         id="orr_npn_bjt_transform"
+         transform="matrix(1,0,0,-1,300.57583,134.26629)"><path
+           id="path2062-0-2-6-5-9-5-3"
+           d="m 18.936613,57.552087 3e-6,1.32292 -3.175,1.852083"
+           style="fill:none;stroke:#000000;stroke-width:0.264583px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" /><path
+           id="path2066-1-9-8-1-8-5-8"
+           d="m 15.676776,62.354191 3.25984,1.812482 -3e-6,1.322914"
+           style="fill:none;stroke:#000000;stroke-width:0.264583px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" /><path
+           style="fill:none;stroke:#000000;stroke-width:0.264583px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1"
+           d="m 15.703729,61.520833 -4.704616,4e-6"
+           id="path2109-2-7-9-1-4-3-0" /><rect
+           style="fill:#000000;fill-opacity:1;stroke:none;stroke-width:0.0739068;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1"
+           id="rect5573-5-1-6-1-3-8"
+           width="0.2780571"
+           height="3.4852338"
+           x="15.537296"
+           y="59.788464" /><path
+           style="font-variation-settings:normal;vector-effect:none;fill:#000000;fill-opacity:1;stroke:none;stroke-width:0.264583;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;-inkscape-stroke:none;stop-color:#000000"
+           d="m 16.551729,60.033708 -0.05555,-0.204357 c -0.02221,-0.08188 -2.54e-4,-0.144561 0.05273,-0.150373 l 1.071241,-0.118105 c 0.02225,-0.0028 0.04874,0.04379 0.03502,0.06138 l -0.655111,0.837418 c -0.03265,0.04177 -0.09836,0.02854 -0.158401,-0.03194 l -0.149203,-0.150288 c -0.06486,-0.06532 -0.09139,-0.158284 -0.140707,-0.243712 z"
+           id="path49552-68-6-1-4-3-8" /><ellipse
+           style="font-variation-settings:normal;opacity:1;vector-effect:none;fill:none;fill-opacity:1;fill-rule:evenodd;stroke:#000000;stroke-width:0.271731;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;-inkscape-stroke:none;stop-color:#000000;stop-opacity:1"
+           id="path98-3-7-0"
+           transform="rotate(90)"
+           cx="61.472012"
+           cy="-15.604911"
+           rx="2.861589"
+           ry="3.0182941" /></g></g></svg>

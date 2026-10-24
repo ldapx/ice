@@ -22,12 +22,15 @@ struct FileSymbol {
 };
 
 // Loads a file-based schematic symbol library from a directory containing
-// `<name>.toml` sidecars and sibling `<name>.svg` artwork files:
+// `<name>.toml` sidecars and sibling `<name>.svg` artwork files. Package
+// libraries can reference ICE's built-in artwork with `artwork =
+// "generic:name.svg"`:
 //
 // ```toml
 // [symbol]
 // name = "resistor"
-// artwork = "resistor.svg"
+// artwork = "resistor.svg"          # sibling artwork
+// # artwork = "generic:resistor.svg" # built-in ICE artwork
 // category = "Passive"
 //
 // [[pin]]
@@ -54,6 +57,11 @@ struct FileSymbol {
 class SymbolLibrary {
   public:
     static std::vector<FileSymbol> load(const std::filesystem::path &directory);
+    // `genericArtworkDirectory` is the built-in symbols directory used to
+    // resolve `generic:<file>.svg` artwork references. Only plain SVG file
+    // names are accepted for generic references.
+    static std::vector<FileSymbol> load(const std::filesystem::path &directory,
+                                        const std::filesystem::path &genericArtworkDirectory);
 };
 
 // Derives the physical pin side from a symbol-relative position using the

@@ -40,6 +40,8 @@ wires attach exactly at the artwork terminals.
 [symbol]
 name = "resistor"
 artwork = "resistor.svg"
+# Or reference ICE's shared artwork from a package sidecar:
+# artwork = "generic:resistor.svg"
 category = "Passive"
 
 [[pin]]
@@ -52,6 +54,11 @@ direction = "inout"
 name = "resistance"
 value = "1k"
 ```
+
+`artwork` normally names a sibling SVG file. Package sidecars may instead use
+`artwork = "generic:<file>.svg"` to reference ICE's built-in symbol artwork
+directory. Only a plain SVG filename is accepted after `generic:`; absolute
+paths and parent-directory traversal are rejected.
 
 `direction` accepts `input`, `output`, or `inout`; the physical pin side is
 derived from the pin position. The loader (`ice::SymbolLibrary::load`) rejects
@@ -68,9 +75,10 @@ Each schematic stores the PDK it uses. The built-in Generic PDK exposes only
 the generic library described above. A schematic linked to a package PDK also
 loads that package's own `symbols/` directory, so the combined browser shows
 generic symbols and PDK-specific symbols together. For example, the IHP SG13G2
-package owns its NMOS, PMOS, NPN HBT, and MIM capacitor symbols and adds them to
-the generic transistor and passive categories. There is no built-in IHP copy in
-the ICE repository.
+package owns its NMOS, PMOS, NPN HBT, and MIM capacitor symbol definitions and
+adds them to the generic transistor and passive categories. Its sidecars
+reference ICE's shared artwork with `generic:` values, so the package does not
+duplicate SVG files. There is no built-in IHP symbol definition in ICE.
 
 ## Source symbols
 

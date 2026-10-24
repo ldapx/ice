@@ -6,6 +6,10 @@ collection, extracted from `Symbols-Inkscape.svg` (`<symbol>` elements). The
 pulse voltage, sine voltage, current source, and inductor symbols are original
 ICE artwork.
 
+The directory is also the shared artwork library for package symbols. Some SVG
+files, such as `pmos.svg` and `npn_bjt.svg`, do not have a generic symbol
+sidecar but are referenced by a packaged PDK through `generic:<file>.svg`.
+
 Source collection license (MIT, Copyright (c) 2023 Sam Gallagher):
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -29,6 +33,8 @@ Source collection license (MIT, Copyright (c) 2023 Sam Gallagher):
 | `ground.svg` | `orr_gnd` | rescaled |
 | `opamp.svg` | `orr_opamp2` | dropped part-number text, rescaled |
 | `nmos.svg` | `orr_nmos` | rescaled |
+| `pmos.svg` | `orr_pmos` | rescaled |
+| `npn_bjt.svg` | `orr_npn_bjt` | rescaled |
 | `inductor.svg` | original ICE artwork | — |
 | `pulse_voltage_source.svg` | original ICE artwork | — |
 | `sine_voltage_source.svg` | original ICE artwork | — |

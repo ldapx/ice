@@ -81,7 +81,7 @@ std::vector<SymbolDefinition> packageSymbolLibrary(const std::filesystem::path &
     if (packageDirectory.empty())
         return {};
     try {
-        return toDefinitions(ice::SymbolLibrary::load(packageDirectory));
+        return toDefinitions(ice::SymbolLibrary::load(packageDirectory, symbolLibraryDirectory()));
     } catch (const ice::ProjectError &) {
         return {};
     }

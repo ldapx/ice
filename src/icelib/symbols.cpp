@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 
 #include <toml++/toml.h>
 
@@ -61,7 +62,11 @@ PinDirection pinSideFromPosition(Coordinate x, Coordinate y) {
     return y > 0 ? PinDirection::up : PinDirection::down;
 }
 
-std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directory) {
+namespace {
+constexpr std::string_view genericArtworkPrefix = "generic:";
+
+std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
+                                    const std::filesystem::path &genericArtworkDirectory) {
     std::error_code status;
     if (!std::filesystem::is_directory(directory, status) || status)
         throw ProjectError("symbol.library", "Symbol library directory does not exist: " + directory.string());
@@ -122,8 +127,7 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
                 for (const auto &item : *parameterList) {
                     const auto *parameterTable = item.as_table();
                     if (!parameterTable)
-                        throw ProjectError("symbol.parameter",
-                                           "Parameter entry must be a table: " + sidecar.string());
+                        throw ProjectError("symbol.parameter", "Parameter entry must be a table: " + sidecar.string());
                     Parameter parameter;
                     parameter.name = (*parameterTable)["name"].value_or(std::string{});
                     parameter.value = (*parameterTable)["value"].value_or(std::string{});
@@ -131,9 +135,8 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
                         throw ProjectError("symbol.parameter", "Parameter name is required: " + sidecar.string());
                     for (const auto &existing : defaultParameters)
                         if (existing.name == parameter.name)
-                            throw ProjectError("symbol.parameter",
-                                               "Duplicate parameter name '" + parameter.name +
-                                                   "': " + sidecar.string());
+                            throw ProjectError("symbol.parameter", "Duplicate parameter name '" + parameter.name +
+                                                                       "': " + sidecar.string());
                     defaultParameters.push_back(std::move(parameter));
                 }
             }
@@ -146,9 +149,24 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
             for (std::size_t j = i + 1; j < pins.size(); ++j)
                 if (pins[i].name == pins[j].name)
                     throw ProjectError("symbol.pin", "Duplicate pin name '" + pins[i].name + "': " + sidecar.string());
-        symbol.svg =
-            readTextFile(sidecar.parent_path() / artworkFile, "symbol.artwork", "Symbol artwork file is missing");
-        rejectUnsafeArtwork(symbol.svg, sidecar.parent_path() / artworkFile);
+        std::filesystem::path artworkPath;
+        if (artworkFile.starts_with(genericArtworkPrefix)) {
+            if (genericArtworkDirectory.empty())
+                throw ProjectError("symbol.artwork",
+                                   "Generic artwork reference requires a built-in artwork directory: " +
+                                       sidecar.string());
+            const auto name = artworkFile.substr(genericArtworkPrefix.size());
+            const std::filesystem::path reference(name);
+            if (name.empty() || reference.is_absolute() || reference != reference.filename() ||
+                reference.extension() != ".svg")
+                throw ProjectError("symbol.artwork",
+                                   "Generic artwork reference must be a plain SVG file name: " + sidecar.string());
+            artworkPath = genericArtworkDirectory / reference;
+        } else {
+            artworkPath = sidecar.parent_path() / artworkFile;
+        }
+        symbol.svg = readTextFile(artworkPath, "symbol.artwork", "Symbol artwork file is missing");
+        rejectUnsafeArtwork(symbol.svg, artworkPath);
         symbol.pins = std::move(pins);
         symbol.defaultParameters = std::move(defaultParameters);
         symbols.push_back(std::move(symbol));
@@ -158,5 +176,15 @@ std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directo
             if (symbols[i].name == symbols[j].name)
                 throw ProjectError("symbol.library", "Duplicate symbol name '" + symbols[i].name + "'");
     return symbols;
+}
+} // namespace
+
+std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directory) {
+    return loadSymbols(directory, {});
+}
+
+std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directory,
+                                            const std::filesystem::path &genericArtworkDirectory) {
+    return loadSymbols(directory, genericArtworkDirectory);
 }
 } // namespace ice

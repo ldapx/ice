@@ -602,6 +602,30 @@ TEST_CASE("file symbol library loads and validates") {
     std::filesystem::remove_all(root);
 }
 
+TEST_CASE("symbols can reference built-in generic artwork") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-generic-artwork-test";
+    std::filesystem::remove_all(root);
+    const auto builtin = root / "builtin";
+    const auto package = root / "package";
+    const auto traversal = root / "traversal";
+    std::filesystem::create_directories(builtin);
+    std::filesystem::create_directories(package);
+    std::filesystem::create_directories(traversal);
+    std::ofstream(builtin / "shared.svg") << "<svg viewBox=\"0 0 10 10\"><path d=\"M0 0h10\"/></svg>";
+    std::ofstream(package / "referenced.toml") << "[symbol]\nname = \"Referenced\"\nartwork = \"generic:shared.svg\"\n"
+                                                  "\n[[pin]]\nname = \"1\"\nx = -5\ny = 0\ndirection = \"inout\"\n"
+                                                  "\n[[pin]]\nname = \"2\"\nx = 5\ny = 0\ndirection = \"inout\"\n";
+    const auto symbols = ice::SymbolLibrary::load(package, builtin);
+    CHECK(symbols.size() == 1);
+    CHECK(symbols.front().svg.find("M0 0h10") != std::string::npos);
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(package), ice::ProjectError);
+
+    std::ofstream(traversal / "escape.toml") << "[symbol]\nname = \"Escape\"\nartwork = \"generic:../shared.svg\"\n"
+                                                "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
+    CHECK_THROWS_AS(ice::SymbolLibrary::load(traversal, builtin), ice::ProjectError);
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("shipped file symbol library loads") {
     const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
     const auto symbols = ice::SymbolLibrary::load(libraryRoot);
