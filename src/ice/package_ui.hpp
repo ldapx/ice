@@ -23,7 +23,7 @@ struct PackageManagerOptions {
     std::filesystem::path installDirectory;
     std::filesystem::path projectPath;
     bool hasProject = false;
-    // Called after installing an IHP SG13G2 package when a project is open.
+    // Called after installing a PDK package when a project is open.
     std::function<void(const ice::PackageSpec &)> activatePackage;
 };
 
@@ -37,6 +37,8 @@ std::string defaultPackageIndexUrl();
 // the package's own .github/logo.png and expose the installed manifest.
 std::vector<ice::PackageIndexEntry> installedPackages(const std::filesystem::path &installDirectory);
 std::vector<ice::PackageIndexEntry> installedPdkPackages(const std::filesystem::path &installDirectory);
+bool packageProvidesPdk(const ice::PackageSpec &package);
+QString packagePdkDisplayName(const ice::PackageSpec &package);
 
 // Shows the project dependency prompt for missing packages and installs the
 // selected packages from the index. Returns true when every missing package is

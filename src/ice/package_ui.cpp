@@ -269,11 +269,21 @@ std::vector<ice::PackageIndexEntry> installedPackages(const std::filesystem::pat
     return ice::PackageManager::scanPackageIndex(installDirectory);
 }
 
+bool packageProvidesPdk(const ice::PackageSpec &package) {
+    const auto capability = package.capabilities.find("pdk");
+    return capability != package.capabilities.end() && capability->second;
+}
+
+QString packagePdkDisplayName(const ice::PackageSpec &package) {
+    if (package.pdk && !package.pdk->displayName.empty())
+        return QString::fromStdString(package.pdk->displayName);
+    return QString::fromStdString(package.name);
+}
+
 std::vector<ice::PackageIndexEntry> installedPdkPackages(const std::filesystem::path &installDirectory) {
     std::vector<ice::PackageIndexEntry> result;
     for (auto &entry : installedPackages(installDirectory)) {
-        const auto capability = entry.spec.capabilities.find("pdk");
-        if (capability != entry.spec.capabilities.end() && capability->second)
+        if (packageProvidesPdk(entry.spec))
             result.push_back(std::move(entry));
     }
     return result;
@@ -313,10 +323,13 @@ CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &instal
     pdk_->addItem(QStringLiteral("Generic PDK"), QString::fromLatin1(ice::genericPdkId));
     pdk_->setItemData(0, QStringLiteral("Built-in generic symbol library only."), Qt::ToolTipRole);
     for (const auto &entry : installedPdkPackages(installDirectory)) {
-        const auto label =
-            QStringLiteral("%1  (%2)")
-                .arg(QString::fromStdString(entry.spec.name), QString::fromStdString(entry.spec.version));
-        pdk_->addItem(label, QString::fromStdString(entry.spec.name));
+        const auto displayName = packagePdkDisplayName(entry.spec);
+        const auto packageName = QString::fromStdString(entry.spec.name);
+        auto label = displayName;
+        if (displayName != packageName)
+            label += QStringLiteral("  (%1)").arg(packageName);
+        label += QStringLiteral("  %1").arg(QString::fromStdString(entry.spec.version));
+        pdk_->addItem(label, packageName);
         auto detail = QStringLiteral("Package PDK. Generic and package symbols are available.");
         if (!entry.spec.description.empty())
             detail = QString::fromStdString(entry.spec.description) + QStringLiteral("  ") + detail;
@@ -646,7 +659,7 @@ QWidget *PackageManagerDialog::createPackageCard(const ice::PackageIndexEntry &e
     auto *actions = new QVBoxLayout;
     actions->setSpacing(6);
     if (installed) {
-        if (entry.spec.name == "ihp.sg13g2") {
+        if (packageProvidesPdk(entry.spec)) {
             auto *activate = new QPushButton(QStringLiteral("Activate"));
             setButtonIcon(activate, QStringLiteral("circuit-board"));
             activate->setEnabled(options_.hasProject);
@@ -738,11 +751,11 @@ void PackageManagerDialog::installRepository(const std::string &url, const std::
             message += QStringLiteral(" Lockfile not updated: %1").arg(QString::fromUtf8(error.what()));
         }
     }
-    if (spec->name == "ihp.sg13g2") {
+    if (packageProvidesPdk(*spec)) {
         if (options_.hasProject && options_.activatePackage) {
             try {
                 options_.activatePackage(*spec);
-                message += QStringLiteral(" IHP SG13G2 installed and activated.");
+                message += QStringLiteral(" %1 installed and activated.").arg(packagePdkDisplayName(*spec));
             } catch (const std::exception &error) {
                 message += QStringLiteral(" Activation failed: %1").arg(QString::fromUtf8(error.what()));
             }
@@ -765,7 +778,7 @@ void PackageManagerDialog::activatePackage(const ice::PackageSpec &spec) {
     }
     try {
         options_.activatePackage(spec);
-        setStatus(QStringLiteral("Activated %1.").arg(packageLabel(spec)));
+        setStatus(QStringLiteral("Activated %1.").arg(packagePdkDisplayName(spec)));
         rebuildPackageList();
     } catch (const std::exception &error) {
         setStatus(QStringLiteral("Activation failed: %1").arg(QString::fromUtf8(error.what())));

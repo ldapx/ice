@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <openssl/sha.h>
+#include <set>
 #include <sstream>
 #include <toml++/toml.h>
 
@@ -257,6 +258,28 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
             spec.sourceType = readString(*source, "type");
             spec.sourceUrl = readString(*source, "url");
             spec.sourceRevision = readString(*source, "revision");
+        }
+        if (const auto *pdk = table["pdk"].as_table()) {
+            PackagePdk pdkSpec;
+            pdkSpec.displayName = readString(*pdk, "display_name", spec.name);
+            pdkSpec.defaultSchematic = readString(*pdk, "default_schematic");
+            if (const auto *layers = (*pdk)["layer"].as_array()) {
+                std::set<std::string> layerNames;
+                for (const auto &item : *layers) {
+                    const auto *layer = item.as_table();
+                    if (!layer)
+                        throw ProjectError("package.manifest", "PDK layer entry must be a table");
+                    PackageLayer entry;
+                    entry.name = readString(*layer, "name");
+                    entry.number = static_cast<int>((*layer)["number"].value_or(-1LL));
+                    if (entry.name.empty() || entry.number < 0)
+                        throw ProjectError("package.manifest", "PDK layers require a name and non-negative GDS number");
+                    if (!layerNames.insert(entry.name).second)
+                        throw ProjectError("package.manifest", "Duplicate PDK layer name: " + entry.name);
+                    pdkSpec.layers.push_back(std::move(entry));
+                }
+            }
+            spec.pdk = std::move(pdkSpec);
         }
         return spec;
     } catch (const ProjectError &) {

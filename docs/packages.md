@@ -15,9 +15,12 @@ permission by itself. Scripts and plugins must remain behind an explicit
 permission boundary.
 
 The example packages under `examples/packages` demonstrate a minimal PDK,
-library dependency, symbol metadata, and SVG artwork. The IHP SG13G2 package is
-maintained separately at https://github.com/ldapx/ice-pkg-ihp on the `dev`
-branch.
+library dependency, symbol metadata, and SVG artwork. The default index ships
+separate packages for:
+
+- `ihp.sg13g2` — IHP SG13G2 130 nm BiCMOS
+- `sky130` — SkyWater SKY130 130 nm CMOS
+- `gf180mcu` — GlobalFoundries GF180MCU 180 nm CMOS
 
 External Git packages can be installed into a local repository with:
 
@@ -27,9 +30,32 @@ ice-pkg install <repository> <name> <version> <git-url> [revision]
 
 The installer clones the source and writes an ICE wrapper manifest when the
 repository does not already provide one. It does not execute package scripts.
-The standalone IHP package definition provides the IHP SG13G2 PDK metadata and
-points to the upstream Apache-2.0 repository; the upstream installation guide
-and preview status still apply.
+Each standalone PDK package points to its upstream Apache-2.0 repository; the
+upstream installation guides and preview status still apply.
+
+## PDK metadata
+
+A package that provides a PDK can declare its display name, default schematic,
+and layout layer stack in `package.toml`:
+
+```toml
+[pdk]
+display_name = "SkyWater SKY130"
+default_schematic = "sky130_top"
+
+[[pdk.layer]]
+name = "nwell"
+number = 64
+
+[[pdk.layer]]
+name = "diff"
+number = 65
+```
+
+Activating the package adds these layers to the Layout editor, records the
+package as a project dependency, and creates the default schematic when the
+project has no schematics yet. Layer GDS numbers are currently stored as single
+integers; non-zero GDS datatypes are not represented by the layout model.
 
 ## Package indexes
 
@@ -55,7 +81,7 @@ Open `Project -> Manage Packages` to:
 - uninstall any installed package, including packages that are not currently in
   the index;
 - refresh the index and initialize its submodules;
-- activate the installed IHP SG13G2 technology when a project is open.
+- activate any installed PDK package when a project is open.
 
 Installing and uninstalling packages work without an open project. Installing a
 package writes an `ice.lock` beside the project when a project is open. A
@@ -77,8 +103,9 @@ creation. The schematic stores its PDK in the project file.
 
 A schematic using the Generic PDK browses only the built-in generic symbols. A
 schematic using a package PDK browses the built-in generic symbols plus that
-package's `symbols/` library. Activating IHP SG13G2 adds the technology layers to
-the Layout editor and records the package as a project dependency.
+package's `symbols/` library. Activating a PDK package adds its declared
+technology layers to the Layout editor and records the package as a project
+dependency.
 
 The File menu also provides **Open GDS/OASIS Layout** and **Save GDS/OASIS
 Layout**. These actions use native GDSII (`*.gds`, `*.gdsii`) for the documented

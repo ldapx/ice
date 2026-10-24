@@ -1691,6 +1691,7 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto name = dialog.schematicName();
         const auto pdk = dialog.pdkId();
+        auto pdkLabel = QStringLiteral("Generic PDK");
         bool addDependency = false;
         if (pdk != ice::genericPdkId) {
             const auto packages = installedPackages(installDirectory);
@@ -1702,20 +1703,21 @@ class DocumentWindow : public QMainWindow {
                     QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
                 return;
             }
-            const auto capability = package->spec.capabilities.find("pdk");
-            if (capability == package->spec.capabilities.end() || !capability->second) {
+            if (!packageProvidesPdk(package->spec)) {
                 QMessageBox::critical(
                     this, QStringLiteral("Create Schematic"),
                     QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
                 return;
             }
+            pdkLabel = packagePdkDisplayName(package->spec);
             const auto &dependencies = project_->project().packageDependencies;
             if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
+                const auto displayName = packagePdkDisplayName(package->spec);
                 const auto response = QMessageBox::question(
                     this, QStringLiteral("Add Package Dependency"),
-                    QStringLiteral("This schematic uses the PDK from package %1. Add %1 to the project's "
+                    QStringLiteral("This schematic uses the %1 PDK from package %2. Add %2 to the project's "
                                    "package dependency list?")
-                        .arg(QString::fromStdString(pdk)),
+                        .arg(displayName, QString::fromStdString(pdk)),
                     QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
                 if (response != QMessageBox::Yes)
                     return;
@@ -1729,8 +1731,6 @@ class DocumentWindow : public QMainWindow {
                 activeSchematicId_ = ice::createSchematicCell(project, name.toStdString(), pdk);
             });
             refreshProject();
-            const auto pdkLabel =
-                pdk == ice::genericPdkId ? QStringLiteral("Generic PDK") : QString::fromStdString(pdk);
             statusBar()->showMessage(QStringLiteral("Schematic created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Schematic"), QString::fromStdString(error.what()));
@@ -1783,7 +1783,7 @@ class DocumentWindow : public QMainWindow {
         options.installDirectory = configuredPackageInstallDirectory();
         options.projectPath = std::filesystem::path(projectPath_.toStdString());
         options.hasProject = project_ != nullptr;
-        options.activatePackage = [this](const ice::PackageSpec &spec) { activateIhpTechnology(spec); };
+        options.activatePackage = [this](const ice::PackageSpec &spec) { activatePdkTechnology(spec); };
 
         PackageManagerDialog dialog(std::move(options), this);
         dialog.exec();
@@ -1793,29 +1793,31 @@ class DocumentWindow : public QMainWindow {
                           QString::fromStdString(dialog.installDirectory().string()));
     }
 
-    void activateIhpTechnology(const ice::PackageSpec &spec) {
-        if (!project_ || spec.name != "ihp.sg13g2")
+    void activatePdkTechnology(const ice::PackageSpec &spec) {
+        if (!project_ || !packageProvidesPdk(spec))
             return;
-        project_->execute("activate IHP SG13G2 technology", [&](ice::Project &project) {
+        const auto displayName = packagePdkDisplayName(spec);
+        project_->execute("activate PDK technology", [&](ice::Project &project) {
             if (std::find(project.packageDependencies.begin(), project.packageDependencies.end(), spec.name) ==
                 project.packageDependencies.end())
                 project.packageDependencies.push_back(spec.name);
-            const std::vector<std::pair<std::string, int>> layers = {
-                {"Activ", 1},  {"Poly2", 2},  {"Metal1", 3},    {"Metal2", 4},    {"Metal3", 5},
-                {"Metal4", 6}, {"Metal5", 7}, {"TopMetal1", 8}, {"TopMetal2", 9}, {"MIM", 10},
-                {"Via1", 11},  {"Via2", 12},  {"Via3", 13},     {"Via4", 14},     {"Contact", 15},
-            };
-            for (const auto &[name, number] : layers) {
-                const auto exists = std::find_if(project.layers.begin(), project.layers.end(),
-                                                 [&](const auto &entry) { return entry.second.name == name; });
-                if (exists == project.layers.end())
-                    ice::addLayer(project, name, number);
+            if (spec.pdk) {
+                for (const auto &layer : spec.pdk->layers) {
+                    const auto exists =
+                        std::find_if(project.layers.begin(), project.layers.end(),
+                                     [&](const auto &entry) { return entry.second.name == layer.name; });
+                    if (exists == project.layers.end())
+                        ice::addLayer(project, layer.name, layer.number);
+                }
             }
-            if (project.schematicCells.empty())
-                ice::createSchematicCell(project, "ihp_top", spec.name);
+            if (project.schematicCells.empty()) {
+                const auto schematic =
+                    spec.pdk && !spec.pdk->defaultSchematic.empty() ? spec.pdk->defaultSchematic : spec.name + "_top";
+                ice::createSchematicCell(project, schematic, spec.name);
+            }
         });
         refreshProject();
-        statusBar()->showMessage(QStringLiteral("IHP SG13G2 technology activated"));
+        statusBar()->showMessage(QStringLiteral("%1 technology activated").arg(displayName));
     }
 
     void refreshLayout() {

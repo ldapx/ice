@@ -74,11 +74,12 @@ the properties editor.
 Each schematic stores the PDK it uses. The built-in Generic PDK exposes only
 the generic library described above. A schematic linked to a package PDK also
 loads that package's own `symbols/` directory, so the combined browser shows
-generic symbols and PDK-specific symbols together. For example, the IHP SG13G2
-package owns its NMOS, PMOS, NPN HBT, and MIM capacitor symbol definitions and
-adds them to the generic transistor and passive categories. Its sidecars
-reference ICE's shared artwork with `generic:` values, so the package does not
-duplicate SVG files. There is no built-in IHP symbol definition in ICE.
+generic symbols and PDK-specific symbols together. The IHP SG13G2, Sky130, and
+GF180MCU packages provide NMOS/PMOS, bipolar, passive, and diode definitions and
+merge them into the generic transistor, passive, and semiconductor categories.
+Their sidecars reference ICE's shared artwork with `generic:` values, so the
+packages do not duplicate SVG files. There are no built-in IHP, Sky130, or
+GF180MCU symbol definitions in ICE.
 
 ## Source symbols
 

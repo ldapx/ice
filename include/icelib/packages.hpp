@@ -2,10 +2,22 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace ice {
+
+struct PackageLayer {
+    std::string name;
+    int number = 0;
+};
+
+struct PackagePdk {
+    std::string displayName;
+    std::string defaultSchematic;
+    std::vector<PackageLayer> layers;
+};
 
 struct PackageSpec {
     int schemaVersion = 1;
@@ -19,6 +31,7 @@ struct PackageSpec {
     std::string sourceType;
     std::string sourceUrl;
     std::string sourceRevision;
+    std::optional<PackagePdk> pdk;
     std::filesystem::path root;
 };
 

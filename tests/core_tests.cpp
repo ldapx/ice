@@ -460,7 +460,10 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     std::filesystem::create_directories(repositoryRoot / "example-lib");
     std::filesystem::create_directories(repositoryRoot / "example-pdk");
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
-        << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n";
+        << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n"
+           "\n[pdk]\ndisplay_name = \"Example PDK\"\ndefault_schematic = \"example_top\"\n"
+           "\n[[pdk.layer]]\nname = \"diff\"\nnumber = 65\n"
+           "\n[[pdk.layer]]\nname = \"metal1\"\nnumber = 68\n";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
         << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
            "\">=1.0.0\"\n\n[provides]\nmodels = true\nsymbols = true\n";
@@ -469,6 +472,15 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     CHECK(package.name == "example.lib");
     CHECK(package.dependencies.at("example.pdk") == ">=1.0.0");
     CHECK((ice::PackageManager::capabilities(package) == std::vector<std::string>{"models", "symbols"}));
+    const auto pdk = ice::PackageManager::readManifest(repositoryRoot / "example-pdk");
+    CHECK(pdk.pdk.has_value());
+    if (pdk.pdk) {
+        CHECK(pdk.pdk->displayName == "Example PDK");
+        CHECK(pdk.pdk->defaultSchematic == "example_top");
+        CHECK(pdk.pdk->layers.size() == 2);
+        CHECK(pdk.pdk->layers.front().name == "diff");
+        CHECK(pdk.pdk->layers.front().number == 65);
+    }
     auto lock = ice::PackageManager::resolve({repositoryRoot}, {{"example.lib", "*"}}, "0.1.0");
     CHECK(lock.packages.size() == 2);
     auto serialized = ice::serializeLockfile(lock);
