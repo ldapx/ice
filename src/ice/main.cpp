@@ -1464,6 +1464,33 @@ class DocumentWindow : public QMainWindow {
         createStatusBar();
     }
 
+    static bool directoryHasSymbols(const std::filesystem::path &directory) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(directory, status) || status)
+            return false;
+        for (const auto &entry : std::filesystem::directory_iterator(directory, status)) {
+            if (status)
+                return false;
+            if (entry.is_regular_file() && entry.path().extension() == ".toml")
+                return true;
+        }
+        return false;
+    }
+
+    static std::filesystem::path defaultIhpSymbolsDirectory() {
+        return std::filesystem::path(QDir::homePath().toStdString()) / ".ice" / "packages" / "ihp.sg13g2" / "symbols";
+    }
+
+    static std::filesystem::path resolveIhpSymbolsDirectory(const QString &storedPath) {
+        if (!storedPath.isEmpty()) {
+            const std::filesystem::path stored(storedPath.toStdString());
+            if (directoryHasSymbols(stored))
+                return stored;
+        }
+        const auto fallback = defaultIhpSymbolsDirectory();
+        return directoryHasSymbols(fallback) ? fallback : std::filesystem::path{};
+    }
+
     void setProject(ice::Project project) {
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         layoutViewInitialized_ = false;
@@ -1473,8 +1500,7 @@ class DocumentWindow : public QMainWindow {
                                            [](const auto &entry) { return entry.second.name == "Metal1"; });
         if (ihpTechnologyActive_) {
             const auto stored = QSettings().value(QStringLiteral("packages/ihpSymbolsDirectory")).toString();
-            if (!stored.isEmpty())
-                ihpSymbolsDirectory_ = stored.toStdString();
+            ihpSymbolsDirectory_ = resolveIhpSymbolsDirectory(stored);
         }
         refreshEmbeddedPanels();
         refreshSimulationSchematics();
@@ -1774,8 +1800,11 @@ class DocumentWindow : public QMainWindow {
         });
         ihpTechnologyActive_ = true;
         ihpSymbolsDirectory_ = spec.root / "symbols";
-        QSettings().setValue(QStringLiteral("packages/ihpSymbolsDirectory"),
-                             QString::fromStdString(ihpSymbolsDirectory_.string()));
+        if (!directoryHasSymbols(ihpSymbolsDirectory_))
+            ihpSymbolsDirectory_ = resolveIhpSymbolsDirectory({});
+        if (!ihpSymbolsDirectory_.empty())
+            QSettings().setValue(QStringLiteral("packages/ihpSymbolsDirectory"),
+                                 QString::fromStdString(ihpSymbolsDirectory_.string()));
         refreshProject();
         statusBar()->showMessage(QStringLiteral("IHP SG13G2 technology activated"));
     }
@@ -1906,6 +1935,12 @@ class DocumentWindow : public QMainWindow {
         try {
             auto ihpSymbols =
                 ihpTechnologyActive_ ? ihpSymbolLibrary(ihpSymbolsDirectory_) : std::vector<SymbolDefinition>{};
+            if (ihpTechnologyActive_ && ihpSymbols.empty()) {
+                QMessageBox::warning(
+                    this, QStringLiteral("IHP symbol library"),
+                    QStringLiteral("The active IHP package does not provide schematic symbols. Reinstall or update "
+                                   "the IHP package, then activate it again."));
+            }
             SymbolLibraryDialog dialog(genericSymbolLibrary(), std::move(ihpSymbols), this);
             if (dialog.exec() != QDialog::Accepted)
                 return;
