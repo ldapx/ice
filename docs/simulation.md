@@ -14,7 +14,9 @@ error string when a job does not succeed.
 Graphs are presentation-only views over a result. Each graph can define
 optional X/Y axis limits; blank limits auto-scale from the returned data. Axis
 limits change only how the plot is drawn and never alter the simulation
-parameters, netlist, or data acquisition.
+parameters, netlist, or data acquisition. Plots draw labelled axis ticks and a
+light grid by default; the **Grid** button in the graph header toggles the grid
+on and off.
 
 `runAsync` executes through a worker future and reports progress through a
 callback. Callers crossing into a GUI event loop must queue those progress

@@ -1157,6 +1157,42 @@ class SchematicCanvas : public QGraphicsView {
     ice::ObjectId selectedInstance_ = 0;
 };
 
+// Chooses a 1/2/5 x 10^n step so tick labels stay readable.
+double niceTickStep(double range, int intervals) {
+    if (!(range > 0.0) || !std::isfinite(range) || intervals <= 0)
+        return 1.0;
+    const double rough = range / static_cast<double>(intervals);
+    const double magnitude = std::pow(10.0, std::floor(std::log10(rough)));
+    const double normalized = rough / magnitude;
+    double nice = 10.0;
+    if (normalized <= 1.0)
+        nice = 1.0;
+    else if (normalized <= 2.0)
+        nice = 2.0;
+    else if (normalized <= 5.0)
+        nice = 5.0;
+    return nice * magnitude;
+}
+
+std::vector<double> axisTicks(double minimum, double maximum, int intervals) {
+    std::vector<double> ticks;
+    if (!(maximum > minimum) || !std::isfinite(minimum) || !std::isfinite(maximum) || intervals <= 0)
+        return ticks;
+    const double step = niceTickStep(maximum - minimum, intervals);
+    const auto firstIndex = static_cast<long long>(std::ceil(minimum / step));
+    for (long long index = firstIndex;; ++index) {
+        const double value = static_cast<double>(index) * step;
+        if (value > maximum + step * 1e-6)
+            break;
+        ticks.push_back(std::abs(value) < step * 1e-9 ? 0.0 : value);
+        if (ticks.size() > 64)
+            break;
+    }
+    return ticks;
+}
+
+QString formatTick(double value) { return QString::number(value, 'g', 5); }
+
 class SimulationPlot : public QWidget {
   public:
     explicit SimulationPlot(QWidget *parent = nullptr) : QWidget(parent) {
@@ -1198,6 +1234,11 @@ class SimulationPlot : public QWidget {
         update();
     }
 
+    void setGridVisible(bool visible) {
+        gridVisible_ = visible;
+        update();
+    }
+
     void clear() {
         result_ = {};
         update();
@@ -1209,24 +1250,30 @@ class SimulationPlot : public QWidget {
   protected:
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
-        painter.fillRect(rect(), QColor(QStringLiteral("#171b20")));
+        // Match the schematic/layout canvas instead of using a dark plot.
+        const QColor canvasBackground(QStringLiteral("#ffffff"));
+        const QColor plotFrame(QStringLiteral("#8a94a0"));
+        const QColor axisText(QStringLiteral("#3f4a56"));
+        const QColor tickText(QStringLiteral("#4a5560"));
+        const QColor zeroLine(QStringLiteral("#a5adb6"));
+        painter.fillRect(rect(), canvasBackground);
         painter.setRenderHint(QPainter::Antialiasing);
         const QRectF plot = rect().adjusted(58, 18, -20, -42);
         // Inset the trace area so a constant trace exactly at the minimum or
         // maximum is fully visible instead of being clipped by the plot border.
         const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
-        painter.setPen(QPen(QColor("#8d98a5"), 1));
+        painter.setPen(QPen(plotFrame, 1));
         painter.drawRect(plot);
         const QString title = graph_.name.empty() ? (result_.traces.empty() ? QStringLiteral("No simulation trace")
                                                                             : QStringLiteral("Simulation traces"))
                                                   : QString::fromStdString(graph_.name);
+        painter.setPen(QPen(axisText, 1));
         painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter, title);
         // Axis labels come from the graph definition.
-        painter.setPen(QPen(QColor("#aeb8c2"), 1));
         painter.drawText(QRectF(58, plot.top() - 16, 160, 14), Qt::AlignLeft, QString::fromStdString(graph_.yAxis));
-        painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 22, 200, 14), Qt::AlignRight,
+        painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 24, 200, 14), Qt::AlignRight,
                          QString::fromStdString(graph_.xAxis));
-        painter.setPen(QPen(QColor("#8d98a5"), 1));
+        painter.setPen(QPen(tickText, 1));
         if (result_.time.empty() || result_.traces.empty())
             return;
 
@@ -1288,24 +1335,54 @@ class SimulationPlot : public QWidget {
             return traceArea.bottom() - ((value - yMin) / (yMax - yMin)) * traceArea.height();
         };
 
-        painter.setPen(QPen(QColor("#65717f"), 1));
-        painter.drawText(QRectF(4, plot.bottom() - 12, 48, 20), Qt::AlignRight, QString::number(yMin, 'g', 4));
-        painter.drawText(QRectF(4, plot.top() - 10, 48, 20), Qt::AlignRight, QString::number(yMax, 'g', 4));
-        painter.drawText(QRectF(plot.left(), plot.bottom() + 8, 130, 20), Qt::AlignLeft,
-                         QString::number(xMin, 'g', 4) + QStringLiteral(" s"));
-        painter.drawText(QRectF(plot.right() - 130, plot.bottom() + 8, 130, 20), Qt::AlignRight,
-                         QString::number(xMax, 'g', 4) + QStringLiteral(" s"));
+        const int xIntervals = std::clamp(static_cast<int>(plot.width() / 110.0), 3, 8);
+        const int yIntervals = std::clamp(static_cast<int>(plot.height() / 55.0), 3, 7);
+        const auto xTicks = axisTicks(xMin, xMax, xIntervals);
+        const auto yTicks = axisTicks(yMin, yMax, yIntervals);
 
-        // Zero reference line (only when the axis straddles zero).
-        if (yMin < 0.0 && yMax > 0.0) {
-            const auto zeroY = mapY(0.0);
-            painter.setPen(QPen(QColor("#46515d"), 1, Qt::DashLine));
-            painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
-            painter.setPen(QPen(QColor("#65717f"), 1));
-            painter.drawText(QRectF(4, zeroY - 10, 48, 20), Qt::AlignRight, QStringLiteral("0"));
+        if (gridVisible_) {
+            painter.setPen(QPen(QColor("#e3e7eb"), 1));
+            for (double value : xTicks) {
+                const auto x = mapX(value);
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+            }
+            for (double value : yTicks) {
+                const auto y = mapY(value);
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+            }
         }
 
-        const QColor colors[] = {QColor("#65c7f7"), QColor("#f6c85f"), QColor("#8be28b"), QColor("#e78ac3")};
+        // Tick marks and labels. Y labels sit left of the frame, X labels below.
+        painter.setPen(QPen(plotFrame, 1));
+        for (double value : yTicks) {
+            const auto y = mapY(value);
+            painter.drawLine(QPointF(plot.left() - 4.0, y), QPointF(plot.left(), y));
+        }
+        for (double value : xTicks) {
+            const auto x = mapX(value);
+            painter.drawLine(QPointF(x, plot.bottom()), QPointF(x, plot.bottom() + 4.0));
+        }
+        painter.setPen(QPen(tickText, 1));
+        for (double value : yTicks) {
+            const auto y = mapY(value);
+            painter.drawText(QRectF(4, y - 8, 48, 16), Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
+        }
+        for (double value : xTicks) {
+            const auto x = mapX(value);
+            painter.drawText(QRectF(x - 45, plot.bottom() + 6, 90, 16), Qt::AlignHCenter | Qt::AlignTop,
+                             formatTick(value));
+        }
+
+        // Zero reference line (only when the axis straddles zero). The value
+        // itself is already labelled by the Y tick marks.
+        if (yMin < 0.0 && yMax > 0.0) {
+            const auto zeroY = mapY(0.0);
+            painter.setPen(QPen(zeroLine, 1, Qt::DashLine));
+            painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
+        }
+
+        // Darker trace colors for the light canvas.
+        const QColor colors[] = {QColor("#1f77b4"), QColor("#d17c00"), QColor("#2e8b57"), QColor("#c2185b")};
         painter.save();
         painter.setClipRect(plot.adjusted(1, 1, -1, -1));
         for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
@@ -1338,6 +1415,7 @@ class SimulationPlot : public QWidget {
   private:
     ice::SimulationResult result_;
     ice::SimulationGraph graph_;
+    bool gridVisible_ = true;
 };
 
 class ProjectPanel : public QWidget {
@@ -2449,6 +2527,7 @@ class DocumentWindow : public QMainWindow {
             // Show a single empty plot labelled "Graph 1".
             simulationPlot_->clear();
             simulationPlot_->setGraph({});
+            simulationPlot_->setGridVisible(graphGridVisible_);
             graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
             return;
         }
@@ -2456,6 +2535,7 @@ class DocumentWindow : public QMainWindow {
             SimulationPlot *plot = (i == 0) ? simulationPlot_ : new SimulationPlot;
             plot->clear();
             plot->setGraph(graphs[i]);
+            plot->setGridVisible(graphGridVisible_);
             if (const auto previous = previousPlots.find(graphs[i].id);
                 previous != previousPlots.end() && previous->second.graph.nodes == graphs[i].nodes)
                 plot->setResult(previous->second.result);
@@ -3572,9 +3652,15 @@ class DocumentWindow : public QMainWindow {
         auto *editGraphButton_ = new QPushButton(QStringLiteral("✎"));
         editGraphButton_->setToolTip(QStringLiteral("Edit graph name, axes, limits, and nodes"));
         editGraphButton_->setFixedWidth(32);
+        auto *gridButton = new QPushButton(QStringLiteral("Grid"));
+        gridButton->setCheckable(true);
+        gridButton->setChecked(true);
+        gridButton->setToolTip(QStringLiteral("Show or hide the graph grid"));
+        gridButton->setAccessibleName(QStringLiteral("Toggle graph grid"));
         graphHeaderLayout->addWidget(addGraphButton_);
         graphHeaderLayout->addWidget(deleteGraphButton_);
         graphHeaderLayout->addWidget(editGraphButton_);
+        graphHeaderLayout->addWidget(gridButton);
         graphHeaderLayout->addStretch();
         simEditorLayout->addWidget(graphHeader);
 
@@ -3633,6 +3719,14 @@ class DocumentWindow : public QMainWindow {
         connect(addGraphButton_, &QPushButton::clicked, this, [this] { addGraph(activeSimulationId_); });
         connect(deleteGraphButton_, &QPushButton::clicked, this, [this] { deleteCurrentGraph(); });
         connect(editGraphButton_, &QPushButton::clicked, this, [this] { editGraph(); });
+        connect(gridButton, &QPushButton::toggled, this, [this](bool visible) {
+            graphGridVisible_ = visible;
+            if (!graphTabs_)
+                return;
+            for (int index = 0; index < graphTabs_->count(); ++index)
+                if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
+                    plot->setGridVisible(visible);
+        });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
 
         // ── Wire schematic / layout tabs ─────────────────────────────────
@@ -3936,6 +4030,7 @@ class DocumentWindow : public QMainWindow {
     SimulationPlot *simulationPlot_ = nullptr;
     SimulationPanel *simulationPanel_ = nullptr;
     QTabWidget *graphTabs_ = nullptr;
+    bool graphGridVisible_ = true;
     ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
