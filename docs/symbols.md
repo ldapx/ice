@@ -62,6 +62,14 @@ duplicates another file. Optional `[[parameter]]` entries seed default instance
 parameters whenever the symbol is placed; users can edit them per instance in
 the properties editor.
 
+## IHP SG13G2 symbols
+
+The IHP SG13G2 package owns its NMOS, PMOS, NPN HBT, and MIM capacitor
+symbols under its own `symbols/` directory. ICE loads those definitions from
+the activated package; there is no built-in IHP copy in the ICE repository.
+The artwork uses the same SchematicSymbolsSVG source collection as the
+built-in symbols.
+
 ## Source symbols
 
 The source symbols share the same two-pin vertical layout and are distinguished

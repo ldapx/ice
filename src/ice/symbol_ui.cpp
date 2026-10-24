@@ -58,9 +58,10 @@ std::filesystem::path symbolLibraryDirectory() {
                                               "/usr/share/ice/symbols)");
 }
 
-std::vector<SymbolDefinition> genericSymbolLibrary() {
+std::vector<SymbolDefinition> toDefinitions(std::vector<ice::FileSymbol> fileSymbols) {
     std::vector<SymbolDefinition> definitions;
-    for (auto &fileSymbol : ice::SymbolLibrary::load(symbolLibraryDirectory())) {
+    definitions.reserve(fileSymbols.size());
+    for (auto &fileSymbol : fileSymbols) {
         SymbolDefinition definition;
         definition.name = QString::fromStdString(fileSymbol.name);
         definition.category = QString::fromStdString(fileSymbol.category);
@@ -72,32 +73,18 @@ std::vector<SymbolDefinition> genericSymbolLibrary() {
     return definitions;
 }
 
-const std::vector<SymbolDefinition> &ihpSymbolLibrary() {
-    static const std::vector<SymbolDefinition> definitions = {
-        {"IHP NMOS 1.2V",
-         "IHP SG13G2 / MOS",
-         "<svg viewBox='0 0 120 120'><path d='M45 20v80M60 35v50M75 35v50M20 35h25M20 85h25M75 60h35M60 20v15M60 "
-         "85v15' fill='none' stroke='black' stroke-width='4'/></svg>",
-         {{0, "G", -60, -25}, {0, "S", 0, 60}, {0, "D", 0, -60}}},
-        {"IHP PMOS 1.2V",
-         "IHP SG13G2 / MOS",
-         "<svg viewBox='0 0 120 120'><path d='M45 20v80M60 35v50M75 35v50M20 35h25M20 85h25M75 60h35M60 20v15M60 "
-         "85v15' fill='none' stroke='black' stroke-width='4'/><circle cx='35' cy='35' r='6' fill='none' stroke='black' "
-         "stroke-width='3'/></svg>",
-         {{0, "G", -60, -25}, {0, "S", 0, 60}, {0, "D", 0, -60}}},
-        {"IHP NPN HBT",
-         "IHP SG13G2 / Bipolar",
-         "<svg viewBox='0 0 120 120'><path d='M55 20v80M70 35v50M20 45h35M20 75h35M70 60h35M70 20v15M70 85v15' "
-         "fill='none' stroke='black' stroke-width='4'/><path d='M82 52l10 8-10 8' fill='none' stroke='black' "
-         "stroke-width='3'/></svg>",
-         {{0, "B", -60, -25}, {0, "E", 0, 60}, {0, "C", 0, -60}}},
-        {"IHP MIM Capacitor",
-         "IHP SG13G2 / Passive",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h45M75 30h45M45 8v44M75 8v44' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "1", -60, 0}, {0, "2", 60, 0}}},
-    };
-    return definitions;
+std::vector<SymbolDefinition> genericSymbolLibrary() {
+    return toDefinitions(ice::SymbolLibrary::load(symbolLibraryDirectory()));
+}
+
+std::vector<SymbolDefinition> ihpSymbolLibrary(const std::filesystem::path &packageDirectory) {
+    if (packageDirectory.empty())
+        return {};
+    try {
+        return toDefinitions(ice::SymbolLibrary::load(packageDirectory));
+    } catch (const ice::ProjectError &) {
+        return {};
+    }
 }
 
 std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition) {
@@ -167,12 +154,10 @@ void SymbolPreview::paintEvent(QPaintEvent *) {
     painter.drawImage(target.topLeft(), artwork);
 }
 
-SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, bool ihpEnabled, QWidget *parent)
+SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, std::vector<SymbolDefinition> ihp,
+                                         QWidget *parent)
     : QDialog(parent), symbols_(std::move(generic)) {
-    if (ihpEnabled) {
-        const auto &ihp = ihpSymbolLibrary();
-        symbols_.insert(symbols_.end(), ihp.begin(), ihp.end());
-    }
+    symbols_.insert(symbols_.end(), std::make_move_iterator(ihp.begin()), std::make_move_iterator(ihp.end()));
 
     setWindowTitle(QStringLiteral("Symbol Library"));
     resize(960, 620);

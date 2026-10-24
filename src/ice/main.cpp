@@ -51,6 +51,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStatusBar>
@@ -1467,8 +1468,14 @@ class DocumentWindow : public QMainWindow {
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         layoutViewInitialized_ = false;
         projectPath_.clear();
+        ihpSymbolsDirectory_.clear();
         ihpTechnologyActive_ = std::any_of(project_->project().layers.begin(), project_->project().layers.end(),
                                            [](const auto &entry) { return entry.second.name == "Metal1"; });
+        if (ihpTechnologyActive_) {
+            const auto stored = QSettings().value(QStringLiteral("packages/ihpSymbolsDirectory")).toString();
+            if (!stored.isEmpty())
+                ihpSymbolsDirectory_ = stored.toStdString();
+        }
         refreshEmbeddedPanels();
         refreshSimulationSchematics();
         refreshSchematic();
@@ -1599,6 +1606,7 @@ class DocumentWindow : public QMainWindow {
     void closeProject() {
         project_.reset();
         ihpTechnologyActive_ = false;
+        ihpSymbolsDirectory_.clear();
         projectPath_.clear();
         refreshEmbeddedPanels();
         if (schematicCanvas_) {
@@ -1765,6 +1773,9 @@ class DocumentWindow : public QMainWindow {
                 ice::createSchematicCell(project, "ihp_top");
         });
         ihpTechnologyActive_ = true;
+        ihpSymbolsDirectory_ = spec.root / "symbols";
+        QSettings().setValue(QStringLiteral("packages/ihpSymbolsDirectory"),
+                             QString::fromStdString(ihpSymbolsDirectory_.string()));
         refreshProject();
         statusBar()->showMessage(QStringLiteral("IHP SG13G2 technology activated"));
     }
@@ -1893,7 +1904,9 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         try {
-            SymbolLibraryDialog dialog(genericSymbolLibrary(), ihpTechnologyActive_, this);
+            auto ihpSymbols =
+                ihpTechnologyActive_ ? ihpSymbolLibrary(ihpSymbolsDirectory_) : std::vector<SymbolDefinition>{};
+            SymbolLibraryDialog dialog(genericSymbolLibrary(), std::move(ihpSymbols), this);
             if (dialog.exec() != QDialog::Accepted)
                 return;
             const auto definition = dialog.selected();
@@ -3646,6 +3659,7 @@ class DocumentWindow : public QMainWindow {
     QLabel *selectionStatus_ = nullptr;
     QList<QAction *> commands_;
     bool ihpTechnologyActive_ = false;
+    std::filesystem::path ihpSymbolsDirectory_;
 };
 
 } // namespace
