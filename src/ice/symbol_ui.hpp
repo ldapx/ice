@@ -47,15 +47,15 @@ struct ParameterEdit {
 };
 
 std::vector<SymbolDefinition> genericSymbolLibrary();
-// Loads the IHP SG13G2 symbol library from an activated package directory.
-// Returns an empty library when the package does not ship symbols.
-std::vector<SymbolDefinition> ihpSymbolLibrary(const std::filesystem::path &packageDirectory);
+// Loads the symbol library shipped by a PDK package. Returns an empty library
+// when the package does not provide symbols.
+std::vector<SymbolDefinition> packageSymbolLibrary(const std::filesystem::path &packageDirectory);
 std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition);
 std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName);
 
 class SymbolLibraryDialog : public QDialog {
   public:
-    explicit SymbolLibraryDialog(std::vector<SymbolDefinition> generic, std::vector<SymbolDefinition> ihp,
+    explicit SymbolLibraryDialog(std::vector<SymbolDefinition> generic, std::vector<SymbolDefinition> pdk,
                                  QWidget *parent = nullptr);
     const SymbolDefinition &selected() const;
 

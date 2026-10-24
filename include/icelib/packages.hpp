@@ -43,11 +43,27 @@ struct ProvenanceDiagnostic {
     std::string package;
 };
 
+struct PackageIndexEntry {
+    PackageSpec spec;
+    std::filesystem::path root;
+    std::filesystem::path logo;
+    std::string repositoryUrl;
+    std::string repositoryRevision;
+};
+
 class PackageManager {
   public:
     static PackageSpec readManifest(const std::filesystem::path &packageRoot);
     static void installGit(const std::filesystem::path &repository, const std::string &name, const std::string &version,
                            const std::string &url, const std::string &revision = {});
+    static PackageSpec installGitPackage(const std::filesystem::path &repository, const std::string &url,
+                                         const std::string &revision = {});
+    static void uninstallPackage(const std::filesystem::path &repository, const std::string &name);
+    static std::vector<PackageIndexEntry> scanPackageIndex(const std::filesystem::path &indexRoot);
+    static std::filesystem::path packageLogo(const std::filesystem::path &packageRoot);
+    static void cloneIndex(const std::filesystem::path &indexRoot, const std::string &url,
+                           const std::string &revision = {});
+    static void updateIndex(const std::filesystem::path &indexRoot);
     static std::string contentHash(const std::filesystem::path &packageRoot);
     static Lockfile resolve(const std::vector<std::filesystem::path> &repositories,
                             const std::map<std::string, std::string> &requested, std::string iceVersion);

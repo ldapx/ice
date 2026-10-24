@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -101,6 +102,100 @@ std::string shellQuote(const std::string &value) {
             result += character;
     }
     return result + "'";
+}
+
+std::string trimText(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string unquoteText(std::string value) {
+    value = trimText(std::move(value));
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') || (value.front() == '\'' && value.back() == '\'')))
+        return value.substr(1, value.size() - 2);
+    return value;
+}
+
+std::string relativeGeneric(const std::filesystem::path &path, const std::filesystem::path &root) {
+    std::error_code error;
+    const auto relative = std::filesystem::relative(path, root, error);
+    if (error)
+        return {};
+    return relative.lexically_normal().generic_string();
+}
+
+struct SubmoduleEntry {
+    std::string path;
+    std::string url;
+    std::string revision;
+};
+
+std::vector<SubmoduleEntry> readGitmodules(const std::filesystem::path &indexRoot) {
+    std::ifstream input(indexRoot / ".gitmodules");
+    if (!input)
+        return {};
+    std::vector<SubmoduleEntry> entries;
+    SubmoduleEntry current;
+    bool inSubmodule = false;
+    const auto flush = [&] {
+        if (inSubmodule && !current.path.empty())
+            entries.push_back(current);
+        current = {};
+    };
+    std::string line;
+    while (std::getline(input, line)) {
+        line = trimText(std::move(line));
+        if (line.empty() || line.starts_with('#'))
+            continue;
+        if (line.front() == '[') {
+            flush();
+            inSubmodule = line.find("submodule") != std::string::npos;
+            continue;
+        }
+        if (!inSubmodule)
+            continue;
+        const auto separator = line.find('=');
+        if (separator == std::string::npos)
+            continue;
+        const auto key = trimText(line.substr(0, separator));
+        const auto value = unquoteText(line.substr(separator + 1));
+        if (key == "path")
+            current.path = value;
+        else if (key == "url")
+            current.url = value;
+        else if (key == "branch")
+            current.revision = value;
+    }
+    flush();
+    return entries;
+}
+
+const SubmoduleEntry *findSubmodule(const std::vector<SubmoduleEntry> &entries, const std::string &relativePath) {
+    const SubmoduleEntry *selected = nullptr;
+    for (const auto &entry : entries) {
+        if (relativePath != entry.path && !relativePath.starts_with(entry.path + "/"))
+            continue;
+        if (!selected || entry.path.size() > selected->path.size())
+            selected = &entry;
+    }
+    return selected;
+}
+
+std::filesystem::path temporaryInstallPath(const std::filesystem::path &repository) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto path = repository / (".ice-install-" + std::to_string(stamp));
+    for (unsigned int suffix = 1; std::filesystem::exists(path); ++suffix)
+        path = repository / (".ice-install-" + std::to_string(stamp) + "-" + std::to_string(suffix));
+    return path;
+}
+
+void removeQuietly(const std::filesystem::path &path) {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
 }
 
 std::filesystem::path findPackage(const std::vector<std::filesystem::path> &roots, const std::string &name,
@@ -210,6 +305,189 @@ void PackageManager::installGit(const std::filesystem::path &repository, const s
              << "layout = true\n\n"
              << "[trust]\n"
              << "trusted = false\n";
+}
+
+PackageSpec PackageManager::installGitPackage(const std::filesystem::path &repository, const std::string &url,
+                                              const std::string &revision) {
+    if (url.empty())
+        throw ProjectError("package.install", "Package repository URL is required");
+    std::filesystem::create_directories(repository);
+    const auto temporary = temporaryInstallPath(repository);
+    const auto cloneCommand = "GIT_TERMINAL_PROMPT=0 git clone --depth 1 " +
+                              (revision.empty() ? std::string{} : "--branch " + shellQuote(revision) + " ") + "-- " +
+                              shellQuote(url) + " " + shellQuote(temporary.string());
+    if (std::system(cloneCommand.c_str()) != 0) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Git clone failed for: " + url);
+    }
+
+    PackageSpec spec;
+    try {
+        spec = readManifest(temporary);
+    } catch (const std::exception &error) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install",
+                           std::string("Package repository does not contain a valid package.toml: ") + error.what());
+    }
+    if (spec.name.find_first_of("/\\") != std::string::npos || spec.name == "." || spec.name == "..") {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Package name must not contain path separators");
+    }
+    if (spec.version.empty()) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Package manifest is missing a version");
+    }
+    const auto destination = repository / spec.name;
+    if (std::filesystem::exists(destination)) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Destination already exists: " + destination.string());
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, destination, error);
+    if (error) {
+        std::filesystem::copy(temporary, destination,
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::copy_symlinks,
+                              error);
+        if (error) {
+            removeQuietly(temporary);
+            removeQuietly(destination);
+            throw ProjectError("package.install", "Unable to move installed package: " + error.message());
+        }
+        removeQuietly(temporary);
+    }
+    return readManifest(destination);
+}
+
+void PackageManager::uninstallPackage(const std::filesystem::path &repository, const std::string &name) {
+    if (name.empty() || name.find_first_of("/\\") != std::string::npos || name == "." || name == "..")
+        throw ProjectError("package.uninstall", "Invalid package name");
+    const auto root = repository / name;
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error) || error)
+        throw ProjectError("package.uninstall", "Package is not installed: " + name);
+    if (std::filesystem::is_regular_file(root / "package.toml", error) && !error) {
+        const auto spec = readManifest(root);
+        if (spec.name != name)
+            throw ProjectError("package.uninstall", "Package manifest name does not match the install directory");
+    }
+    std::filesystem::remove_all(root, error);
+    if (error)
+        throw ProjectError("package.uninstall", "Unable to remove package: " + error.message());
+}
+
+std::filesystem::path PackageManager::packageLogo(const std::filesystem::path &packageRoot) {
+    const auto logo = packageRoot / ".github" / "logo.png";
+    std::error_code error;
+    if (std::filesystem::is_regular_file(logo, error) && !error)
+        return logo;
+    return {};
+}
+
+std::vector<PackageIndexEntry> PackageManager::scanPackageIndex(const std::filesystem::path &indexRoot) {
+    std::vector<PackageIndexEntry> result;
+    std::error_code error;
+    if (!std::filesystem::is_directory(indexRoot, error) || error)
+        return result;
+
+    const auto submodules = readGitmodules(indexRoot);
+    std::vector<std::filesystem::path> packageRoots;
+    if (std::filesystem::is_regular_file(indexRoot / "package.toml", error) && !error)
+        packageRoots.push_back(indexRoot);
+
+    for (std::filesystem::recursive_directory_iterator
+             iterator(indexRoot, std::filesystem::directory_options::skip_permission_denied, error),
+         end;
+         iterator != end; iterator.increment(error)) {
+        if (error) {
+            error.clear();
+            continue;
+        }
+        if (!iterator->is_directory(error)) {
+            error.clear();
+            continue;
+        }
+        const auto name = iterator->path().filename().string();
+        if (name.empty() || name.front() == '.' || name == "build" || name == "node_modules") {
+            iterator.disable_recursion_pending();
+            continue;
+        }
+        if (std::filesystem::is_regular_file(iterator->path() / "package.toml", error) && !error) {
+            packageRoots.push_back(iterator->path());
+            iterator.disable_recursion_pending();
+            continue;
+        }
+        error.clear();
+        if (iterator.depth() >= 4)
+            iterator.disable_recursion_pending();
+    }
+
+    std::sort(packageRoots.begin(), packageRoots.end());
+    std::map<std::string, PackageIndexEntry> selected;
+    for (const auto &root : packageRoots) {
+        try {
+            PackageIndexEntry entry;
+            entry.spec = readManifest(root);
+            entry.root = root;
+            entry.logo = packageLogo(root);
+            const auto relative = relativeGeneric(root, indexRoot);
+            if (const auto *submodule = findSubmodule(submodules, relative)) {
+                entry.repositoryUrl = submodule->url;
+                entry.repositoryRevision = submodule->revision;
+            }
+            if (const auto existing = selected.find(entry.spec.name); existing != selected.end()) {
+                if (compareVersions(entry.spec.version, existing->second.spec.version) <= 0)
+                    continue;
+            }
+            selected[entry.spec.name] = std::move(entry);
+        } catch (const ProjectError &) {
+            // Ignore malformed or unrelated directories in the index.
+        }
+    }
+    for (auto &[_, entry] : selected)
+        result.push_back(std::move(entry));
+    return result;
+}
+
+void PackageManager::cloneIndex(const std::filesystem::path &indexRoot, const std::string &url,
+                                const std::string &revision) {
+    if (url.empty())
+        throw ProjectError("package.index", "Package index URL is required");
+    std::error_code error;
+    if (std::filesystem::exists(indexRoot, error) && !error) {
+        const bool empty = std::filesystem::is_empty(indexRoot, error);
+        if (error || !empty)
+            throw ProjectError("package.index", "Package index destination already exists: " + indexRoot.string());
+    } else if (error) {
+        throw ProjectError("package.index", error.message());
+    }
+    if (!indexRoot.parent_path().empty())
+        std::filesystem::create_directories(indexRoot.parent_path());
+    const auto cloneCommand = "GIT_TERMINAL_PROMPT=0 git clone --depth 1 --recurse-submodules "
+                              "--shallow-submodules " +
+                              (revision.empty() ? std::string{} : "--branch " + shellQuote(revision) + " ") + "-- " +
+                              shellQuote(url) + " " + shellQuote(indexRoot.string());
+    if (std::system(cloneCommand.c_str()) != 0) {
+        removeQuietly(indexRoot);
+        throw ProjectError("package.index", "Unable to clone package index: " + url);
+    }
+}
+
+void PackageManager::updateIndex(const std::filesystem::path &indexRoot) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(indexRoot, error) || error)
+        throw ProjectError("package.index", "Package index not found: " + indexRoot.string());
+    if (!std::filesystem::exists(indexRoot / ".git", error) || error)
+        return;
+    // Best-effort fast-forward. A local checkout may intentionally have no
+    // upstream, local commits, or offline remotes; submodule initialization and
+    // scanning still work in those cases.
+    const auto pullCommand =
+        "GIT_TERMINAL_PROMPT=0 git -C " + shellQuote(indexRoot.string()) + " pull --ff-only --quiet >/dev/null 2>&1";
+    std::system(pullCommand.c_str());
+    const auto submoduleCommand =
+        "GIT_TERMINAL_PROMPT=0 git -C " + shellQuote(indexRoot.string()) + " submodule update --init --recursive";
+    if (std::system(submoduleCommand.c_str()) != 0)
+        throw ProjectError("package.index", "Unable to update package index submodules");
 }
 
 std::string PackageManager::contentHash(const std::filesystem::path &packageRoot) {

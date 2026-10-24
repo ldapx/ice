@@ -8,7 +8,7 @@
 
 namespace ice {
 
-ObjectId createSchematicCell(Project &project, std::string name);
+ObjectId createSchematicCell(Project &project, std::string name, std::string pdk = genericPdkId);
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {});
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y);

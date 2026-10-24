@@ -141,11 +141,13 @@ char spiceElementForSymbol(const std::string &symbolName) {
     return 0;
 }
 
-ObjectId createSchematicCell(Project &project, std::string name) {
+ObjectId createSchematicCell(Project &project, std::string name, std::string pdk) {
     if (name.empty())
         throw ProjectError("schematic.cell", "Schematic cell name must not be empty");
+    if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("schematic.pdk", "Schematic PDK must be a valid PDK identifier");
     ObjectId id = project.nextId();
-    project.schematicCells.emplace(id, SchematicCell{id, std::move(name)});
+    project.schematicCells.emplace(id, SchematicCell{id, std::move(name), std::move(pdk)});
     return id;
 }
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork) {

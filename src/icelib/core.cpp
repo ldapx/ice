@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -100,8 +101,21 @@ std::vector<Diagnostic> Project::validate() const {
             {Diagnostic::Severity::error, "project.units", "Database units must be positive", std::nullopt});
     if (grid <= 0)
         result.push_back({Diagnostic::Severity::error, "project.grid", "Grid spacing must be positive", std::nullopt});
+    std::unordered_set<std::string> dependencyNames;
+    for (const auto &dependency : packageDependencies) {
+        if (dependency.empty()) {
+            result.push_back({Diagnostic::Severity::error, "project.packages.name",
+                              "Package dependency names must not be empty", std::nullopt});
+            continue;
+        }
+        if (!dependencyNames.insert(dependency).second)
+            result.push_back({Diagnostic::Severity::error, "project.packages.duplicate",
+                              "Package dependency is listed more than once: " + dependency, std::nullopt});
+    }
     auto onGrid = [this](Coordinate value) { return grid > 0 && value % grid == 0; };
     for (const auto &[cellId, cell] : schematicCells) {
+        if (cell.pdk.empty() || cell.pdk.find_first_of("/\\") != std::string::npos)
+            result.push_back({Diagnostic::Severity::error, "schematic.pdk", "Schematic PDK is invalid", cellId});
         for (const auto &[instanceId, instance] : cell.instances) {
             if (!cell.symbols.contains(instance.symbol))
                 result.push_back({Diagnostic::Severity::error, "schematic.instance.symbol",
@@ -172,10 +186,12 @@ std::string Project::serialize() const {
     j["name"] = name;
     j["grid"] = grid;
     j["units"] = {{"nanometers_per_unit", units.nanometers_per_unit}, {"denominator", units.denominator}};
+    j["package_dependencies"] = packageDependencies;
     j["schematic_cells"] = json::array();
     for (const auto &[id, cell] : schematicCells) {
         json c = {{"id", id},
                   {"name", cell.name},
+                  {"pdk", cell.pdk},
                   {"symbols", json::array()},
                   {"instances", json::array()},
                   {"nets", json::array()}};
@@ -322,8 +338,19 @@ Project Project::deserialize(const std::string &text) {
         p.grid = j.at("grid");
         p.units.nanometers_per_unit = j.at("units").at("nanometers_per_unit");
         p.units.denominator = j.at("units").at("denominator");
+        if (j.contains("package_dependencies")) {
+            for (const auto &dependency : j.at("package_dependencies")) {
+                const auto name = dependency.get<std::string>();
+                if (!name.empty() && std::find(p.packageDependencies.begin(), p.packageDependencies.end(), name) ==
+                                         p.packageDependencies.end())
+                    p.packageDependencies.push_back(name);
+            }
+        }
         for (const auto &c : j.at("schematic_cells")) {
             SchematicCell cell{c.at("id"), c.at("name")};
+            cell.pdk = c.value("pdk", std::string{genericPdkId});
+            if (cell.pdk.empty())
+                cell.pdk = genericPdkId;
             for (const auto &s : c.at("symbols")) {
                 Symbol symbol{s.at("id"), s.at("name"), s.at("artwork")};
                 for (const auto &pin : s.at("pins"))

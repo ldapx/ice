@@ -14,6 +14,8 @@ namespace ice {
 using ObjectId = std::uint64_t;
 using Coordinate = std::int64_t;
 
+inline constexpr const char *genericPdkId = "generic";
+
 struct Diagnostic {
     enum class Severity { error, warning };
     Severity severity;
@@ -84,6 +86,7 @@ struct Net {
 struct SchematicCell {
     ObjectId id = 0;
     std::string name;
+    std::string pdk = genericPdkId;
     std::map<ObjectId, Symbol> symbols;
     std::map<ObjectId, SchematicInstance> instances;
     std::map<ObjectId, Net> nets;
@@ -176,6 +179,7 @@ class Project {
     std::string name;
     DatabaseUnits units;
     Coordinate grid = 1;
+    std::vector<std::string> packageDependencies;
     std::map<ObjectId, SchematicCell> schematicCells;
     std::map<ObjectId, Layer> layers;
     std::map<ObjectId, LayoutCell> layoutCells;

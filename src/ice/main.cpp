@@ -5,6 +5,7 @@
 #include "icelib/simulation.hpp"
 
 #include "icons.hpp"
+#include "package_ui.hpp"
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
 #include "theme.hpp"
@@ -978,7 +979,9 @@ class ProjectPanel : public QWidget {
         auto *libraries = new QGroupBox(QStringLiteral("Libraries and PDK"));
         auto *libraryLayout = new QVBoxLayout(libraries);
         libraryLayout->addWidget(new QLabel(QStringLiteral("Packages")));
-        libraryLayout->addWidget(new QListWidget);
+        packageList_ = new QListWidget;
+        packageList_->setAccessibleName(QStringLiteral("Project package dependencies"));
+        libraryLayout->addWidget(packageList_);
         if (showLibraries)
             layout->addWidget(libraries);
 
@@ -995,12 +998,23 @@ class ProjectPanel : public QWidget {
         projectName_->setText(QString::fromStdString(project.name));
         tree_->clear();
         layerList_->clear();
+        packageList_->clear();
+        if (project.packageDependencies.empty()) {
+            auto *item = new QListWidgetItem(QStringLiteral("No package dependencies"), packageList_);
+            item->setFlags(Qt::NoItemFlags);
+        } else {
+            for (const auto &dependency : project.packageDependencies)
+                new QListWidgetItem(QString::fromStdString(dependency), packageList_);
+        }
 
         if (!showLayoutHierarchy_) {
             auto *schematic = new QTreeWidgetItem(tree_, {QStringLiteral("Schematic")});
             for (const auto &[id, cell] : project.schematicCells) {
                 auto *cellItem = new QTreeWidgetItem(schematic, {QString::fromStdString(cell.name)});
                 cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
+                                                                                   : QString::fromStdString(cell.pdk);
+                new QTreeWidgetItem(cellItem, {QStringLiteral("PDK: %1").arg(pdk)});
                 new QTreeWidgetItem(cellItem, {QStringLiteral("Symbols (%1)").arg(cell.symbols.size())});
                 new QTreeWidgetItem(cellItem, {QStringLiteral("Instances (%1)").arg(cell.instances.size())});
                 new QTreeWidgetItem(cellItem, {QStringLiteral("Nets (%1)").arg(cell.nets.size())});
@@ -1031,6 +1045,7 @@ class ProjectPanel : public QWidget {
   private:
     QLabel *projectName_ = nullptr;
     QTreeWidget *tree_ = nullptr;
+    QListWidget *packageList_ = nullptr;
     QListWidget *layerList_ = nullptr;
     bool showLayoutHierarchy_ = true;
 };
@@ -1477,40 +1492,52 @@ class DocumentWindow : public QMainWindow {
         return false;
     }
 
-    static std::filesystem::path defaultIhpSymbolsDirectory() {
-        return std::filesystem::path(QDir::homePath().toStdString()) / ".ice" / "packages" / "ihp.sg13g2" / "symbols";
-    }
-
-    static std::filesystem::path resolveIhpSymbolsDirectory(const QString &storedPath) {
-        if (!storedPath.isEmpty()) {
-            const std::filesystem::path stored(storedPath.toStdString());
-            if (directoryHasSymbols(stored))
-                return stored;
-        }
-        const auto fallback = defaultIhpSymbolsDirectory();
-        return directoryHasSymbols(fallback) ? fallback : std::filesystem::path{};
-    }
-
-    void setProject(ice::Project project) {
+    bool setProject(ice::Project project) {
+        if (!ensureProjectPackages(project))
+            return false;
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         layoutViewInitialized_ = false;
         projectPath_.clear();
-        ihpSymbolsDirectory_.clear();
-        ihpTechnologyActive_ = std::any_of(project_->project().layers.begin(), project_->project().layers.end(),
-                                           [](const auto &entry) { return entry.second.name == "Metal1"; });
-        if (ihpTechnologyActive_) {
-            const auto stored = QSettings().value(QStringLiteral("packages/ihpSymbolsDirectory")).toString();
-            ihpSymbolsDirectory_ = resolveIhpSymbolsDirectory(stored);
-        }
         refreshEmbeddedPanels();
         refreshSimulationSchematics();
         refreshSchematic();
         refreshLayout();
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
         statusBar()->showMessage(QStringLiteral("Project loaded"));
+        return true;
     }
 
   private:
+    bool ensureProjectPackages(const ice::Project &project) {
+        if (project.packageDependencies.empty())
+            return true;
+        const auto installDirectory = configuredPackageInstallDirectory();
+        auto installed = installedPackages(installDirectory);
+        const auto isInstalled = [&](const std::string &name) {
+            return std::any_of(installed.begin(), installed.end(),
+                               [&](const auto &entry) { return entry.spec.name == name; });
+        };
+        std::vector<std::string> missing;
+        for (const auto &dependency : project.packageDependencies)
+            if (!isInstalled(dependency))
+                missing.push_back(dependency);
+        if (missing.empty())
+            return true;
+        if (!installMissingPackages(this, missing, configuredPackageIndexDirectory(), installDirectory))
+            return false;
+        installed = installedPackages(installDirectory);
+        for (const auto &dependency : project.packageDependencies) {
+            if (!isInstalled(dependency)) {
+                QMessageBox::critical(
+                    this, QStringLiteral("Missing Packages"),
+                    QStringLiteral("The project cannot be opened because package %1 is still not installed.")
+                        .arg(QString::fromStdString(dependency)));
+                return false;
+            }
+        }
+        return true;
+    }
+
     ice::Project makeNewProject(const QString &name) const {
         ice::Project project;
         project.name = name.toStdString();
@@ -1547,8 +1574,9 @@ class DocumentWindow : public QMainWindow {
         if (path.isEmpty())
             return;
         try {
-            projectPath_ = path;
-            setProject(ice::Project::load(path.toStdString()));
+            auto project = ice::Project::load(path.toStdString());
+            if (!setProject(std::move(project)))
+                return;
             projectPath_ = path;
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Open Project"), QString::fromStdString(error.what()));
@@ -1631,8 +1659,6 @@ class DocumentWindow : public QMainWindow {
 
     void closeProject() {
         project_.reset();
-        ihpTechnologyActive_ = false;
-        ihpSymbolsDirectory_.clear();
         projectPath_.clear();
         refreshEmbeddedPanels();
         if (schematicCanvas_) {
@@ -1659,18 +1685,53 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
-        bool accepted = false;
-        const auto name =
-            QInputDialog::getText(this, QStringLiteral("Create Schematic"), QStringLiteral("Schematic name:"),
-                                  QLineEdit::Normal, QStringLiteral("top"), &accepted);
-        if (!accepted || name.trimmed().isEmpty())
+        const auto installDirectory = configuredPackageInstallDirectory();
+        CreateSchematicDialog dialog(installDirectory, this);
+        if (dialog.exec() != QDialog::Accepted)
             return;
+        const auto name = dialog.schematicName();
+        const auto pdk = dialog.pdkId();
+        bool addDependency = false;
+        if (pdk != ice::genericPdkId) {
+            const auto packages = installedPackages(installDirectory);
+            const auto package = std::find_if(packages.begin(), packages.end(),
+                                              [&](const auto &entry) { return entry.spec.name == pdk; });
+            if (package == packages.end()) {
+                QMessageBox::critical(
+                    this, QStringLiteral("Create Schematic"),
+                    QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
+                return;
+            }
+            const auto capability = package->spec.capabilities.find("pdk");
+            if (capability == package->spec.capabilities.end() || !capability->second) {
+                QMessageBox::critical(
+                    this, QStringLiteral("Create Schematic"),
+                    QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
+                return;
+            }
+            const auto &dependencies = project_->project().packageDependencies;
+            if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
+                const auto response = QMessageBox::question(
+                    this, QStringLiteral("Add Package Dependency"),
+                    QStringLiteral("This schematic uses the PDK from package %1. Add %1 to the project's "
+                                   "package dependency list?")
+                        .arg(QString::fromStdString(pdk)),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+                if (response != QMessageBox::Yes)
+                    return;
+                addDependency = true;
+            }
+        }
         try {
             project_->execute("create schematic", [&](ice::Project &project) {
-                ice::createSchematicCell(project, name.trimmed().toStdString());
+                if (addDependency)
+                    project.packageDependencies.push_back(pdk);
+                activeSchematicId_ = ice::createSchematicCell(project, name.toStdString(), pdk);
             });
             refreshProject();
-            statusBar()->showMessage(QStringLiteral("Schematic created"));
+            const auto pdkLabel =
+                pdk == ice::genericPdkId ? QStringLiteral("Generic PDK") : QString::fromStdString(pdk);
+            statusBar()->showMessage(QStringLiteral("Schematic created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Schematic"), QString::fromStdString(error.what()));
         }
@@ -1716,74 +1777,29 @@ class DocumentWindow : public QMainWindow {
     }
 
     void managePackages() {
-        auto *dialog = new QDialog(this);
-        dialog->setWindowTitle(QStringLiteral("Package and PDK Manager"));
-        dialog->setModal(true);
-        dialog->resize(620, 310);
-        auto *layout = new QVBoxLayout(dialog);
-        layout->addWidget(
-            new QLabel(QStringLiteral("Install a package repository and activate its technology for this project.")));
-        auto *repository = new QLineEdit(QDir::homePath() + QStringLiteral("/.ice/packages"));
-        repository->setPlaceholderText(QStringLiteral("Local package repository"));
-        layout->addWidget(new QLabel(QStringLiteral("Local package repository")));
-        layout->addWidget(repository);
-        auto *url = new QLineEdit(QStringLiteral("https://github.com/ldapx/ice-pkg-ihp.git"));
-        url->setPlaceholderText(QStringLiteral("Package repository URL"));
-        layout->addWidget(new QLabel(QStringLiteral("Package repository URL")));
-        layout->addWidget(url);
-        auto *branch = new QLineEdit(QStringLiteral("main"));
-        branch->setPlaceholderText(QStringLiteral("Git branch or tag"));
-        layout->addWidget(new QLabel(QStringLiteral("Git branch or tag")));
-        layout->addWidget(branch);
-        auto *packageName = new QLineEdit(QStringLiteral("ihp.sg13g2"));
-        auto *packageVersion = new QLineEdit(QStringLiteral("0.1.0"));
-        layout->addWidget(new QLabel(QStringLiteral("Package name")));
-        layout->addWidget(packageName);
-        layout->addWidget(new QLabel(QStringLiteral("Package version")));
-        layout->addWidget(packageVersion);
-        auto *install = new QPushButton(QStringLiteral("Install and activate IHP SG13G2"));
-        layout->addWidget(install);
-        auto *status = new QLabel;
-        status->setWordWrap(true);
-        layout->addWidget(status);
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
-        layout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
-        connect(install, &QPushButton::clicked, this,
-                [this, dialog, repository, url, branch, packageName, packageVersion, status] {
-                    if (!project_) {
-                        status->setText(QStringLiteral("Create or open a project first."));
-                        return;
-                    }
-                    try {
-                        const auto root = std::filesystem::path(repository->text().toStdString());
-                        const auto packageRoot = root / packageName->text().toStdString();
-                        if (!std::filesystem::exists(packageRoot / "package.toml"))
-                            ice::PackageManager::installGit(
-                                root, packageName->text().toStdString(), packageVersion->text().toStdString(),
-                                url->text().toStdString(),
-                                branch->text().trimmed().isEmpty() ? "main" : branch->text().trimmed().toStdString());
-                        const auto spec = ice::PackageManager::readManifest(packageRoot);
-                        const auto lock = ice::PackageManager::resolve({root}, {{spec.name, spec.version}}, "0.1.0");
-                        const auto lockPath =
-                            projectPath_.isEmpty()
-                                ? std::filesystem::path("ice.lock")
-                                : std::filesystem::path(projectPath_.toStdString()).parent_path() / "ice.lock";
-                        ice::PackageManager::writeLockfile(lockPath, lock);
-                        activateIhpTechnology(spec);
-                        status->setText(QStringLiteral("IHP SG13G2 installed, locked, and activated."));
-                    } catch (const std::exception &error) {
-                        status->setText(QStringLiteral("Package error: %1").arg(QString::fromUtf8(error.what())));
-                    }
-                });
-        dialog->exec();
-        dialog->deleteLater();
+        QSettings settings;
+        PackageManagerOptions options;
+        options.indexDirectory = configuredPackageIndexDirectory();
+        options.installDirectory = configuredPackageInstallDirectory();
+        options.projectPath = std::filesystem::path(projectPath_.toStdString());
+        options.hasProject = project_ != nullptr;
+        options.activatePackage = [this](const ice::PackageSpec &spec) { activateIhpTechnology(spec); };
+
+        PackageManagerDialog dialog(std::move(options), this);
+        dialog.exec();
+        settings.setValue(QStringLiteral("packages/indexDirectory"),
+                          QString::fromStdString(dialog.indexDirectory().string()));
+        settings.setValue(QStringLiteral("packages/localRepository"),
+                          QString::fromStdString(dialog.installDirectory().string()));
     }
 
     void activateIhpTechnology(const ice::PackageSpec &spec) {
         if (!project_ || spec.name != "ihp.sg13g2")
             return;
         project_->execute("activate IHP SG13G2 technology", [&](ice::Project &project) {
+            if (std::find(project.packageDependencies.begin(), project.packageDependencies.end(), spec.name) ==
+                project.packageDependencies.end())
+                project.packageDependencies.push_back(spec.name);
             const std::vector<std::pair<std::string, int>> layers = {
                 {"Activ", 1},  {"Poly2", 2},  {"Metal1", 3},    {"Metal2", 4},    {"Metal3", 5},
                 {"Metal4", 6}, {"Metal5", 7}, {"TopMetal1", 8}, {"TopMetal2", 9}, {"MIM", 10},
@@ -1796,15 +1812,8 @@ class DocumentWindow : public QMainWindow {
                     ice::addLayer(project, name, number);
             }
             if (project.schematicCells.empty())
-                ice::createSchematicCell(project, "ihp_top");
+                ice::createSchematicCell(project, "ihp_top", spec.name);
         });
-        ihpTechnologyActive_ = true;
-        ihpSymbolsDirectory_ = spec.root / "symbols";
-        if (!directoryHasSymbols(ihpSymbolsDirectory_))
-            ihpSymbolsDirectory_ = resolveIhpSymbolsDirectory({});
-        if (!ihpSymbolsDirectory_.empty())
-            QSettings().setValue(QStringLiteral("packages/ihpSymbolsDirectory"),
-                                 QString::fromStdString(ihpSymbolsDirectory_.string()));
         refreshProject();
         statusBar()->showMessage(QStringLiteral("IHP SG13G2 technology activated"));
     }
@@ -1933,21 +1942,35 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         try {
-            auto ihpSymbols =
-                ihpTechnologyActive_ ? ihpSymbolLibrary(ihpSymbolsDirectory_) : std::vector<SymbolDefinition>{};
-            if (ihpTechnologyActive_ && ihpSymbols.empty()) {
-                QMessageBox::warning(
-                    this, QStringLiteral("IHP symbol library"),
-                    QStringLiteral("The active IHP package does not provide schematic symbols. Reinstall or update "
-                                   "the IHP package, then activate it again."));
-            }
-            SymbolLibraryDialog dialog(genericSymbolLibrary(), std::move(ihpSymbols), this);
-            if (dialog.exec() != QDialog::Accepted)
-                return;
-            const auto definition = dialog.selected();
             const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
                                     ? activeSchematicId_
                                     : project_->project().schematicCells.begin()->first;
+            const auto &cell = project_->project().schematicCells.at(cellId);
+            const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
+            std::vector<SymbolDefinition> pdkSymbols;
+            if (pdk != ice::genericPdkId) {
+                const auto symbolDirectory = configuredPackageInstallDirectory() / pdk / "symbols";
+                if (!directoryHasSymbols(symbolDirectory)) {
+                    QMessageBox::warning(
+                        this, QStringLiteral("Package PDK symbols"),
+                        QStringLiteral("The PDK package %1 is not installed or does not provide schematic symbols. "
+                                       "Install or update it from Manage Packages before placing symbols.")
+                            .arg(QString::fromStdString(pdk)));
+                    return;
+                }
+                pdkSymbols = packageSymbolLibrary(symbolDirectory);
+                if (pdkSymbols.empty()) {
+                    QMessageBox::warning(
+                        this, QStringLiteral("Package PDK symbols"),
+                        QStringLiteral("The PDK package %1 does not provide a valid schematic symbol library.")
+                            .arg(QString::fromStdString(pdk)));
+                    return;
+                }
+            }
+            SymbolLibraryDialog dialog(genericSymbolLibrary(), std::move(pdkSymbols), this);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            const auto definition = dialog.selected();
             const auto scenePosition = schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center());
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId =
@@ -2628,9 +2651,12 @@ class DocumentWindow : public QMainWindow {
             const auto selected = activeSchematicId_;
             schematicCellTabs_->clear();
             for (const auto &[id, cell] : project.schematicCells) {
+                const int tab = schematicCellTabs_->count();
                 schematicCellTabs_->addTab(new QWidget, QString::fromStdString(cell.name));
-                schematicCellTabs_->tabBar()->setTabData(schematicCellTabs_->count() - 1,
-                                                         QVariant::fromValue<qulonglong>(id));
+                schematicCellTabs_->tabBar()->setTabData(tab, QVariant::fromValue<qulonglong>(id));
+                const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
+                                                                                   : QString::fromStdString(cell.pdk);
+                schematicCellTabs_->setTabToolTip(tab, QStringLiteral("PDK: %1").arg(pdk));
             }
             for (int index = 0; index < schematicCellTabs_->count(); ++index)
                 if (schematicCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
@@ -2713,7 +2739,10 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project_->project().schematicCells.end())
             return;
         const auto &cell = cellIt->second;
-        auto *cellTitle = scene->addText(QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
+        const auto pdkLabel = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
+                                                                                : QString::fromStdString(cell.pdk);
+        auto *cellTitle =
+            scene->addText(QStringLiteral("Schematic: %1  ·  %2").arg(QString::fromStdString(cell.name), pdkLabel));
         cellTitle->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
         cellTitle->setPos(-900, -900);
         cellTitle->setData(0, QStringLiteral("canvas-title"));
@@ -3095,6 +3124,7 @@ class DocumentWindow : public QMainWindow {
         projectMenu->addAction(addCommand(QStringLiteral("Validate Project")));
         projectMenu->addAction(addCommand(QStringLiteral("Project Settings")));
         auto *managePackagesAction = addCommand(QStringLiteral("Manage Packages"));
+        setLucideIcon(managePackagesAction, QStringLiteral("package"));
         projectMenu->addAction(managePackagesAction);
 
         auto *toolsMenu = menuBar()->addMenu(QStringLiteral("&Tools"));
@@ -3693,8 +3723,6 @@ class DocumentWindow : public QMainWindow {
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
     QList<QAction *> commands_;
-    bool ihpTechnologyActive_ = false;
-    std::filesystem::path ihpSymbolsDirectory_;
 };
 
 } // namespace
@@ -3711,7 +3739,8 @@ int main(int argc, char **argv) {
     DocumentWindow window;
     if (argc == 3 && std::string(argv[1]) == "--project") {
         try {
-            window.setProject(ice::Project::load(argv[2]));
+            if (!window.setProject(ice::Project::load(argv[2])))
+                return 0;
         } catch (const ice::ProjectError &) {
             window.statusBar()->showMessage(QStringLiteral("Unable to load project"));
         }

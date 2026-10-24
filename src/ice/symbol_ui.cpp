@@ -77,7 +77,7 @@ std::vector<SymbolDefinition> genericSymbolLibrary() {
     return toDefinitions(ice::SymbolLibrary::load(symbolLibraryDirectory()));
 }
 
-std::vector<SymbolDefinition> ihpSymbolLibrary(const std::filesystem::path &packageDirectory) {
+std::vector<SymbolDefinition> packageSymbolLibrary(const std::filesystem::path &packageDirectory) {
     if (packageDirectory.empty())
         return {};
     try {
@@ -154,10 +154,10 @@ void SymbolPreview::paintEvent(QPaintEvent *) {
     painter.drawImage(target.topLeft(), artwork);
 }
 
-SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, std::vector<SymbolDefinition> ihp,
+SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, std::vector<SymbolDefinition> pdk,
                                          QWidget *parent)
     : QDialog(parent), symbols_(std::move(generic)) {
-    symbols_.insert(symbols_.end(), std::make_move_iterator(ihp.begin()), std::make_move_iterator(ihp.end()));
+    symbols_.insert(symbols_.end(), std::make_move_iterator(pdk.begin()), std::make_move_iterator(pdk.end()));
 
     setWindowTitle(QStringLiteral("Symbol Library"));
     resize(960, 620);

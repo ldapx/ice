@@ -16,12 +16,14 @@ TEST_CASE("project serialization and transactions are deterministic") {
     ice::Project project;
     project.identity = "demo";
     project.name = "demo";
+    project.packageDependencies = {"example.pdk"};
     auto layerId = project.nextId();
     project.layers.emplace(layerId, ice::Layer{layerId, "metal1", 1});
     auto schematicId = project.nextId();
     ice::SchematicCell schematic;
     schematic.id = schematicId;
     schematic.name = "top";
+    schematic.pdk = "example.pdk";
     auto symbolId = project.nextId();
     ice::Symbol symbol;
     symbol.id = symbolId;
@@ -473,6 +475,72 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     CHECK(serialized == ice::serializeLockfile(lock));
     CHECK(serialized.find("content_hash = \"sha256:") != std::string::npos);
     std::filesystem::remove_all(repositoryRoot);
+}
+
+TEST_CASE("package indexes discover submodules and logos") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-package-index-test";
+    std::filesystem::remove_all(root);
+    const auto packageRoot = root / "packages" / "example.lib";
+    std::filesystem::create_directories(packageRoot / ".github");
+    std::ofstream(root / ".gitmodules") << "[submodule \"example.lib\"]\n"
+                                           "    path = packages/example.lib\n"
+                                           "    url = https://example.invalid/example.lib.git\n"
+                                           "    branch = dev\n";
+    std::ofstream(packageRoot / "package.toml") << "[package]\n"
+                                                   "schema_version = 1\n"
+                                                   "name = \"example.lib\"\n"
+                                                   "version = \"1.2.0\"\n"
+                                                   "description = \"Example indexed package\"\n"
+                                                   "\n[provides]\n"
+                                                   "symbols = true\n";
+    std::ofstream(packageRoot / ".github" / "logo.png") << "not a real image, only presence is tested";
+
+    const auto entries = ice::PackageManager::scanPackageIndex(root);
+    CHECK(entries.size() == 1);
+    if (entries.size() == 1) {
+        CHECK(entries.front().spec.name == "example.lib");
+        CHECK(entries.front().repositoryUrl == "https://example.invalid/example.lib.git");
+        CHECK(entries.front().repositoryRevision == "dev");
+        CHECK(entries.front().logo == packageRoot / ".github" / "logo.png");
+    }
+    CHECK(ice::PackageManager::packageLogo(packageRoot) == packageRoot / ".github" / "logo.png");
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("installed packages can be uninstalled") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-package-uninstall-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "example.pkg");
+    std::ofstream(root / "example.pkg" / "package.toml") << "[package]\nname = \"example.pkg\"\nversion = \"1.0.0\"\n";
+    CHECK(std::filesystem::exists(root / "example.pkg"));
+    ice::PackageManager::uninstallPackage(root, "example.pkg");
+    CHECK(!std::filesystem::exists(root / "example.pkg"));
+    CHECK_THROWS_AS(ice::PackageManager::uninstallPackage(root, "missing.pkg"), ice::ProjectError);
+    CHECK_THROWS_AS(ice::PackageManager::uninstallPackage(root, "../escape"), ice::ProjectError);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("schematics carry PDKs and projects carry package dependencies") {
+    ice::Project project;
+    project.identity = "pdk-project";
+    project.name = "pdk-project";
+    const auto generic = ice::createSchematicCell(project, "generic_top");
+    const auto packaged = ice::createSchematicCell(project, "ihp_top", "ihp.sg13g2");
+    CHECK(project.schematicCells.at(generic).pdk == ice::genericPdkId);
+    CHECK(project.schematicCells.at(packaged).pdk == "ihp.sg13g2");
+    project.packageDependencies = {"ihp.sg13g2"};
+    CHECK(project.validate().empty());
+
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.packageDependencies == std::vector<std::string>{"ihp.sg13g2"});
+    CHECK(roundTrip.schematicCells.at(generic).pdk == ice::genericPdkId);
+    CHECK(roundTrip.schematicCells.at(packaged).pdk == "ihp.sg13g2");
+
+    auto duplicated = project;
+    duplicated.packageDependencies.push_back("ihp.sg13g2");
+    CHECK(!duplicated.validate().empty());
+    CHECK_THROWS_AS(ice::createSchematicCell(project, "empty_pdk", ""), ice::ProjectError);
+    CHECK_THROWS_AS(ice::createSchematicCell(project, "bad_pdk", "../escape"), ice::ProjectError);
 }
 
 TEST_CASE("file symbol library loads and validates") {

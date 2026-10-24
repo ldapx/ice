@@ -62,13 +62,15 @@ duplicates another file. Optional `[[parameter]]` entries seed default instance
 parameters whenever the symbol is placed; users can edit them per instance in
 the properties editor.
 
-## IHP SG13G2 symbols
+## PDK symbol libraries
 
-The IHP SG13G2 package owns its NMOS, PMOS, NPN HBT, and MIM capacitor
-symbols under its own `symbols/` directory. ICE loads those definitions from
-the activated package; there is no built-in IHP copy in the ICE repository.
-The artwork uses the same SchematicSymbolsSVG source collection as the
-built-in symbols.
+Each schematic stores the PDK it uses. The built-in Generic PDK exposes only
+the generic library described above. A schematic linked to a package PDK also
+loads that package's own `symbols/` directory, so the combined browser shows
+generic symbols and PDK-specific symbols together. For example, the IHP SG13G2
+package owns its NMOS, PMOS, NPN HBT, and MIM capacitor symbols and adds them to
+the generic transistor and passive categories. There is no built-in IHP copy in
+the ICE repository.
 
 ## Source symbols
 
