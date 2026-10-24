@@ -4,11 +4,13 @@
 #include "icelib/packages.hpp"
 #include "icelib/simulation.hpp"
 
+#include "icons.hpp"
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
 #include "theme.hpp"
 #include "theme_dialog.hpp"
 
+#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QAction>
 #include <QActionGroup>
@@ -51,7 +53,6 @@
 #include <QRegularExpression>
 #include <QSplitter>
 #include <QStatusBar>
-#include <QStyle>
 #include <QSvgRenderer>
 #include <QTabWidget>
 #include <QToolBar>
@@ -73,6 +74,17 @@
 #include <utility>
 
 namespace {
+
+void setLucideIcon(QAction *action, const QString &name) {
+    action->setProperty("lucideIcon", name);
+    action->setIcon(ice::lucideIcon(name));
+}
+
+void setLucideIcon(QAbstractButton *button, const QString &name, int size = 18) {
+    button->setProperty("lucideIcon", name);
+    button->setIcon(ice::lucideIcon(name, size));
+    button->setIconSize(QSize(size, size));
+}
 
 QLabel *heading(const QString &text) {
     auto *label = new QLabel(text);
@@ -1030,12 +1042,16 @@ class SimulationPanel : public QWidget {
         auto *buttonRow = new QWidget;
         auto *buttonLayout = new QHBoxLayout(buttonRow);
         buttonLayout->setContentsMargins(4, 0, 4, 4);
-        addButton_ = new QPushButton(QStringLiteral("+"));
+        addButton_ = new QPushButton;
         addButton_->setToolTip(QStringLiteral("Add simulation"));
+        addButton_->setAccessibleName(QStringLiteral("Add simulation"));
         addButton_->setFixedWidth(32);
-        deleteButton_ = new QPushButton(QStringLiteral("−"));
+        setLucideIcon(addButton_, QStringLiteral("plus"), 16);
+        deleteButton_ = new QPushButton;
         deleteButton_->setToolTip(QStringLiteral("Delete selected simulation"));
+        deleteButton_->setAccessibleName(QStringLiteral("Delete selected simulation"));
         deleteButton_->setFixedWidth(32);
+        setLucideIcon(deleteButton_, QStringLiteral("trash"), 16);
         deleteButton_->setEnabled(false);
         buttonLayout->addWidget(addButton_);
         buttonLayout->addWidget(deleteButton_);
@@ -2928,6 +2944,16 @@ class DocumentWindow : public QMainWindow {
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
                     plot->update();
         }
+        for (auto *action : findChildren<QAction *>()) {
+            const auto name = action->property("lucideIcon").toString();
+            if (!name.isEmpty())
+                action->setIcon(ice::lucideIcon(name));
+        }
+        for (auto *button : findChildren<QAbstractButton *>()) {
+            const auto name = button->property("lucideIcon").toString();
+            if (!name.isEmpty())
+                button->setIcon(ice::lucideIcon(name, button->iconSize().width()));
+        }
         update();
     }
 
@@ -3210,20 +3236,28 @@ class DocumentWindow : public QMainWindow {
         auto *graphHeaderLayout = new QHBoxLayout(graphHeader);
         graphHeaderLayout->setContentsMargins(0, 4, 0, 0);
         graphHeaderLayout->addWidget(heading(QStringLiteral("Graphs")));
-        auto *addGraphButton_ = new QPushButton(QStringLiteral("+"));
+        auto *addGraphButton_ = new QPushButton;
         addGraphButton_->setToolTip(QStringLiteral("Add graph to this simulation"));
+        addGraphButton_->setAccessibleName(QStringLiteral("Add graph"));
         addGraphButton_->setFixedWidth(32);
-        auto *deleteGraphButton_ = new QPushButton(QStringLiteral("−"));
+        setLucideIcon(addGraphButton_, QStringLiteral("plus"), 16);
+        auto *deleteGraphButton_ = new QPushButton;
         deleteGraphButton_->setToolTip(QStringLiteral("Delete current graph"));
+        deleteGraphButton_->setAccessibleName(QStringLiteral("Delete current graph"));
         deleteGraphButton_->setFixedWidth(32);
-        auto *editGraphButton_ = new QPushButton(QStringLiteral("✎"));
+        setLucideIcon(deleteGraphButton_, QStringLiteral("trash"), 16);
+        auto *editGraphButton_ = new QPushButton;
         editGraphButton_->setToolTip(QStringLiteral("Edit graph name, axes, limits, and nodes"));
+        editGraphButton_->setAccessibleName(QStringLiteral("Edit graph"));
         editGraphButton_->setFixedWidth(32);
-        auto *gridButton = new QPushButton(QStringLiteral("Grid"));
+        setLucideIcon(editGraphButton_, QStringLiteral("pencil"), 16);
+        auto *gridButton = new QPushButton;
         gridButton->setCheckable(true);
         gridButton->setChecked(true);
         gridButton->setToolTip(QStringLiteral("Show or hide the graph grid"));
         gridButton->setAccessibleName(QStringLiteral("Toggle graph grid"));
+        gridButton->setFixedWidth(32);
+        setLucideIcon(gridButton, QStringLiteral("grid-3x3"), 16);
         graphHeaderLayout->addWidget(addGraphButton_);
         graphHeaderLayout->addWidget(deleteGraphButton_);
         graphHeaderLayout->addWidget(editGraphButton_);
@@ -3511,22 +3545,23 @@ class DocumentWindow : public QMainWindow {
         toolbar->setAccessibleName(layoutEditor ? QStringLiteral("Layout toolbar")
                                                 : QStringLiteral("Schematic toolbar"));
 
-        auto addTool = [toolbar](QStyle::StandardPixmap icon, const QString &name) {
-            auto *action = toolbar->addAction(toolbar->style()->standardIcon(icon), QString());
+        auto addTool = [toolbar](const QString &iconName, const QString &name) {
+            auto *action = toolbar->addAction(name);
+            setLucideIcon(action, iconName);
             action->setToolTip(name);
             action->setStatusTip(name);
             return action;
         };
 
-        auto *selectTool = addTool(QStyle::SP_ArrowUp, QStringLiteral("Select"));
+        auto *selectTool = addTool(QStringLiteral("mouse-pointer-2"), QStringLiteral("Select"));
         if (layoutEditor) {
             connect(selectTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
                     layoutCanvas_->setTool(LayoutCanvas::Tool::select);
             });
         }
-        addTool(QStyle::SP_DialogResetButton, QStringLiteral("Pan"));
-        auto *fitTool = addTool(QStyle::SP_BrowserReload, QStringLiteral("Fit to view"));
+        addTool(QStringLiteral("hand"), QStringLiteral("Pan"));
+        auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to view"));
         connect(fitTool, &QAction::triggered, this, [this, layoutEditor] {
             if (layoutEditor) {
                 if (layoutCanvas_)
@@ -3536,36 +3571,36 @@ class DocumentWindow : public QMainWindow {
             }
         });
         toolbar->addSeparator();
-        addTool(QStyle::SP_FileDialogDetailedView, QStringLiteral("Grid and snapping"));
-        addTool(QStyle::SP_DesktopIcon, QStringLiteral("Toggle visibility"));
+        addTool(QStringLiteral("grid-3x3"), QStringLiteral("Grid and snapping"));
+        addTool(QStringLiteral("eye"), QStringLiteral("Toggle visibility"));
         toolbar->addSeparator();
         if (layoutEditor) {
-            auto *rectangleTool = addTool(QStyle::SP_FileDialogNewFolder, QStringLiteral("Create rectangle"));
+            auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create rectangle"));
             connect(rectangleTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
                     layoutCanvas_->setTool(LayoutCanvas::Tool::rectangle);
             });
-            addTool(QStyle::SP_DirOpenIcon, QStringLiteral("Create polygon"));
-            addTool(QStyle::SP_DialogOpenButton, QStringLiteral("Create port"));
-            addTool(QStyle::SP_DialogSaveButton, QStringLiteral("Create instance"));
+            addTool(QStringLiteral("pentagon"), QStringLiteral("Create polygon"));
+            addTool(QStringLiteral("circle-dot"), QStringLiteral("Create port"));
+            addTool(QStringLiteral("copy"), QStringLiteral("Create instance"));
             toolbar->addSeparator();
-            addTool(QStyle::SP_ArrowBack, QStringLiteral("Rotate counterclockwise"));
-            addTool(QStyle::SP_ArrowForward, QStringLiteral("Rotate clockwise"));
+            addTool(QStringLiteral("rotate-ccw"), QStringLiteral("Rotate counterclockwise"));
+            addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate clockwise"));
         } else {
-            addTool(QStyle::SP_FileDialogNewFolder, QStringLiteral("Place symbol"));
-            addTool(QStyle::SP_DirOpenIcon, QStringLiteral("Draw wire"));
-            auto *netLabelTool = addTool(QStyle::SP_DialogOpenButton, QStringLiteral("Place net label"));
+            addTool(QStringLiteral("circuit-board"), QStringLiteral("Place symbol"));
+            addTool(QStringLiteral("route"), QStringLiteral("Draw wire"));
+            auto *netLabelTool = addTool(QStringLiteral("tag"), QStringLiteral("Place net label"));
             connect(netLabelTool, &QAction::triggered, this, [this] {
                 if (!project_ || project_->project().schematicCells.empty())
                     return;
                 schematicCanvas_->setNetLabelMode(true);
                 statusBar()->showMessage(QStringLiteral("Click in the schematic to place a net label"));
             });
-            auto *propertiesTool = addTool(QStyle::SP_DialogSaveButton, QStringLiteral("Edit properties"));
+            auto *propertiesTool = addTool(QStringLiteral("sliders-horizontal"), QStringLiteral("Edit properties"));
             connect(propertiesTool, &QAction::triggered, this, [this] { editSelectedSymbol(); });
         }
         toolbar->addSeparator();
-        addTool(QStyle::SP_DialogCancelButton, QStringLiteral("Delete"));
+        addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
         return toolbar;
     }
 
