@@ -1,7 +1,6 @@
 #include "icelib/interchange.hpp"
 
 #include <cstdint>
-#include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -28,17 +27,20 @@ std::uint16_t readU16(std::istream &input) {
     input.read(reinterpret_cast<char *>(bytes), 2);
     if (!input)
         throw ProjectError("interchange.parse", "Unexpected end of GDSII file");
-    return static_cast<std::uint16_t>((bytes[0] << 8) | bytes[1]);
+    const auto high = static_cast<std::uint32_t>(bytes[0]) << 8;
+    return static_cast<std::uint16_t>(high | static_cast<std::uint32_t>(bytes[1]));
 }
 
 std::int32_t readI32(const unsigned char *bytes) {
-    return static_cast<std::int32_t>((static_cast<std::uint32_t>(bytes[0]) << 24) |
-                                     (static_cast<std::uint32_t>(bytes[1]) << 16) |
-                                     (static_cast<std::uint32_t>(bytes[2]) << 8) | bytes[3]);
+    return static_cast<std::int32_t>(
+        (static_cast<std::uint32_t>(bytes[0]) << 24) | (static_cast<std::uint32_t>(bytes[1]) << 16) |
+        (static_cast<std::uint32_t>(bytes[2]) << 8) | static_cast<std::uint32_t>(bytes[3]));
 }
 
 void writeU16(std::ostream &output, std::uint16_t value) {
-    const unsigned char bytes[] = {static_cast<unsigned char>(value >> 8), static_cast<unsigned char>(value & 0xff)};
+    const auto wide = static_cast<std::uint32_t>(value);
+    const unsigned char bytes[] = {static_cast<unsigned char>((wide >> 8) & 0xff),
+                                   static_cast<unsigned char>(wide & 0xff)};
     output.write(reinterpret_cast<const char *>(bytes), 2);
 }
 
@@ -77,14 +79,14 @@ void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const
     writeEmptyRecord(output, kBgnStr);
     writeRecord(output, kStrName, 0x06, {'T', 'O', 'P'});
     writeEmptyRecord(output, 0x0A);
-    for (const auto &[id, shape] : cell->second.shapes) {
+    for (const auto &[_, shape] : cell->second.shapes) {
         int layerNumber = 0;
         if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
             layerNumber = layerIt->second.number;
         if (layerNumber < 0 || layerNumber > 65535)
             throw ProjectError("interchange.export", "Layer number out of GDSII range");
-        const auto layerValue = static_cast<std::uint16_t>(layerNumber);
-        std::vector<unsigned char> layer{static_cast<unsigned char>(layerValue >> 8),
+        const auto layerValue = static_cast<std::uint32_t>(layerNumber);
+        std::vector<unsigned char> layer{static_cast<unsigned char>((layerValue >> 8) & 0xff),
                                          static_cast<unsigned char>(layerValue & 0xff)};
         writeRecord(output, kLayer, 0x02, layer);
         writeEmptyRecord(output, kBoundary);
@@ -101,16 +103,16 @@ void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const
         std::vector<unsigned char> points;
         points.reserve(polygon.size() * 8);
         for (const auto &point : polygon) {
-            const auto px = checkedI32(point.x, "x");
-            const auto py = checkedI32(point.y, "y");
-            points.insert(points.end(), {static_cast<unsigned char>(px >> 24), static_cast<unsigned char>(px >> 16),
-                                         static_cast<unsigned char>(px >> 8), static_cast<unsigned char>(px),
-                                         static_cast<unsigned char>(py >> 24), static_cast<unsigned char>(py >> 16),
-                                         static_cast<unsigned char>(py >> 8), static_cast<unsigned char>(py)});
+            const auto px = static_cast<std::uint32_t>(checkedI32(point.x, "x"));
+            const auto py = static_cast<std::uint32_t>(checkedI32(point.y, "y"));
+            points.insert(points.end(),
+                          {static_cast<unsigned char>((px >> 24) & 0xff), static_cast<unsigned char>((px >> 16) & 0xff),
+                           static_cast<unsigned char>((px >> 8) & 0xff), static_cast<unsigned char>(px & 0xff),
+                           static_cast<unsigned char>((py >> 24) & 0xff), static_cast<unsigned char>((py >> 16) & 0xff),
+                           static_cast<unsigned char>((py >> 8) & 0xff), static_cast<unsigned char>(py & 0xff)});
         }
         writeRecord(output, kXy, 0x03, points);
         writeEmptyRecord(output, kEndEl);
-        (void)id;
     }
     writeEmptyRecord(output, kEndStr);
     writeEmptyRecord(output, kEndLib);
@@ -143,7 +145,8 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path) {
         if (!input)
             throw ProjectError("interchange.parse", "Truncated GDSII record");
         if (type == kLayer && dataType == 0x02 && data.size() >= 2)
-            currentLayer = static_cast<std::uint16_t>((data[0] << 8) | data[1]);
+            currentLayer = static_cast<std::uint16_t>((static_cast<std::uint32_t>(data[0]) << 8) |
+                                                      static_cast<std::uint32_t>(data[1]));
         else if (type == kBoundary) {
             inBoundary = true;
             points.clear();

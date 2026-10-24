@@ -24,6 +24,9 @@ struct SimulationRequest {
     double time_constant = 0.1;
     std::string simulator = "ngspice";
     std::string simulator_version = "1";
+    // SPICE element/card lines. If the first line is not already a comment,
+    // the adapter prepends a title comment because ngspice treats the first
+    // netlist line as the circuit title.
     std::vector<std::string> netlist;
     // Node/signal names to fetch and return as traces (e.g. "N15", "out",
     // "v(out)"). Empty means the adapter falls back to "v(out)".

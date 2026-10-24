@@ -3,13 +3,14 @@
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/simulation.hpp"
-#include "icelib/symbols.hpp"
+
+#include "simulation_plot.hpp"
+#include "symbol_ui.hpp"
 
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -22,14 +23,12 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsItemGroup>
 #include <QGraphicsPathItem>
-#include <QGraphicsPolygonItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QHeaderView>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -48,14 +47,11 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
-#include <QSpinBox>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
 #include <QSvgRenderer>
 #include <QTabWidget>
-#include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -70,10 +66,8 @@
 #include <map>
 #include <memory>
 #include <queue>
-#include <set>
 #include <sstream>
 #include <string>
-#include <tuple>
 #include <utility>
 
 namespace {
@@ -98,118 +92,6 @@ QWidget *placeholder(const QString &title, const QString &description) {
     layout->addWidget(descriptionLabel);
     layout->addStretch();
     return widget;
-}
-
-struct SymbolDefinition {
-    QString name;
-    QString category;
-    QString svg;
-    std::vector<ice::Pin> pins;
-    // Default instance parameters seeded by the symbol sidecar (e.g. the
-    // resistance of a resistor); placed instances copy them at drop time.
-    std::vector<ice::Parameter> parameters;
-};
-
-std::filesystem::path symbolLibraryDirectory() {
-    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
-    std::vector<std::filesystem::path> candidates = {
-        std::filesystem::path(appDir) / "symbols",
-        std::filesystem::path(appDir) / ".." / "symbols",
-#ifdef ICE_SOURCE_DIR
-        std::filesystem::path(ICE_SOURCE_DIR) / "symbols",
-#endif
-        std::filesystem::path("symbols"),
-        std::filesystem::path("/usr/share/ice/symbols"),
-    };
-    for (const auto &candidate : candidates) {
-        std::error_code status;
-        if (std::filesystem::is_directory(candidate, status) && !status)
-            return candidate;
-    }
-    throw ice::ProjectError("symbol.library", "Symbol library directory not found (searched app dir, ./symbols, "
-                                              "/usr/share/ice/symbols)");
-}
-
-std::vector<SymbolDefinition> genericSymbolLibrary() {
-    std::vector<SymbolDefinition> definitions;
-    for (auto &fileSymbol : ice::SymbolLibrary::load(symbolLibraryDirectory())) {
-        SymbolDefinition definition;
-        definition.name = QString::fromStdString(fileSymbol.name);
-        definition.category = QString::fromStdString(fileSymbol.category);
-        definition.svg = QString::fromStdString(fileSymbol.svg);
-        definition.pins = std::move(fileSymbol.pins);
-        definition.parameters = std::move(fileSymbol.defaultParameters);
-        definitions.push_back(std::move(definition));
-    }
-    return definitions;
-}
-
-const std::vector<SymbolDefinition> &ihpSymbolLibrary() {
-    static const std::vector<SymbolDefinition> definitions = {
-        {"IHP NMOS 1.2V",
-         "IHP SG13G2 / MOS",
-         "<svg viewBox='0 0 120 120'><path d='M45 20v80M60 35v50M75 35v50M20 35h25M20 85h25M75 60h35M60 20v15M60 "
-         "85v15' fill='none' stroke='black' stroke-width='4'/></svg>",
-         {{0, "G", -60, -25}, {0, "S", 0, 60}, {0, "D", 0, -60}}},
-        {"IHP PMOS 1.2V",
-         "IHP SG13G2 / MOS",
-         "<svg viewBox='0 0 120 120'><path d='M45 20v80M60 35v50M75 35v50M20 35h25M20 85h25M75 60h35M60 20v15M60 "
-         "85v15' fill='none' stroke='black' stroke-width='4'/><circle cx='35' cy='35' r='6' fill='none' stroke='black' "
-         "stroke-width='3'/></svg>",
-         {{0, "G", -60, -25}, {0, "S", 0, 60}, {0, "D", 0, -60}}},
-        {"IHP NPN HBT",
-         "IHP SG13G2 / Bipolar",
-         "<svg viewBox='0 0 120 120'><path d='M55 20v80M70 35v50M20 45h35M20 75h35M70 60h35M70 20v15M70 85v15' "
-         "fill='none' stroke='black' stroke-width='4'/><path d='M82 52l10 8-10 8' fill='none' stroke='black' "
-         "stroke-width='3'/></svg>",
-         {{0, "B", -60, -25}, {0, "E", 0, 60}, {0, "C", 0, -60}}},
-        {"IHP MIM Capacitor",
-         "IHP SG13G2 / Passive",
-         "<svg viewBox='0 0 120 60'><path d='M0 30h45M75 30h45M45 8v44M75 8v44' fill='none' stroke='black' "
-         "stroke-width='4'/></svg>",
-         {{0, "1", -60, 0}, {0, "2", 60, 0}}},
-    };
-    return definitions;
-}
-
-const SymbolDefinition *findSymbolDefinition(const std::vector<SymbolDefinition> &library, const QString &name) {
-    const auto it =
-        std::find_if(library.begin(), library.end(), [&](const auto &symbol) { return symbol.name == name; });
-    return it == library.end() ? nullptr : &*it;
-}
-
-// Default parameters for a new instance. A voltage source must always carry a
-// voltage value, even when the installed symbol library predates default
-// parameter support or its sidecar omits the entry.
-std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition) {
-    auto parameters = definition.parameters;
-    if (definition.name == QStringLiteral("Voltage Source")) {
-        const bool hasVoltage = std::any_of(parameters.begin(), parameters.end(), [](const ice::Parameter &parameter) {
-            return QString::fromStdString(parameter.name)
-                       .trimmed()
-                       .compare(QStringLiteral("voltage"), Qt::CaseInsensitive) == 0;
-        });
-        if (!hasVoltage)
-            parameters.push_back({0, "voltage", "1"});
-    }
-    return parameters;
-}
-
-// Assigns the next free SPICE-style reference designator (V1, V2, I1, R1, ...)
-// for a newly placed instance. Using the symbol name directly would create
-// duplicate names when the same source or passive is placed more than once.
-std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName) {
-    char prefix = ice::spiceElementForSymbol(symbolName);
-    if (prefix == 0)
-        prefix = 'X';
-    std::set<std::string> used;
-    for (const auto &[_, instance] : cell.instances)
-        used.insert(instance.name);
-    for (std::size_t index = 1;; ++index) {
-        const std::string candidate = std::string(1, prefix) + std::to_string(index);
-        if (!used.contains(candidate))
-            return candidate;
-    }
 }
 
 QPointF rotatePoint(QPointF point, ice::Orientation orientation) {
@@ -262,32 +144,6 @@ QPointF directionVector(ice::PinDirection direction) {
         return {0, 1};
     }
     return {1, 0};
-}
-
-std::string joinNetlist(const std::vector<std::string> &lines) {
-    std::ostringstream output;
-    for (std::size_t index = 0; index < lines.size(); ++index) {
-        if (index != 0)
-            output << '\n';
-        output << lines[index];
-    }
-    return output.str();
-}
-
-std::string simulationSummary(const ice::SimulationResult &result) {
-    std::ostringstream output;
-    output << "State: " << ice::jobStateName(result.state) << "\n"
-           << "Analysis: " << result.analysis << "\n"
-           << "Simulator: " << result.simulator << " " << result.simulator_version << "\n";
-    if (!result.error.empty())
-        output << "Error: " << result.error << "\n";
-    if (!result.time.empty() && !result.traces.empty()) {
-        output << "Samples: " << result.time.size() << "\n"
-               << "Trace: " << result.traces.front().name << "\n"
-               << "First sample: " << result.traces.front().values.front() << "\n"
-               << "Last sample: " << result.traces.front().values.back() << "\n";
-    }
-    return output.str();
 }
 
 // KLayout-style layer appearance: distinct outline color plus a fill pattern
@@ -397,12 +253,14 @@ class LayoutCanvas : public QGraphicsView {
             minorPen.setCosmetic(true);
             minorPen.setWidth(1);
             painter.setPen(minorPen);
-            const auto minorLeft = std::floor(exposed.left() / minor) * minor;
-            const auto minorTop = std::floor(exposed.top() / minor) * minor;
-            for (qreal x = minorLeft; x <= exposed.right(); x += minor)
-                painter.drawLine(QPointF(x, exposed.top()), QPointF(x, exposed.bottom()));
-            for (qreal y = minorTop; y <= exposed.bottom(); y += minor)
-                painter.drawLine(QPointF(exposed.left(), y), QPointF(exposed.right(), y));
+            const int minorLeft = static_cast<int>(std::floor(exposed.left() / minor));
+            const int minorRight = static_cast<int>(std::ceil(exposed.right() / minor));
+            const int minorTop = static_cast<int>(std::floor(exposed.top() / minor));
+            const int minorBottom = static_cast<int>(std::ceil(exposed.bottom() / minor));
+            for (int x = minorLeft; x <= minorRight; ++x)
+                painter.drawLine(QPointF(x * minor, exposed.top()), QPointF(x * minor, exposed.bottom()));
+            for (int y = minorTop; y <= minorBottom; ++y)
+                painter.drawLine(QPointF(exposed.left(), y * minor), QPointF(exposed.right(), y * minor));
         }
         QPen majorPen(QColor(QStringLiteral("#b4b4b4")));
         majorPen.setCosmetic(true);
@@ -609,43 +467,12 @@ class LayoutCanvas : public QGraphicsView {
     QPointF centerScene_;
 };
 
-class SymbolLibraryDialog : public QDialog {
-  public:
-    explicit SymbolLibraryDialog(std::vector<SymbolDefinition> generic, bool ihpEnabled, QWidget *parent = nullptr)
-        : QDialog(parent), generic_(std::move(generic)) {
-        setWindowTitle(QStringLiteral("Symbol Library"));
-        resize(520, 420);
-        auto *layout = new QVBoxLayout(this);
-        list_ = new QListWidget;
-        for (const auto &symbol : generic_)
-            list_->addItem(symbol.category + QStringLiteral(" / ") + symbol.name);
-        if (ihpEnabled)
-            for (const auto &symbol : ihpSymbolLibrary())
-                list_->addItem(symbol.category + QStringLiteral(" / ") + symbol.name);
-        layout->addWidget(list_);
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        layout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        list_->setCurrentRow(0);
-    }
-    const SymbolDefinition &selected() const {
-        if (list_->currentRow() < static_cast<int>(generic_.size()))
-            return generic_.at(list_->currentRow());
-        return ihpSymbolLibrary().at(list_->currentRow() - static_cast<int>(generic_.size()));
-    }
-
-  private:
-    QListWidget *list_ = nullptr;
-    std::vector<SymbolDefinition> generic_;
-};
-
 // Item data roles used to identify schematic canvas items.
 //
 // role 0: item kind ("symbol", "symbol-artwork", "symbol-label",
 //        "symbol-highlight", "pin", "wire", "net-label")
 // role 1: the stable domain id of the object the item projects
-const QString symbolHighlightColor = QStringLiteral("#0b6dd8");
+constexpr auto symbolHighlightColor = "#0b6dd8";
 
 QGraphicsItem *symbolOwner(QGraphicsItem *item) {
     for (auto *cursor = item; cursor; cursor = cursor->parentItem())
@@ -699,132 +526,6 @@ QRectF symbolHighlightRect(QGraphicsItem *symbol) {
 // The single properties dialog used for schematic instances. The dialog is a
 // projection of a domain object: it reads and writes a plain instance struct
 // and never touches the project database directly.
-struct ParameterEdit {
-    ice::ObjectId id = 0;
-    QString name;
-    QString value;
-};
-
-class SymbolPropertiesDialog : public QDialog {
-  public:
-    SymbolPropertiesDialog(const std::string &symbolName, const ice::SchematicInstance &instance,
-                           QWidget *parent = nullptr)
-        : QDialog(parent) {
-        setWindowTitle(QStringLiteral("Symbol Properties"));
-        setModal(true);
-        resize(430, 420);
-
-        auto *layout = new QVBoxLayout(this);
-        auto *form = new QFormLayout;
-        name_ = new QLineEdit(QString::fromStdString(instance.name));
-        form->addRow(QStringLiteral("Instance name"), name_);
-        auto *symbol = new QLabel(QString::fromStdString(symbolName));
-        symbol->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        form->addRow(QStringLiteral("Symbol"), symbol);
-        x_ = new QSpinBox;
-        y_ = new QSpinBox;
-        for (auto *spin : {x_, y_}) {
-            spin->setRange(std::numeric_limits<int>::min(), std::numeric_limits<int>::max());
-            spin->setSingleStep(10);
-        }
-        x_->setValue(static_cast<int>(
-            std::clamp<ice::Coordinate>(instance.x, std::numeric_limits<int>::min(), std::numeric_limits<int>::max())));
-        y_->setValue(static_cast<int>(
-            std::clamp<ice::Coordinate>(instance.y, std::numeric_limits<int>::min(), std::numeric_limits<int>::max())));
-        form->addRow(QStringLiteral("Position X"), x_);
-        form->addRow(QStringLiteral("Position Y"), y_);
-        orientation_ = new QComboBox;
-        for (const auto &entry : orientations())
-            orientation_->addItem(entry.label, static_cast<int>(entry.orientation));
-        orientation_->setCurrentIndex(orientation_->findData(static_cast<int>(instance.orientation)));
-        form->addRow(QStringLiteral("Orientation"), orientation_);
-        layout->addLayout(form);
-
-        auto *parameterHeading = new QLabel(QStringLiteral("Parameters"));
-        parameterHeading->setStyleSheet(QStringLiteral("font-weight: bold; padding-top: 6px;"));
-        layout->addWidget(parameterHeading);
-        parameters_ = new QTableWidget(0, 2);
-        parameters_->setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Value")});
-        parameters_->setAccessibleName(QStringLiteral("Instance parameters"));
-        parameters_->setSelectionBehavior(QAbstractItemView::SelectRows);
-        parameters_->horizontalHeader()->setStretchLastSection(true);
-        layout->addWidget(parameters_, 1);
-        for (const auto &parameter : instance.parameters)
-            addParameterRow(
-                {parameter.id, QString::fromStdString(parameter.name), QString::fromStdString(parameter.value)});
-
-        auto *buttons = new QWidget;
-        auto *buttonRow = new QHBoxLayout(buttons);
-        buttonRow->setContentsMargins(0, 0, 0, 0);
-        auto *add = new QPushButton(QStringLiteral("Add parameter"));
-        auto *remove = new QPushButton(QStringLiteral("Remove parameter"));
-        buttonRow->addWidget(add);
-        buttonRow->addWidget(remove);
-        buttonRow->addStretch();
-        layout->addWidget(buttons);
-
-        auto *close = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        layout->addWidget(close);
-
-        connect(add, &QPushButton::clicked, this, [this] { addParameterRow({}); });
-        connect(remove, &QPushButton::clicked, this, [this] {
-            for (auto *item : parameters_->selectedItems())
-                parameters_->removeRow(item->row());
-            if (parameters_->rowCount() > 0)
-                parameters_->selectRow(parameters_->rowCount() - 1);
-        });
-        connect(close, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(close, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    }
-
-    QString instanceName() const { return name_->text().trimmed(); }
-    ice::Coordinate positionX() const { return x_->value(); }
-    ice::Coordinate positionY() const { return y_->value(); }
-    ice::Orientation orientation() const { return static_cast<ice::Orientation>(orientation_->currentData().toInt()); }
-
-    std::vector<ParameterEdit> parameters() const {
-        std::vector<ParameterEdit> result;
-        result.reserve(parameters_->rowCount());
-        for (int row = 0; row < parameters_->rowCount(); ++row) {
-            const auto *name = parameters_->item(row, 0);
-            const auto *value = parameters_->item(row, 1);
-            result.push_back({name->data(Qt::UserRole).toULongLong(), name->text(), value ? value->text() : QString()});
-        }
-        return result;
-    }
-
-  private:
-    struct OrientationEntry {
-        QString label;
-        ice::Orientation orientation;
-    };
-
-    static const std::vector<OrientationEntry> &orientations() {
-        static const std::vector<OrientationEntry> entries = {
-            {QStringLiteral("r0"), ice::Orientation::r0},     {QStringLiteral("r90"), ice::Orientation::r90},
-            {QStringLiteral("r180"), ice::Orientation::r180}, {QStringLiteral("r270"), ice::Orientation::r270},
-            {QStringLiteral("mx"), ice::Orientation::mx},     {QStringLiteral("my"), ice::Orientation::my},
-        };
-        return entries;
-    }
-
-    void addParameterRow(ParameterEdit parameter) {
-        const int row = parameters_->rowCount();
-        parameters_->insertRow(row);
-        auto *name = new QTableWidgetItem(parameter.name);
-        name->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(parameter.id));
-        parameters_->setItem(row, 0, name);
-        parameters_->setItem(row, 1, new QTableWidgetItem(parameter.value));
-        parameters_->setCurrentCell(row, 0);
-    }
-
-    QLineEdit *name_ = nullptr;
-    QSpinBox *x_ = nullptr;
-    QSpinBox *y_ = nullptr;
-    QComboBox *orientation_ = nullptr;
-    QTableWidget *parameters_ = nullptr;
-};
-
 class SchematicCanvas : public QGraphicsView {
   public:
     explicit SchematicCanvas(QWidget *parent = nullptr) : QGraphicsView(parent) {
@@ -874,22 +575,26 @@ class SchematicCanvas : public QGraphicsView {
         QPen minor(QColor(QStringLiteral("#e1e1e1")));
         minor.setWidthF(0.5);
         painter->setPen(minor);
-        const auto left = std::floor(rect.left() / step) * step;
-        const auto top = std::floor(rect.top() / step) * step;
-        for (qreal x = left; x <= rect.right(); x += step)
-            painter->drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()));
-        for (qreal y = top; y <= rect.bottom(); y += step)
-            painter->drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y));
+        const int left = static_cast<int>(std::floor(rect.left() / step));
+        const int right = static_cast<int>(std::ceil(rect.right() / step));
+        const int top = static_cast<int>(std::floor(rect.top() / step));
+        const int bottom = static_cast<int>(std::ceil(rect.bottom() / step));
+        for (int x = left; x <= right; ++x)
+            painter->drawLine(QPointF(x * step, rect.top()), QPointF(x * step, rect.bottom()));
+        for (int y = top; y <= bottom; ++y)
+            painter->drawLine(QPointF(rect.left(), y * step), QPointF(rect.right(), y * step));
         QPen major(QColor(QStringLiteral("#b4b4b4")));
         major.setWidthF(1.0);
         painter->setPen(major);
         const auto majorStep = step * 5;
-        const auto majorLeft = std::floor(rect.left() / majorStep) * majorStep;
-        const auto majorTop = std::floor(rect.top() / majorStep) * majorStep;
-        for (qreal x = majorLeft; x <= rect.right(); x += majorStep)
-            painter->drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()));
-        for (qreal y = majorTop; y <= rect.bottom(); y += majorStep)
-            painter->drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y));
+        const int majorLeft = static_cast<int>(std::floor(rect.left() / majorStep));
+        const int majorRight = static_cast<int>(std::ceil(rect.right() / majorStep));
+        const int majorTop = static_cast<int>(std::floor(rect.top() / majorStep));
+        const int majorBottom = static_cast<int>(std::ceil(rect.bottom() / majorStep));
+        for (int x = majorLeft; x <= majorRight; ++x)
+            painter->drawLine(QPointF(x * majorStep, rect.top()), QPointF(x * majorStep, rect.bottom()));
+        for (int y = majorTop; y <= majorBottom; ++y)
+            painter->drawLine(QPointF(rect.left(), y * majorStep), QPointF(rect.right(), y * majorStep));
     }
 
   protected:
@@ -1155,267 +860,6 @@ class SchematicCanvas : public QGraphicsView {
     std::function<void(ice::ObjectId)> symbolActivated_;
     bool netLabelMode_ = false;
     ice::ObjectId selectedInstance_ = 0;
-};
-
-// Chooses a 1/2/5 x 10^n step so tick labels stay readable.
-double niceTickStep(double range, int intervals) {
-    if (!(range > 0.0) || !std::isfinite(range) || intervals <= 0)
-        return 1.0;
-    const double rough = range / static_cast<double>(intervals);
-    const double magnitude = std::pow(10.0, std::floor(std::log10(rough)));
-    const double normalized = rough / magnitude;
-    double nice = 10.0;
-    if (normalized <= 1.0)
-        nice = 1.0;
-    else if (normalized <= 2.0)
-        nice = 2.0;
-    else if (normalized <= 5.0)
-        nice = 5.0;
-    return nice * magnitude;
-}
-
-std::vector<double> axisTicks(double minimum, double maximum, int intervals) {
-    std::vector<double> ticks;
-    if (!(maximum > minimum) || !std::isfinite(minimum) || !std::isfinite(maximum) || intervals <= 0)
-        return ticks;
-    const double step = niceTickStep(maximum - minimum, intervals);
-    const auto firstIndex = static_cast<long long>(std::ceil(minimum / step));
-    for (long long index = firstIndex;; ++index) {
-        const double value = static_cast<double>(index) * step;
-        if (value > maximum + step * 1e-6)
-            break;
-        ticks.push_back(std::abs(value) < step * 1e-9 ? 0.0 : value);
-        if (ticks.size() > 64)
-            break;
-    }
-    return ticks;
-}
-
-QString formatTick(double value) { return QString::number(value, 'g', 5); }
-
-class SimulationPlot : public QWidget {
-  public:
-    explicit SimulationPlot(QWidget *parent = nullptr) : QWidget(parent) {
-        setMinimumHeight(260);
-        setAutoFillBackground(true);
-        setToolTip(QStringLiteral("Simulation traces"));
-    }
-
-    void setResult(const ice::SimulationResult &result) {
-        result_ = result;
-        // If the graph declares a node list, only keep traces matching it.
-        if (!graph_.nodes.empty()) {
-            ice::SimulationResult filtered;
-            filtered.analysis = result.analysis;
-            filtered.simulator = result.simulator;
-            filtered.simulator_version = result.simulator_version;
-            filtered.state = result.state;
-            filtered.error = result.error;
-            filtered.time = result.time;
-            for (const auto &trace : result.traces) {
-                const auto traceName = QString::fromStdString(trace.name).trimmed().toLower();
-                for (const auto &node : graph_.nodes) {
-                    const auto nodeName = QString::fromStdString(node).trimmed().toLower();
-                    if (!nodeName.isEmpty() && traceName.contains(nodeName)) {
-                        filtered.traces.push_back(trace);
-                        break;
-                    }
-                }
-            }
-            // Fall back to the full result when nothing matched.
-            if (!filtered.traces.empty())
-                result_ = std::move(filtered);
-        }
-        update();
-    }
-
-    void setGraph(const ice::SimulationGraph &graph) {
-        graph_ = graph;
-        update();
-    }
-
-    void setGridVisible(bool visible) {
-        gridVisible_ = visible;
-        update();
-    }
-
-    void clear() {
-        result_ = {};
-        update();
-    }
-
-    const ice::SimulationResult &result() const { return result_; }
-    const ice::SimulationGraph &graph() const { return graph_; }
-
-  protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter painter(this);
-        // Match the schematic/layout canvas instead of using a dark plot.
-        const QColor canvasBackground(QStringLiteral("#ffffff"));
-        const QColor plotFrame(QStringLiteral("#8a94a0"));
-        const QColor axisText(QStringLiteral("#3f4a56"));
-        const QColor tickText(QStringLiteral("#4a5560"));
-        const QColor zeroLine(QStringLiteral("#a5adb6"));
-        painter.fillRect(rect(), canvasBackground);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const QRectF plot = rect().adjusted(58, 18, -20, -42);
-        // Inset the trace area so a constant trace exactly at the minimum or
-        // maximum is fully visible instead of being clipped by the plot border.
-        const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
-        painter.setPen(QPen(plotFrame, 1));
-        painter.drawRect(plot);
-        const QString title = graph_.name.empty() ? (result_.traces.empty() ? QStringLiteral("No simulation trace")
-                                                                            : QStringLiteral("Simulation traces"))
-                                                  : QString::fromStdString(graph_.name);
-        painter.setPen(QPen(axisText, 1));
-        painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter, title);
-        // Axis labels come from the graph definition.
-        painter.drawText(QRectF(58, plot.top() - 16, 160, 14), Qt::AlignLeft, QString::fromStdString(graph_.yAxis));
-        painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 24, 200, 14), Qt::AlignRight,
-                         QString::fromStdString(graph_.xAxis));
-        painter.setPen(QPen(tickText, 1));
-        if (result_.time.empty() || result_.traces.empty())
-            return;
-
-        // Auto-scale from the data, but always keep zero inside the automatic
-        // Y range so the origin label lines up with the plotted zero line.
-        double dataXMin = result_.time.front();
-        double dataXMax = result_.time.back();
-        if (!std::isfinite(dataXMin) || !std::isfinite(dataXMax) || dataXMax <= dataXMin)
-            dataXMax = std::isfinite(dataXMin) ? dataXMin + 1.0 : 1.0;
-        double dataYMin = std::numeric_limits<double>::max();
-        double dataYMax = std::numeric_limits<double>::lowest();
-        for (const auto &trace : result_.traces) {
-            for (double value : trace.values) {
-                if (!std::isfinite(value))
-                    continue;
-                dataYMin = std::min(dataYMin, value);
-                dataYMax = std::max(dataYMax, value);
-            }
-        }
-        if (dataYMin > dataYMax) {
-            dataYMin = 0.0;
-            dataYMax = 1.0;
-        }
-        dataYMin = std::min(dataYMin, 0.0);
-        dataYMax = std::max(dataYMax, 0.0);
-
-        const auto resolveRange = [](const std::optional<double> &fixedMin,
-                                     const std::optional<double> &fixedMax, double autoMin,
-                                     double autoMax) {
-            if (!std::isfinite(autoMin))
-                autoMin = 0.0;
-            if (!std::isfinite(autoMax) || autoMax <= autoMin)
-                autoMax = autoMin + 1.0;
-            const bool hasMin = fixedMin && std::isfinite(*fixedMin);
-            const bool hasMax = fixedMax && std::isfinite(*fixedMax);
-            double minimum = hasMin ? *fixedMin : autoMin;
-            double maximum = hasMax ? *fixedMax : autoMax;
-            if (maximum <= minimum) {
-                if (hasMin && hasMax)
-                    std::swap(minimum, maximum);
-                if (maximum <= minimum) {
-                    if (hasMin)
-                        maximum = minimum + 1.0;
-                    else
-                        minimum = maximum - 1.0;
-                }
-            }
-            return std::pair<double, double>{minimum, maximum};
-        };
-        const auto [xMin, xMax] = resolveRange(graph_.xMin, graph_.xMax, dataXMin, dataXMax);
-        const auto [yMin, yMax] = resolveRange(graph_.yMin, graph_.yMax, dataYMin, dataYMax);
-
-        const auto mapX = [&](double value) {
-            return traceArea.left() + ((value - xMin) / (xMax - xMin)) * traceArea.width();
-        };
-        // Y grows upwards and zero sits at the bottom of the plot for the
-        // common all-positive transient case.
-        const auto mapY = [&](double value) {
-            return traceArea.bottom() - ((value - yMin) / (yMax - yMin)) * traceArea.height();
-        };
-
-        const int xIntervals = std::clamp(static_cast<int>(plot.width() / 110.0), 3, 8);
-        const int yIntervals = std::clamp(static_cast<int>(plot.height() / 55.0), 3, 7);
-        const auto xTicks = axisTicks(xMin, xMax, xIntervals);
-        const auto yTicks = axisTicks(yMin, yMax, yIntervals);
-
-        if (gridVisible_) {
-            painter.setPen(QPen(QColor("#e3e7eb"), 1));
-            for (double value : xTicks) {
-                const auto x = mapX(value);
-                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
-            }
-            for (double value : yTicks) {
-                const auto y = mapY(value);
-                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
-            }
-        }
-
-        // Tick marks and labels. Y labels sit left of the frame, X labels below.
-        painter.setPen(QPen(plotFrame, 1));
-        for (double value : yTicks) {
-            const auto y = mapY(value);
-            painter.drawLine(QPointF(plot.left() - 4.0, y), QPointF(plot.left(), y));
-        }
-        for (double value : xTicks) {
-            const auto x = mapX(value);
-            painter.drawLine(QPointF(x, plot.bottom()), QPointF(x, plot.bottom() + 4.0));
-        }
-        painter.setPen(QPen(tickText, 1));
-        for (double value : yTicks) {
-            const auto y = mapY(value);
-            painter.drawText(QRectF(4, y - 8, 48, 16), Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
-        }
-        for (double value : xTicks) {
-            const auto x = mapX(value);
-            painter.drawText(QRectF(x - 45, plot.bottom() + 6, 90, 16), Qt::AlignHCenter | Qt::AlignTop,
-                             formatTick(value));
-        }
-
-        // Zero reference line (only when the axis straddles zero). The value
-        // itself is already labelled by the Y tick marks.
-        if (yMin < 0.0 && yMax > 0.0) {
-            const auto zeroY = mapY(0.0);
-            painter.setPen(QPen(zeroLine, 1, Qt::DashLine));
-            painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
-        }
-
-        // Darker trace colors for the light canvas.
-        const QColor colors[] = {QColor("#1f77b4"), QColor("#d17c00"), QColor("#2e8b57"), QColor("#c2185b")};
-        painter.save();
-        painter.setClipRect(plot.adjusted(1, 1, -1, -1));
-        for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
-            const auto &trace = result_.traces[traceIndex];
-            if (trace.values.empty())
-                continue;
-            QPainterPath path;
-            const auto count = std::min(result_.time.size(), trace.values.size());
-            for (std::size_t index = 0; index < count; ++index) {
-                if (!std::isfinite(result_.time[index]) || !std::isfinite(trace.values[index]))
-                    continue;
-                const auto point = QPointF(mapX(result_.time[index]), mapY(trace.values[index]));
-                if (path.elementCount() == 0)
-                    path.moveTo(point);
-                else
-                    path.lineTo(point);
-            }
-            painter.setPen(QPen(colors[traceIndex % 4], 2));
-            painter.drawPath(path);
-        }
-        painter.restore();
-
-        for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
-            painter.setPen(QPen(colors[traceIndex % 4], 1));
-            painter.drawText(QRectF(plot.left() + 8 + traceIndex * 100, plot.top() + 6, 95, 20), Qt::AlignLeft,
-                             QString::fromStdString(result_.traces[traceIndex].name));
-        }
-    }
-
-  private:
-    ice::SimulationResult result_;
-    ice::SimulationGraph graph_;
-    bool gridVisible_ = true;
 };
 
 class ProjectPanel : public QWidget {
@@ -2913,23 +2357,7 @@ class DocumentWindow : public QMainWindow {
             graphTabs_->currentWidget()->update();
     }
 
-    void runSimulation() {
-        if (!project_) {
-            QMessageBox::information(this, QStringLiteral("Run Simulation"),
-                                     QStringLiteral("Create or open a project first."));
-            return;
-        }
-        // If no simulation is selected, offer to create one.
-        if (activeSimulationId_ == 0) {
-            QMessageBox::information(this, QStringLiteral("Run Simulation"),
-                                     QStringLiteral("Select or add a simulation first."));
-            return;
-        }
-        simulationOutput_->setPlainText(QStringLiteral("Running simulation..."));
-        documents_->setCurrentWidget(simulationPage_);
-        QApplication::processEvents();
-
-        const auto &sim = project_->project().simulations.at(activeSimulationId_);
+    ice::SimulationRequest buildSimulationRequest(const ice::SimulationItem &sim, QStringList &netlistNotes) const {
         ice::SimulationRequest request;
         request.analysis = sim.analysis;
         request.simulator = sim.simulator;
@@ -2942,12 +2370,10 @@ class DocumentWindow : public QMainWindow {
         const auto cellId = sim.schematic != 0 && project.schematicCells.contains(sim.schematic)
                                 ? sim.schematic
                                 : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
-        QStringList netlistNotes;
         if (cellId != 0) {
             std::vector<std::string> notes;
             const auto lines = ice::buildSchematicNetlist(project, cellId, &notes);
-            for (const auto &line : lines)
-                request.netlist.push_back(line);
+            request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
             for (const auto &noteText : notes)
                 netlistNotes << QString::fromStdString(noteText);
         }
@@ -2966,8 +2392,6 @@ class DocumentWindow : public QMainWindow {
                 continue;
             request.netlist.push_back(trimmed.toStdString());
         }
-        const auto selectedCell = QString::fromStdString(
-            cellId != 0 ? project.schematicCells.at(cellId).name : std::string{});
         // The active graph's Nodes/signals tell the adapter which vectors to
         // fetch back from ngspice, so editing a graph's Nodes changes what the
         // run returns and plots.
@@ -2995,21 +2419,22 @@ class DocumentWindow : public QMainWindow {
                 request.step = step;
             }
         }
+        return request;
+    }
 
-        const auto result =
-            ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
-
+    static QString formatSimulationReport(const ice::SimulationRequest &request,
+                                          const ice::SimulationResult &result, const QStringList &netlistNotes) {
         std::ostringstream output;
         output << "State: " << ice::jobStateName(result.state) << "\n"
                << "Analysis: " << result.analysis << "\n"
                << "Simulator: " << result.simulator << " " << result.simulator_version << "\n";
         if (!request.netlist.empty()) {
             output << "Netlist:\n";
-            for (const auto &netlistLine : request.netlist)
-                output << "  " << netlistLine << "\n";
+            for (const auto &line : request.netlist)
+                output << "  " << line << "\n";
         }
-        for (const auto &noteText : netlistNotes)
-            output << "Note: " << noteText.toStdString() << "\n";
+        for (const auto &note : netlistNotes)
+            output << "Note: " << note.toStdString() << "\n";
         if (!result.error.empty())
             output << "Error: " << result.error << "\n";
         if (!result.time.empty() && !result.traces.empty()) {
@@ -3018,7 +2443,31 @@ class DocumentWindow : public QMainWindow {
                    << "First sample: " << result.traces.front().values.front() << "\n"
                    << "Last sample: " << result.traces.front().values.back() << "\n";
         }
-        simulationOutput_->setPlainText(QString::fromStdString(output.str()));
+        return QString::fromStdString(output.str());
+    }
+
+    void runSimulation() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Run Simulation"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        // If no simulation is selected, offer to create one.
+        if (activeSimulationId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Run Simulation"),
+                                     QStringLiteral("Select or add a simulation first."));
+            return;
+        }
+        simulationOutput_->setPlainText(QStringLiteral("Running simulation..."));
+        documents_->setCurrentWidget(simulationPage_);
+        QApplication::processEvents();
+
+        const auto &sim = project_->project().simulations.at(activeSimulationId_);
+        QStringList netlistNotes;
+        const auto request = buildSimulationRequest(sim, netlistNotes);
+        const auto result =
+            ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
+        simulationOutput_->setPlainText(formatSimulationReport(request, result, netlistNotes));
 
         // Show result in the currently active graph tab.
         if (graphTabs_) {
@@ -3028,9 +2477,6 @@ class DocumentWindow : public QMainWindow {
         }
         statusBar()->showMessage(QStringLiteral("Simulation finished"));
     }
-
-    // (Kept for clarity; new code no longer calls this but the slot name is wired in older code)
-    void loadSimulationEntry(int /*row*/) {}
 
     void refreshProject() {
         if (!project_)
@@ -3089,8 +2535,7 @@ class DocumentWindow : public QMainWindow {
             schematicSelector_->addItem(QString::fromStdString(cell.name), QVariant::fromValue<qulonglong>(id));
     }
 
-    static std::optional<QPointF> pinScenePosition(const ice::Project &project, const ice::SchematicCell &cell,
-                                                   ice::ObjectId pinId) {
+    static std::optional<QPointF> pinScenePosition(const ice::SchematicCell &cell, ice::ObjectId pinId) {
         for (const auto &[_, instance] : cell.instances) {
             const auto symbol = cell.symbols.find(instance.symbol);
             if (symbol == cell.symbols.end())
@@ -3113,7 +2558,7 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 std::vector<QPointF> positions;
                 for (const auto pinId : net.pins)
-                    if (const auto position = pinScenePosition(project, cell, pinId))
+                    if (const auto position = pinScenePosition(cell, pinId))
                         positions.push_back(*position);
                 if (positions.empty())
                     continue;
@@ -3754,10 +3199,7 @@ class DocumentWindow : public QMainWindow {
     QWidget *makeEditor(const QString &title, const QString &text, bool layoutEditor) {
         auto *editor = new QWidget;
         auto *editorLayout = new QVBoxLayout(editor);
-        Q_UNUSED(title);
-        Q_UNUSED(layoutEditor);
         auto *splitter = new QSplitter(Qt::Vertical, editor);
-        auto *scene = new QGraphicsScene(splitter);
         QGraphicsView *view = nullptr;
         if (!layoutEditor) {
             schematicCanvas_ = new SchematicCanvas;

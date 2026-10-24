@@ -22,3 +22,6 @@ __pycache__/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Tooling output
+compile_commands.json

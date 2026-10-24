@@ -229,6 +229,21 @@ TEST_CASE("ngspice fetches the vectors named by the request signals") {
     }
 }
 
+TEST_CASE("ngspice adapter supplies a title line for raw netlists") {
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.step = 1e-9;
+    request.stop = 200e-9;
+    request.netlist = {"V1 out 0 PULSE(0 1 1n 1n 1n 100n 200n)", "R1 out 0 1k"};
+    request.probeSignals = {"out"};
+    ice::SimulationRunner runner;
+    const auto result = runner.run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.traces.size() == 1);
+    if (!result.traces.empty())
+        CHECK(*std::max_element(result.traces.front().values.begin(), result.traces.front().values.end()) > 0.5);
+}
+
 TEST_CASE("a run with no resolvable signal names fails with a clear error") {
     ice::SimulationRequest request;
     request.analysis = "transient";
@@ -349,8 +364,8 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
     const auto pulse = ice::addSchematicInstance(project, cellId, pulseId, "V1", 0, 0);
     const auto sine = ice::addSchematicInstance(project, cellId, sineId, "V2", 0, 0);
     const auto current = ice::addSchematicInstance(project, cellId, currentId, "I1", 0, 0);
-    const auto pulseDefaults = ice::addSchematicInstance(project, cellId, pulseDefaultsId, "V3", 0, 0);
-    const auto sineDefaults = ice::addSchematicInstance(project, cellId, sineDefaultsId, "V4", 0, 0);
+    ice::addSchematicInstance(project, cellId, pulseDefaultsId, "V3", 0, 0);
+    ice::addSchematicInstance(project, cellId, sineDefaultsId, "V4", 0, 0);
     setParameters(pulse, {{"initial_voltage", "-1"},
                           {"pulsed_voltage", "2.5"},
                           {"delay_time", "1u"},

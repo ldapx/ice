@@ -10,7 +10,7 @@ namespace ice {
 using json = nlohmann::ordered_json;
 
 ProjectError::ProjectError(std::string code, std::string message)
-    : std::runtime_error(std::move(message)), code_(std::move(code)) {}
+    : std::runtime_error(message), code_(std::move(code)) {}
 const std::string &ProjectError::code() const noexcept { return code_; }
 
 double DatabaseUnits::toNanometers(Coordinate value) const {

@@ -5,15 +5,16 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("spdlog", "nlohmann_json")
 
+-- First-party warnings. Third-party headers are included via system paths, so
+-- -Werror is intentionally not enabled.
+local first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
+
 target("icelib")
     set_kind("static")
     add_files("src/icelib/*.cpp")
     add_includedirs("include", {public = true})
     add_cxxflags("-fPIC", {public = true})
-    -- Keep warnings on first-party code; third-party headers are included
-    -- via system paths so -Werror is intentionally not enabled.
-    -- Missing-field-init is intentional for aggregate construction of domain structs.
-    add_cxxflags("-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers")
+    add_cxxflags(first_party_warnings)
     add_packages("spdlog", "nlohmann_json")
     -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
     -- TODO: replace hardcoded /usr paths with packaged deps or pkg-config checks.
@@ -25,7 +26,7 @@ target("icelib")
 
 target("ice")
     set_kind("binary")
-    add_files("src/ice/main.cpp")
+    add_files("src/ice/*.cpp")
     add_deps("icelib")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_includedirs("include", "/usr/include/qt6", "/usr/include/qt6/QtCore",
@@ -33,30 +34,35 @@ target("ice")
                     "/usr/include/qt6/QtSvg", "/usr/include/qt6/QtSvgWidgets")
     add_syslinks("Qt6Widgets", "Qt6Gui", "Qt6Core", "Qt6Svg", "Qt6SvgWidgets")
     add_cxxflags("-fPIC", {force = true})
+    add_cxxflags(first_party_warnings)
     add_ldflags("-no-pie", {force = true})
 
 target("ice-cli")
     set_kind("binary")
     add_files("src/ice-cli/main.cpp")
     add_deps("icelib")
+    add_cxxflags(first_party_warnings)
     add_includedirs("include")
 
 target("ice-pkg")
     set_kind("binary")
     add_files("src/ice-pkg/main.cpp")
     add_deps("icelib")
+    add_cxxflags(first_party_warnings)
     add_includedirs("include")
 
 target("ice-mcp")
     set_kind("binary")
     add_files("src/ice-mcp/main.cpp")
     add_deps("icelib")
+    add_cxxflags(first_party_warnings)
     add_includedirs("include")
 
 target("doctest")
     set_kind("binary")
     add_files("tests/*.cpp")
     add_deps("icelib")
+    add_cxxflags(first_party_warnings)
     add_includedirs("include")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
 

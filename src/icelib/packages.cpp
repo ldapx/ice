@@ -66,7 +66,7 @@ int compareVersions(const std::string &left, const std::string &right) {
 bool satisfies(const std::string &version, const std::string &constraint) {
     if (constraint.empty() || constraint == "*" || constraint == version)
         return true;
-    if (constraint.starts_with("^")) {
+    if (constraint.starts_with('^')) {
         const std::string base = constraint.substr(1);
         if (compareVersions(version, base) < 0)
             return false;
@@ -122,6 +122,8 @@ std::filesystem::path findPackage(const std::vector<std::filesystem::path> &root
                     selectedVersion = spec.version;
                 }
             } catch (const ProjectError &) {
+                // Ignore unrelated or malformed package directories while
+                // searching a repository root.
             }
         }
     }
@@ -258,9 +260,12 @@ Lockfile PackageManager::resolve(const std::vector<std::filesystem::path> &repos
         auto [name, constraint] = *pending.begin();
         pending.erase(pending.begin());
         if (const auto existing = resolved.find(name); existing != resolved.end()) {
-            if (!satisfies(existing->second, constraint))
-                throw ProjectError("package.resolve", "Conflicting constraints for package: " + name + " (" +
-                                                          existing->second + " does not satisfy " + constraint + ")");
+            if (!satisfies(existing->second, constraint)) {
+                std::ostringstream message;
+                message << "Conflicting constraints for package: " << name << " (" << existing->second
+                        << " does not satisfy " << constraint << ")";
+                throw ProjectError("package.resolve", message.str());
+            }
             continue;
         }
         auto root = findPackage(repositories, name, constraint);

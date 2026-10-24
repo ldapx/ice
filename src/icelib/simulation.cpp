@@ -75,8 +75,19 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         return result;
     }
     std::vector<std::string> lines = request.netlist;
+    const auto firstLineIsComment = [](const std::string &line) {
+        for (const char character : line) {
+            if (std::isspace(static_cast<unsigned char>(character)))
+                continue;
+            return character == '*' || character == ';';
+        }
+        return false;
+    };
+    if (lines.empty() || !firstLineIsComment(lines.front()))
+        lines.insert(lines.begin(), "* ICE simulation");
     lines.push_back(".end");
     std::vector<char *> circuit;
+    circuit.reserve(lines.size() + 1);
     for (auto &line : lines)
         circuit.push_back(line.data());
     circuit.push_back(nullptr);

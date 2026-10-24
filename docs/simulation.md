@@ -23,7 +23,9 @@ callback. Callers crossing into a GUI event loop must queue those progress
 events onto the application thread; the core adapter never touches Qt objects.
 Cancellation is cooperative and backend adapters must check the token between
 work units. Experiments enumerate parameter combinations deterministically and
-reuse the same runner contract.
+reuse the same runner contract. Netlists are supplied as element/card lines;
+the ngspice adapter adds a title comment when the first line is not already a
+comment.
 
 CLI example:
 
