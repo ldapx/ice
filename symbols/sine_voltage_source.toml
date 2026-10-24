@@ -1,0 +1,40 @@
+[symbol]
+name = "Sine Voltage Source"
+artwork = "sine_voltage_source.svg"
+category = "Sources"
+
+[[pin]]
+name = "+"
+x = 0
+y = 32
+direction = "output"
+
+[[pin]]
+name = "-"
+x = 0
+y = -32
+direction = "input"
+
+[[parameter]]
+name = "offset_voltage"
+value = "0"
+
+[[parameter]]
+name = "amplitude"
+value = "1"
+
+[[parameter]]
+name = "frequency"
+value = "1"
+
+[[parameter]]
+name = "delay_time"
+value = "0"
+
+[[parameter]]
+name = "damping_factor"
+value = "0"
+
+[[parameter]]
+name = "phase"
+value = "0"

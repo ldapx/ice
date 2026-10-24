@@ -67,12 +67,14 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <queue>
 #include <set>
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 
 namespace {
 
@@ -174,6 +176,40 @@ const SymbolDefinition *findSymbolDefinition(const std::vector<SymbolDefinition>
     const auto it =
         std::find_if(library.begin(), library.end(), [&](const auto &symbol) { return symbol.name == name; });
     return it == library.end() ? nullptr : &*it;
+}
+
+// Default parameters for a new instance. A voltage source must always carry a
+// voltage value, even when the installed symbol library predates default
+// parameter support or its sidecar omits the entry.
+std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition) {
+    auto parameters = definition.parameters;
+    if (definition.name == QStringLiteral("Voltage Source")) {
+        const bool hasVoltage = std::any_of(parameters.begin(), parameters.end(), [](const ice::Parameter &parameter) {
+            return QString::fromStdString(parameter.name)
+                       .trimmed()
+                       .compare(QStringLiteral("voltage"), Qt::CaseInsensitive) == 0;
+        });
+        if (!hasVoltage)
+            parameters.push_back({0, "voltage", "1"});
+    }
+    return parameters;
+}
+
+// Assigns the next free SPICE-style reference designator (V1, V2, I1, R1, ...)
+// for a newly placed instance. Using the symbol name directly would create
+// duplicate names when the same source or passive is placed more than once.
+std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName) {
+    char prefix = ice::spiceElementForSymbol(symbolName);
+    if (prefix == 0)
+        prefix = 'X';
+    std::set<std::string> used;
+    for (const auto &[_, instance] : cell.instances)
+        used.insert(instance.name);
+    for (std::size_t index = 1;; ++index) {
+        const std::string candidate = std::string(1, prefix) + std::to_string(index);
+        if (!used.contains(candidate))
+            return candidate;
+    }
 }
 
 QPointF rotatePoint(QPointF point, ice::Orientation orientation) {
@@ -1167,45 +1203,111 @@ class SimulationPlot : public QWidget {
         update();
     }
 
+    const ice::SimulationResult &result() const { return result_; }
+    const ice::SimulationGraph &graph() const { return graph_; }
+
   protected:
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
         painter.fillRect(rect(), QColor(QStringLiteral("#171b20")));
         painter.setRenderHint(QPainter::Antialiasing);
         const QRectF plot = rect().adjusted(58, 18, -20, -42);
+        // Inset the trace area so a constant trace exactly at the minimum or
+        // maximum is fully visible instead of being clipped by the plot border.
+        const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
         painter.setPen(QPen(QColor("#8d98a5"), 1));
         painter.drawRect(plot);
-        const QString title =
-            graph_.name.empty()
-                ? (result_.traces.empty() ? QStringLiteral("No simulation trace")
-                                          : QStringLiteral("Simulation traces"))
-                : QString::fromStdString(graph_.name);
+        const QString title = graph_.name.empty() ? (result_.traces.empty() ? QStringLiteral("No simulation trace")
+                                                                            : QStringLiteral("Simulation traces"))
+                                                  : QString::fromStdString(graph_.name);
         painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter, title);
         // Axis labels come from the graph definition.
         painter.setPen(QPen(QColor("#aeb8c2"), 1));
-        painter.drawText(QRectF(58, plot.top() - 16, 160, 14), Qt::AlignLeft,
-                         QString::fromStdString(graph_.yAxis));
+        painter.drawText(QRectF(58, plot.top() - 16, 160, 14), Qt::AlignLeft, QString::fromStdString(graph_.yAxis));
         painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 22, 200, 14), Qt::AlignRight,
                          QString::fromStdString(graph_.xAxis));
         painter.setPen(QPen(QColor("#8d98a5"), 1));
         if (result_.time.empty() || result_.traces.empty())
             return;
 
-        double maxY = 0.0;
-        for (const auto &trace : result_.traces)
-            for (double value : trace.values)
-                maxY = std::max(maxY, std::abs(value));
-        if (maxY <= 0.0)
-            maxY = 1.0;
-        const double maxX = result_.time.back() > 0.0 ? result_.time.back() : 1.0;
+        // Auto-scale from the data, but always keep zero inside the automatic
+        // Y range so the origin label lines up with the plotted zero line.
+        double dataXMin = result_.time.front();
+        double dataXMax = result_.time.back();
+        if (!std::isfinite(dataXMin) || !std::isfinite(dataXMax) || dataXMax <= dataXMin)
+            dataXMax = std::isfinite(dataXMin) ? dataXMin + 1.0 : 1.0;
+        double dataYMin = std::numeric_limits<double>::max();
+        double dataYMax = std::numeric_limits<double>::lowest();
+        for (const auto &trace : result_.traces) {
+            for (double value : trace.values) {
+                if (!std::isfinite(value))
+                    continue;
+                dataYMin = std::min(dataYMin, value);
+                dataYMax = std::max(dataYMax, value);
+            }
+        }
+        if (dataYMin > dataYMax) {
+            dataYMin = 0.0;
+            dataYMax = 1.0;
+        }
+        dataYMin = std::min(dataYMin, 0.0);
+        dataYMax = std::max(dataYMax, 0.0);
+
+        const auto resolveRange = [](const std::optional<double> &fixedMin,
+                                     const std::optional<double> &fixedMax, double autoMin,
+                                     double autoMax) {
+            if (!std::isfinite(autoMin))
+                autoMin = 0.0;
+            if (!std::isfinite(autoMax) || autoMax <= autoMin)
+                autoMax = autoMin + 1.0;
+            const bool hasMin = fixedMin && std::isfinite(*fixedMin);
+            const bool hasMax = fixedMax && std::isfinite(*fixedMax);
+            double minimum = hasMin ? *fixedMin : autoMin;
+            double maximum = hasMax ? *fixedMax : autoMax;
+            if (maximum <= minimum) {
+                if (hasMin && hasMax)
+                    std::swap(minimum, maximum);
+                if (maximum <= minimum) {
+                    if (hasMin)
+                        maximum = minimum + 1.0;
+                    else
+                        minimum = maximum - 1.0;
+                }
+            }
+            return std::pair<double, double>{minimum, maximum};
+        };
+        const auto [xMin, xMax] = resolveRange(graph_.xMin, graph_.xMax, dataXMin, dataXMax);
+        const auto [yMin, yMax] = resolveRange(graph_.yMin, graph_.yMax, dataYMin, dataYMax);
+
+        const auto mapX = [&](double value) {
+            return traceArea.left() + ((value - xMin) / (xMax - xMin)) * traceArea.width();
+        };
+        // Y grows upwards and zero sits at the bottom of the plot for the
+        // common all-positive transient case.
+        const auto mapY = [&](double value) {
+            return traceArea.bottom() - ((value - yMin) / (yMax - yMin)) * traceArea.height();
+        };
+
         painter.setPen(QPen(QColor("#65717f"), 1));
-        painter.drawText(QRectF(4, plot.bottom() - 12, 48, 20), Qt::AlignRight, QStringLiteral("0"));
-        painter.drawText(QRectF(4, plot.top() - 10, 48, 20), Qt::AlignRight, QString::number(maxY, 'g', 4));
-        painter.drawText(QRectF(plot.left(), plot.bottom() + 8, 100, 20), Qt::AlignLeft, QStringLiteral("0"));
-        painter.drawText(QRectF(plot.right() - 100, plot.bottom() + 8, 100, 20), Qt::AlignRight,
-                         QString::number(maxX, 'g', 4) + QStringLiteral(" s"));
+        painter.drawText(QRectF(4, plot.bottom() - 12, 48, 20), Qt::AlignRight, QString::number(yMin, 'g', 4));
+        painter.drawText(QRectF(4, plot.top() - 10, 48, 20), Qt::AlignRight, QString::number(yMax, 'g', 4));
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 8, 130, 20), Qt::AlignLeft,
+                         QString::number(xMin, 'g', 4) + QStringLiteral(" s"));
+        painter.drawText(QRectF(plot.right() - 130, plot.bottom() + 8, 130, 20), Qt::AlignRight,
+                         QString::number(xMax, 'g', 4) + QStringLiteral(" s"));
+
+        // Zero reference line (only when the axis straddles zero).
+        if (yMin < 0.0 && yMax > 0.0) {
+            const auto zeroY = mapY(0.0);
+            painter.setPen(QPen(QColor("#46515d"), 1, Qt::DashLine));
+            painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
+            painter.setPen(QPen(QColor("#65717f"), 1));
+            painter.drawText(QRectF(4, zeroY - 10, 48, 20), Qt::AlignRight, QStringLiteral("0"));
+        }
 
         const QColor colors[] = {QColor("#65c7f7"), QColor("#f6c85f"), QColor("#8be28b"), QColor("#e78ac3")};
+        painter.save();
+        painter.setClipRect(plot.adjusted(1, 1, -1, -1));
         for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
             const auto &trace = result_.traces[traceIndex];
             if (trace.values.empty())
@@ -1213,17 +1315,23 @@ class SimulationPlot : public QWidget {
             QPainterPath path;
             const auto count = std::min(result_.time.size(), trace.values.size());
             for (std::size_t index = 0; index < count; ++index) {
-                const auto x = plot.left() + (result_.time[index] / maxX) * plot.width();
-                const auto y = plot.center().y() - (trace.values[index] / maxY) * (plot.height() / 2.0);
-                if (index == 0)
-                    path.moveTo(x, y);
+                if (!std::isfinite(result_.time[index]) || !std::isfinite(trace.values[index]))
+                    continue;
+                const auto point = QPointF(mapX(result_.time[index]), mapY(trace.values[index]));
+                if (path.elementCount() == 0)
+                    path.moveTo(point);
                 else
-                    path.lineTo(x, y);
+                    path.lineTo(point);
             }
             painter.setPen(QPen(colors[traceIndex % 4], 2));
             painter.drawPath(path);
+        }
+        painter.restore();
+
+        for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
+            painter.setPen(QPen(colors[traceIndex % 4], 1));
             painter.drawText(QRectF(plot.left() + 8 + traceIndex * 100, plot.top() + 6, 95, 20), Qt::AlignLeft,
-                             QString::fromStdString(trace.name));
+                             QString::fromStdString(result_.traces[traceIndex].name));
         }
     }
 
@@ -1920,10 +2028,7 @@ class DocumentWindow : public QMainWindow {
                 // Seed default parameters (voltage) like interactive placement
                 // does, so the starter source is immediately configurable.
                 auto &sourceInstance = project.schematicCells.at(cell).instances.at(instanceId);
-                for (auto parameter : sourceDefinition->parameters) {
-                    parameter.id = project.nextId();
-                    sourceInstance.parameters.push_back(std::move(parameter));
-                }
+                ice::seedDefaultParameters(project, sourceInstance, instanceDefaults(*sourceDefinition));
             });
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Schematic created"));
@@ -2206,17 +2311,15 @@ class DocumentWindow : public QMainWindow {
                                                 : ice::PinDirection::down;
                     symbol.pins.push_back(std::move(pin));
                 }
-                const auto instanceId = ice::addSchematicInstance(
-                    project, cellId, symbolId, definition.name.toStdString(),
-                    static_cast<ice::Coordinate>(scenePosition.x()),
-                    static_cast<ice::Coordinate>(-scenePosition.y()));
+                const auto instanceName =
+                    nextInstanceName(project.schematicCells.at(cellId), definition.name.toStdString());
+                const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, instanceName,
+                                                                  static_cast<ice::Coordinate>(scenePosition.x()),
+                                                                  static_cast<ice::Coordinate>(-scenePosition.y()));
                 // Seed the symbol's default parameters (resistance, capacitance,
                 // ...) so they are editable in the properties panel right away.
                 auto &placedInstance = project.schematicCells.at(cellId).instances.at(instanceId);
-                for (auto parameter : definition.parameters) {
-                    parameter.id = project.nextId();
-                    placedInstance.parameters.push_back(std::move(parameter));
-                }
+                ice::seedDefaultParameters(project, placedInstance, instanceDefaults(definition));
             });
             refreshProject();
         } catch (const ice::ProjectError &error) {
@@ -2315,6 +2418,23 @@ class DocumentWindow : public QMainWindow {
         const int prevIndex = graphTabs_ ? graphTabs_->currentIndex() : 0;
         if (!graphTabs_)
             return;
+        // Keep existing results by graph id so changing display settings
+        // (axis limits, labels, ...) redraws the current data instead of
+        // discarding it and forcing another simulation run. Results are only
+        // restored when the probe list is unchanged, so stale traces are never
+        // shown for a graph that now requests different signals.
+        struct PreviousPlot {
+            ice::SimulationGraph graph;
+            ice::SimulationResult result;
+        };
+        std::map<ice::ObjectId, PreviousPlot> previousPlots;
+        for (int i = 0; i < graphTabs_->count(); ++i) {
+            const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong());
+            const auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(i));
+            if (graphId != 0 && plot && !plot->result().time.empty())
+                previousPlots.emplace(graphId, PreviousPlot{plot->graph(), plot->result()});
+        }
+
         // Remove all tabs except the first (which holds simulationPlot_).
         // We always keep simulationPlot_ alive; additional tabs use fresh plots.
         while (graphTabs_->count() > 0) {
@@ -2336,6 +2456,9 @@ class DocumentWindow : public QMainWindow {
             SimulationPlot *plot = (i == 0) ? simulationPlot_ : new SimulationPlot;
             plot->clear();
             plot->setGraph(graphs[i]);
+            if (const auto previous = previousPlots.find(graphs[i].id);
+                previous != previousPlots.end() && previous->second.graph.nodes == graphs[i].nodes)
+                plot->setResult(previous->second.result);
             const auto tabName = QString::fromStdString(graphs[i].name);
             const auto idx = graphTabs_->addTab(plot, tabName);
             graphTabs_->tabBar()->setTabData(idx, QVariant::fromValue<qulonglong>(graphs[i].id));
@@ -2551,15 +2674,14 @@ class DocumentWindow : public QMainWindow {
         deleteGraph(activeSimulationId_, graphId);
     }
 
-    // Edit the current graph's name, axis labels, and node list.
+    // Edit the current graph's name, axis labels, limits, and node list.
     void editGraph() {
         if (!project_ || activeSimulationId_ == 0 || !graphTabs_)
             return;
         const int tabIdx = graphTabs_->currentIndex();
         if (tabIdx < 0)
             return;
-        const auto graphId =
-            static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
+        const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
         const auto simId = activeSimulationId_;
         const auto &sim = project_->project().simulations.at(simId);
         const auto git = std::find_if(sim.graphs.begin(), sim.graphs.end(),
@@ -2568,33 +2690,96 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto &currentGraph = *git;
 
-        // Build a small dialog for editing name/axes/nodes.
+        // Build a small dialog for editing name/axes/limits/nodes.
         QDialog dlg(this);
         dlg.setWindowTitle(QStringLiteral("Edit Graph"));
-        dlg.resize(380, 240);
+        dlg.resize(460, 340);
         auto *dlgLayout = new QVBoxLayout(&dlg);
         auto *form = new QFormLayout;
         auto *nameEdit = new QLineEdit(QString::fromStdString(currentGraph.name));
         auto *xAxisEdit = new QLineEdit(QString::fromStdString(currentGraph.xAxis));
         auto *yAxisEdit = new QLineEdit(QString::fromStdString(currentGraph.yAxis));
-        auto *nodesEdit = new QLineEdit(
-            QString::fromStdString([&] {
-                std::string joined;
-                for (std::size_t i = 0; i < currentGraph.nodes.size(); ++i) {
-                    if (i) joined += ", ";
-                    joined += currentGraph.nodes[i];
-                }
-                return joined;
-            }()));
+        auto *nodesEdit = new QLineEdit(QString::fromStdString([&] {
+            std::string joined;
+            for (std::size_t i = 0; i < currentGraph.nodes.size(); ++i) {
+                if (i)
+                    joined += ", ";
+                joined += currentGraph.nodes[i];
+            }
+            return joined;
+        }()));
         nodesEdit->setPlaceholderText(QStringLiteral("e.g. v(out), v(in)  (comma-separated)"));
+        const auto makeLimitEdit = [](const std::optional<double> &limit) {
+            auto *edit = new QLineEdit;
+            edit->setPlaceholderText(QStringLiteral("auto"));
+            if (limit)
+                edit->setText(QString::number(*limit, 'g', 12));
+            return edit;
+        };
+        auto *xMinEdit = makeLimitEdit(currentGraph.xMin);
+        auto *xMaxEdit = makeLimitEdit(currentGraph.xMax);
+        auto *yMinEdit = makeLimitEdit(currentGraph.yMin);
+        auto *yMaxEdit = makeLimitEdit(currentGraph.yMax);
+        const auto makeLimitRow = [](QLineEdit *minimum, QLineEdit *maximum) {
+            auto *row = new QWidget;
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            rowLayout->addWidget(minimum);
+            rowLayout->addWidget(new QLabel(QStringLiteral("to")));
+            rowLayout->addWidget(maximum);
+            return row;
+        };
         form->addRow(QStringLiteral("Graph name:"), nameEdit);
         form->addRow(QStringLiteral("X axis label:"), xAxisEdit);
         form->addRow(QStringLiteral("Y axis label:"), yAxisEdit);
+        form->addRow(QStringLiteral("X limits:"), makeLimitRow(xMinEdit, xMaxEdit));
+        form->addRow(QStringLiteral("Y limits:"), makeLimitRow(yMinEdit, yMaxEdit));
         form->addRow(QStringLiteral("Nodes / signals:"), nodesEdit);
         dlgLayout->addLayout(form);
+        auto *limitsHint = new QLabel(
+            QStringLiteral("Leave a limit blank to auto-scale that axis. Limits only change how the graph is drawn; "
+                           "they do not affect simulation parameters or data acquisition."));
+        limitsHint->setWordWrap(true);
+        dlgLayout->addWidget(limitsHint);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         dlgLayout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+
+        std::optional<double> newXMin;
+        std::optional<double> newXMax;
+        std::optional<double> newYMin;
+        std::optional<double> newYMax;
+        const auto parseLimit = [](const QLineEdit *edit, std::optional<double> &limit) {
+            limit.reset();
+            const auto text = edit->text().trimmed();
+            if (text.isEmpty())
+                return true;
+            bool ok = false;
+            const auto value = text.toDouble(&ok);
+            if (!ok || !std::isfinite(value))
+                return false;
+            limit = value;
+            return true;
+        };
+        connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
+            if (!parseLimit(xMinEdit, newXMin) || !parseLimit(xMaxEdit, newXMax) || !parseLimit(yMinEdit, newYMin) ||
+                !parseLimit(yMaxEdit, newYMax)) {
+                QMessageBox::warning(&dlg, QStringLiteral("Axis limits"),
+                                     QStringLiteral("Enter numeric axis limits or leave a field blank for automatic "
+                                                    "scaling."));
+                return;
+            }
+            if (newXMin && newXMax && *newXMax <= *newXMin) {
+                QMessageBox::warning(&dlg, QStringLiteral("Axis limits"),
+                                     QStringLiteral("The X maximum must be greater than the X minimum."));
+                return;
+            }
+            if (newYMin && newYMax && *newYMax <= *newYMin) {
+                QMessageBox::warning(&dlg, QStringLiteral("Axis limits"),
+                                     QStringLiteral("The Y maximum must be greater than the Y minimum."));
+                return;
+            }
+            dlg.accept();
+        });
         connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
         if (dlg.exec() != QDialog::Accepted)
             return;
@@ -2608,8 +2793,8 @@ class DocumentWindow : public QMainWindow {
             if (const auto trimmed = part.trimmed(); !trimmed.isEmpty())
                 newNodes.push_back(trimmed.toStdString());
 
-        project_->execute("edit graph", [simId, graphId, newName, newXAxis, newYAxis,
-                                         newNodes](ice::Project &project) {
+        project_->execute("edit graph", [simId, graphId, newName, newXAxis, newYAxis, newNodes, newXMin, newXMax,
+                                         newYMin, newYMax](ice::Project &project) {
             auto it = project.simulations.find(simId);
             if (it == project.simulations.end())
                 return;
@@ -2620,6 +2805,10 @@ class DocumentWindow : public QMainWindow {
                 g.xAxis = newXAxis.toStdString();
                 g.yAxis = newYAxis.toStdString();
                 g.nodes = newNodes;
+                g.xMin = newXMin;
+                g.xMax = newXMax;
+                g.yMin = newYMin;
+                g.yMax = newYMax;
                 break;
             }
         });
@@ -3381,7 +3570,7 @@ class DocumentWindow : public QMainWindow {
         deleteGraphButton_->setToolTip(QStringLiteral("Delete current graph"));
         deleteGraphButton_->setFixedWidth(32);
         auto *editGraphButton_ = new QPushButton(QStringLiteral("✎"));
-        editGraphButton_->setToolTip(QStringLiteral("Edit graph name, axes, and nodes"));
+        editGraphButton_->setToolTip(QStringLiteral("Edit graph name, axes, limits, and nodes"));
         editGraphButton_->setFixedWidth(32);
         graphHeaderLayout->addWidget(addGraphButton_);
         graphHeaderLayout->addWidget(deleteGraphButton_);

@@ -127,6 +127,64 @@ TEST_CASE("schematic instance parameters survive serialization") {
     CHECK(restored.front().value == "1k");
 }
 
+TEST_CASE("symbol default parameters are seeded without duplicates") {
+    ice::Project project;
+    project.identity = "defaults";
+    project.name = "defaults";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto symbolId = ice::addSymbol(project, cellId, "Voltage Source");
+    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
+    auto &instance = project.schematicCells.at(cellId).instances.at(instanceId);
+
+    const std::vector<ice::Parameter> defaults = {{0, "voltage", "1"}, {0, "gain", "2"}};
+    CHECK(ice::seedDefaultParameters(project, instance, defaults) == 2);
+    CHECK(instance.parameters.size() == 2);
+    CHECK(instance.parameters[0].id != 0);
+    CHECK(instance.parameters[1].id != 0);
+    CHECK(instance.parameters[0].id != instance.parameters[1].id);
+    CHECK(instance.parameters[0].name == "voltage");
+    CHECK(instance.parameters[0].value == "1");
+    // Re-seeding keeps existing values and does not duplicate names.
+    CHECK(ice::seedDefaultParameters(project, instance, defaults) == 0);
+    CHECK(instance.parameters.size() == 2);
+}
+
+TEST_CASE("simulation graph axis limits are optional and survive serialization") {
+    ice::Project project;
+    project.identity = "graphs";
+    project.name = "graphs";
+    const auto simId = project.nextId();
+    ice::SimulationItem sim;
+    sim.id = simId;
+    sim.name = "tran";
+    ice::SimulationGraph automatic;
+    automatic.id = project.nextId();
+    automatic.name = "auto";
+    ice::SimulationGraph limited;
+    limited.id = project.nextId();
+    limited.name = "limited";
+    limited.xMin = 1e-9;
+    limited.xMax = 2e-9;
+    limited.yMin = -0.5;
+    limited.yMax = 1.5;
+    sim.graphs = {automatic, limited};
+    project.simulations.emplace(simId, sim);
+
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto &graphs = roundTrip.simulations.at(simId).graphs;
+    CHECK(graphs.size() == 2);
+    CHECK(!graphs[0].xMin.has_value());
+    CHECK(!graphs[0].xMax.has_value());
+    CHECK(!graphs[0].yMin.has_value());
+    CHECK(!graphs[0].yMax.has_value());
+    CHECK(graphs[1].xMin == std::optional<double>{1e-9});
+    CHECK(graphs[1].xMax == std::optional<double>{2e-9});
+    CHECK(graphs[1].yMin == std::optional<double>{-0.5});
+    CHECK(graphs[1].yMax == std::optional<double>{1.5});
+    CHECK(roundTrip.serialize() == serialized);
+}
+
 TEST_CASE("geometry transforms match Qt rotation convention") {
     const ice::Point point{10, 0};
     CHECK((ice::Transform{0, 0, ice::Orientation::r0}.apply(point) == ice::Point{10, 0}));
@@ -156,7 +214,7 @@ TEST_CASE("ngspice fetches the vectors named by the request signals") {
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
-    request.netlist = {"V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
+    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
                        "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
     request.probeSignals = {"N15"};
     ice::SimulationRunner runner;
@@ -167,6 +225,7 @@ TEST_CASE("ngspice fetches the vectors named by the request signals") {
     if (!result.traces.empty()) {
         CHECK(result.traces[0].name == "N15");
         CHECK(result.traces[0].values.size() == result.time.size());
+        CHECK(*std::max_element(result.traces[0].values.begin(), result.traces[0].values.end()) > 0.01);
     }
 }
 
@@ -175,7 +234,7 @@ TEST_CASE("a run with no resolvable signal names fails with a clear error") {
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
-    request.netlist = {"V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
+    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
                        "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
     request.probeSignals = {"nope"};
     ice::SimulationRunner runner;
@@ -252,6 +311,130 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     CHECK(reportedUnsupported);
     // No trailing .end: the simulator adapter appends it.
     CHECK(joined.find(".end") == std::string::npos);
+}
+
+TEST_CASE("waveform and current source symbols generate SPICE source expressions") {
+    ice::Project project;
+    project.identity = "sources";
+    project.name = "sources";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    auto &cell = project.schematicCells.at(cellId);
+
+    auto addSource = [&](const std::string &name) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = cell.symbols.at(symbolId);
+        for (const auto *pinName : {"+", "-"}) {
+            const auto pinId = project.nextId();
+            symbol.pins.push_back({pinId, pinName, 0, 0});
+        }
+        return symbolId;
+    };
+    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) {
+        return cell.symbols.at(symbolId).pins.at(index).id;
+    };
+    auto setParameters = [&](ice::ObjectId instanceId,
+                             std::initializer_list<std::pair<std::string, std::string>> values) {
+        for (const auto &[name, value] : values)
+            cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
+    };
+
+    const auto pulseId = addSource("Pulse Voltage Source");
+    const auto sineId = addSource("Sine Voltage Source");
+    const auto currentId = addSource("Current Source");
+    const auto pulseDefaultsId = addSource("Pulse Voltage Source");
+    const auto sineDefaultsId = addSource("Sine Voltage Source");
+    const auto groundId = addSource("Ground");
+
+    ice::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
+    const auto pulse = ice::addSchematicInstance(project, cellId, pulseId, "V1", 0, 0);
+    const auto sine = ice::addSchematicInstance(project, cellId, sineId, "V2", 0, 0);
+    const auto current = ice::addSchematicInstance(project, cellId, currentId, "I1", 0, 0);
+    const auto pulseDefaults = ice::addSchematicInstance(project, cellId, pulseDefaultsId, "V3", 0, 0);
+    const auto sineDefaults = ice::addSchematicInstance(project, cellId, sineDefaultsId, "V4", 0, 0);
+    setParameters(pulse, {{"initial_voltage", "-1"},
+                          {"pulsed_voltage", "2.5"},
+                          {"delay_time", "1u"},
+                          {"rise_time", "2u"},
+                          {"fall_time", "3u"},
+                          {"pulse_width", "4m"},
+                          {"period", "5m"},
+                          {"pulse_count", "3"}});
+    setParameters(sine, {{"offset_voltage", "1"},
+                         {"amplitude", "2"},
+                         {"frequency", "3k"},
+                         {"delay_time", "4u"},
+                         {"damping_factor", "5"},
+                         {"phase", "6"}});
+    setParameters(current, {{"current", "7m"}});
+
+    const auto outNet = project.nextId();
+    cell.nets.emplace(outNet, ice::Net{outNet,
+                                       "out",
+                                       {pinIdOf(pulseId, 0), pinIdOf(sineId, 0), pinIdOf(currentId, 0),
+                                        pinIdOf(pulseDefaultsId, 0), pinIdOf(sineDefaultsId, 0)}});
+    const auto groundNet = project.nextId();
+    cell.nets.emplace(groundNet,
+                      ice::Net{groundNet,
+                               "",
+                               {pinIdOf(pulseId, 1), pinIdOf(sineId, 1), pinIdOf(currentId, 1),
+                                pinIdOf(pulseDefaultsId, 1), pinIdOf(sineDefaultsId, 1), pinIdOf(groundId, 0)}});
+
+    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    const auto joined = [&] {
+        std::string text;
+        for (const auto &line : netlist)
+            text += line + "\n";
+        return text;
+    }();
+    CHECK(joined.find("V1 out 0 PULSE(-1 2.5 1u 2u 3u 4m 5m 3)") != std::string::npos);
+    CHECK(joined.find("V2 out 0 SIN(1 2 3k 4u 5 6)") != std::string::npos);
+    CHECK(joined.find("I1 out 0 7m") != std::string::npos);
+    // Missing parameters fall back to the symbol's documented defaults.
+    CHECK(joined.find("V3 out 0 PULSE(0 1 0 1u 1u 0.5 1 0)") != std::string::npos);
+    CHECK(joined.find("V4 out 0 SIN(0 1 1 0 0 0)") != std::string::npos);
+    CHECK(ice::spiceElementForSymbol("Current Source") == 'I');
+    CHECK(ice::spiceElementForSymbol("Pulse Voltage Source") == 'V');
+    CHECK(ice::spiceElementForSymbol("Sine Voltage Source") == 'V');
+    CHECK(ice::spiceElementForSymbol("IHP NMOS 1.2V") == 0);
+}
+
+TEST_CASE("generated source expressions are accepted by ngspice") {
+    auto run = [](const std::vector<std::string> &netlist, const std::string &probe) {
+        ice::SimulationRequest request;
+        request.analysis = "transient";
+        request.step = 0.01;
+        request.stop = 2.0;
+        // ngspice treats the first netlist line as the circuit title, so make
+        // it an explicit comment before the source netlist.
+        request.netlist = {"* source expression test"};
+        request.netlist.insert(request.netlist.end(), netlist.begin(), netlist.end());
+        request.probeSignals = {probe};
+        ice::SimulationRunner runner;
+        return runner.run(request, std::chrono::seconds(5));
+    };
+
+    const auto pulse = run({"V1 out 0 DC 0 PULSE(0 1 0 1u 1u 0.5 1)", "R1 out 0 1k"}, "out");
+    CHECK(pulse.state == ice::JobState::succeeded);
+    CHECK(pulse.traces.size() == 1);
+    if (!pulse.traces.empty()) {
+        const auto &values = pulse.traces.front().values;
+        CHECK(!values.empty());
+        CHECK(*std::max_element(values.begin(), values.end()) > 0.9);
+    }
+
+    const auto sine = run({"V1 out 0 SIN(0 1 1 0 0 0)", "R1 out 0 1k"}, "out");
+    CHECK(sine.state == ice::JobState::succeeded);
+    CHECK(sine.traces.size() == 1);
+    if (!sine.traces.empty()) {
+        const auto &values = sine.traces.front().values;
+        CHECK(!values.empty());
+        CHECK(*std::max_element(values.begin(), values.end()) > 0.9);
+        CHECK(*std::min_element(values.begin(), values.end()) < -0.9);
+    }
+
+    const auto current = run({"I1 0 out 1m", "R1 out 0 1k"}, "out");
+    CHECK(current.state == ice::JobState::succeeded);
+    CHECK(current.traces.size() == 1);
 }
 
 TEST_CASE("package manifests and lockfiles are reproducible") {
@@ -339,29 +522,43 @@ TEST_CASE("file symbol library loads and validates") {
 TEST_CASE("shipped file symbol library loads") {
     const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
     const auto symbols = ice::SymbolLibrary::load(libraryRoot);
-    CHECK(symbols.size() == 8);
+    CHECK(symbols.size() == 11);
     std::map<std::string, std::size_t> pinCounts;
-    std::map<std::string, std::string> defaultValues;
+    std::map<std::string, std::map<std::string, std::string>> defaults;
     for (const auto &symbol : symbols) {
         CHECK(!symbol.svg.empty());
         CHECK(!symbol.pins.empty());
         pinCounts[symbol.name] = symbol.pins.size();
         for (const auto &parameter : symbol.defaultParameters)
-            defaultValues[symbol.name] = parameter.name + "=" + parameter.value;
+            defaults[symbol.name][parameter.name] = parameter.value;
     }
     CHECK(pinCounts["Resistor"] == 2);
     CHECK(pinCounts["Capacitor"] == 2);
     CHECK(pinCounts["Diode"] == 2);
     CHECK(pinCounts["Voltage Source"] == 2);
+    CHECK(pinCounts["Pulse Voltage Source"] == 2);
+    CHECK(pinCounts["Sine Voltage Source"] == 2);
+    CHECK(pinCounts["Current Source"] == 2);
     CHECK(pinCounts["Ground"] == 1);
     CHECK(pinCounts["Op Amp"] == 3);
     CHECK(pinCounts["NMOS"] == 4);
     CHECK(pinCounts["Inductor"] == 2);
-    // Passive and source symbols seed a quantity-named default parameter.
-    CHECK(defaultValues["Resistor"] == "resistance=1k");
-    CHECK(defaultValues["Capacitor"] == "capacitance=1n");
-    CHECK(defaultValues["Inductor"] == "inductance=1u");
-    CHECK(defaultValues["Voltage Source"] == "voltage=1");
+    // Passive and source symbols seed their editable default parameters.
+    CHECK(defaults["Resistor"]["resistance"] == "1k");
+    CHECK(defaults["Capacitor"]["capacitance"] == "1n");
+    CHECK(defaults["Inductor"]["inductance"] == "1u");
+    CHECK(defaults["Voltage Source"]["voltage"] == "1");
+    CHECK(defaults["Pulse Voltage Source"]["initial_voltage"] == "0");
+    CHECK(defaults["Pulse Voltage Source"]["pulsed_voltage"] == "1");
+    CHECK(defaults["Pulse Voltage Source"]["rise_time"] == "1u");
+    CHECK(defaults["Pulse Voltage Source"]["pulse_width"] == "0.5");
+    CHECK(defaults["Pulse Voltage Source"]["period"] == "1");
+    CHECK(defaults["Pulse Voltage Source"]["pulse_count"] == "0");
+    CHECK(defaults["Sine Voltage Source"]["offset_voltage"] == "0");
+    CHECK(defaults["Sine Voltage Source"]["amplitude"] == "1");
+    CHECK(defaults["Sine Voltage Source"]["frequency"] == "1");
+    CHECK(defaults["Sine Voltage Source"]["phase"] == "0");
+    CHECK(defaults["Current Source"]["current"] == "1m");
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {

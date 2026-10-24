@@ -147,6 +147,13 @@ struct SimulationGraph {
     std::string xAxis = "Time (s)";
     std::string yAxis = "Voltage (V)";
     std::vector<std::string> nodes;
+    // Optional display limits. Empty values auto-scale that axis from the
+    // result data; they are presentation-only and never affect the simulation
+    // request, netlist, or data acquisition.
+    std::optional<double> xMin;
+    std::optional<double> xMax;
+    std::optional<double> yMin;
+    std::optional<double> yMax;
 };
 
 struct SimulationItem {

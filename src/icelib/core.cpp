@@ -255,11 +255,21 @@ std::string Project::serialize() const {
                   {"directives", sim.directives},
                   {"graphs", json::array()}};
         for (const auto &graph : sim.graphs) {
-            s["graphs"].push_back({{"id", graph.id},
-                                   {"name", graph.name},
-                                   {"x_axis", graph.xAxis},
-                                   {"y_axis", graph.yAxis},
-                                   {"nodes", graph.nodes}});
+            json graphJson = {{"id", graph.id},
+                              {"name", graph.name},
+                              {"x_axis", graph.xAxis},
+                              {"y_axis", graph.yAxis},
+                              {"nodes", graph.nodes}};
+            // Limits are optional so older projects keep auto-scaling.
+            if (graph.xMin)
+                graphJson["x_min"] = *graph.xMin;
+            if (graph.xMax)
+                graphJson["x_max"] = *graph.xMax;
+            if (graph.yMin)
+                graphJson["y_min"] = *graph.yMin;
+            if (graph.yMax)
+                graphJson["y_max"] = *graph.yMax;
+            s["graphs"].push_back(std::move(graphJson));
         }
         j["simulations"].push_back(s);
     }
@@ -382,6 +392,14 @@ Project Project::deserialize(const std::string &text) {
                         graph.yAxis = g.value("y_axis", std::string{"Voltage (V)"});
                         if (g.contains("nodes"))
                             graph.nodes = g.at("nodes").get<std::vector<std::string>>();
+                        if (g.contains("x_min") && !g.at("x_min").is_null())
+                            graph.xMin = g.at("x_min").get<double>();
+                        if (g.contains("x_max") && !g.at("x_max").is_null())
+                            graph.xMax = g.at("x_max").get<double>();
+                        if (g.contains("y_min") && !g.at("y_min").is_null())
+                            graph.yMin = g.at("y_min").get<double>();
+                        if (g.contains("y_max") && !g.at("y_max").is_null())
+                            graph.yMax = g.at("y_max").get<double>();
                         sim.graphs.push_back(std::move(graph));
                     }
                 }

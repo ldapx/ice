@@ -1,0 +1,48 @@
+[symbol]
+name = "Pulse Voltage Source"
+artwork = "pulse_voltage_source.svg"
+category = "Sources"
+
+[[pin]]
+name = "+"
+x = 0
+y = 32
+direction = "output"
+
+[[pin]]
+name = "-"
+x = 0
+y = -32
+direction = "input"
+
+[[parameter]]
+name = "initial_voltage"
+value = "0"
+
+[[parameter]]
+name = "pulsed_voltage"
+value = "1"
+
+[[parameter]]
+name = "delay_time"
+value = "0"
+
+[[parameter]]
+name = "rise_time"
+value = "1u"
+
+[[parameter]]
+name = "fall_time"
+value = "1u"
+
+[[parameter]]
+name = "pulse_width"
+value = "0.5"
+
+[[parameter]]
+name = "period"
+value = "1"
+
+[[parameter]]
+name = "pulse_count"
+value = "0"

@@ -1,8 +1,10 @@
 # Symbol artwork attribution
 
-The `*.svg` files in this directory are copies of artwork from the
+Most `*.svg` files in this directory are copies of artwork from the
 [SchematicSymbolsSVG](https://github.com/sjgallagher2/SchematicSymbolsSVG)
-collection, extracted from `Symbols-Inkscape.svg` (`<symbol>` elements).
+collection, extracted from `Symbols-Inkscape.svg` (`<symbol>` elements). The
+pulse voltage, sine voltage, current source, and inductor symbols are original
+ICE artwork.
 
 Source collection license (MIT, Copyright (c) 2023 Sam Gallagher):
 
@@ -27,6 +29,10 @@ Source collection license (MIT, Copyright (c) 2023 Sam Gallagher):
 | `ground.svg` | `orr_gnd` | rescaled |
 | `opamp.svg` | `orr_opamp2` | dropped part-number text, rescaled |
 | `nmos.svg` | `orr_nmos` | rescaled |
+| `inductor.svg` | original ICE artwork | — |
+| `pulse_voltage_source.svg` | original ICE artwork | — |
+| `sine_voltage_source.svg` | original ICE artwork | — |
+| `current_source.svg` | original ICE artwork | — |
 
 All symbols: embedded text labels removed (text must not be baked into
 artwork), annotation glyphs removed, geometry uniformly rescaled for

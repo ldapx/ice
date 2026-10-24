@@ -40,25 +40,106 @@ std::string parameterValue(const SchematicInstance &instance,
     return instance.parameters.size() == 1 ? fallback : std::string{};
 }
 
-// The SPICE element a symbol maps to, or 0 when unsupported.
-char spiceElementFor(const std::string &symbolName) {
+// Exact parameter lookup. Unlike parameterValue(), this never falls back to
+// the sole parameter, which matters for multi-parameter waveform sources.
+std::string parameterNamed(const SchematicInstance &instance, std::initializer_list<std::string_view> wanted) {
+    for (const auto &parameter : instance.parameters) {
+        const auto name = lower(parameter.name);
+        for (const auto &candidate : wanted)
+            if (name == lower(std::string(candidate)))
+                return parameter.value;
+    }
+    return {};
+}
+
+std::string sourceParameter(const SchematicInstance &instance, std::initializer_list<std::string_view> names,
+                            std::string_view fallback) {
+    const auto value = parameterNamed(instance, names);
+    return value.empty() ? std::string(fallback) : value;
+}
+
+std::string pulseExpression(const SchematicInstance &instance) {
+    return "PULSE(" + sourceParameter(instance, {"initial_voltage", "v1"}, "0") + " " +
+           sourceParameter(instance, {"pulsed_voltage", "v2"}, "1") + " " +
+           sourceParameter(instance, {"delay_time", "td"}, "0") + " " +
+           sourceParameter(instance, {"rise_time", "tr"}, "1u") + " " +
+           sourceParameter(instance, {"fall_time", "tf"}, "1u") + " " +
+           sourceParameter(instance, {"pulse_width", "pw"}, "0.5") + " " +
+           sourceParameter(instance, {"period", "per"}, "1") + " " +
+           sourceParameter(instance, {"pulse_count", "number_of_pulses", "cycles", "ncycles"}, "0") + ")";
+}
+
+std::string sineExpression(const SchematicInstance &instance) {
+    return "SIN(" + sourceParameter(instance, {"offset_voltage", "vo"}, "0") + " " +
+           sourceParameter(instance, {"amplitude", "va"}, "1") + " " +
+           sourceParameter(instance, {"frequency", "freq"}, "1") + " " +
+           sourceParameter(instance, {"delay_time", "td"}, "0") + " " +
+           sourceParameter(instance, {"damping_factor", "theta"}, "0") + " " +
+           sourceParameter(instance, {"phase", "phi"}, "0") + ")";
+}
+
+std::string sourceExpression(const SchematicInstance &instance, const std::string &symbolName, char element) {
+    // A raw value parameter is an explicit SPICE expression and wins over the
+    // structured waveform parameters.
+    if (const auto raw = parameterNamed(instance, {"value"}); !raw.empty())
+        return raw;
     const auto name = lower(symbolName);
-    if (name.find("resistor") != std::string::npos || name.rfind('r', 0) == 0)
+    if (name.find("pulse") != std::string::npos)
+        return pulseExpression(instance);
+    if (name.find("sine") != std::string::npos || name.find("sinusoid") != std::string::npos)
+        return sineExpression(instance);
+    if (element == 'I')
+        return parameterValue(instance, {"current", "value"});
+    return parameterValue(instance, {"voltage", "value"});
+}
+} // namespace
+
+char spiceElementForSymbol(const std::string &symbolName) {
+    const auto name = lower(symbolName);
+    if (name.find("resistor") != std::string::npos)
         return 'R';
-    if (name.find("capacitor") != std::string::npos || name.rfind('c', 0) == 0)
+    if (name.find("capacitor") != std::string::npos)
         return 'C';
-    if (name.find("inductor") != std::string::npos || name.rfind('l', 0) == 0)
+    if (name.find("inductor") != std::string::npos)
         return 'L';
     if (name.find("diode") != std::string::npos)
         return 'D';
-    if (name.find("voltage") != std::string::npos || name.find("source") != std::string::npos ||
-        name.rfind('v', 0) == 0)
+    // Check current before the generic source/prefix rules: "Current Source"
+    // must not be mistaken for a capacitor because it starts with 'C'.
+    if (name.find("current") != std::string::npos)
+        return 'I';
+    if (name.find("voltage") != std::string::npos || name.find("source") != std::string::npos)
         return 'V';
     if (name.find("ground") != std::string::npos)
         return 'G';
+    // Legacy short designators such as "R1" or "V2". Requiring a digit after
+    // the letter avoids classifying names like "IHP NMOS" as current sources.
+    if (!name.empty()) {
+        const auto prefix = name.front();
+        const bool digitFollows = name.size() > 1 && std::isdigit(static_cast<unsigned char>(name[1]));
+        if (name.size() == 1 || digitFollows) {
+            switch (prefix) {
+            case 'r':
+                return 'R';
+            case 'c':
+                return 'C';
+            case 'l':
+                return 'L';
+            case 'd':
+                return 'D';
+            case 'i':
+                return 'I';
+            case 'v':
+                return 'V';
+            case 'g':
+                return 'G';
+            default:
+                break;
+            }
+        }
+    }
     return 0;
 }
-} // namespace
 
 ObjectId createSchematicCell(Project &project, std::string name) {
     if (name.empty())
@@ -85,6 +166,21 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
     ObjectId id = project.nextId();
     cell.instances.emplace(id, SchematicInstance{id, symbolId, std::move(name), x, y});
     return id;
+}
+std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
+                                  const std::vector<Parameter> &defaults) {
+    std::size_t added = 0;
+    for (auto parameter : defaults) {
+        const auto name = lower(parameter.name);
+        const bool exists = std::any_of(instance.parameters.begin(), instance.parameters.end(),
+                                        [&](const Parameter &existing) { return lower(existing.name) == name; });
+        if (exists)
+            continue;
+        parameter.id = project.nextId();
+        instance.parameters.push_back(std::move(parameter));
+        ++added;
+    }
+    return added;
 }
 ObjectId createLayoutCell(Project &project, std::string name) {
     if (name.empty())
@@ -176,7 +272,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             const Pin *pin = nullptr;
             if (resolvePin(pinId, &owner, &pin)) {
                 const auto symbol = cell.symbols.find(owner->symbol);
-                if (symbol != cell.symbols.end() && spiceElementFor(symbol->second.name) == 'G')
+                if (symbol != cell.symbols.end() && spiceElementForSymbol(symbol->second.name) == 'G')
                     return "0";
             }
         }
@@ -190,7 +286,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         const auto symbol = cell.symbols.find(instance.symbol);
         if (symbol == cell.symbols.end())
             continue;
-        const char element = spiceElementFor(symbol->second.name);
+        const char element = spiceElementForSymbol(symbol->second.name);
         if (element == 'G')
             continue; // ground contributes the reference node only
         if (element == 0) {
@@ -235,7 +331,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             case 'L':
                 return parameterValue(instance, {"inductance", "value"});
             case 'V':
-                return parameterValue(instance, {"voltage", "value"});
+            case 'I':
+                return sourceExpression(instance, symbol->second.name, element);
             default:
                 return parameterValue(instance, {"value"});
             }
@@ -246,6 +343,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                        : element == 'C' ? "1n"
                        : element == 'L' ? "1u"
                        : element == 'D' ? "Dmodel"
+                       : element == 'I' ? "1m"
                                         : "1";
             note("missing value parameter for " + instance.name + ", using " + resolved);
         }

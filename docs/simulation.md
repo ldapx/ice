@@ -11,6 +11,11 @@ Simulation jobs have explicit terminal states: `succeeded`, `failed`,
 identity, an input fingerprint, time samples, named traces, and an actionable
 error string when a job does not succeed.
 
+Graphs are presentation-only views over a result. Each graph can define
+optional X/Y axis limits; blank limits auto-scale from the returned data. Axis
+limits change only how the plot is drawn and never alter the simulation
+parameters, netlist, or data acquisition.
+
 `runAsync` executes through a worker future and reports progress through a
 callback. Callers crossing into a GUI event loop must queue those progress
 events onto the application thread; the core adapter never touches Qt objects.

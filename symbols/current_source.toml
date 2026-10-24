@@ -1,0 +1,20 @@
+[symbol]
+name = "Current Source"
+artwork = "current_source.svg"
+category = "Sources"
+
+[[pin]]
+name = "+"
+x = 0
+y = 32
+direction = "output"
+
+[[pin]]
+name = "-"
+x = 0
+y = -32
+direction = "input"
+
+[[parameter]]
+name = "current"
+value = "1m"
