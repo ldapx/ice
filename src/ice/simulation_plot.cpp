@@ -1,5 +1,7 @@
 #include "simulation_plot.hpp"
 
+#include "theme.hpp"
+
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -104,11 +106,12 @@ void SimulationPlot::clear() {
 void SimulationPlot::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     // Match the schematic/layout canvas instead of using a dark plot.
-    const QColor canvasBackground(QStringLiteral("#ffffff"));
-    const QColor plotFrame(QStringLiteral("#8a94a0"));
-    const QColor axisText(QStringLiteral("#3f4a56"));
-    const QColor tickText(QStringLiteral("#4a5560"));
-    const QColor zeroLine(QStringLiteral("#a5adb6"));
+    const auto canvasBackground = ice::themeColor(ice::ThemeRole::Background2);
+    const auto plotFrame = ice::themeColor(ice::ThemeRole::Axis1);
+    const auto axisText = ice::themeColor(ice::ThemeRole::Axis1);
+    const auto tickText = ice::themeColor(ice::ThemeRole::Axis1);
+    auto zeroLine = ice::themeColor(ice::ThemeRole::Axis1);
+    zeroLine.setAlpha(110);
     painter.fillRect(rect(), canvasBackground);
     painter.setRenderHint(QPainter::Antialiasing);
     const QRectF plot = rect().adjusted(58, 18, -20, -42);
@@ -193,7 +196,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     const auto yTicks = axisTicks(yMin, yMax, yIntervals);
 
     if (gridVisible_) {
-        painter.setPen(QPen(QColor("#e3e7eb"), 1));
+        painter.setPen(QPen(ice::themeColor(ice::ThemeRole::Grid1), 1));
         for (double value : xTicks) {
             const auto x = mapX(value);
             painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
@@ -232,8 +235,11 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
     }
 
-    // Darker trace colors for the light canvas.
-    const QColor colors[] = {QColor("#1f77b4"), QColor("#d17c00"), QColor("#2e8b57"), QColor("#c2185b")};
+    // Accent palette, with the brightest cyan darkened for contrast on canvas.
+    auto cyan = ice::themeColor(ice::ThemeRole::Accent3);
+    cyan = cyan.darker(135);
+    const QColor colors[] = {ice::themeColor(ice::ThemeRole::Accent2), ice::themeColor(ice::ThemeRole::Accent4),
+                             ice::themeColor(ice::ThemeRole::Accent5), ice::themeColor(ice::ThemeRole::Accent6), cyan};
     painter.save();
     painter.setClipRect(plot.adjusted(1, 1, -1, -1));
     for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
@@ -251,13 +257,13 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
             else
                 path.lineTo(point);
         }
-        painter.setPen(QPen(colors[traceIndex % 4], 2));
+        painter.setPen(QPen(colors[traceIndex % 5], 2));
         painter.drawPath(path);
     }
     painter.restore();
 
     for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {
-        painter.setPen(QPen(colors[traceIndex % 4], 1));
+        painter.setPen(QPen(colors[traceIndex % 5], 1));
         painter.drawText(QRectF(plot.left() + 8 + traceIndex * 100, plot.top() + 6, 95, 20), Qt::AlignLeft,
                          QString::fromStdString(result_.traces[traceIndex].name));
     }

@@ -31,7 +31,6 @@ struct ParameterEdit {
 };
 
 std::vector<SymbolDefinition> genericSymbolLibrary();
-const SymbolDefinition *findSymbolDefinition(const std::vector<SymbolDefinition> &library, const QString &name);
 std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition);
 std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName);
 

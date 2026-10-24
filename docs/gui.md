@@ -111,7 +111,8 @@ out of date, with the relationship status shown explicitly.
 
 The schematic editor should initially provide:
 
-- pan, zoom, grid, and snapping;
+- an infinite panning canvas with origin axes;
+- pan, zoom, grid, snapping, and fit-to-view;
 - symbol placement and movement;
 - wire and net-label creation;
 - pin and net inspection;
@@ -132,7 +133,8 @@ and richer hierarchy editing.
 The layout editor should initially provide:
 
 - layer-aware rendering;
-- grid and snapping;
+- an infinite panning canvas with origin axes;
+- grid, snapping, and fit-to-view;
 - rectangle and polygon creation;
 - shape selection and movement;
 - ports, labels, and net visibility;
@@ -151,6 +153,35 @@ Generated layout should enter the same editor and database as manually created
 layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
+
+## Theme palette
+
+The application palette is editable from **Settings → Theme Palette…** and is
+persisted with `QSettings`. **Settings → Theme → Dark Theme / Light Theme**
+applies either preset. The schematic canvas, layout canvas, and simulation
+plots use the same color as the application background (`background-2`).
+
+| Role | Dark preset | Light preset |
+| --- | --- | --- |
+| `accent-1` | `#fff47e` | `#b8860b` |
+| `accent-2` | `#fffde2` | `#a88f00` |
+| `accent-3` | `#6afdff` | `#008b8b` |
+| `accent-4` | `#828aff` | `#3f51b5` |
+| `accent-5` | `#9a16ff` | `#7a00cc` |
+| `accent-6` | `#bc4fff` | `#9c27b0` |
+| `background-1` | `#272730` | `#f2ead4` |
+| `background-2` | `#19191c` | `#fffde2` |
+| `surface-1` | `#31313c` | `#f7f0dc` |
+| `border-1` | `#464652` | `#c8b98a` |
+| `text-1` | `#fffde2` | `#272730` |
+| `text-2` | `#a8a8b3` | `#6b6b76` |
+| `text-on-accent` | `#19191c` | `#fffde2` |
+| `grid-1` | `#2a2a32` | `#e8e0c8` |
+| `grid-2` | `#383842` | `#cfc6aa` |
+| `axis-1` | `#9a9aa6` | `#272730` |
+
+All roles can be changed independently, and **Reset Theme** restores the
+current dark/light preset defaults.
 
 ## Interaction conventions
 

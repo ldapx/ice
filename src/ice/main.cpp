@@ -6,9 +6,12 @@
 
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
+#include "theme.hpp"
+#include "theme_dialog.hpp"
 
 #include <QAbstractItemView>
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -46,7 +49,6 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QScrollBar>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
@@ -190,7 +192,7 @@ std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project) 
 
 QPixmap layerPreviewIcon(const LayerStyle &style) {
     QPixmap pixmap(36, 18);
-    pixmap.fill(Qt::white);
+    pixmap.fill(ice::themeColor(ice::ThemeRole::Background2));
     QPainter painter(&pixmap);
     painter.setPen(QPen(style.color, 1));
     if (style.pattern != Qt::NoBrush)
@@ -199,6 +201,15 @@ QPixmap layerPreviewIcon(const LayerStyle &style) {
         painter.setBrush(Qt::NoBrush);
     painter.drawRect(1, 1, 33, 15);
     return pixmap;
+}
+
+void drawCanvasAxes(QPainter &painter, const QRectF &exposed) {
+    QPen axisPen(ice::themeColor(ice::ThemeRole::Axis1));
+    axisPen.setCosmetic(true);
+    axisPen.setWidthF(1.2);
+    painter.setPen(axisPen);
+    painter.drawLine(QPointF(exposed.left(), 0.0), QPointF(exposed.right(), 0.0));
+    painter.drawLine(QPointF(0.0, exposed.top()), QPointF(0.0, exposed.bottom()));
 }
 
 class LayoutCanvas : public QGraphicsView {
@@ -214,8 +225,9 @@ class LayoutCanvas : public QGraphicsView {
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setBackgroundBrush(QColor(QStringLiteral("#ffffff")));
+        setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        applyNavigationTransform();
     }
 
     void setTool(Tool tool) { tool_ = tool; }
@@ -249,7 +261,7 @@ class LayoutCanvas : public QGraphicsView {
         const qreal minor = major / 5.0;
         const bool drawMinor = (right - left) * 5 + (bottom - top) * 5 <= 5000;
         if (drawMinor) {
-            QPen minorPen(QColor(QStringLiteral("#e1e1e1")));
+            QPen minorPen(ice::themeColor(ice::ThemeRole::Grid1));
             minorPen.setCosmetic(true);
             minorPen.setWidth(1);
             painter.setPen(minorPen);
@@ -262,7 +274,7 @@ class LayoutCanvas : public QGraphicsView {
             for (int y = minorTop; y <= minorBottom; ++y)
                 painter.drawLine(QPointF(exposed.left(), y * minor), QPointF(exposed.right(), y * minor));
         }
-        QPen majorPen(QColor(QStringLiteral("#b4b4b4")));
+        QPen majorPen(ice::themeColor(ice::ThemeRole::Grid2));
         majorPen.setCosmetic(true);
         majorPen.setWidth(1);
         painter.setPen(majorPen);
@@ -273,11 +285,6 @@ class LayoutCanvas : public QGraphicsView {
     }
 
     void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) { layerStyles_ = styles; }
-    void setContentRect(const QRectF &bounds) {
-        Q_UNUSED(bounds);
-        scene()->setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
-    }
-
     void setInitialView(const QRectF &bounds) {
         if (!bounds.isValid() || bounds.isNull())
             return;
@@ -290,10 +297,22 @@ class LayoutCanvas : public QGraphicsView {
         applyNavigationTransform();
     }
 
+    void fitToContent() {
+        const auto bounds = scene()->itemsBoundingRect();
+        if (!bounds.isValid() || bounds.isNull()) {
+            zoom_ = 1.0;
+            centerScene_ = QPointF(0.0, 0.0);
+            applyNavigationTransform();
+            return;
+        }
+        setInitialView(bounds.adjusted(-20, -20, 20, 20));
+    }
+
   protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override {
-        painter->fillRect(rect, QColor(QStringLiteral("#ffffff")));
+        painter->fillRect(rect, ice::themeColor(ice::ThemeRole::Background2));
         drawGrid(*painter, rect, transform().m11());
+        drawCanvasAxes(*painter, rect);
     }
 
     void drawScaleIndicator(QPainter &painter) {
@@ -310,7 +329,7 @@ class LayoutCanvas : public QGraphicsView {
 
         const qreal left = 14.0;
         const qreal bottom = viewport()->height() - 16.0;
-        const QColor color(QStringLiteral("#333a42"));
+        const auto color = ice::themeColor(ice::ThemeRole::Axis1);
         QPen pen(color);
         pen.setWidthF(2.0);
         painter.setPen(pen);
@@ -340,8 +359,10 @@ class LayoutCanvas : public QGraphicsView {
         if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton) {
             drawing_ = true;
             drawStart_ = mapToScene(event->pos());
+            const auto previewColor = ice::themeColor(ice::ThemeRole::Accent3);
             drawPreview_ =
-                scene()->addRect(QRectF(drawStart_, drawStart_), QPen(Qt::cyan, 1), QBrush(QColor(0, 180, 220, 50)));
+                scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1),
+                                 QBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 50)));
             event->accept();
             return;
         }
@@ -472,7 +493,6 @@ class LayoutCanvas : public QGraphicsView {
 // role 0: item kind ("symbol", "symbol-artwork", "symbol-label",
 //        "symbol-highlight", "pin", "wire", "net-label")
 // role 1: the stable domain id of the object the item projects
-constexpr auto symbolHighlightColor = "#0b6dd8";
 
 QGraphicsItem *symbolOwner(QGraphicsItem *item) {
     for (auto *cursor = item; cursor; cursor = cursor->parentItem())
@@ -503,10 +523,12 @@ void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
     if (auto *highlight = symbolChild(symbol, QStringLiteral("symbol-highlight")))
         highlight->setVisible(selected);
     if (auto *label = symbolChild(symbol, QStringLiteral("symbol-label")))
-        static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? QColor(symbolHighlightColor)
-                                                                              : Qt::black);
-    if (auto *effect = symbolArtworkEffect(symbol))
-        effect->setEnabled(selected);
+        static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::themeColor(ice::ThemeRole::Accent4)
+                                                                              : ice::themeColor(ice::ThemeRole::Axis1));
+    if (auto *effect = symbolArtworkEffect(symbol)) {
+        effect->setColor(selected ? ice::themeColor(ice::ThemeRole::Accent4) : ice::themeColor(ice::ThemeRole::Axis1));
+        effect->setEnabled(true);
+    }
 }
 
 QRectF symbolHighlightRect(QGraphicsItem *symbol) {
@@ -530,11 +552,15 @@ class SchematicCanvas : public QGraphicsView {
   public:
     explicit SchematicCanvas(QWidget *parent = nullptr) : QGraphicsView(parent) {
         setScene(new QGraphicsScene(this));
-        setSceneRect(-2000, -2000, 4000, 4000);
+        setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
         setRenderHint(QPainter::Antialiasing);
         setDragMode(QGraphicsView::RubberBandDrag);
-        setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
-        setBackgroundBrush(QColor(QStringLiteral("#20252b")));
+        setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
+        setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        applyNavigationTransform();
     }
 
     void setCallbacks(std::function<void(ice::ObjectId, QPointF)> moved, std::function<void(ice::ObjectId)> rotated,
@@ -569,10 +595,33 @@ class SchematicCanvas : public QGraphicsView {
             symbolSelected_(0);
     }
 
+    void fitToContent() {
+        QRectF bounds;
+        for (auto *item : scene()->items()) {
+            const auto kind = item->data(0).toString();
+            if (!item->parentItem() && kind != QStringLiteral("canvas-title") &&
+                kind != QStringLiteral("canvas-placeholder"))
+                bounds |= item->sceneBoundingRect();
+        }
+        if (!bounds.isValid() || bounds.isNull()) {
+            zoom_ = 1.0;
+            centerScene_ = QPointF(0.0, 0.0);
+            applyNavigationTransform();
+            return;
+        }
+        const qreal width = std::max<qreal>(200.0, bounds.width());
+        const qreal height = std::max<qreal>(200.0, bounds.height());
+        const auto available = viewport()->size();
+        zoom_ = std::clamp(std::min(available.width() / width, available.height() / height) * 0.85, qreal(0.05),
+                           qreal(100.0));
+        centerScene_ = bounds.center();
+        applyNavigationTransform();
+    }
+
     void drawBackground(QPainter *painter, const QRectF &rect) override {
-        painter->fillRect(rect, QColor(QStringLiteral("#f7f7f7")));
+        painter->fillRect(rect, ice::themeColor(ice::ThemeRole::Background2));
         const qreal step = 20.0;
-        QPen minor(QColor(QStringLiteral("#e1e1e1")));
+        QPen minor(ice::themeColor(ice::ThemeRole::Grid1));
         minor.setWidthF(0.5);
         painter->setPen(minor);
         const int left = static_cast<int>(std::floor(rect.left() / step));
@@ -583,7 +632,7 @@ class SchematicCanvas : public QGraphicsView {
             painter->drawLine(QPointF(x * step, rect.top()), QPointF(x * step, rect.bottom()));
         for (int y = top; y <= bottom; ++y)
             painter->drawLine(QPointF(rect.left(), y * step), QPointF(rect.right(), y * step));
-        QPen major(QColor(QStringLiteral("#b4b4b4")));
+        QPen major(ice::themeColor(ice::ThemeRole::Grid2));
         major.setWidthF(1.0);
         painter->setPen(major);
         const auto majorStep = step * 5;
@@ -595,13 +644,15 @@ class SchematicCanvas : public QGraphicsView {
             painter->drawLine(QPointF(x * majorStep, rect.top()), QPointF(x * majorStep, rect.bottom()));
         for (int y = majorTop; y <= majorBottom; ++y)
             painter->drawLine(QPointF(rect.left(), y * majorStep), QPointF(rect.right(), y * majorStep));
+        drawCanvasAxes(*painter, rect);
     }
 
   protected:
     void mousePressEvent(QMouseEvent *event) override {
         if (event->button() == Qt::MiddleButton) {
             panning_ = true;
-            lastPan_ = event->pos();
+            panStartPosition_ = event->pos();
+            panStartCenterScene_ = centerScene_;
             setCursor(Qt::ClosedHandCursor);
             event->accept();
             return;
@@ -646,10 +697,9 @@ class SchematicCanvas : public QGraphicsView {
 
     void mouseMoveEvent(QMouseEvent *event) override {
         if (panning_) {
-            const auto delta = event->pos() - lastPan_;
-            lastPan_ = event->pos();
-            horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
-            verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+            const auto delta = event->pos() - panStartPosition_;
+            centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
+            applyNavigationTransform();
             event->accept();
             return;
         }
@@ -687,15 +737,23 @@ class SchematicCanvas : public QGraphicsView {
     }
 
     void wheelEvent(QWheelEvent *event) override {
-        if (!event->modifiers().testFlag(Qt::ControlModifier) || event->angleDelta().y() == 0) {
-            QGraphicsView::wheelEvent(event);
+        if (event->angleDelta().y() == 0) {
+            event->ignore();
             return;
         }
-
-        const qreal currentZoom = transform().m11();
-        const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
-        const qreal newZoom = std::clamp(currentZoom * factor, qreal(0.05), qreal(100.0));
-        scale(newZoom / currentZoom, newZoom / currentZoom);
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            const auto scenePosition = mapToScene(event->position().toPoint());
+            const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+            zoom_ = std::clamp(zoom_ * factor, qreal(0.05), qreal(100.0));
+            const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
+            const auto cursor = event->position();
+            centerScene_ = scenePosition - QPointF((cursor.x() - viewportCenter.x()) / zoom_,
+                                                   (cursor.y() - viewportCenter.y()) / zoom_);
+        } else {
+            const auto delta = event->angleDelta();
+            centerScene_ -= QPointF(-delta.x() / zoom_, delta.y() / zoom_);
+        }
+        applyNavigationTransform();
         event->accept();
     }
 
@@ -760,13 +818,20 @@ class SchematicCanvas : public QGraphicsView {
     std::function<void(std::vector<ice::ObjectId>)> deleteSelected_;
 
   private:
+    void applyNavigationTransform() {
+        setTransform(QTransform(zoom_, 0.0, 0.0, zoom_, 0.0, 0.0), false);
+        centerOn(centerScene_);
+        viewport()->update();
+    }
+
     void setPinHighlights(QGraphicsItem *source) {
         for (auto *item : scene()->items()) {
             if (item->data(0).toString() != QStringLiteral("pin"))
                 continue;
             auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item);
             if (pin)
-                pin->setBrush(item == source ? QBrush(Qt::green) : QBrush(QColor("#8cff66")));
+                pin->setBrush(item == source ? QBrush(ice::themeColor(ice::ThemeRole::Accent5))
+                                             : QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
         }
     }
 
@@ -777,10 +842,11 @@ class SchematicCanvas : public QGraphicsView {
             auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item);
             if (!pin)
                 continue;
-            pin->setBrush(item == candidate && item != wireStart_ ? QBrush(Qt::white) : QBrush(QColor("#8cff66")));
+            pin->setBrush(item == candidate && item != wireStart_ ? QBrush(ice::themeColor(ice::ThemeRole::Accent3))
+                                                                  : QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
         }
         if (auto *pin = dynamic_cast<QGraphicsEllipseItem *>(wireStart_))
-            pin->setBrush(QBrush(Qt::green));
+            pin->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent5)));
     }
 
     void clearPinHighlights() {
@@ -788,7 +854,7 @@ class SchematicCanvas : public QGraphicsView {
             if (item->data(0).toString() != QStringLiteral("pin"))
                 continue;
             if (auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item))
-                pin->setBrush(QBrush(Qt::yellow));
+                pin->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
         }
     }
 
@@ -845,7 +911,8 @@ class SchematicCanvas : public QGraphicsView {
     }
 
     bool panning_ = false;
-    QPoint lastPan_;
+    QPoint panStartPosition_;
+    QPointF panStartCenterScene_;
     QGraphicsItem *wireStart_ = nullptr;
     ice::ObjectId dragInstance_ = 0;
     QPointF dragOriginScene_;
@@ -860,6 +927,8 @@ class SchematicCanvas : public QGraphicsView {
     std::function<void(ice::ObjectId)> symbolActivated_;
     bool netLabelMode_ = false;
     ice::ObjectId selectedInstance_ = 0;
+    qreal zoom_ = 1.0;
+    QPointF centerScene_;
 };
 
 class ProjectPanel : public QWidget {
@@ -1165,7 +1234,9 @@ class LayersPanel : public QWidget {
         list_->clear();
         const auto styles = layerStylesFor(project);
         for (const auto &[id, layer] : project.layers) {
-            const auto style = styles.contains(id) ? styles.at(id) : LayerStyle{QColor("#777777"), Qt::SolidPattern};
+            const auto style = styles.contains(id)
+                                   ? styles.at(id)
+                                   : LayerStyle{ice::themeColor(ice::ThemeRole::Border1), Qt::SolidPattern};
             auto *item = new QListWidgetItem(
                 QIcon(layerPreviewIcon(style)),
                 QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer.name)).arg(layer.number), list_);
@@ -1529,28 +1600,8 @@ class DocumentWindow : public QMainWindow {
         if (!accepted || name.trimmed().isEmpty())
             return;
         try {
-            const auto generic = genericSymbolLibrary();
-            const auto *sourceDefinition = findSymbolDefinition(generic, QStringLiteral("Voltage Source"));
-            if (!sourceDefinition)
-                throw ice::ProjectError("symbol.library", "Symbol library does not provide a Voltage Source symbol");
             project_->execute("create schematic", [&](ice::Project &project) {
-                const auto cell = ice::createSchematicCell(project, name.trimmed().toStdString());
-                const auto symbol =
-                    ice::addSymbol(project, cell, "Voltage Source", sourceDefinition->svg.toStdString());
-                auto &source = project.schematicCells.at(cell).symbols.at(symbol);
-                for (auto pin : sourceDefinition->pins) {
-                    pin.id = project.nextId();
-                    pin.direction = pin.x < 0   ? ice::PinDirection::left
-                                    : pin.x > 0 ? ice::PinDirection::right
-                                    : pin.y > 0 ? ice::PinDirection::up
-                                                : ice::PinDirection::down;
-                    source.pins.push_back(std::move(pin));
-                }
-                const auto instanceId = ice::addSchematicInstance(project, cell, symbol, "V1", 0, 0);
-                // Seed default parameters (voltage) like interactive placement
-                // does, so the starter source is immediately configurable.
-                auto &sourceInstance = project.schematicCells.at(cell).instances.at(instanceId);
-                ice::seedDefaultParameters(project, sourceInstance, instanceDefaults(*sourceDefinition));
+                ice::createSchematicCell(project, name.trimmed().toStdString());
             });
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Schematic created"));
@@ -1701,8 +1752,9 @@ class DocumentWindow : public QMainWindow {
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
         for (const auto &[id, shape] : cellIt->second.shapes) {
-            const auto style =
-                styles.contains(shape.layer) ? styles.at(shape.layer) : LayerStyle{QColor("#777777"), Qt::SolidPattern};
+            const auto style = styles.contains(shape.layer)
+                                   ? styles.at(shape.layer)
+                                   : LayerStyle{ice::themeColor(ice::ThemeRole::Border1), Qt::SolidPattern};
             const QPen pen(style.color, 1);
             QBrush brush(QColor(style.color.red(), style.color.green(), style.color.blue(), 110), style.pattern);
             if (style.pattern == Qt::NoBrush)
@@ -1724,12 +1776,8 @@ class DocumentWindow : public QMainWindow {
             item->setFlag(QGraphicsItem::ItemIsMovable);
             item->setToolTip(QStringLiteral("Shape %1").arg(id));
         }
-        const auto bounds = layoutCanvas_->scene()->itemsBoundingRect();
-        if (!bounds.isNull() && bounds.isValid())
-            layoutCanvas_->setContentRect(bounds);
         if (!layoutViewInitialized_) {
-            layoutCanvas_->setInitialView(bounds.isNull() ? layoutCanvas_->scene()->sceneRect()
-                                                          : bounds.adjusted(-100, -100, 100, 100));
+            layoutCanvas_->fitToContent();
             layoutViewInitialized_ = true;
         }
     }
@@ -2578,7 +2626,10 @@ class DocumentWindow : public QMainWindow {
         auto *scene = schematicCanvas_->scene();
         scene->clear();
         if (!project_ || project_->project().schematicCells.empty()) {
-            scene->addText(QStringLiteral("No schematic cell.\nUse Project → Create Schematic."));
+            auto *placeholderText =
+                scene->addText(QStringLiteral("No schematic cell.\nUse Project → Create Schematic."));
+            placeholderText->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
+            placeholderText->setData(0, QStringLiteral("canvas-placeholder"));
             return;
         }
         auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
@@ -2587,12 +2638,15 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project_->project().schematicCells.end())
             return;
         const auto &cell = cellIt->second;
-        scene->addText(QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)))->setPos(-900, -900);
+        auto *cellTitle = scene->addText(QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
+        cellTitle->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
+        cellTitle->setPos(-900, -900);
+        cellTitle->setData(0, QStringLiteral("canvas-title"));
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
                 continue;
             auto *label = scene->addText(QString::fromStdString(net.name));
-            label->setDefaultTextColor(Qt::darkBlue);
+            label->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Accent5));
             label->setData(0, QStringLiteral("net-label"));
             label->setData(1, QVariant::fromValue<qulonglong>(netId));
             label->setPos(net.x, -net.y);
@@ -2638,19 +2692,19 @@ class DocumentWindow : public QMainWindow {
             artwork->setFlag(QGraphicsItem::ItemIsSelectable, false);
             artwork->setData(0, QStringLiteral("symbol-artwork"));
             auto *tint = new QGraphicsColorizeEffect(artwork);
-            tint->setColor(QColor(symbolHighlightColor));
+            tint->setColor(ice::themeColor(ice::ThemeRole::Axis1));
             tint->setStrength(1.0);
-            tint->setEnabled(false);
+            tint->setEnabled(true);
             artwork->setGraphicsEffect(tint);
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
-            label->setDefaultTextColor(Qt::black);
+            label->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
             label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
             label->setData(0, QStringLiteral("symbol-label"));
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
-                pinItem->setPen(QPen(Qt::darkYellow));
-                pinItem->setBrush(QBrush(Qt::yellow));
+                pinItem->setPen(QPen(ice::themeColor(ice::ThemeRole::Axis1)));
+                pinItem->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
                 pinItem->setFlag(QGraphicsItem::ItemIsSelectable, false);
                 pinItem->setData(0, QStringLiteral("pin"));
                 pinItem->setData(1, QVariant::fromValue<qulonglong>(pin.id));
@@ -2662,8 +2716,8 @@ class DocumentWindow : public QMainWindow {
             // follows the symbol and its transform.
             if (const auto bounds = symbolHighlightRect(group); !bounds.isNull()) {
                 auto *highlight = new QGraphicsRectItem(bounds, group);
-                highlight->setPen(QPen(QColor(symbolHighlightColor), 2));
-                QColor fill(symbolHighlightColor);
+                highlight->setPen(QPen(ice::themeColor(ice::ThemeRole::Accent4), 2));
+                QColor fill(ice::themeColor(ice::ThemeRole::Accent4));
                 fill.setAlpha(45);
                 highlight->setBrush(fill);
                 highlight->setZValue(-1);
@@ -2690,7 +2744,7 @@ class DocumentWindow : public QMainWindow {
             if (first != pinViews.end() && second != pinViews.end()) {
                 auto path = routeWire(first->second.point, first->second.direction, second->second.point,
                                       second->second.direction, scene, net.pins.front(), net.pins.back());
-                auto *wire = scene->addPath(path, QPen(QColor("#277da1"), 2));
+                auto *wire = scene->addPath(path, QPen(ice::themeColor(ice::ThemeRole::Accent4), 2));
                 wire->setZValue(-1);
                 wire->setData(0, QStringLiteral("wire"));
             }
@@ -2856,6 +2910,48 @@ class DocumentWindow : public QMainWindow {
         return action;
     }
 
+    void refreshTheme() {
+        auto &theme = ice::Theme::instance();
+        theme.save();
+        theme.applyToApplication();
+        const auto canvas = ice::themeColor(ice::ThemeRole::Background2);
+        if (schematicCanvas_)
+            schematicCanvas_->setBackgroundBrush(canvas);
+        if (layoutCanvas_)
+            layoutCanvas_->setBackgroundBrush(canvas);
+        // Scene items cache their colors, so rebuild both editors after a
+        // palette change; the canvas transform and selection are preserved.
+        refreshSchematic();
+        refreshLayout();
+        if (graphTabs_) {
+            for (int index = 0; index < graphTabs_->count(); ++index)
+                if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
+                    plot->update();
+        }
+        update();
+    }
+
+    void editTheme() {
+        ice::ThemeDialog dialog(this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        refreshTheme();
+        statusBar()->showMessage(QStringLiteral("Theme palette updated"));
+    }
+
+    void applyThemePreset(ice::ThemePreset preset) {
+        ice::Theme::instance().applyPreset(preset);
+        refreshTheme();
+        statusBar()->showMessage(preset == ice::ThemePreset::Dark ? QStringLiteral("Dark theme applied")
+                                                                  : QStringLiteral("Light theme applied"));
+    }
+
+    void resetTheme() {
+        ice::Theme::instance().resetToDefaults();
+        refreshTheme();
+        statusBar()->showMessage(QStringLiteral("Theme reset to defaults"));
+    }
+
     void createMenus() {
         auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
         auto *newAction = addCommand(QStringLiteral("New Project"), QKeySequence::New);
@@ -2924,6 +3020,30 @@ class DocumentWindow : public QMainWindow {
         toolsMenu->addAction(addCommand(QStringLiteral("Run PEX")));
         toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
 
+        auto *settingsMenu = menuBar()->addMenu(QStringLiteral("&Settings"));
+        auto *themeMenu = settingsMenu->addMenu(QStringLiteral("Theme"));
+        auto *darkThemeAction = addCommand(QStringLiteral("Dark Theme"));
+        auto *lightThemeAction = addCommand(QStringLiteral("Light Theme"));
+        for (auto *action : {darkThemeAction, lightThemeAction}) {
+            action->setCheckable(true);
+            themeMenu->addAction(action);
+        }
+        auto *themeGroup = new QActionGroup(this);
+        themeGroup->setExclusive(true);
+        themeGroup->addAction(darkThemeAction);
+        themeGroup->addAction(lightThemeAction);
+        if (ice::Theme::instance().preset() == ice::ThemePreset::Dark)
+            darkThemeAction->setChecked(true);
+        else
+            lightThemeAction->setChecked(true);
+        settingsMenu->addSeparator();
+        auto *themeAction = addCommand(QStringLiteral("Theme Palette…"));
+        settingsMenu->addAction(themeAction);
+        auto *resetThemeAction = addCommand(QStringLiteral("Reset Theme"));
+        settingsMenu->addAction(resetThemeAction);
+        connect(darkThemeAction, &QAction::triggered, this, [this] { applyThemePreset(ice::ThemePreset::Dark); });
+        connect(lightThemeAction, &QAction::triggered, this, [this] { applyThemePreset(ice::ThemePreset::Light); });
+
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
         helpMenu->addAction(addCommand(QStringLiteral("Keyboard Shortcuts")));
         helpMenu->addAction(addCommand(QStringLiteral("About ICE")));
@@ -2940,6 +3060,8 @@ class DocumentWindow : public QMainWindow {
         connect(managePackagesAction, &QAction::triggered, this, &DocumentWindow::managePackages);
         connect(placeSymbolAction, &QAction::triggered, this, &DocumentWindow::placeSymbol);
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
+        connect(themeAction, &QAction::triggered, this, &DocumentWindow::editTheme);
+        connect(resetThemeAction, &QAction::triggered, this, &DocumentWindow::resetTheme);
     }
 
     void showCommandPalette() {
@@ -3368,7 +3490,7 @@ class DocumentWindow : public QMainWindow {
                 });
             view = layoutCanvas_;
         }
-        view->setBackgroundBrush(QColor(QStringLiteral("#ffffff")));
+        view->setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
         view->setAlignment(Qt::AlignCenter);
         view->setAccessibleName(title);
         splitter->addWidget(view);
@@ -3404,7 +3526,15 @@ class DocumentWindow : public QMainWindow {
             });
         }
         addTool(QStyle::SP_DialogResetButton, QStringLiteral("Pan"));
-        addTool(QStyle::SP_BrowserReload, QStringLiteral("Zoom to fit"));
+        auto *fitTool = addTool(QStyle::SP_BrowserReload, QStringLiteral("Fit to view"));
+        connect(fitTool, &QAction::triggered, this, [this, layoutEditor] {
+            if (layoutEditor) {
+                if (layoutCanvas_)
+                    layoutCanvas_->fitToContent();
+            } else if (schematicCanvas_) {
+                schematicCanvas_->fitToContent();
+            }
+        });
         toolbar->addSeparator();
         addTool(QStyle::SP_FileDialogDetailedView, QStringLiteral("Grid and snapping"));
         addTool(QStyle::SP_DesktopIcon, QStringLiteral("Toggle visibility"));
@@ -3484,8 +3614,12 @@ class DocumentWindow : public QMainWindow {
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    app.setOrganizationName(QStringLiteral("ICE"));
     app.setApplicationName(QStringLiteral("ICE"));
     app.setApplicationVersion(QString::fromStdString(ice::version()));
+    QApplication::setStyle(QStringLiteral("Fusion"));
+    ice::Theme::instance().load();
+    ice::Theme::instance().applyToApplication();
 
     DocumentWindow window;
     if (argc == 3 && std::string(argv[1]) == "--project") {

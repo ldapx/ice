@@ -85,15 +85,6 @@ const std::vector<SymbolDefinition> &ihpSymbolLibrary() {
     return definitions;
 }
 
-const SymbolDefinition *findSymbolDefinition(const std::vector<SymbolDefinition> &library, const QString &name) {
-    const auto it =
-        std::find_if(library.begin(), library.end(), [&](const auto &symbol) { return symbol.name == name; });
-    return it == library.end() ? nullptr : &*it;
-}
-
-// Default parameters for a new instance. A voltage source must always carry a
-// voltage value, even when the installed symbol library predates default
-// parameter support or its sidecar omits the entry.
 std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition) {
     auto parameters = definition.parameters;
     if (definition.name == QStringLiteral("Voltage Source")) {
