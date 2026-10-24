@@ -8,8 +8,10 @@ collection (MIT, (c) 2023 Sam Gallagher); the waveform source, current source,
 and inductor symbols are original ICE artwork. See `symbols/ATTRIBUTION.md` for
 sources and modifications. No symbol artwork is hardcoded in the application.
 
-Use **Project → Place Symbol** or press `P` in the editor. Symbols are stored in
-the canonical schematic model with stable IDs and explicit pin IDs, so placement,
+Use **Project → Place Symbol** or press `P` in the editor. The symbol browser
+groups symbols into category tabs, supports name/category search, and shows an
+SVG preview plus the symbol's default parameters. Symbols are stored in the
+canonical schematic model with stable IDs and explicit pin IDs, so placement,
 movement, deletion, and connections survive project save/reload.
 
 ## Symbols

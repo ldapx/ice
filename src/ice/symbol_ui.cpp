@@ -3,24 +3,39 @@
 #include "icelib/operations.hpp"
 #include "icelib/symbols.hpp"
 
+#include "theme.hpp"
+
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QSpinBox>
+#include <QSplitter>
+#include <QStringList>
+#include <QSvgRenderer>
+#include <QSvgWidget>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <set>
 
 std::filesystem::path symbolLibraryDirectory() {
@@ -116,29 +131,261 @@ std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &
     }
 }
 
-SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, bool ihpEnabled, QWidget *parent)
-    : QDialog(parent), generic_(std::move(generic)) {
-    setWindowTitle(QStringLiteral("Symbol Library"));
-    resize(520, 420);
-    auto *layout = new QVBoxLayout(this);
-    list_ = new QListWidget;
-    for (const auto &symbol : generic_)
-        list_->addItem(symbol.category + QStringLiteral(" / ") + symbol.name);
-    if (ihpEnabled)
-        for (const auto &symbol : ihpSymbolLibrary())
-            list_->addItem(symbol.category + QStringLiteral(" / ") + symbol.name);
-    layout->addWidget(list_);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    list_->setCurrentRow(0);
+void SymbolPreview::paintEvent(QPaintEvent *) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    if (!renderer()->isValid())
+        return;
+    const auto artworkSize = renderer()->defaultSize();
+    if (artworkSize.isEmpty())
+        return;
+    const auto available = QRectF(rect()).adjusted(8, 8, -8, -8);
+    const qreal scale = std::min(available.width() / artworkSize.width(), available.height() / artworkSize.height());
+    const QSizeF scaledSize(artworkSize.width() * scale, artworkSize.height() * scale);
+    const QRectF target(available.center().x() - scaledSize.width() / 2.0,
+                        available.center().y() - scaledSize.height() / 2.0, scaledSize.width(), scaledSize.height());
+
+    // Render the artwork offscreen, then tint it with the theme axis color.
+    // This mirrors the schematic editor, where symbol strokes are colorized so
+    // they remain visible on both dark and light canvases.
+    const qreal ratio = devicePixelRatioF();
+    const QSize pixelSize(static_cast<int>(std::ceil(target.width() * ratio)),
+                          static_cast<int>(std::ceil(target.height() * ratio)));
+    QImage artwork(pixelSize, QImage::Format_ARGB32_Premultiplied);
+    artwork.setDevicePixelRatio(ratio);
+    artwork.fill(Qt::transparent);
+    {
+        QPainter artworkPainter(&artwork);
+        artworkPainter.setRenderHint(QPainter::Antialiasing);
+        renderer()->render(&artworkPainter, QRectF(QPointF(0.0, 0.0), QSizeF(target.size())));
+    }
+    {
+        QPainter tintPainter(&artwork);
+        tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tintPainter.fillRect(artwork.rect(), ice::themeColor(ice::ThemeRole::Axis1));
+    }
+    painter.drawImage(target.topLeft(), artwork);
 }
 
-const SymbolDefinition &SymbolLibraryDialog::selected() const {
-    if (list_->currentRow() < static_cast<int>(generic_.size()))
-        return generic_.at(list_->currentRow());
-    return ihpSymbolLibrary().at(list_->currentRow() - static_cast<int>(generic_.size()));
+SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, bool ihpEnabled, QWidget *parent)
+    : QDialog(parent), symbols_(std::move(generic)) {
+    if (ihpEnabled) {
+        const auto &ihp = ihpSymbolLibrary();
+        symbols_.insert(symbols_.end(), ihp.begin(), ihp.end());
+    }
+
+    setWindowTitle(QStringLiteral("Symbol Library"));
+    resize(960, 620);
+    setMinimumSize(720, 480);
+
+    auto *layout = new QVBoxLayout(this);
+    auto *searchRow = new QHBoxLayout;
+    searchRow->addWidget(new QLabel(QStringLiteral("Search:")));
+    search_ = new QLineEdit;
+    search_->setPlaceholderText(QStringLiteral("Search by symbol or category…"));
+    search_->setClearButtonEnabled(true);
+    search_->setAccessibleName(QStringLiteral("Symbol search"));
+    searchRow->addWidget(search_, 1);
+    layout->addLayout(searchRow);
+
+    auto *splitter = new QSplitter(Qt::Horizontal);
+    auto *browser = new QWidget;
+    auto *browserLayout = new QVBoxLayout(browser);
+    browserLayout->setContentsMargins(0, 0, 0, 0);
+    tabs_ = new QTabWidget;
+    tabs_->setDocumentMode(true);
+    tabs_->setUsesScrollButtons(true);
+    tabs_->setElideMode(Qt::ElideRight);
+    browserLayout->addWidget(tabs_, 1);
+    noResults_ = new QLabel(QStringLiteral("No matching symbols."));
+    noResults_->setAlignment(Qt::AlignCenter);
+    noResults_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    noResults_->setVisible(false);
+    browserLayout->addWidget(noResults_);
+    splitter->addWidget(browser);
+
+    auto *previewPanel = new QWidget;
+    auto *previewLayout = new QVBoxLayout(previewPanel);
+    previewLayout->setContentsMargins(8, 0, 0, 0);
+    symbolName_ = new QLabel;
+    auto nameFont = symbolName_->font();
+    nameFont.setBold(true);
+    nameFont.setPointSize(nameFont.pointSize() + 4);
+    symbolName_->setFont(nameFont);
+    symbolName_->setWordWrap(true);
+    previewLayout->addWidget(symbolName_);
+    symbolCategory_ = new QLabel;
+    symbolCategory_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    previewLayout->addWidget(symbolCategory_);
+    symbolPins_ = new QLabel;
+    previewLayout->addWidget(symbolPins_);
+
+    auto *previewFrame = new QFrame;
+    previewFrame->setObjectName(QStringLiteral("symbolPreviewFrame"));
+    previewFrame->setMinimumSize(260, 220);
+    previewFrame->setStyleSheet(
+        QStringLiteral("#symbolPreviewFrame { background: %1; border: 1px solid %2; "
+                       "border-radius: 4px; }")
+            .arg(ice::themeColor(ice::ThemeRole::Background2).name(), ice::themeColor(ice::ThemeRole::Border1).name()));
+    auto *previewFrameLayout = new QVBoxLayout(previewFrame);
+    preview_ = new SymbolPreview;
+    preview_->setMinimumSize(240, 200);
+    preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    previewFrameLayout->addWidget(preview_);
+    previewLayout->addWidget(previewFrame, 1);
+
+    previewLayout->addWidget(new QLabel(QStringLiteral("Default parameters")));
+    symbolParameters_ = new QLabel;
+    symbolParameters_->setWordWrap(true);
+    symbolParameters_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    previewLayout->addWidget(symbolParameters_);
+    splitter->addWidget(previewPanel);
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 2);
+    splitter->setSizes({540, 340});
+    layout->addWidget(splitter, 1);
+
+    buttons_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons_);
+    connect(buttons_, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    const auto categoryRank = [](const QString &category) {
+        static const QStringList preferred = {QStringLiteral("Passive"),       QStringLiteral("Sources"),
+                                              QStringLiteral("Semiconductor"), QStringLiteral("Power"),
+                                              QStringLiteral("Analog"),        QStringLiteral("Transistor")};
+        const auto index = preferred.indexOf(category);
+        if (index >= 0)
+            return static_cast<int>(index);
+        return category.startsWith(QStringLiteral("IHP")) ? static_cast<int>(preferred.size())
+                                                          : static_cast<int>(preferred.size()) + 1;
+    };
+    const auto categoryLess = [categoryRank](const QString &left, const QString &right) {
+        const auto leftRank = categoryRank(left);
+        const auto rightRank = categoryRank(right);
+        if (leftRank != rightRank)
+            return leftRank < rightRank;
+        return left.compare(right, Qt::CaseInsensitive) < 0;
+    };
+    std::map<QString, std::vector<std::size_t>, decltype(categoryLess)> categories(categoryLess);
+    for (std::size_t index = 0; index < symbols_.size(); ++index) {
+        const auto category =
+            symbols_[index].category.isEmpty() ? QStringLiteral("Uncategorized") : symbols_[index].category;
+        categories[category].push_back(index);
+    }
+    for (const auto &[category, indices] : categories) {
+        auto *list = new QListWidget;
+        list->setAccessibleName(QStringLiteral("%1 symbols").arg(category));
+        for (const auto index : indices) {
+            auto *item = new QListWidgetItem(symbols_[index].name, list);
+            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(index));
+        }
+        tabs_->addTab(list, category);
+        connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *current, QListWidgetItem *) {
+            if (current && !current->isHidden())
+                updatePreview(static_cast<std::size_t>(current->data(Qt::UserRole).toULongLong()));
+        });
+    }
+    connect(tabs_, &QTabWidget::currentChanged, this, [this](int) { showCurrentTab(); });
+    connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
+    connect(search_, &QLineEdit::returnPressed, this, [this] {
+        if (auto *ok = buttons_->button(QDialogButtonBox::Ok); ok && ok->isEnabled())
+            accept();
+    });
+    if (tabs_->count() > 0)
+        tabs_->setCurrentIndex(0);
+    showCurrentTab();
+    search_->setFocus();
+}
+
+const SymbolDefinition &SymbolLibraryDialog::selected() const { return symbols_.at(selectedIndex_); }
+
+QListWidget *SymbolLibraryDialog::currentList() const { return qobject_cast<QListWidget *>(tabs_->currentWidget()); }
+
+void SymbolLibraryDialog::showCurrentTab() {
+    auto *list = currentList();
+    if (!list)
+        return;
+    auto *current = list->currentItem();
+    if (!current || current->isHidden()) {
+        for (int index = 0; index < list->count(); ++index) {
+            auto *candidate = list->item(index);
+            if (!candidate->isHidden()) {
+                list->setCurrentItem(candidate);
+                return;
+            }
+        }
+    }
+    if (current && !current->isHidden())
+        updatePreview(static_cast<std::size_t>(current->data(Qt::UserRole).toULongLong()));
+}
+
+void SymbolLibraryDialog::updatePreview(std::size_t index) {
+    if (index >= symbols_.size())
+        return;
+    selectedIndex_ = index;
+    const auto &symbol = symbols_[index];
+    symbolName_->setText(symbol.name);
+    symbolCategory_->setText(symbol.category.isEmpty() ? QStringLiteral("Uncategorized") : symbol.category);
+    symbolPins_->setText(QStringLiteral("Pins: %1").arg(symbol.pins.size()));
+
+    QString parameters;
+    for (const auto &parameter : symbol.parameters) {
+        if (!parameters.isEmpty())
+            parameters += QLatin1Char('\n');
+        parameters += QStringLiteral("%1 = %2").arg(QString::fromStdString(parameter.name),
+                                                    QString::fromStdString(parameter.value));
+    }
+    symbolParameters_->setText(parameters.isEmpty() ? QStringLiteral("No default parameters") : parameters);
+    preview_->load(symbol.svg.toUtf8());
+}
+
+void SymbolLibraryDialog::applyFilter(const QString &text) {
+    const auto needle = text.trimmed();
+    bool anyVisible = false;
+    int firstVisibleTab = -1;
+    for (int tab = 0; tab < tabs_->count(); ++tab) {
+        auto *list = qobject_cast<QListWidget *>(tabs_->widget(tab));
+        if (!list)
+            continue;
+        const bool categoryMatches = tabs_->tabText(tab).contains(needle, Qt::CaseInsensitive);
+        bool tabVisible = false;
+        for (int row = 0; row < list->count(); ++row) {
+            auto *item = list->item(row);
+            const bool visible =
+                needle.isEmpty() || categoryMatches || item->text().contains(needle, Qt::CaseInsensitive);
+            item->setHidden(!visible);
+            tabVisible = tabVisible || visible;
+        }
+        tabs_->setTabVisible(tab, tabVisible);
+        if (tabVisible) {
+            anyVisible = true;
+            if (firstVisibleTab < 0)
+                firstVisibleTab = tab;
+        }
+    }
+
+    tabs_->setVisible(anyVisible);
+    noResults_->setVisible(!anyVisible);
+    if (auto *ok = buttons_->button(QDialogButtonBox::Ok))
+        ok->setEnabled(anyVisible);
+    if (!anyVisible)
+        return;
+    if (!tabs_->isTabVisible(tabs_->currentIndex()))
+        tabs_->setCurrentIndex(firstVisibleTab);
+    auto *list = currentList();
+    if (!list)
+        return;
+    auto *current = list->currentItem();
+    if (current && !current->isHidden())
+        return;
+    for (int row = 0; row < list->count(); ++row) {
+        auto *candidate = list->item(row);
+        if (!candidate->isHidden()) {
+            list->setCurrentItem(candidate);
+            return;
+        }
+    }
 }
 
 SymbolPropertiesDialog::SymbolPropertiesDialog(const std::string &symbolName, const ice::SchematicInstance &instance,
