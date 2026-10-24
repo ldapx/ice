@@ -51,10 +51,12 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QSvgRenderer>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -611,8 +613,7 @@ class SchematicCanvas : public QGraphicsView {
         QRectF bounds;
         for (auto *item : scene()->items()) {
             const auto kind = item->data(0).toString();
-            if (!item->parentItem() && kind != QStringLiteral("canvas-title") &&
-                kind != QStringLiteral("canvas-placeholder"))
+            if (!item->parentItem() && kind != QStringLiteral("canvas-title"))
                 bounds |= item->sceneBoundingRect();
         }
         if (!bounds.isValid() || bounds.isNull()) {
@@ -660,6 +661,20 @@ class SchematicCanvas : public QGraphicsView {
     }
 
   protected:
+    void showEvent(QShowEvent *event) override {
+        QGraphicsView::showEvent(event);
+        if (viewInitialized_)
+            return;
+        // Defer one event-loop turn: the tab/widget layout is finalized after
+        // showEvent, and centering earlier leaves the origin slightly offset.
+        QTimer::singleShot(0, this, [this] {
+            if (viewInitialized_)
+                return;
+            viewInitialized_ = true;
+            applyNavigationTransform();
+        });
+    }
+
     void mousePressEvent(QMouseEvent *event) override {
         if (event->button() == Qt::MiddleButton) {
             panning_ = true;
@@ -939,6 +954,7 @@ class SchematicCanvas : public QGraphicsView {
     std::function<void(ice::ObjectId)> symbolActivated_;
     bool netLabelMode_ = false;
     ice::ObjectId selectedInstance_ = 0;
+    bool viewInitialized_ = false;
     qreal zoom_ = 1.0;
     QPointF centerScene_;
 };
@@ -2641,13 +2657,8 @@ class DocumentWindow : public QMainWindow {
             return;
         auto *scene = schematicCanvas_->scene();
         scene->clear();
-        if (!project_ || project_->project().schematicCells.empty()) {
-            auto *placeholderText =
-                scene->addText(QStringLiteral("No schematic cell.\nUse Project → Create Schematic."));
-            placeholderText->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
-            placeholderText->setData(0, QStringLiteral("canvas-placeholder"));
+        if (!project_ || project_->project().schematicCells.empty())
             return;
-        }
         auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
         if (cellIt == project_->project().schematicCells.end())
             cellIt = project_->project().schematicCells.begin();
@@ -3143,11 +3154,7 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->setContentsMargins(0, 0, 0, 0);
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
-        schematicEditorLayout->addWidget(
-            makeEditor(QStringLiteral("Schematic editor"),
-                       QStringLiteral("Schematic view\nPan, zoom, grid, snapping, symbols, pins, nets, and hierarchy"),
-                       false),
-            1);
+        schematicEditorLayout->addWidget(makeEditor(QStringLiteral("Schematic editor"), false), 1);
         schematicContentLayout->addWidget(schematicEditorColumn, 1);
         auto *schematicProperties = new QTabWidget;
         schematicPropertiesPanel_ = new PropertiesPanel;
@@ -3173,10 +3180,7 @@ class DocumentWindow : public QMainWindow {
         layoutEditorLayout->setContentsMargins(0, 0, 0, 0);
         layoutEditorLayout->setSpacing(0);
         layoutEditorLayout->addWidget(layoutCellTabs_);
-        layoutEditorLayout->addWidget(
-            makeEditor(QStringLiteral("Layout editor"),
-                       QStringLiteral("Layout view\nLayers, shapes, ports, instances, snapping, and geometry"), true),
-            1);
+        layoutEditorLayout->addWidget(makeEditor(QStringLiteral("Layout editor"), true), 1);
         layoutContentLayout->addWidget(layoutEditorColumn, 1);
         layersPanel_ = new LayersPanel;
         layoutContentLayout->addWidget(layersPanel_, 0);
@@ -3352,7 +3356,7 @@ class DocumentWindow : public QMainWindow {
         setCentralWidget(documents);
     }
 
-    QWidget *makeEditor(const QString &title, const QString &text, bool layoutEditor) {
+    QWidget *makeEditor(const QString &title, bool layoutEditor) {
         auto *editor = new QWidget;
         auto *editorLayout = new QVBoxLayout(editor);
         auto *splitter = new QSplitter(Qt::Vertical, editor);
@@ -3464,7 +3468,6 @@ class DocumentWindow : public QMainWindow {
                 refreshProject();
             };
             view = schematicCanvas_;
-            schematicCanvas_->scene()->addText(text);
         } else {
             layoutCanvas_ = new LayoutCanvas;
             layoutCanvas_->setCallbacks(
