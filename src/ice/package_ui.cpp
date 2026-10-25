@@ -3,7 +3,7 @@
 #include "icelib/core.hpp"
 
 #include "icons.hpp"
-#include "theme.hpp"
+#include "ui_colors.hpp"
 
 #include <QApplication>
 #include <QComboBox>
@@ -166,7 +166,7 @@ class MissingPackagesDialog : public QDialog {
 
         status_ = new QLabel;
         status_->setWordWrap(true);
-        status_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+        status_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
         layout->addWidget(status_);
 
         auto *buttons = new QHBoxLayout;
@@ -340,7 +340,7 @@ CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &instal
 
     pdkDescription_ = new QLabel;
     pdkDescription_->setWordWrap(true);
-    pdkDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    pdkDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(pdkDescription_);
     layout->addStretch();
 
@@ -402,7 +402,7 @@ PackageManagerDialog::PackageManagerDialog(PackageManagerOptions options, QWidge
     layout->addLayout(indexRow);
 
     installLocation_ = new QLabel;
-    installLocation_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    installLocation_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(installLocation_);
     updateInstallLocationLabel();
 
@@ -509,8 +509,7 @@ void PackageManagerDialog::rebuildPackageList() {
     if (entries_.empty()) {
         auto *empty = new QLabel(QStringLiteral("No indexed packages to display."));
         empty->setAlignment(Qt::AlignCenter);
-        empty->setStyleSheet(
-            QStringLiteral("color: %1; padding: 24px;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+        empty->setStyleSheet(QStringLiteral("color: %1; padding: 24px;").arg(ice::uiColor(ice::UiColor::Text2).name()));
         packageLayout_->addWidget(empty);
     } else {
         for (const auto &entry : entries_)
@@ -531,7 +530,7 @@ QPixmap PackageManagerDialog::packageLogoPixmap(const ice::PackageIndexEntry &en
     QPainterPath clip;
     clip.addRoundedRect(frame, 6.0, 6.0);
     painter.setClipPath(clip);
-    painter.fillRect(frame, ice::themeColor(ice::ThemeRole::Background2));
+    painter.fillRect(frame, ice::uiColor(ice::UiColor::Background2));
 
     const QPixmap source(QString::fromStdString(entry.logo.string()));
     if (!entry.logo.empty() && !source.isNull()) {
@@ -546,13 +545,13 @@ QPixmap PackageManagerDialog::packageLogoPixmap(const ice::PackageIndexEntry &en
         font.setBold(true);
         font.setPointSize(font.pointSize() + 10);
         painter.setFont(font);
-        painter.setPen(ice::themeColor(ice::ThemeRole::Text2));
+        painter.setPen(ice::uiColor(ice::UiColor::Text2));
         const auto name = QString::fromStdString(entry.spec.name);
         painter.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, name.left(2).toUpper());
     }
 
     painter.setClipping(false);
-    painter.setPen(ice::themeColor(ice::ThemeRole::Border1));
+    painter.setPen(ice::uiColor(ice::UiColor::Border1));
     painter.drawRoundedRect(frame, 6.0, 6.0);
     return canvas;
 }
@@ -592,9 +591,9 @@ QWidget *PackageManagerDialog::createPackageCard(const ice::PackageIndexEntry &e
     card->setObjectName(QStringLiteral("packageCard"));
     card->setStyleSheet(QStringLiteral("#packageCard { background: %1; border: 1px solid %2; border-radius: 7px; } "
                                        "#packageLogo { background: %3; border: 1px solid %2; border-radius: 6px; }")
-                            .arg(ice::themeColor(ice::ThemeRole::Surface1).name(),
-                                 ice::themeColor(ice::ThemeRole::Border1).name(),
-                                 ice::themeColor(ice::ThemeRole::Background2).name()));
+                            .arg(ice::uiColor(ice::UiColor::Surface1).name(),
+                                 ice::uiColor(ice::UiColor::Border1).name(),
+                                 ice::uiColor(ice::UiColor::Background2).name()));
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     auto *row = new QHBoxLayout(card);
@@ -621,12 +620,12 @@ QWidget *PackageManagerDialog::createPackageCard(const ice::PackageIndexEntry &e
     name->setFont(nameFont);
     titleRow->addWidget(name);
     auto *version = new QLabel(QStringLiteral("v%1").arg(QString::fromStdString(entry.spec.version)));
-    version->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    version->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     titleRow->addWidget(version);
     if (installed) {
         auto *badge = new QLabel(QStringLiteral("Installed %1").arg(QString::fromStdString(installed->version)));
         badge->setStyleSheet(
-            QStringLiteral("color: %1; font-weight: 600;").arg(ice::themeColor(ice::ThemeRole::Accent3).name()));
+            QStringLiteral("color: %1; font-weight: 600;").arg(ice::uiColor(ice::UiColor::Accent3).name()));
         titleRow->addWidget(badge);
     }
     titleRow->addStretch();
@@ -652,7 +651,7 @@ QWidget *PackageManagerDialog::createPackageCard(const ice::PackageIndexEntry &e
         details << QStringLiteral("License: %1").arg(QString::fromStdString(entry.spec.license));
     auto *meta = new QLabel(details.join(QStringLiteral("  •  ")));
     meta->setWordWrap(true);
-    meta->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    meta->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     text->addWidget(meta);
     row->addLayout(text, 1);
 
@@ -797,5 +796,5 @@ void PackageManagerDialog::writeProjectLock(const ice::PackageSpec &spec) {
 
 void PackageManagerDialog::setStatus(const QString &message) {
     status_->setText(message);
-    status_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    status_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
 }

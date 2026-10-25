@@ -48,6 +48,11 @@ Panels should be dockable and replaceable without changing the core model. The
 `ice` executable links against `icelib` and must not duplicate the model used by
 `ice-cli`, `ice-pkg`, or `ice-mcp`.
 
+When no project is open, the central area shows a startup view with create and
+open project actions, recent projects, community links, and news. Document tabs
+and the activity dock appear once a project is loaded, and closing the project
+returns to the startup view.
+
 ## Document and project lifecycle
 
 The GUI should support:
@@ -154,34 +159,14 @@ layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
 
-## Theme palette
+## Styling
 
-The application palette is editable from **Settings → Theme Palette…** and is
-persisted with `QSettings`. **Settings → Theme → Dark Theme / Light Theme**
-applies either preset. The schematic canvas, layout canvas, and simulation
-plots use the same color as the application background (`background-2`).
-
-| Role | Dark preset | Light preset |
-| --- | --- | --- |
-| `accent-1` | `#fff47e` | `#b8860b` |
-| `accent-2` | `#fffde2` | `#a88f00` |
-| `accent-3` | `#6afdff` | `#008b8b` |
-| `accent-4` | `#828aff` | `#3f51b5` |
-| `accent-5` | `#9a16ff` | `#7a00cc` |
-| `accent-6` | `#bc4fff` | `#9c27b0` |
-| `background-1` | `#272730` | `#f2ead4` |
-| `background-2` | `#19191c` | `#fffde2` |
-| `surface-1` | `#31313c` | `#f7f0dc` |
-| `border-1` | `#464652` | `#c8b98a` |
-| `text-1` | `#fffde2` | `#272730` |
-| `text-2` | `#a8a8b3` | `#6b6b76` |
-| `text-on-accent` | `#19191c` | `#fffde2` |
-| `grid-1` | `#2a2a32` | `#e8e0c8` |
-| `grid-2` | `#383842` | `#cfc6aa` |
-| `axis-1` | `#9a9aa6` | `#272730` |
-
-All roles can be changed independently, and **Reset Theme** restores the
-current dark/light preset defaults.
+The application uses Qt's **Fusion** style. By default it follows the system
+appearance (light or dark) through the platform color scheme. **Settings →
+Appearance** allows overriding this with **System Theme**, **Light Theme**, or
+**Dark Theme**; the choice is persisted with `QSettings`. Custom-painted views
+such as the schematic, layout, and simulation plot derive their colors from the
+active QPalette so they stay consistent with the surrounding widgets.
 
 ## Interaction conventions
 

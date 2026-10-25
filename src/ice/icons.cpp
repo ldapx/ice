@@ -1,6 +1,6 @@
 #include "icons.hpp"
 
-#include "theme.hpp"
+#include "ui_colors.hpp"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -71,10 +71,10 @@ QPixmap renderIcon(const QByteArray &source, const QColor &color, int size) {
 
 QIcon buildIcon(const QByteArray &source, int size) {
     QIcon icon;
-    icon.addPixmap(renderIcon(source, themeColor(ThemeRole::Text1), size), QIcon::Normal, QIcon::Off);
-    icon.addPixmap(renderIcon(source, themeColor(ThemeRole::TextOnAccent), size), QIcon::Normal, QIcon::On);
-    icon.addPixmap(renderIcon(source, themeColor(ThemeRole::Text2), size), QIcon::Disabled, QIcon::Off);
-    icon.addPixmap(renderIcon(source, themeColor(ThemeRole::Text2), size), QIcon::Disabled, QIcon::On);
+    icon.addPixmap(renderIcon(source, uiColor(UiColor::Text1), size), QIcon::Normal, QIcon::Off);
+    icon.addPixmap(renderIcon(source, uiColor(UiColor::TextOnAccent), size), QIcon::Normal, QIcon::On);
+    icon.addPixmap(renderIcon(source, uiColor(UiColor::Text2), size), QIcon::Disabled, QIcon::Off);
+    icon.addPixmap(renderIcon(source, uiColor(UiColor::Text2), size), QIcon::Disabled, QIcon::On);
     return icon;
 }
 } // namespace
@@ -84,6 +84,31 @@ QIcon lucideIcon(const QString &name, int size) {
     if (source.isEmpty())
         return {};
     return buildIcon(source, size);
+}
+
+QPixmap appLogo(int size) {
+    static const QPixmap logo = [] {
+        const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+        const std::vector<std::filesystem::path> candidates = {
+            std::filesystem::path(appDir) / "logo.png",
+            std::filesystem::path(appDir) / "assets" / "logo.png",
+            std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "logo.png",
+#ifdef ICE_SOURCE_DIR
+            std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "logo.png",
+#endif
+            std::filesystem::path("assets") / "logo.png",
+            std::filesystem::path("/usr/share/ice/logo.png"),
+        };
+        for (const auto &candidate : candidates) {
+            std::error_code status;
+            if (std::filesystem::is_regular_file(candidate, status) && !status)
+                return QPixmap(QString::fromStdString(candidate.string()));
+        }
+        return QPixmap();
+    }();
+    if (logo.isNull() || size <= 0)
+        return logo;
+    return logo.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
 
 } // namespace ice

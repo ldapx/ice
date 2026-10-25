@@ -1,6 +1,6 @@
 #include "simulation_plot.hpp"
 
-#include "theme.hpp"
+#include "ui_colors.hpp"
 
 #include <QPaintEvent>
 #include <QPainter>
@@ -106,11 +106,11 @@ void SimulationPlot::clear() {
 void SimulationPlot::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     // Match the schematic/layout canvas instead of using a dark plot.
-    const auto canvasBackground = ice::themeColor(ice::ThemeRole::Background2);
-    const auto plotFrame = ice::themeColor(ice::ThemeRole::Axis1);
-    const auto axisText = ice::themeColor(ice::ThemeRole::Axis1);
-    const auto tickText = ice::themeColor(ice::ThemeRole::Axis1);
-    auto zeroLine = ice::themeColor(ice::ThemeRole::Axis1);
+    const auto canvasBackground = ice::uiColor(ice::UiColor::Background2);
+    const auto plotFrame = ice::uiColor(ice::UiColor::Axis1);
+    const auto axisText = ice::uiColor(ice::UiColor::Axis1);
+    const auto tickText = ice::uiColor(ice::UiColor::Axis1);
+    auto zeroLine = ice::uiColor(ice::UiColor::Axis1);
     zeroLine.setAlpha(110);
     painter.fillRect(rect(), canvasBackground);
     painter.setRenderHint(QPainter::Antialiasing);
@@ -196,7 +196,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     const auto yTicks = axisTicks(yMin, yMax, yIntervals);
 
     if (gridVisible_) {
-        painter.setPen(QPen(ice::themeColor(ice::ThemeRole::Grid1), 1));
+        painter.setPen(QPen(ice::uiColor(ice::UiColor::Grid1), 1));
         for (double value : xTicks) {
             const auto x = mapX(value);
             painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
@@ -235,11 +235,11 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
     }
 
-    // Accent palette, with the brightest cyan darkened for contrast on canvas.
-    auto cyan = ice::themeColor(ice::ThemeRole::Accent3);
+    // Palette-derived accent colors for the traces.
+    auto cyan = ice::uiColor(ice::UiColor::Accent3);
     cyan = cyan.darker(135);
-    const QColor colors[] = {ice::themeColor(ice::ThemeRole::Accent2), ice::themeColor(ice::ThemeRole::Accent4),
-                             ice::themeColor(ice::ThemeRole::Accent5), ice::themeColor(ice::ThemeRole::Accent6), cyan};
+    const QColor colors[] = {ice::uiColor(ice::UiColor::Accent2), ice::uiColor(ice::UiColor::Accent4),
+                             ice::uiColor(ice::UiColor::Accent5), ice::uiColor(ice::UiColor::Accent6), cyan};
     painter.save();
     painter.setClipRect(plot.adjusted(1, 1, -1, -1));
     for (std::size_t traceIndex = 0; traceIndex < result_.traces.size(); ++traceIndex) {

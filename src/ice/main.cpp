@@ -4,12 +4,12 @@
 #include "icelib/packages.hpp"
 #include "icelib/simulation.hpp"
 
+#include "appearance.hpp"
 #include "icons.hpp"
 #include "package_ui.hpp"
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
-#include "theme.hpp"
-#include "theme_dialog.hpp"
+#include "ui_colors.hpp"
 
 #include <QAbstractButton>
 #include <QAbstractItemView>
@@ -35,6 +35,7 @@
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -55,9 +56,13 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QShortcut>
 #include <QShowEvent>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
+#include <QStringList>
+#include <QStyleHints>
 #include <QSvgRenderer>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -211,7 +216,7 @@ std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project) 
 
 QPixmap layerPreviewIcon(const LayerStyle &style) {
     QPixmap pixmap(36, 18);
-    pixmap.fill(ice::themeColor(ice::ThemeRole::Background2));
+    pixmap.fill(ice::uiColor(ice::UiColor::Background2));
     QPainter painter(&pixmap);
     painter.setPen(QPen(style.color, 1));
     if (style.pattern != Qt::NoBrush)
@@ -223,7 +228,7 @@ QPixmap layerPreviewIcon(const LayerStyle &style) {
 }
 
 void drawCanvasAxes(QPainter &painter, const QRectF &exposed) {
-    QPen axisPen(ice::themeColor(ice::ThemeRole::Axis1));
+    QPen axisPen(ice::uiColor(ice::UiColor::Axis1));
     axisPen.setCosmetic(true);
     axisPen.setWidthF(1.2);
     painter.setPen(axisPen);
@@ -244,7 +249,7 @@ class LayoutCanvas : public QGraphicsView {
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
+        setBackgroundBrush(ice::uiColor(ice::UiColor::Background2));
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
         applyNavigationTransform();
     }
@@ -280,7 +285,7 @@ class LayoutCanvas : public QGraphicsView {
         const qreal minor = major / 5.0;
         const bool drawMinor = (right - left) * 5 + (bottom - top) * 5 <= 5000;
         if (drawMinor) {
-            QPen minorPen(ice::themeColor(ice::ThemeRole::Grid1));
+            QPen minorPen(ice::uiColor(ice::UiColor::Grid1));
             minorPen.setCosmetic(true);
             minorPen.setWidth(1);
             painter.setPen(minorPen);
@@ -293,7 +298,7 @@ class LayoutCanvas : public QGraphicsView {
             for (int y = minorTop; y <= minorBottom; ++y)
                 painter.drawLine(QPointF(exposed.left(), y * minor), QPointF(exposed.right(), y * minor));
         }
-        QPen majorPen(ice::themeColor(ice::ThemeRole::Grid2));
+        QPen majorPen(ice::uiColor(ice::UiColor::Grid2));
         majorPen.setCosmetic(true);
         majorPen.setWidth(1);
         painter.setPen(majorPen);
@@ -329,7 +334,7 @@ class LayoutCanvas : public QGraphicsView {
 
   protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override {
-        painter->fillRect(rect, ice::themeColor(ice::ThemeRole::Background2));
+        painter->fillRect(rect, ice::uiColor(ice::UiColor::Background2));
         drawGrid(*painter, rect, transform().m11());
         drawCanvasAxes(*painter, rect);
     }
@@ -348,7 +353,7 @@ class LayoutCanvas : public QGraphicsView {
 
         const qreal left = 14.0;
         const qreal bottom = viewport()->height() - 16.0;
-        const auto color = ice::themeColor(ice::ThemeRole::Axis1);
+        const auto color = ice::uiColor(ice::UiColor::Axis1);
         QPen pen(color);
         pen.setWidthF(2.0);
         painter.setPen(pen);
@@ -378,7 +383,7 @@ class LayoutCanvas : public QGraphicsView {
         if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton) {
             drawing_ = true;
             drawStart_ = mapToScene(event->pos());
-            const auto previewColor = ice::themeColor(ice::ThemeRole::Accent3);
+            const auto previewColor = ice::uiColor(ice::UiColor::Accent3);
             drawPreview_ =
                 scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1),
                                  QBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 50)));
@@ -542,10 +547,10 @@ void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
     if (auto *highlight = symbolChild(symbol, QStringLiteral("symbol-highlight")))
         highlight->setVisible(selected);
     if (auto *label = symbolChild(symbol, QStringLiteral("symbol-label")))
-        static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::themeColor(ice::ThemeRole::Accent4)
-                                                                              : ice::themeColor(ice::ThemeRole::Axis1));
+        static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
+                                                                              : ice::uiColor(ice::UiColor::Axis1));
     if (auto *effect = symbolArtworkEffect(symbol)) {
-        effect->setColor(selected ? ice::themeColor(ice::ThemeRole::Accent4) : ice::themeColor(ice::ThemeRole::Axis1));
+        effect->setColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1));
         effect->setEnabled(true);
     }
 }
@@ -574,10 +579,12 @@ class SchematicCanvas : public QGraphicsView {
         setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
         setRenderHint(QPainter::Antialiasing);
         setDragMode(QGraphicsView::RubberBandDrag);
+        setMouseTracking(true);
+        viewport()->setMouseTracking(true);
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
+        setBackgroundBrush(ice::uiColor(ice::UiColor::Background2));
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
         applyNavigationTransform();
     }
@@ -596,7 +603,43 @@ class SchematicCanvas : public QGraphicsView {
         symbolActivated_ = std::move(symbolActivated);
     }
 
-    void setNetLabelMode(bool enabled) { netLabelMode_ = enabled; }
+    void setNetLabelMode(bool enabled) {
+        netLabelMode_ = enabled;
+        if (enabled)
+            setCursor(Qt::CrossCursor);
+        else if (!placeSymbolMode_)
+            unsetCursor();
+        updatePinVisibility();
+    }
+
+    void setPlaceSymbolMode(bool enabled) {
+        placeSymbolMode_ = enabled;
+        if (enabled)
+            setCursor(Qt::CrossCursor);
+        else if (!netLabelMode_)
+            unsetCursor();
+        updatePinVisibility();
+    }
+
+    void setGridVisible(bool visible) {
+        gridVisible_ = visible;
+        viewport()->update();
+    }
+
+    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; }
+
+    void setSymbolPlacementCallback(std::function<void(QPointF)> callback) {
+        symbolPlacementRequested_ = std::move(callback);
+    }
+
+    void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
+
+    void setPlaceSymbolPreview(const QByteArray &artwork) {
+        placeSymbolArtwork_ = artwork;
+        viewport()->update();
+    }
+
+    void refreshPinVisibility() { updatePinVisibility(); }
 
     ice::ObjectId selectedInstanceId() const { return selectedInstance_; }
 
@@ -612,6 +655,15 @@ class SchematicCanvas : public QGraphicsView {
         applySelection(0);
         if (symbolSelected_)
             symbolSelected_(0);
+    }
+
+    void deleteSelectedSymbols() {
+        std::vector<ice::ObjectId> ids;
+        for (auto *item : scene()->selectedItems())
+            if (item->data(0).toString() == QStringLiteral("symbol"))
+                ids.push_back(item->data(1).toULongLong());
+        if (!ids.empty() && deleteSelected_)
+            deleteSelected_(ids);
     }
 
     void fitToContent() {
@@ -637,32 +689,68 @@ class SchematicCanvas : public QGraphicsView {
     }
 
     void drawBackground(QPainter *painter, const QRectF &rect) override {
-        painter->fillRect(rect, ice::themeColor(ice::ThemeRole::Background2));
-        const qreal step = 20.0;
-        QPen minor(ice::themeColor(ice::ThemeRole::Grid1));
-        minor.setWidthF(0.5);
-        painter->setPen(minor);
-        const int left = static_cast<int>(std::floor(rect.left() / step));
-        const int right = static_cast<int>(std::ceil(rect.right() / step));
-        const int top = static_cast<int>(std::floor(rect.top() / step));
-        const int bottom = static_cast<int>(std::ceil(rect.bottom() / step));
-        for (int x = left; x <= right; ++x)
-            painter->drawLine(QPointF(x * step, rect.top()), QPointF(x * step, rect.bottom()));
-        for (int y = top; y <= bottom; ++y)
-            painter->drawLine(QPointF(rect.left(), y * step), QPointF(rect.right(), y * step));
-        QPen major(ice::themeColor(ice::ThemeRole::Grid2));
-        major.setWidthF(1.0);
-        painter->setPen(major);
-        const auto majorStep = step * 5;
-        const int majorLeft = static_cast<int>(std::floor(rect.left() / majorStep));
-        const int majorRight = static_cast<int>(std::ceil(rect.right() / majorStep));
-        const int majorTop = static_cast<int>(std::floor(rect.top() / majorStep));
-        const int majorBottom = static_cast<int>(std::ceil(rect.bottom() / majorStep));
-        for (int x = majorLeft; x <= majorRight; ++x)
-            painter->drawLine(QPointF(x * majorStep, rect.top()), QPointF(x * majorStep, rect.bottom()));
-        for (int y = majorTop; y <= majorBottom; ++y)
-            painter->drawLine(QPointF(rect.left(), y * majorStep), QPointF(rect.right(), y * majorStep));
+        painter->fillRect(rect, ice::uiColor(ice::UiColor::Background2));
+        if (gridVisible_) {
+            const qreal step = 20.0;
+            QPen minor(ice::uiColor(ice::UiColor::Grid1));
+            minor.setWidthF(0.5);
+            painter->setPen(minor);
+            const int left = static_cast<int>(std::floor(rect.left() / step));
+            const int right = static_cast<int>(std::ceil(rect.right() / step));
+            const int top = static_cast<int>(std::floor(rect.top() / step));
+            const int bottom = static_cast<int>(std::ceil(rect.bottom() / step));
+            for (int x = left; x <= right; ++x)
+                painter->drawLine(QPointF(x * step, rect.top()), QPointF(x * step, rect.bottom()));
+            for (int y = top; y <= bottom; ++y)
+                painter->drawLine(QPointF(rect.left(), y * step), QPointF(rect.right(), y * step));
+            QPen major(ice::uiColor(ice::UiColor::Grid2));
+            major.setWidthF(1.0);
+            painter->setPen(major);
+            const auto majorStep = step * 5;
+            const int majorLeft = static_cast<int>(std::floor(rect.left() / majorStep));
+            const int majorRight = static_cast<int>(std::ceil(rect.right() / majorStep));
+            const int majorTop = static_cast<int>(std::floor(rect.top() / majorStep));
+            const int majorBottom = static_cast<int>(std::ceil(rect.bottom() / majorStep));
+            for (int x = majorLeft; x <= majorRight; ++x)
+                painter->drawLine(QPointF(x * majorStep, rect.top()), QPointF(x * majorStep, rect.bottom()));
+            for (int y = majorTop; y <= majorBottom; ++y)
+                painter->drawLine(QPointF(rect.left(), y * majorStep), QPointF(rect.right(), y * majorStep));
+        }
         drawCanvasAxes(*painter, rect);
+    }
+
+    void drawForeground(QPainter *painter, const QRectF &) override {
+        if (!placeSymbolMode_ || placeSymbolArtwork_.isEmpty() || !viewport()->underMouse())
+            return;
+        QSvgRenderer renderer(placeSymbolArtwork_);
+        if (!renderer.isValid())
+            return;
+        const auto artworkSize = renderer.defaultSize();
+        if (artworkSize.isEmpty())
+            return;
+        const auto center = snapScenePosition(cursorScenePosition_);
+        const QRectF target(center.x() - artworkSize.width() / 2.0, center.y() - artworkSize.height() / 2.0,
+                            artworkSize.width(), artworkSize.height());
+        const qreal ratio = devicePixelRatioF();
+        const QSize pixelSize(static_cast<int>(std::ceil(target.width() * ratio)),
+                              static_cast<int>(std::ceil(target.height() * ratio)));
+        QImage artwork(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        artwork.setDevicePixelRatio(ratio);
+        artwork.fill(Qt::transparent);
+        {
+            QPainter artworkPainter(&artwork);
+            artworkPainter.setRenderHint(QPainter::Antialiasing);
+            renderer.render(&artworkPainter, QRectF(QPointF(0.0, 0.0), target.size()));
+        }
+        {
+            QPainter tintPainter(&artwork);
+            tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            tintPainter.fillRect(artwork.rect(), ice::uiColor(ice::UiColor::Axis1));
+        }
+        painter->save();
+        painter->setOpacity(0.45);
+        painter->drawImage(target.topLeft(), artwork);
+        painter->restore();
     }
 
   protected:
@@ -689,18 +777,24 @@ class SchematicCanvas : public QGraphicsView {
             event->accept();
             return;
         }
+        if (placeSymbolMode_ && event->button() == Qt::LeftButton) {
+            if (symbolPlacementRequested_)
+                symbolPlacementRequested_(snapScenePosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::LeftButton) {
             auto *item = itemAt(event->pos());
             if (netLabelMode_ && (!item || item->data(0).toString() != QStringLiteral("pin"))) {
                 if (netLabelPlaced_)
-                    netLabelPlaced_(mapToScene(event->pos()));
-                netLabelMode_ = false;
+                    netLabelPlaced_(snapScenePosition(mapToScene(event->pos())));
                 event->accept();
                 return;
             }
             if (item && item->data(0).toString() == QStringLiteral("pin")) {
                 wireStart_ = item;
                 setPinHighlights(item);
+                updatePinVisibility();
                 event->accept();
                 return;
             }
@@ -728,6 +822,10 @@ class SchematicCanvas : public QGraphicsView {
     }
 
     void mouseMoveEvent(QMouseEvent *event) override {
+        cursorScenePosition_ = mapToScene(event->pos());
+        updatePinVisibility();
+        if (placeSymbolMode_)
+            viewport()->update();
         if (panning_) {
             const auto delta = event->pos() - panStartPosition_;
             centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
@@ -749,7 +847,7 @@ class SchematicCanvas : public QGraphicsView {
             if (!dragged_ && (std::abs(delta.x()) > 2.0 || std::abs(delta.y()) > 2.0))
                 dragged_ = true;
             if (dragged_)
-                dragged->setPos(dragOriginPosition_ + delta);
+                dragged->setPos(snapScenePosition(dragOriginPosition_ + delta));
             event->accept();
             return;
         }
@@ -786,13 +884,27 @@ class SchematicCanvas : public QGraphicsView {
             centerScene_ -= QPointF(-delta.x() / zoom_, delta.y() / zoom_);
         }
         applyNavigationTransform();
+        cursorScenePosition_ = mapToScene(event->position().toPoint());
+        updatePinVisibility();
+        if (placeSymbolMode_)
+            viewport()->update();
         event->accept();
+    }
+
+    void leaveEvent(QEvent *event) override {
+        for (auto *item : scene()->items())
+            if (item->data(0).toString() == QStringLiteral("pin"))
+                item->setVisible(false);
+        QGraphicsView::leaveEvent(event);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
         if (panning_ && event->button() == Qt::MiddleButton) {
             panning_ = false;
-            unsetCursor();
+            if (placeSymbolMode_)
+                setCursor(Qt::CrossCursor);
+            else
+                unsetCursor();
             event->accept();
             return;
         }
@@ -804,6 +916,7 @@ class SchematicCanvas : public QGraphicsView {
             }
             wireStart_ = nullptr;
             clearPinHighlights();
+            updatePinVisibility();
             event->accept();
             return;
         }
@@ -825,6 +938,12 @@ class SchematicCanvas : public QGraphicsView {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        if (event->key() == Qt::Key_Escape && (placeSymbolMode_ || netLabelMode_)) {
+            if (toolEscapeRequested_)
+                toolEscapeRequested_();
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_R && scene()) {
             for (auto *item : scene()->selectedItems())
                 if (item->data(0).toString() == QStringLiteral("symbol") && rotated_)
@@ -862,8 +981,8 @@ class SchematicCanvas : public QGraphicsView {
                 continue;
             auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item);
             if (pin)
-                pin->setBrush(item == source ? QBrush(ice::themeColor(ice::ThemeRole::Accent5))
-                                             : QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
+                pin->setBrush(item == source ? QBrush(ice::uiColor(ice::UiColor::Accent5))
+                                             : QBrush(ice::uiColor(ice::UiColor::Accent1)));
         }
     }
 
@@ -874,11 +993,11 @@ class SchematicCanvas : public QGraphicsView {
             auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item);
             if (!pin)
                 continue;
-            pin->setBrush(item == candidate && item != wireStart_ ? QBrush(ice::themeColor(ice::ThemeRole::Accent3))
-                                                                  : QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
+            pin->setBrush(item == candidate && item != wireStart_ ? QBrush(ice::uiColor(ice::UiColor::Accent3))
+                                                                  : QBrush(ice::uiColor(ice::UiColor::Accent1)));
         }
         if (auto *pin = dynamic_cast<QGraphicsEllipseItem *>(wireStart_))
-            pin->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent5)));
+            pin->setBrush(QBrush(ice::uiColor(ice::UiColor::Accent5)));
     }
 
     void clearPinHighlights() {
@@ -886,7 +1005,7 @@ class SchematicCanvas : public QGraphicsView {
             if (item->data(0).toString() != QStringLiteral("pin"))
                 continue;
             if (auto *pin = dynamic_cast<QGraphicsEllipseItem *>(item))
-                pin->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
+                pin->setBrush(QBrush(ice::uiColor(ice::UiColor::Accent1)));
         }
     }
 
@@ -942,6 +1061,28 @@ class SchematicCanvas : public QGraphicsView {
         return false;
     }
 
+    QPointF snapScenePosition(const QPointF &position) const {
+        if (!snapToGrid_)
+            return position;
+        constexpr qreal step = 20.0;
+        return {std::round(position.x() / step) * step, std::round(position.y() / step) * step};
+    }
+
+    void updatePinVisibility() {
+        const bool selectTool = !placeSymbolMode_ && !netLabelMode_;
+        const bool showAll = selectTool && wireStart_ != nullptr;
+        const bool cursorOver = viewport()->underMouse();
+        const qreal radius = 12.0 / std::max(zoom_, qreal(0.0001));
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() != QStringLiteral("pin"))
+                continue;
+            const bool visible =
+                selectTool &&
+                (showAll || (cursorOver && QLineF(cursorScenePosition_, item->scenePos()).length() <= radius));
+            item->setVisible(visible);
+        }
+    }
+
     bool panning_ = false;
     QPoint panStartPosition_;
     QPointF panStartCenterScene_;
@@ -958,6 +1099,13 @@ class SchematicCanvas : public QGraphicsView {
     std::function<void(ice::ObjectId)> symbolSelected_;
     std::function<void(ice::ObjectId)> symbolActivated_;
     bool netLabelMode_ = false;
+    bool placeSymbolMode_ = false;
+    bool gridVisible_ = true;
+    bool snapToGrid_ = true;
+    QByteArray placeSymbolArtwork_;
+    QPointF cursorScenePosition_;
+    std::function<void(QPointF)> symbolPlacementRequested_;
+    std::function<void()> toolEscapeRequested_;
     ice::ObjectId selectedInstance_ = 0;
     bool viewInitialized_ = false;
     qreal zoom_ = 1.0;
@@ -967,22 +1115,52 @@ class SchematicCanvas : public QGraphicsView {
 class ProjectPanel : public QWidget {
   public:
     explicit ProjectPanel(bool showLibraries = true, bool showLayers = true, bool showLayoutHierarchy = true,
-                          QWidget *parent = nullptr)
+                          bool showActions = false, QWidget *parent = nullptr)
         : QWidget(parent), showLayoutHierarchy_(showLayoutHierarchy) {
         auto *layout = new QVBoxLayout(this);
+        if (showActions) {
+            auto *searchRow = new QHBoxLayout;
+            search_ = new QLineEdit;
+            search_->setPlaceholderText(showLayoutHierarchy_ ? QStringLiteral("Search layouts…")
+                                                             : QStringLiteral("Search schematics…"));
+            search_->setClearButtonEnabled(true);
+            search_->setAccessibleName(showLayoutHierarchy_ ? QStringLiteral("Search layouts")
+                                                            : QStringLiteral("Search schematics"));
+            addButton_ = new QPushButton;
+            addButton_->setFixedWidth(28);
+            setLucideIcon(addButton_, QStringLiteral("plus"), 16);
+            removeButton_ = new QPushButton;
+            removeButton_->setFixedWidth(28);
+            setLucideIcon(removeButton_, QStringLiteral("trash"), 16);
+            removeButton_->setEnabled(false);
+            if (showLayoutHierarchy_) {
+                addButton_->setToolTip(QStringLiteral("Add layout cell"));
+                addButton_->setAccessibleName(QStringLiteral("Add layout cell"));
+                removeButton_->setToolTip(QStringLiteral("Remove selected layout cell"));
+                removeButton_->setAccessibleName(QStringLiteral("Remove selected layout cell"));
+            } else {
+                addButton_->setToolTip(QStringLiteral("Add schematic"));
+                addButton_->setAccessibleName(QStringLiteral("Add schematic"));
+                removeButton_->setToolTip(QStringLiteral("Remove selected schematic"));
+                removeButton_->setAccessibleName(QStringLiteral("Remove selected schematic"));
+            }
+            searchRow->addWidget(search_, 1);
+            searchRow->addWidget(addButton_);
+            searchRow->addWidget(removeButton_);
+            layout->addLayout(searchRow);
+        }
         tree_ = new QTreeWidget;
-        tree_->setHeaderLabel(QStringLiteral("Hierarchy"));
-        tree_->setAccessibleName(QStringLiteral("Project hierarchy"));
+        tree_->setHeaderLabel(showLayoutHierarchy_ ? QStringLiteral("Layouts") : QStringLiteral("Schematics"));
+        tree_->setAccessibleName(showLayoutHierarchy_ ? QStringLiteral("Layout hierarchy")
+                                                      : QStringLiteral("Schematic hierarchy"));
         layout->addWidget(tree_, 1);
 
-        auto *libraries = new QGroupBox(QStringLiteral("Libraries and PDK"));
-        auto *libraryLayout = new QVBoxLayout(libraries);
-        libraryLayout->addWidget(new QLabel(QStringLiteral("Packages")));
         packageList_ = new QListWidget;
         packageList_->setAccessibleName(QStringLiteral("Project package dependencies"));
-        libraryLayout->addWidget(packageList_);
-        if (showLibraries)
-            layout->addWidget(libraries);
+        if (showLibraries) {
+            layout->addWidget(heading(QStringLiteral("Packages")));
+            layout->addWidget(packageList_);
+        }
 
         auto *layers = new QGroupBox(QStringLiteral("Layers"));
         auto *layerLayout = new QVBoxLayout(layers);
@@ -991,7 +1169,26 @@ class ProjectPanel : public QWidget {
         layerLayout->addWidget(layerList_);
         if (showLayers)
             layout->addWidget(layers);
+
+        if (search_)
+            connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
+        if (addButton_)
+            connect(addButton_, &QPushButton::clicked, this, [this] {
+                if (onAdd_)
+                    onAdd_();
+            });
+        if (removeButton_)
+            connect(removeButton_, &QPushButton::clicked, this, [this] {
+                const auto cellId = selectedCellId();
+                if (cellId != 0 && onRemove_)
+                    onRemove_(cellId);
+            });
+        connect(tree_, &QTreeWidget::currentItemChanged, this,
+                [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateRemoveButton(); });
     }
+
+    void setOnAddClicked(std::function<void()> callback) { onAdd_ = std::move(callback); }
+    void setOnRemoveClicked(std::function<void(ice::ObjectId)> callback) { onRemove_ = std::move(callback); }
 
     void setProject(const ice::Project &project) {
         tree_->clear();
@@ -1020,6 +1217,9 @@ class ProjectPanel : public QWidget {
 
         if (!showLayoutHierarchy_) {
             tree_->expandAll();
+            if (search_)
+                applyFilter(search_->text());
+            updateRemoveButton();
             return;
         }
         for (const auto &[id, layer] : project.layers) {
@@ -1036,12 +1236,51 @@ class ProjectPanel : public QWidget {
             new QTreeWidgetItem(cellItem, {QStringLiteral("Instances (%1)").arg(cell.instances.size())});
         }
         tree_->expandAll();
+        if (search_)
+            applyFilter(search_->text());
+        updateRemoveButton();
     }
 
   private:
+    ice::ObjectId selectedCellId() const {
+        const auto *item = tree_->currentItem();
+        if (!item || item->parent() != nullptr || item->isHidden() || !item->data(0, Qt::UserRole).isValid())
+            return 0;
+        return static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+    }
+
+    void updateRemoveButton() {
+        if (removeButton_)
+            removeButton_->setEnabled(selectedCellId() != 0);
+    }
+
+    static bool filterTreeItem(QTreeWidgetItem *item, const QString &needle) {
+        bool childMatches = false;
+        for (int index = 0; index < item->childCount(); ++index)
+            childMatches |= filterTreeItem(item->child(index), needle);
+        const bool selfMatches = needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive);
+        const bool visible = selfMatches || childMatches;
+        item->setHidden(!visible);
+        return visible;
+    }
+
+    void applyFilter(const QString &text) {
+        const auto needle = text.trimmed();
+        for (int index = 0; index < tree_->topLevelItemCount(); ++index)
+            filterTreeItem(tree_->topLevelItem(index), needle);
+        if (!needle.isEmpty())
+            tree_->expandAll();
+        updateRemoveButton();
+    }
+
     QTreeWidget *tree_ = nullptr;
     QListWidget *packageList_ = nullptr;
     QListWidget *layerList_ = nullptr;
+    QLineEdit *search_ = nullptr;
+    QPushButton *addButton_ = nullptr;
+    QPushButton *removeButton_ = nullptr;
+    std::function<void()> onAdd_;
+    std::function<void(ice::ObjectId)> onRemove_;
     bool showLayoutHierarchy_ = true;
 };
 
@@ -1246,34 +1485,35 @@ class LayersPanel : public QWidget {
   public:
     explicit LayersPanel(QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
-        layout->addWidget(heading(QStringLiteral("Layers")));
-        list_ = new QListWidget;
-        list_->setAccessibleName(QStringLiteral("Layer visibility"));
-        list_->setIconSize(QSize(36, 18));
-        list_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
-        layout->addWidget(list_, 1);
+        tree_ = new QTreeWidget;
+        tree_->setHeaderLabel(QStringLiteral("Layers"));
+        tree_->setAccessibleName(QStringLiteral("Layer visibility"));
+        tree_->setRootIsDecorated(false);
+        tree_->setUniformRowHeights(true);
+        tree_->setIconSize(QSize(36, 18));
+        tree_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        layout->addWidget(tree_, 1);
         setMinimumWidth(190);
         setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     }
 
     void setProject(const ice::Project &project) {
-        list_->clear();
+        tree_->clear();
         const auto styles = layerStylesFor(project);
         for (const auto &[id, layer] : project.layers) {
-            const auto style = styles.contains(id)
-                                   ? styles.at(id)
-                                   : LayerStyle{ice::themeColor(ice::ThemeRole::Border1), Qt::SolidPattern};
-            auto *item = new QListWidgetItem(
-                QIcon(layerPreviewIcon(style)),
-                QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer.name)).arg(layer.number), list_);
-            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            const auto style =
+                styles.contains(id) ? styles.at(id) : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
+            auto *item = new QTreeWidgetItem(
+                tree_, {QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer.name)).arg(layer.number)});
+            item->setIcon(0, QIcon(layerPreviewIcon(style)));
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
+            item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
         }
     }
 
   private:
-    QListWidget *list_ = nullptr;
+    QTreeWidget *tree_ = nullptr;
 };
 
 class PropertiesPanel : public QWidget {
@@ -1284,19 +1524,14 @@ class PropertiesPanel : public QWidget {
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
         layout->addWidget(heading(QStringLiteral("Properties")));
-        auto *previewFrame = new QFrame;
-        previewFrame->setObjectName(QStringLiteral("propertiesSymbolPreview"));
-        previewFrame->setFixedHeight(160);
-        previewFrame->setStyleSheet(
-            QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
-                .arg(ice::themeColor(ice::ThemeRole::Background2).name(),
-                     ice::themeColor(ice::ThemeRole::Border1).name()));
-        auto *previewLayout = new QVBoxLayout(previewFrame);
+        previewFrame_ = new QFrame;
+        previewFrame_->setObjectName(QStringLiteral("propertiesSymbolPreview"));
+        previewFrame_->setFixedHeight(160);
+        auto *previewLayout = new QVBoxLayout(previewFrame_);
         preview_ = new SymbolPreview;
         preview_->setMinimumSize(160, 120);
         preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         previewLayout->addWidget(preview_);
-        previewFrame_ = previewFrame;
         previewFrame_->setVisible(false);
         layout->addWidget(previewFrame_);
         auto *form = new QFormLayout;
@@ -1321,9 +1556,16 @@ class PropertiesPanel : public QWidget {
         layout->addStretch();
         connect(parameters_, &QTableWidget::itemChanged, this,
                 [this](QTableWidgetItem *item) { handleParameterEdit(item); });
+        refreshAppearance();
     }
 
     void setOnParameterChanged(ParameterChanged callback) { onParameterChanged_ = std::move(callback); }
+
+    void refreshAppearance() {
+        previewFrame_->setStyleSheet(
+            QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
+                .arg(ice::uiColor(ice::UiColor::Background2).name(), ice::uiColor(ice::UiColor::Border1).name()));
+    }
 
     void clearSelection() {
         instanceId_ = 0;
@@ -1379,6 +1621,166 @@ class PropertiesPanel : public QWidget {
     ParameterChanged onParameterChanged_;
 };
 
+class SymbolsPanel : public QWidget {
+  public:
+    explicit SymbolsPanel(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        search_ = new QLineEdit;
+        search_->setPlaceholderText(QStringLiteral("Search symbols…"));
+        search_->setClearButtonEnabled(true);
+        search_->setAccessibleName(QStringLiteral("Search symbols"));
+        layout->addWidget(search_);
+        category_ = new QComboBox;
+        category_->setAccessibleName(QStringLiteral("Symbol category"));
+        category_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        category_->setMinimumContentsLength(12);
+        layout->addWidget(category_);
+        list_ = new QListWidget;
+        list_->setAccessibleName(QStringLiteral("Available symbols"));
+        layout->addWidget(list_, 1);
+
+        connect(search_, &QLineEdit::textChanged, this, [this] { rebuildList(); });
+        connect(category_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { rebuildList(); });
+        connect(list_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *, QListWidgetItem *) {
+            if (onSelectionChanged_)
+                onSelectionChanged_();
+        });
+        rebuildCategories();
+        rebuildList();
+    }
+
+    void setOnSelectionChanged(std::function<void()> callback) { onSelectionChanged_ = std::move(callback); }
+
+    void setSymbols(std::vector<SymbolDefinition> symbols) {
+        QString selectedName;
+        if (const auto *item = list_->currentItem(); item && item->data(Qt::UserRole).isValid()) {
+            const int index = item->data(Qt::UserRole).toInt();
+            if (index >= 0 && index < static_cast<int>(symbols_.size()))
+                selectedName = symbols_[index].name;
+        }
+        symbols_ = std::move(symbols);
+        rebuildCategories();
+        rebuildList(selectedName);
+    }
+
+    void clear() {
+        symbols_.clear();
+        rebuildCategories();
+        rebuildList();
+    }
+
+    const SymbolDefinition *selectedSymbol() const {
+        const auto *item = list_->currentItem();
+        if (!item || !item->data(Qt::UserRole).isValid())
+            return nullptr;
+        const int index = item->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= static_cast<int>(symbols_.size()))
+            return nullptr;
+        return &symbols_[index];
+    }
+
+  private:
+    void rebuildCategories() {
+        const auto current = category_->currentData().toString();
+        QSignalBlocker blocker(category_);
+        category_->clear();
+        category_->addItem(QStringLiteral("All categories"), QString());
+        QStringList categories;
+        for (const auto &symbol : symbols_)
+            if (!symbol.category.isEmpty() && !categories.contains(symbol.category))
+                categories << symbol.category;
+        categories.sort(Qt::CaseInsensitive);
+        for (const auto &category : categories)
+            category_->addItem(category, category);
+        const auto index = category_->findData(current);
+        category_->setCurrentIndex(index >= 0 ? index : 0);
+    }
+
+    void rebuildList(const QString &keepSelected = {}) {
+        list_->clear();
+        const auto needle = search_->text().trimmed();
+        const auto category = category_->currentData().toString();
+        for (std::size_t index = 0; index < symbols_.size(); ++index) {
+            const auto &symbol = symbols_[index];
+            if (!category.isEmpty() && symbol.category != category)
+                continue;
+            if (!needle.isEmpty() && !symbol.name.contains(needle, Qt::CaseInsensitive) &&
+                !symbol.category.contains(needle, Qt::CaseInsensitive))
+                continue;
+            auto *item = new QListWidgetItem(symbol.name, list_);
+            item->setData(Qt::UserRole, static_cast<int>(index));
+            item->setToolTip(symbol.category.isEmpty() ? QStringLiteral("Uncategorized") : symbol.category);
+        }
+        if (list_->count() == 0) {
+            auto *item = new QListWidgetItem(symbols_.empty() ? QStringLiteral("No symbols available")
+                                                              : QStringLiteral("No matching symbols"),
+                                             list_);
+            item->setFlags(Qt::NoItemFlags);
+            return;
+        }
+        int row = 0;
+        if (!keepSelected.isEmpty()) {
+            for (int index = 0; index < list_->count(); ++index) {
+                const int symbolIndex = list_->item(index)->data(Qt::UserRole).toInt();
+                if (symbolIndex >= 0 && symbolIndex < static_cast<int>(symbols_.size()) &&
+                    symbols_[symbolIndex].name == keepSelected) {
+                    row = index;
+                    break;
+                }
+            }
+        }
+        list_->setCurrentRow(row);
+    }
+
+    QLineEdit *search_ = nullptr;
+    QComboBox *category_ = nullptr;
+    QListWidget *list_ = nullptr;
+    std::vector<SymbolDefinition> symbols_;
+    std::function<void()> onSelectionChanged_;
+};
+
+class SchematicNetlistPanel : public QWidget {
+  public:
+    explicit SchematicNetlistPanel(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        layout->addWidget(heading(QStringLiteral("Netlist")));
+        netlist_ = new QPlainTextEdit;
+        netlist_->setReadOnly(true);
+        netlist_->setLineWrapMode(QPlainTextEdit::NoWrap);
+        netlist_->setPlaceholderText(QStringLiteral("No schematic open."));
+        layout->addWidget(netlist_, 1);
+    }
+
+    void setCell(const ice::Project &project, const ice::SchematicCell *cell) {
+        if (!cell) {
+            netlist_->clear();
+            return;
+        }
+        std::vector<std::string> notes;
+        try {
+            const auto lines = ice::buildSchematicNetlist(project, cell->id, &notes);
+            QString text;
+            for (const auto &line : lines)
+                text += QString::fromStdString(line) + QLatin1Char('\n');
+            if (!notes.empty()) {
+                if (!text.isEmpty())
+                    text += QLatin1Char('\n');
+                text += QStringLiteral("* Notes\n");
+                for (const auto &note : notes)
+                    text += QStringLiteral("* %1\n").arg(QString::fromStdString(note));
+            }
+            netlist_->setPlainText(text.isEmpty() ? QStringLiteral("* Empty netlist") : text);
+        } catch (const ice::ProjectError &error) {
+            netlist_->setPlainText(QString::fromStdString(error.what()));
+        }
+    }
+
+    void clear() { netlist_->clear(); }
+
+  private:
+    QPlainTextEdit *netlist_ = nullptr;
+};
+
 class DiagnosticsPanel : public QWidget {
   public:
     explicit DiagnosticsPanel(QWidget *parent = nullptr) : QWidget(parent) {
@@ -1397,6 +1799,60 @@ class ActivityPanel : public QWidget {
         auto *layout = new QVBoxLayout(this);
         auto *tabs = new QTabWidget;
 
+        auto *agent = new QWidget;
+        auto *agentLayout = new QHBoxLayout(agent);
+        auto *transcript = new QPlainTextEdit;
+        transcript->setReadOnly(true);
+        transcript->setPlaceholderText(QStringLiteral("Agent conversation and tool-call updates"));
+
+        auto *sessionPanel = new QFrame;
+        sessionPanel->setFrameShape(QFrame::StyledPanel);
+        sessionPanel->setFixedWidth(240);
+        auto *sessionLayout = new QVBoxLayout(sessionPanel);
+        sessionLayout->setContentsMargins(10, 8, 10, 8);
+        sessionLayout->setSpacing(6);
+        auto *sessionTitle = new QLabel(QStringLiteral("No active session"));
+        sessionTitle->setWordWrap(true);
+        sessionTitle->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        sessionLayout->addWidget(sessionTitle);
+        sessionLayout->addSpacing(6);
+        auto *tokens = new QLabel(QStringLiteral("0 / 128,000 tokens"));
+        sessionLayout->addWidget(tokens);
+        auto *contextUsage = new QProgressBar;
+        contextUsage->setRange(0, 100);
+        contextUsage->setValue(0);
+        contextUsage->setFormat(QStringLiteral("%p% used"));
+        contextUsage->setMaximumHeight(18);
+        sessionLayout->addWidget(contextUsage);
+        sessionLayout->addSpacing(6);
+        auto *mcpServers = new QListWidget;
+        mcpServers->setAccessibleName(QStringLiteral("MCP servers"));
+        mcpServers->setAlternatingRowColors(true);
+        auto *noServers = new QListWidgetItem(QStringLiteral("No MCP servers connected"), mcpServers);
+        noServers->setFlags(Qt::NoItemFlags);
+        sessionLayout->addWidget(mcpServers, 1);
+
+        auto *conversationColumn = new QVBoxLayout;
+        conversationColumn->addWidget(transcript, 1);
+        auto *prompt = new QLineEdit;
+        prompt->setPlaceholderText(QStringLiteral("Ask the agent about the current project..."));
+        conversationColumn->addWidget(prompt);
+        agentLayout->addLayout(conversationColumn, 1);
+
+        auto *sessionColumn = new QVBoxLayout;
+        sessionColumn->setSpacing(8);
+        sessionColumn->addWidget(sessionPanel, 1);
+        auto *sendButton = new QPushButton(QStringLiteral("Send"));
+        sendButton->setFixedWidth(240);
+        sessionColumn->addWidget(sendButton);
+        agentLayout->addLayout(sessionColumn, 0);
+        tabs->addTab(agent, QStringLiteral("Agent"));
+
+        auto *messages = new QPlainTextEdit;
+        messages->setReadOnly(true);
+        messages->setPlaceholderText(QStringLiteral("Structured application and external-tool messages"));
+        tabs->addTab(messages, QStringLiteral("Messages"));
+
         auto *jobs = new QWidget;
         auto *jobsLayout = new QVBoxLayout(jobs);
         jobsLayout->addWidget(new QLabel(QStringLiteral("No active jobs")));
@@ -1408,24 +1864,6 @@ class ActivityPanel : public QWidget {
         jobsLayout->addWidget(new QPushButton(QStringLiteral("Cancel selected job")));
         jobsLayout->addStretch();
         tabs->addTab(jobs, QStringLiteral("Jobs"));
-
-        auto *messages = new QPlainTextEdit;
-        messages->setReadOnly(true);
-        messages->setPlaceholderText(QStringLiteral("Structured application and external-tool messages"));
-        tabs->addTab(messages, QStringLiteral("Messages"));
-
-        auto *agent = new QWidget;
-        auto *agentLayout = new QVBoxLayout(agent);
-        agentLayout->addWidget(new QLabel(QStringLiteral("Agent / ACP session")));
-        auto *transcript = new QPlainTextEdit;
-        transcript->setReadOnly(true);
-        transcript->setPlaceholderText(QStringLiteral("Agent conversation and tool-call updates"));
-        agentLayout->addWidget(transcript, 1);
-        auto *prompt = new QLineEdit;
-        prompt->setPlaceholderText(QStringLiteral("Ask the agent about the current project..."));
-        agentLayout->addWidget(prompt);
-        agentLayout->addWidget(new QPushButton(QStringLiteral("Send")));
-        tabs->addTab(agent, QStringLiteral("Agent"));
 
         layout->addWidget(tabs);
     }
@@ -1507,15 +1945,361 @@ class StatusBar : public QStatusBar {
     QString projectName_;
 };
 
+constexpr auto kManualUrl = "https://github.com/ldapx/ice/tree/main/docs";
+constexpr auto kDonationUrl = "https://github.com/sponsors/ldapx";
+constexpr auto kSourceUrl = "https://github.com/ldapx/ice";
+// The project currently has no dedicated website; the repository page is the
+// canonical home until one exists.
+constexpr auto kWebsiteUrl = "https://github.com/ldapx/ice";
+
+class StartupView : public QWidget {
+  public:
+    using CreateProjectCallback = std::function<void(const QString &name, const QString &location)>;
+    using OpenProjectCallback = std::function<void()>;
+    using OpenRecentCallback = std::function<void(const QString &path)>;
+
+    explicit StartupView(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(40, 28, 40, 28);
+        layout->setSpacing(16);
+
+        auto *header = new QHBoxLayout;
+        header->setSpacing(16);
+        auto *logo = new QLabel;
+        const auto logoPixmap = ice::appLogo(96);
+        logo->setPixmap(logoPixmap);
+        logo->setFixedSize(96, 96);
+        logo->setAlignment(Qt::AlignCenter);
+        logo->setVisible(!logoPixmap.isNull());
+        header->addWidget(logo, 0, Qt::AlignTop);
+
+        auto *titleColumn = new QVBoxLayout;
+        titleColumn->setSpacing(4);
+        auto *title = new QLabel(QStringLiteral("ICE"));
+        auto titleFont = title->font();
+        titleFont.setPointSize(titleFont.pointSize() + 18);
+        titleFont.setBold(true);
+        title->setFont(titleFont);
+        titleColumn->addWidget(title);
+
+        subtitle_ = new QLabel(QStringLiteral("Integrated Circuits Electronics Design Automation"));
+        auto subtitleFont = subtitle_->font();
+        subtitleFont.setPointSize(subtitleFont.pointSize() + 2);
+        subtitle_->setFont(subtitleFont);
+        titleColumn->addWidget(subtitle_);
+        titleColumn->addStretch();
+        header->addLayout(titleColumn, 1);
+        layout->addLayout(header);
+
+        auto *content = new QHBoxLayout;
+        content->setSpacing(20);
+
+        auto *left = new QVBoxLayout;
+        left->setSpacing(16);
+        auto *createGroup = new QGroupBox(QStringLiteral("Create Project"));
+        auto *form = new QFormLayout(createGroup);
+        name_ = new QLineEdit;
+        name_->setPlaceholderText(QStringLiteral("My design"));
+        name_->setClearButtonEnabled(true);
+        location_ = new QLineEdit(QDir::homePath());
+        auto *browseButton = new QPushButton(QStringLiteral("Browse…"));
+        auto *locationRow = new QWidget;
+        auto *locationLayout = new QHBoxLayout(locationRow);
+        locationLayout->setContentsMargins(0, 0, 0, 0);
+        locationLayout->addWidget(location_, 1);
+        locationLayout->addWidget(browseButton);
+        form->addRow(QStringLiteral("Project name"), name_);
+        form->addRow(QStringLiteral("Location"), locationRow);
+        auto *buttonRow = new QHBoxLayout;
+        auto *openButton = new QPushButton(QStringLiteral("Open Project…"));
+        createButton_ = new QPushButton(QStringLiteral("Create Project"));
+        createButton_->setDefault(true);
+        buttonRow->addWidget(openButton);
+        buttonRow->addStretch();
+        buttonRow->addWidget(createButton_);
+        form->addRow(buttonRow);
+        left->addWidget(createGroup);
+
+        auto *recentGroup = new QGroupBox(QStringLiteral("Recent Projects"));
+        auto *recentLayout = new QVBoxLayout(recentGroup);
+        recent_ = new QListWidget;
+        recent_->setAlternatingRowColors(true);
+        recent_->setAccessibleName(QStringLiteral("Recent projects"));
+        recent_->setMinimumHeight(200);
+        recentLayout->addWidget(recent_, 1);
+        left->addWidget(recentGroup, 1);
+        content->addLayout(left, 3);
+
+        auto *right = new QVBoxLayout;
+        right->setSpacing(16);
+        auto *communityGroup = new QGroupBox(QStringLiteral("Community"));
+        auto *communityLayout = new QVBoxLayout(communityGroup);
+        communityLayout->addWidget(makeLink(QStringLiteral("Manual"), QString::fromLatin1(kManualUrl)));
+        communityLayout->addWidget(makeLink(QStringLiteral("Donate"), QString::fromLatin1(kDonationUrl)));
+        communityLayout->addWidget(makeLink(QStringLiteral("Source code"), QString::fromLatin1(kSourceUrl)));
+        communityLayout->addWidget(makeLink(QStringLiteral("Website"), QString::fromLatin1(kWebsiteUrl)));
+        communityLayout->addStretch();
+        right->addWidget(communityGroup);
+
+        auto *newsGroup = new QGroupBox(QStringLiteral("News"));
+        auto *newsLayout = new QVBoxLayout(newsGroup);
+        newsPlaceholder_ = new QLabel(QStringLiteral("No news yet."));
+        newsPlaceholder_->setAlignment(Qt::AlignCenter);
+        newsLayout->addWidget(newsPlaceholder_);
+        newsLayout->addStretch();
+        right->addWidget(newsGroup, 1);
+        content->addLayout(right, 2);
+
+        layout->addLayout(content, 1);
+
+        connect(browseButton, &QPushButton::clicked, this, [this] {
+            const auto directory =
+                QFileDialog::getExistingDirectory(this, QStringLiteral("Choose Project Location"), location_->text());
+            if (!directory.isEmpty())
+                location_->setText(directory);
+        });
+        connect(openButton, &QPushButton::clicked, this, [this] {
+            if (onOpenProject_)
+                onOpenProject_();
+        });
+        connect(createButton_, &QPushButton::clicked, this, [this] {
+            if (onCreateProject_)
+                onCreateProject_(name_->text().trimmed(), location_->text().trimmed());
+        });
+        auto submit = [this] {
+            if (createButton_->isEnabled())
+                createButton_->click();
+        };
+        connect(name_, &QLineEdit::returnPressed, this, submit);
+        connect(location_, &QLineEdit::returnPressed, this, submit);
+        auto updateCreateButton = [this] {
+            createButton_->setEnabled(!name_->text().trimmed().isEmpty() && !location_->text().trimmed().isEmpty());
+        };
+        connect(name_, &QLineEdit::textChanged, this, updateCreateButton);
+        connect(location_, &QLineEdit::textChanged, this, updateCreateButton);
+        connect(recent_, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+            if (!item)
+                return;
+            const auto path = item->data(Qt::UserRole).toString();
+            if (!path.isEmpty() && onOpenRecent_)
+                onOpenRecent_(path);
+        });
+        updateCreateButton();
+        refreshAppearance();
+    }
+
+    void setOnCreateProject(CreateProjectCallback callback) { onCreateProject_ = std::move(callback); }
+    void setOnOpenProject(OpenProjectCallback callback) { onOpenProject_ = std::move(callback); }
+    void setOnOpenRecent(OpenRecentCallback callback) { onOpenRecent_ = std::move(callback); }
+
+    void setRecentProjects(const QStringList &paths) {
+        recent_->clear();
+        if (paths.isEmpty()) {
+            auto *item = new QListWidgetItem(QStringLiteral("No recent projects"), recent_);
+            item->setFlags(Qt::NoItemFlags);
+            return;
+        }
+        for (const auto &path : paths) {
+            auto *item = new QListWidgetItem(QFileInfo(path).fileName(), recent_);
+            item->setData(Qt::UserRole, path);
+            item->setToolTip(path);
+        }
+    }
+
+    void clearCreateForm() {
+        name_->clear();
+        name_->setFocus();
+    }
+
+    void refreshAppearance() {
+        const auto muted = ice::uiColor(ice::UiColor::Text2).name();
+        subtitle_->setStyleSheet(QStringLiteral("color: %1;").arg(muted));
+        newsPlaceholder_->setStyleSheet(QStringLiteral("color: %1;").arg(muted));
+    }
+
+  private:
+    static QLabel *makeLink(const QString &text, const QString &url) {
+        auto *label =
+            new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), text.toHtmlEscaped()));
+        label->setOpenExternalLinks(true);
+        label->setTextFormat(Qt::RichText);
+        label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        return label;
+    }
+
+    QLineEdit *name_ = nullptr;
+    QLineEdit *location_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QListWidget *recent_ = nullptr;
+    QLabel *subtitle_ = nullptr;
+    QLabel *newsPlaceholder_ = nullptr;
+    CreateProjectCallback onCreateProject_;
+    OpenProjectCallback onOpenProject_;
+    OpenRecentCallback onOpenRecent_;
+};
+
+class EmptySchematicPanel : public QWidget {
+  public:
+    using CreateCallback = std::function<void(const QString &name, const std::string &pdk)>;
+
+    explicit EmptySchematicPanel(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        layout->addStretch(1);
+        auto *card = new QGroupBox(QStringLiteral("Create a schematic"));
+        card->setMaximumWidth(520);
+        auto *cardLayout = new QVBoxLayout(card);
+        auto *description =
+            new QLabel(QStringLiteral("This project has no schematics yet. Create one to start drawing."));
+        description->setWordWrap(true);
+        cardLayout->addWidget(description);
+        auto *form = new QFormLayout;
+        name_ = new QLineEdit(QStringLiteral("top"));
+        name_->setClearButtonEnabled(true);
+        pdk_ = new QComboBox;
+        pdk_->setAccessibleName(QStringLiteral("Schematic PDK"));
+        form->addRow(QStringLiteral("Schematic name"), name_);
+        form->addRow(QStringLiteral("PDK"), pdk_);
+        cardLayout->addLayout(form);
+        auto *buttonRow = new QHBoxLayout;
+        buttonRow->addStretch();
+        auto *createButton = new QPushButton(QStringLiteral("Create Schematic"));
+        createButton->setDefault(true);
+        buttonRow->addWidget(createButton);
+        cardLayout->addLayout(buttonRow);
+        layout->addWidget(card, 0, Qt::AlignHCenter);
+        layout->addStretch(1);
+
+        refreshPdks(configuredPackageInstallDirectory());
+        connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
+        connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
+    }
+
+    void setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
+
+    void refreshPdks(const std::filesystem::path &installDirectory) {
+        const auto current = pdk_->currentData().toString();
+        QSignalBlocker blocker(pdk_);
+        pdk_->clear();
+        pdk_->addItem(QStringLiteral("Generic PDK"), QString::fromLatin1(ice::genericPdkId));
+        for (const auto &entry : installedPdkPackages(installDirectory)) {
+            const auto packageName = QString::fromStdString(entry.spec.name);
+            auto label = packagePdkDisplayName(entry.spec);
+            if (label != packageName)
+                label += QStringLiteral("  (%1)").arg(packageName);
+            pdk_->addItem(label, packageName);
+        }
+        const auto index = pdk_->findData(current);
+        if (index >= 0)
+            pdk_->setCurrentIndex(index);
+    }
+
+    void prepareForDisplay() {
+        name_->selectAll();
+        name_->setFocus();
+    }
+
+  private:
+    void submit() {
+        const auto name = name_->text().trimmed();
+        if (name.isEmpty()) {
+            name_->setFocus();
+            return;
+        }
+        if (onCreate_)
+            onCreate_(name, pdk_->currentData().toString().toStdString());
+    }
+
+    QLineEdit *name_ = nullptr;
+    QComboBox *pdk_ = nullptr;
+    CreateCallback onCreate_;
+};
+
+class EmptyLayoutPanel : public QWidget {
+  public:
+    using CreateCallback = std::function<void(const QString &name)>;
+
+    explicit EmptyLayoutPanel(QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+        layout->addStretch(1);
+        auto *card = new QGroupBox(QStringLiteral("Create a layout cell"));
+        card->setMaximumWidth(520);
+        auto *cardLayout = new QVBoxLayout(card);
+        auto *description =
+            new QLabel(QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
+        description->setWordWrap(true);
+        cardLayout->addWidget(description);
+        auto *form = new QFormLayout;
+        name_ = new QLineEdit(QStringLiteral("top"));
+        name_->setClearButtonEnabled(true);
+        form->addRow(QStringLiteral("Layout cell name"), name_);
+        cardLayout->addLayout(form);
+        auto *buttonRow = new QHBoxLayout;
+        buttonRow->addStretch();
+        auto *createButton = new QPushButton(QStringLiteral("Create Layout Cell"));
+        createButton->setDefault(true);
+        buttonRow->addWidget(createButton);
+        cardLayout->addLayout(buttonRow);
+        layout->addWidget(card, 0, Qt::AlignHCenter);
+        layout->addStretch(1);
+
+        connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
+        connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
+    }
+
+    void setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
+
+    void prepareForDisplay() {
+        name_->selectAll();
+        name_->setFocus();
+    }
+
+  private:
+    void submit() {
+        const auto name = name_->text().trimmed();
+        if (name.isEmpty()) {
+            name_->setFocus();
+            return;
+        }
+        if (onCreate_)
+            onCreate_(name);
+    }
+
+    QLineEdit *name_ = nullptr;
+    CreateCallback onCreate_;
+};
+
+class WorkspaceStack : public QStackedWidget {
+  public:
+    using QStackedWidget::QStackedWidget;
+
+    // Keep the horizontal minimum from the pages, but do not let the pages'
+    // vertical minimum stop the user from enlarging bottom docks.
+    QSize minimumSizeHint() const override { return QSize(QStackedWidget::minimumSizeHint().width(), 0); }
+};
+
 class DocumentWindow : public QMainWindow {
   public:
-    explicit DocumentWindow() {
+    explicit DocumentWindow(ice::AppearanceMode appearanceMode = ice::AppearanceMode::System)
+        : appearanceMode_(appearanceMode) {
         setWindowTitle(QStringLiteral("ICE"));
+        if (const auto logo = ice::appLogo(); !logo.isNull())
+            setWindowIcon(QIcon(logo));
         setDockNestingEnabled(true);
         createMenus();
         createActivityDock();
         createDocuments();
         createStatusBar();
+        toolEscapeShortcut_ = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+        toolEscapeShortcut_->setContext(Qt::WindowShortcut);
+        toolEscapeShortcut_->setEnabled(false);
+        connect(toolEscapeShortcut_, &QShortcut::activated, this, [this] { selectSchematicTool(); });
+        showStartup();
+        connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this](Qt::ColorScheme) {
+            if (appearanceMode_ != ice::AppearanceMode::System)
+                return;
+            ice::applyAppearance(appearanceMode_);
+            refreshAppearance();
+        });
     }
 
     static bool directoryHasSymbols(const std::filesystem::path &directory) {
@@ -1531,12 +2315,26 @@ class DocumentWindow : public QMainWindow {
         return false;
     }
 
+    std::vector<SymbolDefinition> symbolLibraryForPdk(const std::string &pdk) const {
+        auto symbols = genericSymbolLibrary();
+        if (pdk != ice::genericPdkId) {
+            const auto symbolDirectory = configuredPackageInstallDirectory() / pdk / "symbols";
+            if (directoryHasSymbols(symbolDirectory)) {
+                const auto pdkSymbols = packageSymbolLibrary(symbolDirectory);
+                symbols.insert(symbols.end(), pdkSymbols.begin(), pdkSymbols.end());
+            }
+        }
+        return symbols;
+    }
+
     bool setProject(ice::Project project) {
         if (!ensureProjectPackages(project))
             return false;
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         layoutViewInitialized_ = false;
         projectPath_.clear();
+        schematicSymbolsLoaded_ = false;
+        schematicSymbolsPdk_.clear();
         refreshEmbeddedPanels();
         refreshSimulationSchematics();
         refreshSchematic();
@@ -1544,6 +2342,7 @@ class DocumentWindow : public QMainWindow {
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
         statusBar_->setProjectName(QString::fromStdString(project_->project().name));
         statusBar()->showMessage(QStringLiteral("Project loaded"));
+        showWorkspace();
         return true;
     }
 
@@ -1587,6 +2386,104 @@ class DocumentWindow : public QMainWindow {
         return project;
     }
 
+    QStringList loadRecentProjects() const {
+        QSettings settings;
+        auto projects = settings.value(QStringLiteral("recentProjects")).toStringList();
+        projects.removeAll(QString());
+        return projects;
+    }
+
+    void storeRecentProjects(const QStringList &projects) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("recentProjects"), projects);
+    }
+
+    void addRecentProject(const QString &path) {
+        if (path.isEmpty())
+            return;
+        const auto normalized = QFileInfo(path).absoluteFilePath();
+        auto projects = loadRecentProjects();
+        projects.removeAll(normalized);
+        projects.prepend(normalized);
+        while (projects.size() > 10)
+            projects.removeLast();
+        storeRecentProjects(projects);
+        if (startupView_)
+            startupView_->setRecentProjects(projects);
+    }
+
+    void removeRecentProject(const QString &path) {
+        auto projects = loadRecentProjects();
+        projects.removeAll(QFileInfo(path).absoluteFilePath());
+        storeRecentProjects(projects);
+        if (startupView_)
+            startupView_->setRecentProjects(projects);
+    }
+
+    void createProject(const QString &rawName, const QString &rawLocation) {
+        const auto name = rawName.trimmed();
+        const auto location = rawLocation.trimmed();
+        if (name.isEmpty() || location.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("Create Project"),
+                                     QStringLiteral("A project name and location are required."));
+            return;
+        }
+        if (std::any_of(name.begin(), name.end(),
+                        [](QChar character) { return QStringLiteral("<>:\"/\\|?*").contains(character); })) {
+            QMessageBox::information(this, QStringLiteral("Create Project"),
+                                     QStringLiteral("The project name contains characters that are not valid in a "
+                                                    "file name."));
+            return;
+        }
+        QDir directory(location);
+        if (!directory.exists() && !QDir().mkpath(location)) {
+            QMessageBox::critical(this, QStringLiteral("Create Project"),
+                                  QStringLiteral("The project location could not be created:\n%1").arg(location));
+            return;
+        }
+        const auto path = directory.filePath(name + QStringLiteral(".ice.json"));
+        if (QFileInfo::exists(path) &&
+            QMessageBox::question(this, QStringLiteral("Create Project"),
+                                  QStringLiteral("A project file already exists at:\n%1\n\nOverwrite it?").arg(path),
+                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+            return;
+        auto project = makeNewProject(name);
+        try {
+            project.save(path.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create Project"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (!setProject(std::move(project)))
+            return;
+        projectPath_ = path;
+        addRecentProject(path);
+        if (startupView_)
+            startupView_->clearCreateForm();
+        statusBar()->showMessage(QStringLiteral("New project created"));
+    }
+
+    void openProjectPath(const QString &path) {
+        if (path.isEmpty())
+            return;
+        if (!QFileInfo::exists(path)) {
+            QMessageBox::warning(this, QStringLiteral("Open Project"),
+                                 QStringLiteral("The project file no longer exists:\n%1").arg(path));
+            removeRecentProject(path);
+            return;
+        }
+        try {
+            auto project = ice::Project::load(path.toStdString());
+            if (!setProject(std::move(project)))
+                return;
+            projectPath_ = path;
+            addRecentProject(path);
+            statusBar()->showMessage(QStringLiteral("Project opened"));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Open Project"), QString::fromStdString(error.what()));
+        }
+    }
+
     void newProject() {
         bool accepted = false;
         const auto name = QInputDialog::getText(this, QStringLiteral("New Project"), QStringLiteral("Project name:"),
@@ -1601,6 +2498,7 @@ class DocumentWindow : public QMainWindow {
             try {
                 project_->save(path.toStdString());
                 projectPath_ = path;
+                addRecentProject(path);
             } catch (const ice::ProjectError &error) {
                 QMessageBox::critical(this, QStringLiteral("New Project"), QString::fromStdString(error.what()));
             }
@@ -1611,16 +2509,8 @@ class DocumentWindow : public QMainWindow {
     void openProject() {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Open ICE Project"), QString(),
                                                        QStringLiteral("ICE projects (*.ice.json);;All files (*)"));
-        if (path.isEmpty())
-            return;
-        try {
-            auto project = ice::Project::load(path.toStdString());
-            if (!setProject(std::move(project)))
-                return;
-            projectPath_ = path;
-        } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Open Project"), QString::fromStdString(error.what()));
-        }
+        if (!path.isEmpty())
+            openProjectPath(path);
     }
 
     void saveProject() {
@@ -1640,6 +2530,7 @@ class DocumentWindow : public QMainWindow {
         try {
             project_->save(path.toStdString());
             projectPath_ = path;
+            addRecentProject(path);
             statusBar()->showMessage(QStringLiteral("Project saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save Project"), QString::fromStdString(error.what()));
@@ -1705,6 +2596,12 @@ class DocumentWindow : public QMainWindow {
             schematicCanvas_->scene()->clear();
             schematicCanvas_->clearSelection();
         }
+        if (schematicSymbolsPanel_)
+            schematicSymbolsPanel_->clear();
+        if (schematicNetlistPanel_)
+            schematicNetlistPanel_->clear();
+        schematicSymbolsLoaded_ = false;
+        schematicSymbolsPdk_.clear();
         if (layoutCanvas_)
             layoutCanvas_->scene()->clear();
         simulationOutput_->setPlainText(QStringLiteral("No project open."));
@@ -1718,6 +2615,7 @@ class DocumentWindow : public QMainWindow {
         statusBar_->setProjectName(QStringLiteral("No project open"));
         updateSelectionStatus();
         statusBar()->showMessage(QStringLiteral("Ready — no project open"));
+        showStartup();
     }
 
     void createSchematic() {
@@ -1730,8 +2628,18 @@ class DocumentWindow : public QMainWindow {
         CreateSchematicDialog dialog(installDirectory, this);
         if (dialog.exec() != QDialog::Accepted)
             return;
-        const auto name = dialog.schematicName();
-        const auto pdk = dialog.pdkId();
+        createSchematic(dialog.schematicName(), dialog.pdkId());
+    }
+
+    void createSchematic(const QString &name, const std::string &pdk) {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create Schematic"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        if (name.trimmed().isEmpty())
+            return;
+        const auto installDirectory = configuredPackageInstallDirectory();
         auto pdkLabel = QStringLiteral("Generic PDK");
         bool addDependency = false;
         if (pdk != ice::genericPdkId) {
@@ -1769,7 +2677,7 @@ class DocumentWindow : public QMainWindow {
             project_->execute("create schematic", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
-                activeSchematicId_ = ice::createSchematicCell(project, name.toStdString(), pdk);
+                activeSchematicId_ = ice::createSchematicCell(project, name.trimmed().toStdString(), pdk);
             });
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Schematic created with %1").arg(pdkLabel));
@@ -1790,11 +2698,83 @@ class DocumentWindow : public QMainWindow {
                                   QLineEdit::Normal, QStringLiteral("top"), &accepted);
         if (!accepted || name.trimmed().isEmpty())
             return;
+        createLayoutCell(name.trimmed());
+    }
+
+    void createLayoutCell(const QString &name) {
+        if (!project_ || name.trimmed().isEmpty())
+            return;
         project_->execute("create layout cell", [&](ice::Project &project) {
             activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString());
         });
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Layout cell created"));
+    }
+
+    void removeSchematic(ice::ObjectId cellId) {
+        if (!project_ || cellId == 0)
+            return;
+        const auto &cells = project_->project().schematicCells;
+        const auto cell = cells.find(cellId);
+        if (cell == cells.end())
+            return;
+        QStringList simulations;
+        for (const auto &[_, simulation] : project_->project().simulations)
+            if (simulation.schematic == cellId)
+                simulations << QString::fromStdString(simulation.name);
+        if (!simulations.isEmpty()) {
+            QMessageBox::information(
+                this, QStringLiteral("Remove Schematic"),
+                QStringLiteral("Schematic '%1' is used by these simulations:\n%2\n\nDelete or reassign them first.")
+                    .arg(QString::fromStdString(cell->second.name), simulations.join(QStringLiteral("\n"))));
+            return;
+        }
+        const auto name = QString::fromStdString(cell->second.name);
+        if (QMessageBox::question(this, QStringLiteral("Remove Schematic"),
+                                  QStringLiteral("Remove schematic '%1'?").arg(name),
+                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+            return;
+        project_->execute("remove schematic", [&](ice::Project &project) { project.schematicCells.erase(cellId); });
+        if (activeSchematicId_ == cellId)
+            activeSchematicId_ = 0;
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Schematic '%1' removed").arg(name));
+    }
+
+    void removeLayoutCell(ice::ObjectId cellId) {
+        if (!project_ || cellId == 0)
+            return;
+        const auto &cells = project_->project().layoutCells;
+        const auto cell = cells.find(cellId);
+        if (cell == cells.end())
+            return;
+        QStringList references;
+        for (const auto &[otherId, otherCell] : cells) {
+            if (otherId == cellId)
+                continue;
+            for (const auto &[_, instance] : otherCell.instances)
+                if (instance.cell == cellId)
+                    references << QStringLiteral("%1 in %2")
+                                      .arg(QString::fromStdString(instance.name),
+                                           QString::fromStdString(otherCell.name));
+        }
+        if (!references.isEmpty()) {
+            QMessageBox::information(
+                this, QStringLiteral("Remove Layout Cell"),
+                QStringLiteral("Layout cell '%1' is used as an instance in:\n%2\n\nRemove those instances first.")
+                    .arg(QString::fromStdString(cell->second.name), references.join(QStringLiteral("\n"))));
+            return;
+        }
+        const auto name = QString::fromStdString(cell->second.name);
+        if (QMessageBox::question(this, QStringLiteral("Remove Layout Cell"),
+                                  QStringLiteral("Remove layout cell '%1'?").arg(name),
+                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+            return;
+        project_->execute("remove layout cell", [&](ice::Project &project) { project.layoutCells.erase(cellId); });
+        if (activeLayoutId_ == cellId)
+            activeLayoutId_ = 0;
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Layout cell '%1' removed").arg(name));
     }
 
     void createLayer() {
@@ -1878,7 +2858,7 @@ class DocumentWindow : public QMainWindow {
         for (const auto &[id, shape] : cellIt->second.shapes) {
             const auto style = styles.contains(shape.layer)
                                    ? styles.at(shape.layer)
-                                   : LayerStyle{ice::themeColor(ice::ThemeRole::Border1), Qt::SolidPattern};
+                                   : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
             const QPen pen(style.color, 1);
             QBrush brush(QColor(style.color.red(), style.color.green(), style.color.blue(), 110), style.pattern);
             if (style.pattern == Qt::NoBrush)
@@ -2014,7 +2994,21 @@ class DocumentWindow : public QMainWindow {
             if (dialog.exec() != QDialog::Accepted)
                 return;
             const auto definition = dialog.selected();
-            const auto scenePosition = schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center());
+            placeSymbolDefinition(definition);
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Place Symbol"), QString::fromStdString(error.what()));
+        }
+    }
+
+    bool placeSymbolDefinition(const SymbolDefinition &definition, std::optional<QPointF> position = std::nullopt) {
+        if (!project_ || !schematicCanvas_ || project_->project().schematicCells.empty())
+            return false;
+        try {
+            const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
+                                    ? activeSchematicId_
+                                    : project_->project().schematicCells.begin()->first;
+            const auto scenePosition =
+                position.value_or(schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center()));
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId =
                     ice::addSymbol(project, cellId, definition.name.toStdString(), definition.svg.toStdString());
@@ -2038,8 +3032,10 @@ class DocumentWindow : public QMainWindow {
                 ice::seedDefaultParameters(project, placedInstance, instanceDefaults(definition));
             });
             refreshProject();
+            return true;
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Place Symbol"), QString::fromStdString(error.what()));
+            return false;
         }
     }
 
@@ -2219,12 +3215,14 @@ class DocumentWindow : public QMainWindow {
         activeSimulationId_ = id;
         if (!project_ || id == 0) {
             rebuildGraphTabs({});
+            refreshSimulationNetlist();
             return;
         }
         const auto &sims = project_->project().simulations;
         auto it = sims.find(id);
         if (it == sims.end()) {
             rebuildGraphTabs({});
+            refreshSimulationNetlist();
             return;
         }
         const auto &sim = it->second;
@@ -2248,6 +3246,7 @@ class DocumentWindow : public QMainWindow {
             rebuildGraphTabs(sim.graphs);
         if (graphId != 0)
             selectGraphTab(graphId);
+        refreshSimulationNetlist();
     }
 
     // Switch the graph tab widget to the tab holding the given graph id.
@@ -2278,6 +3277,7 @@ class DocumentWindow : public QMainWindow {
             sim.step = stepTime_->value();
             sim.directives = directiveEditor_->toPlainText().toStdString();
         });
+        refreshSimulationNetlist();
     }
 
     // Add a new SimulationItem to the project.
@@ -2329,6 +3329,7 @@ class DocumentWindow : public QMainWindow {
         activeSimulationId_ = 0;
         simulationPanel_->setProject(project_->project());
         rebuildGraphTabs({});
+        refreshSimulationNetlist();
         statusBar()->showMessage(QStringLiteral("Simulation deleted"));
     }
 
@@ -2632,6 +3633,37 @@ class DocumentWindow : public QMainWindow {
         return request;
     }
 
+    void refreshSimulationNetlist() {
+        if (!simulationNetlist_)
+            return;
+        if (!project_ || activeSimulationId_ == 0) {
+            simulationNetlist_->clear();
+            return;
+        }
+        const auto simulation = project_->project().simulations.find(activeSimulationId_);
+        if (simulation == project_->project().simulations.end()) {
+            simulationNetlist_->clear();
+            return;
+        }
+        QStringList notes;
+        try {
+            const auto request = buildSimulationRequest(simulation->second, notes);
+            QString text;
+            for (const auto &line : request.netlist)
+                text += QString::fromStdString(line) + QLatin1Char('\n');
+            if (!notes.isEmpty()) {
+                if (!text.isEmpty())
+                    text += QLatin1Char('\n');
+                text += QStringLiteral("* Notes\n");
+                for (const auto &note : notes)
+                    text += QStringLiteral("* %1\n").arg(note);
+            }
+            simulationNetlist_->setPlainText(text.isEmpty() ? QStringLiteral("* Empty netlist") : text);
+        } catch (const ice::ProjectError &error) {
+            simulationNetlist_->setPlainText(QString::fromStdString(error.what()));
+        }
+    }
+
     static QString formatSimulationReport(const ice::SimulationRequest &request, const ice::SimulationResult &result,
                                           const QStringList &netlistNotes) {
         std::ostringstream output;
@@ -2695,6 +3727,7 @@ class DocumentWindow : public QMainWindow {
         refreshSimulationSchematics();
         refreshSchematic();
         refreshLayout();
+        refreshSimulationNetlist();
     }
 
     void refreshEmbeddedPanels() {
@@ -2736,6 +3769,7 @@ class DocumentWindow : public QMainWindow {
         // Refresh simulation panel.
         if (simulationPanel_)
             simulationPanel_->setProject(project);
+        updateEmptyWorkspaceState();
     }
 
     void refreshSimulationSchematics() {
@@ -2790,26 +3824,41 @@ class DocumentWindow : public QMainWindow {
             return;
         auto *scene = schematicCanvas_->scene();
         scene->clear();
-        if (!project_ || project_->project().schematicCells.empty())
+        if (schematicNetlistPanel_)
+            schematicNetlistPanel_->clear();
+        if (!project_ || project_->project().schematicCells.empty()) {
+            if (schematicSymbolsPanel_)
+                schematicSymbolsPanel_->clear();
+            schematicSymbolsLoaded_ = false;
+            schematicSymbolsPdk_.clear();
             return;
+        }
         auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
         if (cellIt == project_->project().schematicCells.end())
             cellIt = project_->project().schematicCells.begin();
         if (cellIt == project_->project().schematicCells.end())
             return;
         const auto &cell = cellIt->second;
+        const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
+        if (schematicSymbolsPanel_ && (!schematicSymbolsLoaded_ || schematicSymbolsPdk_ != pdk)) {
+            schematicSymbolsLoaded_ = true;
+            schematicSymbolsPdk_ = pdk;
+            schematicSymbolsPanel_->setSymbols(symbolLibraryForPdk(pdk));
+        }
+        if (schematicNetlistPanel_)
+            schematicNetlistPanel_->setCell(project_->project(), &cell);
         const auto pdkLabel = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                                 : QString::fromStdString(cell.pdk);
         auto *cellTitle =
             scene->addText(QStringLiteral("Schematic: %1  ·  %2").arg(QString::fromStdString(cell.name), pdkLabel));
-        cellTitle->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
+        cellTitle->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
         cellTitle->setPos(-900, -900);
         cellTitle->setData(0, QStringLiteral("canvas-title"));
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
                 continue;
             auto *label = scene->addText(QString::fromStdString(net.name));
-            label->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Accent5));
+            label->setDefaultTextColor(ice::uiColor(ice::UiColor::Accent5));
             label->setData(0, QStringLiteral("net-label"));
             label->setData(1, QVariant::fromValue<qulonglong>(netId));
             label->setPos(net.x, -net.y);
@@ -2855,32 +3904,33 @@ class DocumentWindow : public QMainWindow {
             artwork->setFlag(QGraphicsItem::ItemIsSelectable, false);
             artwork->setData(0, QStringLiteral("symbol-artwork"));
             auto *tint = new QGraphicsColorizeEffect(artwork);
-            tint->setColor(ice::themeColor(ice::ThemeRole::Axis1));
+            tint->setColor(ice::uiColor(ice::UiColor::Axis1));
             tint->setStrength(1.0);
             tint->setEnabled(true);
             artwork->setGraphicsEffect(tint);
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
-            label->setDefaultTextColor(ice::themeColor(ice::ThemeRole::Axis1));
+            label->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
             label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
             label->setData(0, QStringLiteral("symbol-label"));
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
-                pinItem->setPen(QPen(ice::themeColor(ice::ThemeRole::Axis1)));
-                pinItem->setBrush(QBrush(ice::themeColor(ice::ThemeRole::Accent1)));
+                pinItem->setPen(QPen(ice::uiColor(ice::UiColor::Axis1)));
+                pinItem->setBrush(QBrush(ice::uiColor(ice::UiColor::Accent1)));
                 pinItem->setFlag(QGraphicsItem::ItemIsSelectable, false);
                 pinItem->setData(0, QStringLiteral("pin"));
                 pinItem->setData(1, QVariant::fromValue<qulonglong>(pin.id));
                 pinItem->setData(2, static_cast<int>(rotateDirection(pin.direction, instance.orientation)));
                 pinItem->setPos(pin.x, -pin.y);
                 pinItem->setToolTip(QString::fromStdString(pin.name));
+                pinItem->setVisible(false);
             }
             // Selection feedback is drawn as a child of the symbol group so it
             // follows the symbol and its transform.
             if (const auto bounds = symbolHighlightRect(group); !bounds.isNull()) {
                 auto *highlight = new QGraphicsRectItem(bounds, group);
-                highlight->setPen(QPen(ice::themeColor(ice::ThemeRole::Accent4), 2));
-                QColor fill(ice::themeColor(ice::ThemeRole::Accent4));
+                highlight->setPen(QPen(ice::uiColor(ice::UiColor::Accent4), 2));
+                QColor fill(ice::uiColor(ice::UiColor::Accent4));
                 fill.setAlpha(45);
                 highlight->setBrush(fill);
                 highlight->setZValue(-1);
@@ -2907,7 +3957,7 @@ class DocumentWindow : public QMainWindow {
             if (first != pinViews.end() && second != pinViews.end()) {
                 auto path = routeWire(first->second.point, first->second.direction, second->second.point,
                                       second->second.direction, scene, net.pins.front(), net.pins.back());
-                auto *wire = scene->addPath(path, QPen(ice::themeColor(ice::ThemeRole::Accent4), 2));
+                auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
                 wire->setZValue(-1);
                 wire->setData(0, QStringLiteral("wire"));
             }
@@ -2916,6 +3966,7 @@ class DocumentWindow : public QMainWindow {
         // the scene has been rebuilt from the database.
         schematicCanvas_->restoreSelection();
         updateSelectionStatus();
+        schematicCanvas_->refreshPinVisibility();
     }
 
     QPainterPath routeWire(QPointF start, ice::PinDirection startDirection, QPointF target,
@@ -3073,19 +4124,34 @@ class DocumentWindow : public QMainWindow {
         return action;
     }
 
-    void refreshTheme() {
-        auto &theme = ice::Theme::instance();
-        theme.save();
-        theme.applyToApplication();
-        const auto canvas = ice::themeColor(ice::ThemeRole::Background2);
+    void setAppearanceMode(ice::AppearanceMode mode) {
+        appearanceMode_ = mode;
+        ice::saveAppearanceMode(mode);
+        ice::applyAppearance(mode);
+        refreshAppearance();
+        statusBar()->showMessage(mode == ice::AppearanceMode::System
+                                     ? QStringLiteral("Following the system appearance")
+                                     : (mode == ice::AppearanceMode::Dark
+                                            ? QStringLiteral("Dark appearance applied")
+                                            : QStringLiteral("Light appearance applied")));
+    }
+
+    void refreshAppearance() {
+        const auto canvas = ice::uiColor(ice::UiColor::Background2);
         if (schematicCanvas_)
             schematicCanvas_->setBackgroundBrush(canvas);
         if (layoutCanvas_)
             layoutCanvas_->setBackgroundBrush(canvas);
-        // Scene items cache their colors, so rebuild both editors after a
-        // palette change; the canvas transform and selection are preserved.
+        // Scene items cache their colors, so rebuild both editors after an
+        // appearance change; the canvas transform and selection are preserved.
         refreshSchematic();
         refreshLayout();
+        if (layersPanel_ && project_)
+            layersPanel_->setProject(project_->project());
+        if (schematicPropertiesPanel_)
+            schematicPropertiesPanel_->refreshAppearance();
+        if (startupView_)
+            startupView_->refreshAppearance();
         if (graphTabs_) {
             for (int index = 0; index < graphTabs_->count(); ++index)
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
@@ -3102,27 +4168,6 @@ class DocumentWindow : public QMainWindow {
                 button->setIcon(ice::lucideIcon(name, button->iconSize().width()));
         }
         update();
-    }
-
-    void editTheme() {
-        ice::ThemeDialog dialog(this);
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        refreshTheme();
-        statusBar()->showMessage(QStringLiteral("Theme palette updated"));
-    }
-
-    void applyThemePreset(ice::ThemePreset preset) {
-        ice::Theme::instance().applyPreset(preset);
-        refreshTheme();
-        statusBar()->showMessage(preset == ice::ThemePreset::Dark ? QStringLiteral("Dark theme applied")
-                                                                  : QStringLiteral("Light theme applied"));
-    }
-
-    void resetTheme() {
-        ice::Theme::instance().resetToDefaults();
-        refreshTheme();
-        statusBar()->showMessage(QStringLiteral("Theme reset to defaults"));
     }
 
     void createMenus() {
@@ -3195,28 +4240,28 @@ class DocumentWindow : public QMainWindow {
         toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
 
         auto *settingsMenu = menuBar()->addMenu(QStringLiteral("&Settings"));
-        auto *themeMenu = settingsMenu->addMenu(QStringLiteral("Theme"));
-        auto *darkThemeAction = addCommand(QStringLiteral("Dark Theme"));
-        auto *lightThemeAction = addCommand(QStringLiteral("Light Theme"));
-        for (auto *action : {darkThemeAction, lightThemeAction}) {
+        auto *appearanceMenu = settingsMenu->addMenu(QStringLiteral("Appearance"));
+        auto *systemAppearanceAction = addCommand(QStringLiteral("System Theme"));
+        auto *lightAppearanceAction = addCommand(QStringLiteral("Light Theme"));
+        auto *darkAppearanceAction = addCommand(QStringLiteral("Dark Theme"));
+        auto *appearanceGroup = new QActionGroup(this);
+        appearanceGroup->setExclusive(true);
+        for (auto *action : {systemAppearanceAction, lightAppearanceAction, darkAppearanceAction}) {
             action->setCheckable(true);
-            themeMenu->addAction(action);
+            appearanceGroup->addAction(action);
+            appearanceMenu->addAction(action);
         }
-        auto *themeGroup = new QActionGroup(this);
-        themeGroup->setExclusive(true);
-        themeGroup->addAction(darkThemeAction);
-        themeGroup->addAction(lightThemeAction);
-        if (ice::Theme::instance().preset() == ice::ThemePreset::Dark)
-            darkThemeAction->setChecked(true);
-        else
-            lightThemeAction->setChecked(true);
-        settingsMenu->addSeparator();
-        auto *themeAction = addCommand(QStringLiteral("Theme Palette…"));
-        settingsMenu->addAction(themeAction);
-        auto *resetThemeAction = addCommand(QStringLiteral("Reset Theme"));
-        settingsMenu->addAction(resetThemeAction);
-        connect(darkThemeAction, &QAction::triggered, this, [this] { applyThemePreset(ice::ThemePreset::Dark); });
-        connect(lightThemeAction, &QAction::triggered, this, [this] { applyThemePreset(ice::ThemePreset::Light); });
+        switch (appearanceMode_) {
+        case ice::AppearanceMode::Light:
+            lightAppearanceAction->setChecked(true);
+            break;
+        case ice::AppearanceMode::Dark:
+            darkAppearanceAction->setChecked(true);
+            break;
+        case ice::AppearanceMode::System:
+            systemAppearanceAction->setChecked(true);
+            break;
+        }
 
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
         helpMenu->addAction(addCommand(QStringLiteral("Keyboard Shortcuts")));
@@ -3228,14 +4273,18 @@ class DocumentWindow : public QMainWindow {
         connect(openLayoutAction, &QAction::triggered, this, &DocumentWindow::openLayoutInterchange);
         connect(saveLayoutAction, &QAction::triggered, this, &DocumentWindow::saveLayoutInterchange);
         connect(closeAction, &QAction::triggered, this, &DocumentWindow::closeProject);
-        connect(createSchematicAction, &QAction::triggered, this, &DocumentWindow::createSchematic);
-        connect(createLayoutAction, &QAction::triggered, this, &DocumentWindow::createLayoutCell);
+        connect(createSchematicAction, &QAction::triggered, this, [this] { createSchematic(); });
+        connect(createLayoutAction, &QAction::triggered, this, [this] { createLayoutCell(); });
         connect(createLayerAction, &QAction::triggered, this, &DocumentWindow::createLayer);
         connect(managePackagesAction, &QAction::triggered, this, &DocumentWindow::managePackages);
         connect(placeSymbolAction, &QAction::triggered, this, &DocumentWindow::placeSymbol);
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
-        connect(themeAction, &QAction::triggered, this, &DocumentWindow::editTheme);
-        connect(resetThemeAction, &QAction::triggered, this, &DocumentWindow::resetTheme);
+        connect(systemAppearanceAction, &QAction::triggered, this,
+                [this] { setAppearanceMode(ice::AppearanceMode::System); });
+        connect(lightAppearanceAction, &QAction::triggered, this,
+                [this] { setAppearanceMode(ice::AppearanceMode::Light); });
+        connect(darkAppearanceAction, &QAction::triggered, this,
+                [this] { setAppearanceMode(ice::AppearanceMode::Dark); });
     }
 
     void showCommandPalette() {
@@ -3264,11 +4313,69 @@ class DocumentWindow : public QMainWindow {
     }
 
     void createActivityDock() {
-        auto *dock = new QDockWidget(QStringLiteral("Activity / Agent"), this);
-        dock->setObjectName(QStringLiteral("activityDock"));
-        dock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
-        dock->setWidget(new ActivityPanel);
-        addDockWidget(Qt::BottomDockWidgetArea, dock);
+        activityDock_ = new QDockWidget(this);
+        activityDock_->setObjectName(QStringLiteral("activityDock"));
+        activityDock_->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+        auto *titleBar = new QWidget(activityDock_);
+        titleBar->setFixedHeight(0);
+        activityDock_->setTitleBarWidget(titleBar);
+        activityDock_->setWidget(new ActivityPanel);
+        addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
+    }
+
+    void showStartup() {
+        if (workspaceStack_ && startupView_)
+            workspaceStack_->setCurrentWidget(startupView_);
+        if (activityDock_)
+            activityDock_->hide();
+        if (startupView_)
+            startupView_->setRecentProjects(loadRecentProjects());
+    }
+
+    void showWorkspace() {
+        if (workspaceStack_ && documents_)
+            workspaceStack_->setCurrentWidget(documents_);
+        if (activityDock_)
+            activityDock_->show();
+    }
+
+    void selectSchematicTool() {
+        if (schematicSelectTool_)
+            schematicSelectTool_->setChecked(true);
+        if (schematicCanvas_) {
+            schematicCanvas_->setPlaceSymbolMode(false);
+            schematicCanvas_->setNetLabelMode(false);
+        }
+        if (toolEscapeShortcut_)
+            toolEscapeShortcut_->setEnabled(false);
+        statusBar()->showMessage(QStringLiteral("Select tool"));
+    }
+
+    void updateEmptyWorkspaceState() {
+        const bool hasSchematics = project_ && !project_->project().schematicCells.empty();
+        const bool hasLayouts = project_ && !project_->project().layoutCells.empty();
+        if (schematicToolbarColumn_)
+            schematicToolbarColumn_->setVisible(hasSchematics);
+        if (layoutToolbarColumn_)
+            layoutToolbarColumn_->setVisible(hasLayouts);
+
+        if (schematicEditorStack_ && schematicEditorPage_ && schematicEmptyPanel_) {
+            const bool showingEmpty = schematicEditorStack_->currentWidget() == schematicEmptyPanel_;
+            if (hasSchematics) {
+                schematicEditorStack_->setCurrentWidget(schematicEditorPage_);
+            } else {
+                schematicEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
+                schematicEditorStack_->setCurrentWidget(schematicEmptyPanel_);
+                if (!showingEmpty)
+                    schematicEmptyPanel_->prepareForDisplay();
+            }
+        }
+        if (layoutEditorStack_ && layoutEditorPage_ && layoutEmptyPanel_) {
+            const bool showingEmpty = layoutEditorStack_->currentWidget() == layoutEmptyPanel_;
+            layoutEditorStack_->setCurrentWidget(hasLayouts ? layoutEditorPage_ : layoutEmptyPanel_);
+            if (!hasLayouts && !showingEmpty)
+                layoutEmptyPanel_->prepareForDisplay();
+        }
     }
 
     void createDocuments() {
@@ -3283,31 +4390,50 @@ class DocumentWindow : public QMainWindow {
         schematicCellTabs_->setDocumentMode(true);
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
-        schematicHierarchy_ = new ProjectPanel(false, false, false);
-        schematicContentLayout->addWidget(schematicHierarchy_, 0);
+        schematicHierarchy_ = new ProjectPanel(false, false, false, true);
+        schematicHierarchy_->setOnAddClicked([this] { createSchematic(); });
+        schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
+        schematicSymbolsPanel_ = new SymbolsPanel;
+        schematicSymbolsPanel_->setOnSelectionChanged([this] {
+            if (!schematicCanvas_)
+                return;
+            const auto *symbol = schematicSymbolsPanel_ ? schematicSymbolsPanel_->selectedSymbol() : nullptr;
+            schematicCanvas_->setPlaceSymbolPreview(symbol ? symbol->svg.toUtf8() : QByteArray());
+        });
+        schematicLeftTabs_ = new QTabWidget;
+        schematicLeftTabs_->addTab(schematicHierarchy_, QStringLiteral("Hierarchy"));
+        schematicLeftTabs_->addTab(schematicSymbolsPanel_, QStringLiteral("Symbols"));
+        schematicContentLayout->addWidget(schematicLeftTabs_, 0);
         auto *schematicToolbar = createEditorToolbar(false);
         schematicToolbar->setOrientation(Qt::Vertical);
-        auto *schematicToolbarColumn = new QWidget;
-        auto *schematicToolbarLayout = new QVBoxLayout(schematicToolbarColumn);
+        schematicToolbarColumn_ = new QWidget;
+        auto *schematicToolbarLayout = new QVBoxLayout(schematicToolbarColumn_);
         schematicToolbarLayout->setContentsMargins(0, 0, 0, 0);
         schematicToolbarLayout->addStretch(1);
         schematicToolbarLayout->addWidget(schematicToolbar, 0, Qt::AlignHCenter);
         schematicToolbarLayout->addStretch(1);
-        schematicContentLayout->addWidget(schematicToolbarColumn, 0);
-        auto *schematicEditorColumn = new QWidget;
-        auto *schematicEditorLayout = new QVBoxLayout(schematicEditorColumn);
+        schematicContentLayout->addWidget(schematicToolbarColumn_, 0);
+        schematicEditorPage_ = new QWidget;
+        auto *schematicEditorLayout = new QVBoxLayout(schematicEditorPage_);
         schematicEditorLayout->setContentsMargins(0, 0, 0, 0);
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
         schematicEditorLayout->addWidget(makeEditor(QStringLiteral("Schematic editor"), false), 1);
-        schematicContentLayout->addWidget(schematicEditorColumn, 1);
+        schematicEmptyPanel_ = new EmptySchematicPanel;
+        schematicEmptyPanel_->setOnCreate(
+            [this](const QString &name, const std::string &pdk) { createSchematic(name, pdk); });
+        schematicEditorStack_ = new QStackedWidget;
+        schematicEditorStack_->addWidget(schematicEmptyPanel_);
+        schematicEditorStack_->addWidget(schematicEditorPage_);
+        schematicContentLayout->addWidget(schematicEditorStack_, 1);
         auto *schematicProperties = new QTabWidget;
         schematicPropertiesPanel_ = new PropertiesPanel(false);
         schematicPropertiesPanel_->setOnParameterChanged(
             [this](ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
                    const std::string &value) { updateInstanceParameter(instanceId, parameterId, name, value); });
         schematicProperties->addTab(schematicPropertiesPanel_, QStringLiteral("Properties"));
-        schematicProperties->addTab(new DiagnosticsPanel, QStringLiteral("Diagnostics"));
+        schematicNetlistPanel_ = new SchematicNetlistPanel;
+        schematicProperties->addTab(schematicNetlistPanel_, QStringLiteral("Netlist"));
         schematicContentLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
         documents->addTab(schematicPage, QStringLiteral("Schematic"));
@@ -3320,24 +4446,31 @@ class DocumentWindow : public QMainWindow {
         layoutCellTabs_->setDocumentMode(true);
         auto *layoutContent = new QWidget;
         auto *layoutContentLayout = new QHBoxLayout(layoutContent);
-        layoutHierarchy_ = new ProjectPanel(true, false);
+        layoutHierarchy_ = new ProjectPanel(true, false, true, true);
+        layoutHierarchy_->setOnAddClicked([this] { createLayoutCell(); });
+        layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutCell(id); });
         layoutContentLayout->addWidget(layoutHierarchy_, 0);
         auto *layoutToolbar = createEditorToolbar(true);
         layoutToolbar->setOrientation(Qt::Vertical);
-        auto *layoutToolbarColumn = new QWidget;
-        auto *layoutToolbarLayout = new QVBoxLayout(layoutToolbarColumn);
+        layoutToolbarColumn_ = new QWidget;
+        auto *layoutToolbarLayout = new QVBoxLayout(layoutToolbarColumn_);
         layoutToolbarLayout->setContentsMargins(0, 0, 0, 0);
         layoutToolbarLayout->addStretch(1);
         layoutToolbarLayout->addWidget(layoutToolbar, 0, Qt::AlignHCenter);
         layoutToolbarLayout->addStretch(1);
-        layoutContentLayout->addWidget(layoutToolbarColumn, 0);
-        auto *layoutEditorColumn = new QWidget;
-        auto *layoutEditorLayout = new QVBoxLayout(layoutEditorColumn);
+        layoutContentLayout->addWidget(layoutToolbarColumn_, 0);
+        layoutEditorPage_ = new QWidget;
+        auto *layoutEditorLayout = new QVBoxLayout(layoutEditorPage_);
         layoutEditorLayout->setContentsMargins(0, 0, 0, 0);
         layoutEditorLayout->setSpacing(0);
         layoutEditorLayout->addWidget(layoutCellTabs_);
         layoutEditorLayout->addWidget(makeEditor(QStringLiteral("Layout editor"), true), 1);
-        layoutContentLayout->addWidget(layoutEditorColumn, 1);
+        layoutEmptyPanel_ = new EmptyLayoutPanel;
+        layoutEmptyPanel_->setOnCreate([this](const QString &name) { createLayoutCell(name); });
+        layoutEditorStack_ = new QStackedWidget;
+        layoutEditorStack_->addWidget(layoutEmptyPanel_);
+        layoutEditorStack_->addWidget(layoutEditorPage_);
+        layoutContentLayout->addWidget(layoutEditorStack_, 1);
         layersPanel_ = new LayersPanel;
         layoutContentLayout->addWidget(layersPanel_, 0);
         layoutLayout->addWidget(layoutContent, 1);
@@ -3355,12 +4488,15 @@ class DocumentWindow : public QMainWindow {
         simulationPanel_->setMaximumWidth(280);
         simulationSplit->addWidget(simulationPanel_);
 
-        // ── Right: simulation editor (properties + graph tabs) ───────────
+        // ── Right: simulation editor (properties, graphs, netlist tabs) ──
         auto *simEditor = new QWidget;
         auto *simEditorLayout = new QVBoxLayout(simEditor);
         simEditorLayout->setContentsMargins(4, 4, 4, 4);
+        simulationTabs_ = new QTabWidget;
 
         // Properties form – links to the selected SimulationItem fields
+        auto *propertiesPage = new QWidget;
+        auto *propertiesLayout = new QVBoxLayout(propertiesPage);
         auto *simPropsGroup = new QGroupBox(QStringLiteral("Simulation Properties"));
         auto *simulationForm = new QFormLayout(simPropsGroup);
         schematicSelector_ = new QComboBox;
@@ -3389,9 +4525,30 @@ class DocumentWindow : public QMainWindow {
         simulationForm->addRow(QStringLiteral("Stop time / end"), stopTime_);
         simulationForm->addRow(QStringLiteral("Step / increment"), stepTime_);
         simulationForm->addRow(QStringLiteral("SPICE directives"), directiveEditor_);
-        simEditorLayout->addWidget(simPropsGroup);
+        propertiesLayout->addWidget(simPropsGroup);
+
+        auto *runButton = new QPushButton;
+        setLucideIcon(runButton, QStringLiteral("play"), 16);
+        runButton->setToolTip(QStringLiteral("Run simulation"));
+        runButton->setAccessibleName(QStringLiteral("Run simulation"));
+        runButton->setFixedWidth(32);
+        auto *runRow = new QHBoxLayout;
+        runRow->addStretch();
+        runRow->addWidget(runButton);
+        propertiesLayout->addLayout(runRow);
+
+        simulationOutput_ = new QPlainTextEdit;
+        simulationOutput_->setReadOnly(true);
+        simulationOutput_->setMaximumHeight(110);
+        simulationOutput_->setPlaceholderText(QStringLiteral("Simulation status and result summary"));
+        propertiesLayout->addWidget(simulationOutput_);
+        propertiesLayout->addStretch();
+        simulationTabs_->addTab(propertiesPage, QStringLiteral("Properties"));
 
         // Graph tabs area
+        auto *graphsPage = new QWidget;
+        auto *graphsLayout = new QVBoxLayout(graphsPage);
+        graphsLayout->setContentsMargins(0, 0, 0, 0);
         auto *graphHeader = new QWidget;
         auto *graphHeaderLayout = new QHBoxLayout(graphHeader);
         graphHeaderLayout->setContentsMargins(0, 4, 0, 0);
@@ -3423,23 +4580,28 @@ class DocumentWindow : public QMainWindow {
         graphHeaderLayout->addWidget(editGraphButton_);
         graphHeaderLayout->addWidget(gridButton);
         graphHeaderLayout->addStretch();
-        simEditorLayout->addWidget(graphHeader);
+        graphsLayout->addWidget(graphHeader);
 
         graphTabs_ = new QTabWidget;
         graphTabs_->setDocumentMode(true);
         graphTabs_->setTabsClosable(false);
         simulationPlot_ = new SimulationPlot;
         graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
-        simEditorLayout->addWidget(graphTabs_, 1);
+        graphsLayout->addWidget(graphTabs_, 1);
+        simulationTabs_->addTab(graphsPage, QStringLiteral("Graphs"));
 
-        // Run button + output
-        auto *runButton = new QPushButton(QStringLiteral("Run simulation"));
-        simEditorLayout->addWidget(runButton);
-        simulationOutput_ = new QPlainTextEdit;
-        simulationOutput_->setReadOnly(true);
-        simulationOutput_->setMaximumHeight(110);
-        simulationOutput_->setPlaceholderText(QStringLiteral("Simulation status and result summary"));
-        simEditorLayout->addWidget(simulationOutput_);
+        // Netlist viewer
+        auto *netlistPage = new QWidget;
+        auto *netlistLayout = new QVBoxLayout(netlistPage);
+        netlistLayout->setContentsMargins(0, 0, 0, 0);
+        simulationNetlist_ = new QPlainTextEdit;
+        simulationNetlist_->setReadOnly(true);
+        simulationNetlist_->setLineWrapMode(QPlainTextEdit::NoWrap);
+        simulationNetlist_->setPlaceholderText(QStringLiteral("Select a simulation to see its netlist."));
+        netlistLayout->addWidget(simulationNetlist_);
+        simulationTabs_->addTab(netlistPage, QStringLiteral("Netlist"));
+
+        simEditorLayout->addWidget(simulationTabs_, 1);
 
         simulationSplit->addWidget(simEditor);
         simulationLayout->addWidget(simulationSplit, 1);
@@ -3489,6 +4651,10 @@ class DocumentWindow : public QMainWindow {
                     plot->setGridVisible(visible);
         });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
+        connect(simulationTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+            if (index >= 0 && simulationTabs_->tabText(index) == QStringLiteral("Netlist"))
+                refreshSimulationNetlist();
+        });
 
         // ── Wire schematic / layout tabs ─────────────────────────────────
         connect(schematicCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
@@ -3509,7 +4675,17 @@ class DocumentWindow : public QMainWindow {
         documents->addTab(placeholder(QStringLiteral("Verification results"),
                                       QStringLiteral("DRC, LVS, PEX, diagnostics, and provenance")),
                           QStringLiteral("Results"));
-        setCentralWidget(documents);
+        workspaceStack_ = new WorkspaceStack;
+        startupView_ = new StartupView;
+        startupView_->setOnCreateProject(
+            [this](const QString &name, const QString &location) { createProject(name, location); });
+        startupView_->setOnOpenProject([this] { openProject(); });
+        startupView_->setOnOpenRecent([this](const QString &path) { openProjectPath(path); });
+        startupView_->setRecentProjects(loadRecentProjects());
+        workspaceStack_->addWidget(startupView_);
+        workspaceStack_->addWidget(documents);
+        setCentralWidget(workspaceStack_);
+        updateEmptyWorkspaceState();
     }
 
     QWidget *makeEditor(const QString &title, bool layoutEditor) {
@@ -3590,6 +4766,19 @@ class DocumentWindow : public QMainWindow {
                 },
                 [this](ice::ObjectId) { updateSelectionStatus(); },
                 [this](ice::ObjectId instanceId) { openSymbolProperties(instanceId); });
+            schematicCanvas_->setSymbolPlacementCallback([this](QPointF position) {
+                if (!schematicSymbolsPanel_)
+                    return;
+                const auto *symbol = schematicSymbolsPanel_->selectedSymbol();
+                if (!symbol) {
+                    statusBar()->showMessage(QStringLiteral("Select a symbol in the Symbols tab first"));
+                    return;
+                }
+                const auto symbolName = symbol->name;
+                if (placeSymbolDefinition(*symbol, position))
+                    statusBar()->showMessage(QStringLiteral("Placed %1").arg(symbolName));
+            });
+            schematicCanvas_->setToolEscapeCallback([this] { selectSchematicTool(); });
             schematicCanvas_->deleteSelected_ = [this](std::vector<ice::ObjectId> ids) {
                 if (!project_)
                     return;
@@ -3682,7 +4871,7 @@ class DocumentWindow : public QMainWindow {
                 });
             view = layoutCanvas_;
         }
-        view->setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
+        view->setBackgroundBrush(ice::uiColor(ice::UiColor::Background2));
         view->setAlignment(Qt::AlignCenter);
         view->setAccessibleName(title);
         editorLayout->addWidget(view, 1);
@@ -3712,22 +4901,15 @@ class DocumentWindow : public QMainWindow {
                 if (layoutCanvas_)
                     layoutCanvas_->setTool(LayoutCanvas::Tool::select);
             });
-        }
-        addTool(QStringLiteral("hand"), QStringLiteral("Pan"));
-        auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to view"));
-        connect(fitTool, &QAction::triggered, this, [this, layoutEditor] {
-            if (layoutEditor) {
+            auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to view"));
+            connect(fitTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
                     layoutCanvas_->fitToContent();
-            } else if (schematicCanvas_) {
-                schematicCanvas_->fitToContent();
-            }
-        });
-        toolbar->addSeparator();
-        addTool(QStringLiteral("grid-3x3"), QStringLiteral("Grid and snapping"));
-        addTool(QStringLiteral("eye"), QStringLiteral("Toggle visibility"));
-        toolbar->addSeparator();
-        if (layoutEditor) {
+            });
+            toolbar->addSeparator();
+            addTool(QStringLiteral("grid-3x3"), QStringLiteral("Grid and snapping"));
+            addTool(QStringLiteral("eye"), QStringLiteral("Toggle visibility"));
+            toolbar->addSeparator();
             auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create rectangle"));
             connect(rectangleTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
@@ -3739,21 +4921,113 @@ class DocumentWindow : public QMainWindow {
             toolbar->addSeparator();
             addTool(QStringLiteral("rotate-ccw"), QStringLiteral("Rotate counterclockwise"));
             addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate clockwise"));
-        } else {
-            addTool(QStringLiteral("circuit-board"), QStringLiteral("Place symbol"));
-            addTool(QStringLiteral("route"), QStringLiteral("Draw wire"));
-            auto *netLabelTool = addTool(QStringLiteral("tag"), QStringLiteral("Place net label"));
-            connect(netLabelTool, &QAction::triggered, this, [this] {
-                if (!project_ || project_->project().schematicCells.empty())
-                    return;
-                schematicCanvas_->setNetLabelMode(true);
-                statusBar()->showMessage(QStringLiteral("Click in the schematic to place a net label"));
-            });
-            auto *propertiesTool = addTool(QStringLiteral("sliders-horizontal"), QStringLiteral("Edit properties"));
-            connect(propertiesTool, &QAction::triggered, this, [this] { editSelectedSymbol(); });
+            toolbar->addSeparator();
+            addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+            return toolbar;
         }
+
+        selectTool->setCheckable(true);
+        schematicSelectTool_ = selectTool;
+        auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Symbol"));
+        placeSymbolTool->setCheckable(true);
+        auto *placeLabelTool = addTool(QStringLiteral("tag"), QStringLiteral("Place Label"));
+        placeLabelTool->setCheckable(true);
+        auto *toolGroup = new QActionGroup(toolbar);
+        toolGroup->setExclusive(true);
+        for (auto *action : {selectTool, placeSymbolTool, placeLabelTool})
+            toolGroup->addAction(action);
+        selectTool->setChecked(true);
+        const auto ensureToolChecked = [this, selectTool, placeSymbolTool, placeLabelTool] {
+            if (!selectTool->isChecked() && !placeSymbolTool->isChecked() && !placeLabelTool->isChecked()) {
+                selectTool->setChecked(true);
+                if (schematicCanvas_) {
+                    schematicCanvas_->setPlaceSymbolMode(false);
+                    schematicCanvas_->setNetLabelMode(false);
+                }
+                if (toolEscapeShortcut_)
+                    toolEscapeShortcut_->setEnabled(false);
+            }
+        };
+        for (auto *action : {selectTool, placeSymbolTool, placeLabelTool})
+            connect(action, &QAction::toggled, this, [ensureToolChecked](bool) { ensureToolChecked(); });
+        connect(selectTool, &QAction::triggered, this, [this, selectTool] {
+            if (!selectTool->isChecked())
+                return;
+            if (schematicCanvas_) {
+                schematicCanvas_->setPlaceSymbolMode(false);
+                schematicCanvas_->setNetLabelMode(false);
+            }
+            if (toolEscapeShortcut_)
+                toolEscapeShortcut_->setEnabled(false);
+        });
+        connect(placeSymbolTool, &QAction::triggered, this, [this, placeSymbolTool] {
+            if (!placeSymbolTool->isChecked())
+                return;
+            if (schematicLeftTabs_ && schematicSymbolsPanel_)
+                schematicLeftTabs_->setCurrentWidget(schematicSymbolsPanel_);
+            if (schematicCanvas_) {
+                const auto *symbol = schematicSymbolsPanel_ ? schematicSymbolsPanel_->selectedSymbol() : nullptr;
+                schematicCanvas_->setPlaceSymbolPreview(symbol ? symbol->svg.toUtf8() : QByteArray());
+                schematicCanvas_->setNetLabelMode(false);
+                schematicCanvas_->setPlaceSymbolMode(true);
+                schematicCanvas_->setFocus();
+            }
+            if (toolEscapeShortcut_)
+                toolEscapeShortcut_->setEnabled(true);
+            statusBar()->showMessage(
+                QStringLiteral("Select a symbol in the Symbols tab, then click in the schematic to place it"));
+        });
+        connect(placeLabelTool, &QAction::triggered, this, [this, placeLabelTool] {
+            if (!placeLabelTool->isChecked())
+                return;
+            if (schematicCanvas_) {
+                schematicCanvas_->setPlaceSymbolMode(false);
+                schematicCanvas_->setNetLabelMode(true);
+                schematicCanvas_->setFocus();
+            }
+            if (toolEscapeShortcut_)
+                toolEscapeShortcut_->setEnabled(true);
+            statusBar()->showMessage(QStringLiteral("Click in the schematic to place a net label"));
+        });
+
         toolbar->addSeparator();
-        addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+        auto *toggleGridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
+        toggleGridTool->setCheckable(true);
+        toggleGridTool->setChecked(true);
+        connect(toggleGridTool, &QAction::toggled, this, [this](bool checked) {
+            if (schematicCanvas_)
+                schematicCanvas_->setGridVisible(checked);
+        });
+        auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
+        snapTool->setCheckable(true);
+        snapTool->setChecked(true);
+        connect(snapTool, &QAction::toggled, this, [this](bool checked) {
+            if (schematicCanvas_)
+                schematicCanvas_->setSnapToGrid(checked);
+        });
+        auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to View"));
+        connect(fitTool, &QAction::triggered, this, [this] {
+            if (schematicCanvas_)
+                schematicCanvas_->fitToContent();
+        });
+
+        toolbar->addSeparator();
+        auto *upTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Go Up the Hierarchy"));
+        connect(upTool, &QAction::triggered, this,
+                [this] { statusBar()->showMessage(QStringLiteral("Hierarchy navigation is not available yet")); });
+        auto *downTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Go Down the Hierarchy"));
+        connect(downTool, &QAction::triggered, this,
+                [this] { statusBar()->showMessage(QStringLiteral("Hierarchy navigation is not available yet")); });
+
+        toolbar->addSeparator();
+        auto *wrapTool = addTool(QStringLiteral("package"), QStringLiteral("Wrap into Symbol"));
+        connect(wrapTool, &QAction::triggered, this,
+                [this] { statusBar()->showMessage(QStringLiteral("Wrapping symbols is not available yet")); });
+        auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+        connect(deleteTool, &QAction::triggered, this, [this] {
+            if (schematicCanvas_)
+                schematicCanvas_->deleteSelectedSymbols();
+        });
         return toolbar;
     }
 
@@ -3775,15 +5049,28 @@ class DocumentWindow : public QMainWindow {
     LayersPanel *layersPanel_ = nullptr;
     QTabWidget *schematicCellTabs_ = nullptr;
     QTabWidget *layoutCellTabs_ = nullptr;
+    QStackedWidget *schematicEditorStack_ = nullptr;
+    QWidget *schematicEditorPage_ = nullptr;
+    EmptySchematicPanel *schematicEmptyPanel_ = nullptr;
+    QWidget *schematicToolbarColumn_ = nullptr;
+    QStackedWidget *layoutEditorStack_ = nullptr;
+    QWidget *layoutEditorPage_ = nullptr;
+    EmptyLayoutPanel *layoutEmptyPanel_ = nullptr;
+    QWidget *layoutToolbarColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
     std::unique_ptr<ice::ProjectSession> project_;
     QString projectPath_;
+    QStackedWidget *workspaceStack_ = nullptr;
+    StartupView *startupView_ = nullptr;
+    QDockWidget *activityDock_ = nullptr;
     QTabWidget *documents_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
     QPlainTextEdit *simulationOutput_ = nullptr;
+    QTabWidget *simulationTabs_ = nullptr;
+    QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationPage_ = nullptr;
     QComboBox *schematicSelector_ = nullptr;
     QComboBox *simulatorSelector_ = nullptr;
@@ -3797,8 +5084,16 @@ class DocumentWindow : public QMainWindow {
     bool graphGridVisible_ = true;
     ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
+    SymbolsPanel *schematicSymbolsPanel_ = nullptr;
+    QTabWidget *schematicLeftTabs_ = nullptr;
+    SchematicNetlistPanel *schematicNetlistPanel_ = nullptr;
+    std::string schematicSymbolsPdk_;
+    bool schematicSymbolsLoaded_ = false;
     StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
+    QAction *schematicSelectTool_ = nullptr;
+    QShortcut *toolEscapeShortcut_ = nullptr;
+    ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
     QList<QAction *> commands_;
 };
 
@@ -3810,10 +5105,10 @@ int main(int argc, char **argv) {
     app.setApplicationName(QStringLiteral("ICE"));
     app.setApplicationVersion(QString::fromStdString(ice::version()));
     QApplication::setStyle(QStringLiteral("Fusion"));
-    ice::Theme::instance().load();
-    ice::Theme::instance().applyToApplication();
+    const auto appearance = ice::loadAppearanceMode();
+    ice::applyAppearance(appearance);
 
-    DocumentWindow window;
+    DocumentWindow window(appearance);
     if (argc == 3 && std::string(argv[1]) == "--project") {
         try {
             if (!window.setProject(ice::Project::load(argv[2])))

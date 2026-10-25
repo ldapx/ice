@@ -3,7 +3,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/symbols.hpp"
 
-#include "theme.hpp"
+#include "ui_colors.hpp"
 
 #include <QComboBox>
 #include <QCoreApplication>
@@ -132,9 +132,9 @@ void SymbolPreview::paintEvent(QPaintEvent *) {
     const QRectF target(available.center().x() - scaledSize.width() / 2.0,
                         available.center().y() - scaledSize.height() / 2.0, scaledSize.width(), scaledSize.height());
 
-    // Render the artwork offscreen, then tint it with the theme axis color.
+    // Render the artwork offscreen, then tint it with the palette axis color.
     // This mirrors the schematic editor, where symbol strokes are colorized so
-    // they remain visible on both dark and light canvases.
+    // they remain visible against the canvas background.
     const qreal ratio = devicePixelRatioF();
     const QSize pixelSize(static_cast<int>(std::ceil(target.width() * ratio)),
                           static_cast<int>(std::ceil(target.height() * ratio)));
@@ -149,7 +149,7 @@ void SymbolPreview::paintEvent(QPaintEvent *) {
     {
         QPainter tintPainter(&artwork);
         tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        tintPainter.fillRect(artwork.rect(), ice::themeColor(ice::ThemeRole::Axis1));
+        tintPainter.fillRect(artwork.rect(), ice::uiColor(ice::UiColor::Axis1));
     }
     painter.drawImage(target.topLeft(), artwork);
 }
@@ -184,7 +184,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     browserLayout->addWidget(tabs_, 1);
     noResults_ = new QLabel(QStringLiteral("No matching symbols."));
     noResults_->setAlignment(Qt::AlignCenter);
-    noResults_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    noResults_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     noResults_->setVisible(false);
     browserLayout->addWidget(noResults_);
     splitter->addWidget(browser);
@@ -200,7 +200,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     symbolName_->setWordWrap(true);
     previewLayout->addWidget(symbolName_);
     symbolCategory_ = new QLabel;
-    symbolCategory_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::themeColor(ice::ThemeRole::Text2).name()));
+    symbolCategory_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     previewLayout->addWidget(symbolCategory_);
     symbolPins_ = new QLabel;
     previewLayout->addWidget(symbolPins_);
@@ -211,7 +211,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     previewFrame->setStyleSheet(
         QStringLiteral("#symbolPreviewFrame { background: %1; border: 1px solid %2; "
                        "border-radius: 4px; }")
-            .arg(ice::themeColor(ice::ThemeRole::Background2).name(), ice::themeColor(ice::ThemeRole::Border1).name()));
+            .arg(ice::uiColor(ice::UiColor::Background2).name(), ice::uiColor(ice::UiColor::Border1).name()));
     auto *previewFrameLayout = new QVBoxLayout(previewFrame);
     preview_ = new SymbolPreview;
     preview_->setMinimumSize(240, 200);
