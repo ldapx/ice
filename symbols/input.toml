@@ -1,0 +1,10 @@
+[symbol]
+name = "Input"
+artwork = "input.svg"
+category = "Ports"
+
+[[pin]]
+name = "IN"
+x = 40
+y = 0
+direction = "input"

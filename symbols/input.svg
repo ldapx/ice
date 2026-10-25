@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60" viewBox="0 0 120 60">
+  <rect x="20" y="10" width="80" height="40" fill="none" stroke="black" stroke-width="3"/>
+  <text x="60" y="35" text-anchor="middle" font-family="sans-serif" font-size="14" fill="black">Input</text>
+</svg>

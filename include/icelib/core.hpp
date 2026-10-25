@@ -87,6 +87,9 @@ struct SchematicCell {
     ObjectId id = 0;
     std::string name;
     std::string pdk = genericPdkId;
+    // Default parameters of the symbol that represents this schematic when it
+    // is used as a hierarchical block in another schematic.
+    std::vector<Parameter> parameters;
     std::map<ObjectId, Symbol> symbols;
     std::map<ObjectId, SchematicInstance> instances;
     std::map<ObjectId, Net> nets;

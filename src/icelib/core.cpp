@@ -45,6 +45,8 @@ ObjectId Project::nextId() {
     auto update = [&highest](ObjectId id) { highest = std::max(highest, id); };
     for (const auto &[id, cell] : schematicCells) {
         update(id);
+        for (const auto &parameter : cell.parameters)
+            update(parameter.id);
         for (const auto &[symbolId, symbol] : cell.symbols) {
             update(symbolId);
             for (const auto &pin : symbol.pins)
@@ -192,9 +194,15 @@ std::string Project::serialize() const {
         json c = {{"id", id},
                   {"name", cell.name},
                   {"pdk", cell.pdk},
+                  {"parameters", json::array()},
                   {"symbols", json::array()},
                   {"instances", json::array()},
                   {"nets", json::array()}};
+        for (const auto &parameter : cell.parameters) {
+            json entry;
+            put(entry, parameter);
+            c["parameters"].push_back(std::move(entry));
+        }
         for (const auto &[sid, symbol] : cell.symbols) {
             json s = {{"id", sid}, {"name", symbol.name}, {"artwork", symbol.artwork}, {"pins", json::array()}};
             for (const auto &pin : symbol.pins) {
@@ -351,6 +359,10 @@ Project Project::deserialize(const std::string &text) {
             cell.pdk = c.value("pdk", std::string{genericPdkId});
             if (cell.pdk.empty())
                 cell.pdk = genericPdkId;
+            if (c.contains("parameters")) {
+                for (const auto &parameter : c.at("parameters"))
+                    cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
+            }
             for (const auto &s : c.at("symbols")) {
                 Symbol symbol{s.at("id"), s.at("name"), s.at("artwork")};
                 for (const auto &pin : s.at("pins"))

@@ -105,14 +105,22 @@ std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition)
 // for a newly placed instance. Using the symbol name directly would create
 // duplicate names when the same source or passive is placed more than once.
 std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName) {
-    char prefix = ice::spiceElementForSymbol(symbolName);
-    if (prefix == 0)
-        prefix = 'X';
+    std::string prefix;
+    if (symbolName == "Input") {
+        prefix = "IN";
+    } else if (symbolName == "Output") {
+        prefix = "OUT";
+    } else {
+        char elementPrefix = ice::spiceElementForSymbol(symbolName);
+        if (elementPrefix == 0)
+            elementPrefix = 'X';
+        prefix = std::string(1, elementPrefix);
+    }
     std::set<std::string> used;
     for (const auto &[_, instance] : cell.instances)
         used.insert(instance.name);
     for (std::size_t index = 1;; ++index) {
-        const std::string candidate = std::string(1, prefix) + std::to_string(index);
+        const std::string candidate = prefix + std::to_string(index);
         if (!used.contains(candidate))
             return candidate;
     }

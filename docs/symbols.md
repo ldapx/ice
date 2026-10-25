@@ -29,6 +29,8 @@ movement, deletion, and connections survive project save/reload.
 | Ground | `orr_gnd` | GND |
 | Op Amp | `orr_opamp2` | +, -, OUT |
 | NMOS | `orr_nmos` | G, D, S, B |
+| Input | original ICE artwork | IN |
+| Output | original ICE artwork | OUT |
 
 Pin coordinates are integers in symbol units with the origin at the artwork
 center, so the GUI can center artwork of any size on the symbol origin and

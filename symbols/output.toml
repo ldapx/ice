@@ -1,0 +1,10 @@
+[symbol]
+name = "Output"
+artwork = "output.svg"
+category = "Ports"
+
+[[pin]]
+name = "OUT"
+x = -40
+y = 0
+direction = "output"

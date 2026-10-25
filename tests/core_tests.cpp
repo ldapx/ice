@@ -216,8 +216,8 @@ TEST_CASE("ngspice fetches the vectors named by the request signals") {
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
-    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
-                       "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
+    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)", "Resistor N14 N15 1k",
+                       "Capacitor N15 N16 1n"};
     request.probeSignals = {"N15"};
     ice::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(5));
@@ -251,8 +251,8 @@ TEST_CASE("a run with no resolvable signal names fails with a clear error") {
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
-    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)",
-                       "Resistor N14 N15 1k", "Capacitor N15 N16 1n"};
+    request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)", "Resistor N14 N15 1k",
+                       "Capacitor N15 N16 1n"};
     request.probeSignals = {"nope"};
     ice::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(5));
@@ -276,7 +276,9 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
         }
         return symbolId;
     };
-    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) { return cell.symbols.at(symbolId).pins.at(index).id; };
+    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) {
+        return cell.symbols.at(symbolId).pins.at(index).id;
+    };
 
     const auto sourceId = makeSymbol("Voltage Source", {"+", "-"});
     const auto resistorId = makeSymbol("Resistor", {"1", "2"});
@@ -299,9 +301,10 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     cell.nets.emplace(netId,
                       ice::Net{netId, "out", {pinIdOf(sourceId, 0), pinIdOf(resistorId, 0), pinIdOf(weirdId, 0)}});
     const auto groundNetId = project.nextId();
-    cell.nets.emplace(groundNetId,
-                      ice::Net{groundNetId, "", {pinIdOf(sourceId, 1), pinIdOf(resistorId, 1), pinIdOf(groundId, 0),
-                                                  pinIdOf(weirdId, 1)}});
+    cell.nets.emplace(groundNetId, ice::Net{groundNetId,
+                                            "",
+                                            {pinIdOf(sourceId, 1), pinIdOf(resistorId, 1), pinIdOf(groundId, 0),
+                                             pinIdOf(weirdId, 1)}});
 
     std::vector<std::string> notes;
     const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
@@ -641,7 +644,7 @@ TEST_CASE("symbols can reference built-in generic artwork") {
 TEST_CASE("shipped file symbol library loads") {
     const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
     const auto symbols = ice::SymbolLibrary::load(libraryRoot);
-    CHECK(symbols.size() == 11);
+    CHECK(symbols.size() == 13);
     std::map<std::string, std::size_t> pinCounts;
     std::map<std::string, std::map<std::string, std::string>> defaults;
     for (const auto &symbol : symbols) {
@@ -662,6 +665,8 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(pinCounts["Op Amp"] == 3);
     CHECK(pinCounts["NMOS"] == 4);
     CHECK(pinCounts["Inductor"] == 2);
+    CHECK(pinCounts["Input"] == 1);
+    CHECK(pinCounts["Output"] == 1);
     // Passive and source symbols seed their editable default parameters.
     CHECK(defaults["Resistor"]["resistance"] == "1k");
     CHECK(defaults["Capacitor"]["capacitance"] == "1n");

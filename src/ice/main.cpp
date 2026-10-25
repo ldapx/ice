@@ -120,6 +120,116 @@ QWidget *placeholder(const QString &title, const QString &description) {
     return widget;
 }
 
+SymbolDefinition generatedSchematicSymbol(const ice::SchematicCell &cell) {
+    struct Port {
+        QString name;
+        ice::Coordinate y = 0;
+    };
+    std::vector<Port> inputs;
+    std::vector<Port> outputs;
+    for (const auto &[_, instance] : cell.instances) {
+        const auto symbol = cell.symbols.find(instance.symbol);
+        if (symbol == cell.symbols.end())
+            continue;
+        const auto type = QString::fromStdString(symbol->second.name);
+        if (type.compare(QStringLiteral("Input"), Qt::CaseInsensitive) == 0)
+            inputs.push_back({QString::fromStdString(instance.name), instance.y});
+        else if (type.compare(QStringLiteral("Output"), Qt::CaseInsensitive) == 0)
+            outputs.push_back({QString::fromStdString(instance.name), instance.y});
+    }
+    const auto sortPorts = [](std::vector<Port> &ports) {
+        std::sort(ports.begin(), ports.end(), [](const Port &left, const Port &right) {
+            if (left.y != right.y)
+                return left.y > right.y;
+            return left.name.compare(right.name, Qt::CaseInsensitive) < 0;
+        });
+    };
+    sortPorts(inputs);
+    sortPorts(outputs);
+
+    const int portCount = static_cast<int>(std::max(inputs.size(), outputs.size()));
+    const int width = 220;
+    const int height = std::max(100, 70 + 30 * std::max(0, portCount - 1));
+    const int boxLeft = 30;
+    const int boxRight = width - 30;
+    const int boxTop = 20;
+    const int boxBottom = height - 20;
+    const int inputPinX = 10;
+    const int outputPinX = width - 10;
+    const qreal centerX = width / 2.0;
+    const qreal centerY = height / 2.0;
+    const auto portY = [&](std::size_t index, std::size_t count) {
+        if (count <= 1)
+            return centerY;
+        const auto spacing = (boxBottom - boxTop) / static_cast<qreal>(count + 1);
+        return boxTop + spacing * static_cast<qreal>(index + 1);
+    };
+
+    QStringList svg;
+    svg << QStringLiteral("<svg xmlns='http://www.w3.org/2000/svg' width='%1' height='%2' viewBox='0 0 %1 %2'>")
+               .arg(width)
+               .arg(height);
+    svg << QStringLiteral("<rect x='%1' y='%2' width='%3' height='%4' fill='none' stroke='black' stroke-width='3'/>")
+               .arg(boxLeft)
+               .arg(boxTop)
+               .arg(boxRight - boxLeft)
+               .arg(boxBottom - boxTop);
+    const auto name = QString::fromStdString(cell.name);
+    const int fontSize = name.size() > 24 ? 10 : name.size() > 16 ? 12 : 14;
+    svg << QStringLiteral("<text x='%1' y='%2' text-anchor='middle' font-family='sans-serif' font-size='%3' "
+                          "fill='black'>%4</text>")
+               .arg(centerX)
+               .arg(centerY + 5)
+               .arg(fontSize)
+               .arg(name.toHtmlEscaped());
+
+    SymbolDefinition definition;
+    definition.name = name;
+    definition.category = QStringLiteral("Schematics");
+    definition.parameters = cell.parameters;
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        const auto y = portY(index, inputs.size());
+        svg << QStringLiteral("<path d='M%1 %2 L%3 %2' fill='none' stroke='black' stroke-width='2'/>")
+                   .arg(boxLeft)
+                   .arg(y)
+                   .arg(inputPinX);
+        svg << QStringLiteral("<circle cx='%1' cy='%2' r='4' fill='black'/>").arg(inputPinX).arg(y);
+        svg << QStringLiteral("<text x='%1' y='%2' text-anchor='start' font-family='sans-serif' font-size='10' "
+                              "fill='black'>%3</text>")
+                   .arg(boxLeft + 5)
+                   .arg(y + 4)
+                   .arg(inputs[index].name.toHtmlEscaped());
+        ice::Pin pin;
+        pin.name = inputs[index].name.toStdString();
+        pin.x = static_cast<ice::Coordinate>(std::lround(inputPinX - centerX));
+        pin.y = static_cast<ice::Coordinate>(std::lround(centerY - y));
+        pin.direction = ice::PinDirection::left;
+        definition.pins.push_back(std::move(pin));
+    }
+    for (std::size_t index = 0; index < outputs.size(); ++index) {
+        const auto y = portY(index, outputs.size());
+        svg << QStringLiteral("<path d='M%1 %2 L%3 %2' fill='none' stroke='black' stroke-width='2'/>")
+                   .arg(boxRight)
+                   .arg(y)
+                   .arg(outputPinX);
+        svg << QStringLiteral("<circle cx='%1' cy='%2' r='4' fill='black'/>").arg(outputPinX).arg(y);
+        svg << QStringLiteral("<text x='%1' y='%2' text-anchor='end' font-family='sans-serif' font-size='10' "
+                              "fill='black'>%3</text>")
+                   .arg(boxRight - 5)
+                   .arg(y + 4)
+                   .arg(outputs[index].name.toHtmlEscaped());
+        ice::Pin pin;
+        pin.name = outputs[index].name.toStdString();
+        pin.x = static_cast<ice::Coordinate>(std::lround(outputPinX - centerX));
+        pin.y = static_cast<ice::Coordinate>(std::lround(centerY - y));
+        pin.direction = ice::PinDirection::right;
+        definition.pins.push_back(std::move(pin));
+    }
+    svg << QStringLiteral("</svg>");
+    definition.svg = svg.join(QLatin1Char('\n'));
+    return definition;
+}
+
 QPointF rotatePoint(QPointF point, ice::Orientation orientation) {
     switch (orientation) {
     case ice::Orientation::r90:
@@ -1520,6 +1630,11 @@ class PropertiesPanel : public QWidget {
   public:
     using ParameterChanged = std::function<void(ice::ObjectId instanceId, ice::ObjectId parameterId,
                                                 const std::string &name, const std::string &value)>;
+    using CellParameterChanged = std::function<void(ice::ObjectId cellId, ice::ObjectId parameterId,
+                                                    const std::string &name, const std::string &value)>;
+    using CellParameterAdded = std::function<void(ice::ObjectId cellId, const std::string &name)>;
+    using CellParametersRemoved =
+        std::function<void(ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
@@ -1537,10 +1652,27 @@ class PropertiesPanel : public QWidget {
         auto *form = new QFormLayout;
         selection_ = addRow(form, QStringLiteral("Selection"));
         layout->addLayout(form);
-        layout->addWidget(heading(QStringLiteral("Parameters")));
+        auto *parametersHeader = new QWidget;
+        auto *parametersHeaderLayout = new QHBoxLayout(parametersHeader);
+        parametersHeaderLayout->setContentsMargins(0, 0, 0, 0);
+        parametersHeaderLayout->addWidget(heading(QStringLiteral("Parameters")));
+        parametersHeaderLayout->addStretch();
+        addParameterButton_ = new QPushButton;
+        addParameterButton_->setFixedWidth(24);
+        addParameterButton_->setToolTip(QStringLiteral("Add parameter"));
+        addParameterButton_->setAccessibleName(QStringLiteral("Add parameter"));
+        setLucideIcon(addParameterButton_, QStringLiteral("plus"), 14);
+        removeParameterButton_ = new QPushButton;
+        removeParameterButton_->setFixedWidth(24);
+        removeParameterButton_->setToolTip(QStringLiteral("Remove selected parameters"));
+        removeParameterButton_->setAccessibleName(QStringLiteral("Remove selected parameters"));
+        setLucideIcon(removeParameterButton_, QStringLiteral("trash"), 14);
+        parametersHeaderLayout->addWidget(addParameterButton_);
+        parametersHeaderLayout->addWidget(removeParameterButton_);
+        layout->addWidget(parametersHeader);
         parameters_ = new QTableWidget(0, 2);
         parameters_->setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Value")});
-        parameters_->setAccessibleName(QStringLiteral("Instance parameters"));
+        parameters_->setAccessibleName(QStringLiteral("Parameters"));
         parameters_->setSelectionBehavior(QAbstractItemView::SelectRows);
         parameters_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         parameters_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -1556,10 +1688,17 @@ class PropertiesPanel : public QWidget {
         layout->addStretch();
         connect(parameters_, &QTableWidget::itemChanged, this,
                 [this](QTableWidgetItem *item) { handleParameterEdit(item); });
+        connect(parameters_, &QTableWidget::itemSelectionChanged, this, [this] { updateParameterButtons(); });
+        connect(addParameterButton_, &QPushButton::clicked, this, [this] { addParameter(); });
+        connect(removeParameterButton_, &QPushButton::clicked, this, [this] { removeParameters(); });
+        updateParameterButtons();
         refreshAppearance();
     }
 
     void setOnParameterChanged(ParameterChanged callback) { onParameterChanged_ = std::move(callback); }
+    void setOnCellParameterChanged(CellParameterChanged callback) { onCellParameterChanged_ = std::move(callback); }
+    void setOnCellParameterAdded(CellParameterAdded callback) { onCellParameterAdded_ = std::move(callback); }
+    void setOnCellParametersRemoved(CellParametersRemoved callback) { onCellParametersRemoved_ = std::move(callback); }
 
     void refreshAppearance() {
         previewFrame_->setStyleSheet(
@@ -1569,30 +1708,34 @@ class PropertiesPanel : public QWidget {
 
     void clearSelection() {
         instanceId_ = 0;
+        cellId_ = 0;
         selection_->setText(QStringLiteral("Nothing selected"));
         previewFrame_->setVisible(false);
         QSignalBlocker blocker(parameters_);
         parameters_->setRowCount(0);
+        updateParameterButtons();
     }
 
     void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
                      const std::string &symbolSvg) {
         instanceId_ = instance.id;
+        cellId_ = 0;
         const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
         selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
         preview_->load(QByteArray::fromStdString(symbolSvg));
         previewFrame_->setVisible(!symbolSvg.empty());
-        QSignalBlocker blocker(parameters_);
-        parameters_->setRowCount(0);
-        for (const auto &parameter : instance.parameters) {
-            const int row = parameters_->rowCount();
-            parameters_->insertRow(row);
-            auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
-            name->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(parameter.id));
-            name->setFlags(name->flags() & ~Qt::ItemIsEditable);
-            parameters_->setItem(row, 0, name);
-            parameters_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(parameter.value)));
-        }
+        populateParameters(instance.parameters);
+        updateParameterButtons();
+    }
+
+    void setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg) {
+        instanceId_ = 0;
+        cellId_ = cell.id;
+        selection_->setText(QStringLiteral("%1 (Schematic)").arg(QString::fromStdString(cell.name)));
+        preview_->load(symbolSvg.toUtf8());
+        previewFrame_->setVisible(!symbolSvg.isEmpty());
+        populateParameters(cell.parameters);
+        updateParameterButtons();
     }
 
   private:
@@ -1603,22 +1746,80 @@ class PropertiesPanel : public QWidget {
         return value;
     }
 
+    void populateParameters(const std::vector<ice::Parameter> &parameters) {
+        QSignalBlocker blocker(parameters_);
+        parameters_->setRowCount(0);
+        for (const auto &parameter : parameters) {
+            const int row = parameters_->rowCount();
+            parameters_->insertRow(row);
+            auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
+            name->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(parameter.id));
+            name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+            parameters_->setItem(row, 0, name);
+            parameters_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(parameter.value)));
+        }
+    }
+
     void handleParameterEdit(QTableWidgetItem *item) {
-        if (!item || item->column() != 1 || instanceId_ == 0 || !onParameterChanged_)
+        if (!item || item->column() != 1)
             return;
         const auto *name = parameters_->item(item->row(), 0);
         if (!name)
             return;
         const auto parameterId = static_cast<ice::ObjectId>(name->data(Qt::UserRole).toULongLong());
-        onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());
+        if (instanceId_ != 0 && onParameterChanged_)
+            onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());
+        else if (cellId_ != 0 && onCellParameterChanged_)
+            onCellParameterChanged_(cellId_, parameterId, name->text().toStdString(), item->text().toStdString());
+    }
+
+    void updateParameterButtons() {
+        const bool schematicMode = cellId_ != 0 && instanceId_ == 0;
+        if (addParameterButton_)
+            addParameterButton_->setEnabled(schematicMode);
+        if (removeParameterButton_) {
+            const bool hasSelection = parameters_->selectionModel() && parameters_->selectionModel()->hasSelection();
+            removeParameterButton_->setEnabled(schematicMode && hasSelection);
+        }
+    }
+
+    void addParameter() {
+        if (instanceId_ != 0 || cellId_ == 0 || !onCellParameterAdded_)
+            return;
+        bool accepted = false;
+        const auto name = QInputDialog::getText(
+            this, QStringLiteral("Add Parameter"), QStringLiteral("Parameter name:"), QLineEdit::Normal,
+            QStringLiteral("parameter%1").arg(parameters_->rowCount() + 1), &accepted);
+        if (!accepted || name.trimmed().isEmpty())
+            return;
+        onCellParameterAdded_(cellId_, name.trimmed().toStdString());
+    }
+
+    void removeParameters() {
+        if (instanceId_ != 0 || cellId_ == 0 || !onCellParametersRemoved_)
+            return;
+        std::vector<ice::ObjectId> parameterIds;
+        const auto rows = parameters_->selectionModel()->selectedRows();
+        for (const auto &index : rows) {
+            if (const auto *name = parameters_->item(index.row(), 0))
+                parameterIds.push_back(static_cast<ice::ObjectId>(name->data(Qt::UserRole).toULongLong()));
+        }
+        if (!parameterIds.empty())
+            onCellParametersRemoved_(cellId_, parameterIds);
     }
 
     QLabel *selection_ = nullptr;
     SymbolPreview *preview_ = nullptr;
     QFrame *previewFrame_ = nullptr;
     QTableWidget *parameters_ = nullptr;
+    QPushButton *addParameterButton_ = nullptr;
+    QPushButton *removeParameterButton_ = nullptr;
     ice::ObjectId instanceId_ = 0;
+    ice::ObjectId cellId_ = 0;
     ParameterChanged onParameterChanged_;
+    CellParameterChanged onCellParameterChanged_;
+    CellParameterAdded onCellParameterAdded_;
+    CellParametersRemoved onCellParametersRemoved_;
 };
 
 class SymbolsPanel : public QWidget {
@@ -3045,10 +3246,27 @@ class DocumentWindow : public QMainWindow {
         const auto instanceId = schematicCanvas_ ? schematicCanvas_->selectedInstanceId() : 0;
         if (!selectionStatus_)
             return;
-        if (instanceId == 0 || !project_ || !schematicPropertiesPanel_) {
+        if (instanceId == 0) {
             selectionStatus_->setText(QStringLiteral("Selection: none"));
-            if (schematicPropertiesPanel_)
+            if (!schematicPropertiesPanel_)
+                return;
+            if (!project_ || project_->project().schematicCells.empty()) {
                 schematicPropertiesPanel_->clearSelection();
+                return;
+            }
+            const auto &cells = project_->project().schematicCells;
+            auto cell = cells.find(activeSchematicId_);
+            if (cell == cells.end())
+                cell = cells.begin();
+            if (cell == cells.end()) {
+                schematicPropertiesPanel_->clearSelection();
+                return;
+            }
+            schematicPropertiesPanel_->setSchematic(cell->second, generatedSchematicSymbol(cell->second).svg);
+            return;
+        }
+        if (!project_ || !schematicPropertiesPanel_) {
+            selectionStatus_->setText(QStringLiteral("Selection: none"));
             return;
         }
         for (const auto &[_, cell] : project_->project().schematicCells) {
@@ -3092,6 +3310,59 @@ class DocumentWindow : public QMainWindow {
             QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
             updateSelectionStatus();
         }
+    }
+
+    void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
+                                  const std::string &value) {
+        if (!project_)
+            return;
+        try {
+            project_->execute("edit schematic parameter", [&](ice::Project &project) {
+                const auto cell = project.schematicCells.find(cellId);
+                if (cell == project.schematicCells.end())
+                    return;
+                for (auto &parameter : cell->second.parameters) {
+                    if ((parameterId != 0 && parameter.id == parameterId) ||
+                        (parameterId == 0 && parameter.name == name)) {
+                        parameter.value = value;
+                        return;
+                    }
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
+            updateSelectionStatus();
+        }
+    }
+
+    void addSchematicParameter(ice::ObjectId cellId, const std::string &name) {
+        if (!project_)
+            return;
+        project_->execute("add schematic parameter", [&](ice::Project &project) {
+            const auto cell = project.schematicCells.find(cellId);
+            if (cell == project.schematicCells.end())
+                return;
+            cell->second.parameters.push_back({project.nextId(), name, ""});
+        });
+        updateSelectionStatus();
+    }
+
+    void removeSchematicParameters(ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds) {
+        if (!project_)
+            return;
+        project_->execute("remove schematic parameters", [&](ice::Project &project) {
+            const auto cell = project.schematicCells.find(cellId);
+            if (cell == project.schematicCells.end())
+                return;
+            auto &parameters = cell->second.parameters;
+            parameters.erase(std::remove_if(parameters.begin(), parameters.end(),
+                                            [&](const ice::Parameter &parameter) {
+                                                return std::find(parameterIds.begin(), parameterIds.end(),
+                                                                 parameter.id) != parameterIds.end();
+                                            }),
+                             parameters.end());
+        });
+        updateSelectionStatus();
     }
 
     void editSelectedSymbol() {
@@ -3840,10 +4111,19 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto &cell = cellIt->second;
         const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
-        if (schematicSymbolsPanel_ && (!schematicSymbolsLoaded_ || schematicSymbolsPdk_ != pdk)) {
-            schematicSymbolsLoaded_ = true;
-            schematicSymbolsPdk_ = pdk;
-            schematicSymbolsPanel_->setSymbols(symbolLibraryForPdk(pdk));
+        if (schematicSymbolsPanel_) {
+            if (!schematicSymbolsLoaded_ || schematicSymbolsPdk_ != pdk) {
+                schematicSymbolsLoaded_ = true;
+                schematicSymbolsPdk_ = pdk;
+                schematicBaseSymbols_ = symbolLibraryForPdk(pdk);
+            }
+            auto symbols = schematicBaseSymbols_;
+            for (const auto &[id, other] : project_->project().schematicCells) {
+                if (id == cell.id)
+                    continue;
+                symbols.push_back(generatedSchematicSymbol(other));
+            }
+            schematicSymbolsPanel_->setSymbols(std::move(symbols));
         }
         if (schematicNetlistPanel_)
             schematicNetlistPanel_->setCell(project_->project(), &cell);
@@ -4431,6 +4711,16 @@ class DocumentWindow : public QMainWindow {
         schematicPropertiesPanel_->setOnParameterChanged(
             [this](ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
                    const std::string &value) { updateInstanceParameter(instanceId, parameterId, name, value); });
+        schematicPropertiesPanel_->setOnCellParameterChanged(
+            [this](ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name, const std::string &value) {
+                updateSchematicParameter(cellId, parameterId, name, value);
+            });
+        schematicPropertiesPanel_->setOnCellParameterAdded(
+            [this](ice::ObjectId cellId, const std::string &name) { addSchematicParameter(cellId, name); });
+        schematicPropertiesPanel_->setOnCellParametersRemoved(
+            [this](ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds) {
+                removeSchematicParameters(cellId, parameterIds);
+            });
         schematicProperties->addTab(schematicPropertiesPanel_, QStringLiteral("Properties"));
         schematicNetlistPanel_ = new SchematicNetlistPanel;
         schematicProperties->addTab(schematicNetlistPanel_, QStringLiteral("Netlist"));
@@ -5089,6 +5379,7 @@ class DocumentWindow : public QMainWindow {
     SchematicNetlistPanel *schematicNetlistPanel_ = nullptr;
     std::string schematicSymbolsPdk_;
     bool schematicSymbolsLoaded_ = false;
+    std::vector<SymbolDefinition> schematicBaseSymbols_;
     StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
     QAction *schematicSelectTool_ = nullptr;
