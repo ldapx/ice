@@ -25,6 +25,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGraphicsColorizeEffect>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsItemGroup>
@@ -35,6 +36,7 @@
 #include <QGraphicsView>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -58,6 +60,7 @@
 #include <QStatusBar>
 #include <QSvgRenderer>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
@@ -967,10 +970,6 @@ class ProjectPanel : public QWidget {
                           QWidget *parent = nullptr)
         : QWidget(parent), showLayoutHierarchy_(showLayoutHierarchy) {
         auto *layout = new QVBoxLayout(this);
-        layout->addWidget(heading(QStringLiteral("Project")));
-        projectName_ = new QLabel(QStringLiteral("No project open"));
-        layout->addWidget(projectName_);
-
         tree_ = new QTreeWidget;
         tree_->setHeaderLabel(QStringLiteral("Hierarchy"));
         tree_->setAccessibleName(QStringLiteral("Project hierarchy"));
@@ -995,7 +994,6 @@ class ProjectPanel : public QWidget {
     }
 
     void setProject(const ice::Project &project) {
-        projectName_->setText(QString::fromStdString(project.name));
         tree_->clear();
         layerList_->clear();
         packageList_->clear();
@@ -1008,9 +1006,8 @@ class ProjectPanel : public QWidget {
         }
 
         if (!showLayoutHierarchy_) {
-            auto *schematic = new QTreeWidgetItem(tree_, {QStringLiteral("Schematic")});
             for (const auto &[id, cell] : project.schematicCells) {
-                auto *cellItem = new QTreeWidgetItem(schematic, {QString::fromStdString(cell.name)});
+                auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
                 cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                 const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                                    : QString::fromStdString(cell.pdk);
@@ -1025,7 +1022,6 @@ class ProjectPanel : public QWidget {
             tree_->expandAll();
             return;
         }
-        auto *layout = new QTreeWidgetItem(tree_, {QStringLiteral("Layout")});
         for (const auto &[id, layer] : project.layers) {
             auto *item = new QListWidgetItem(QString::fromStdString(layer.name), layerList_);
             item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
@@ -1033,7 +1029,7 @@ class ProjectPanel : public QWidget {
             item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
         }
         for (const auto &[id, cell] : project.layoutCells) {
-            auto *cellItem = new QTreeWidgetItem(layout, {QString::fromStdString(cell.name)});
+            auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             new QTreeWidgetItem(cellItem, {QStringLiteral("Shapes (%1)").arg(cell.shapes.size())});
             new QTreeWidgetItem(cellItem, {QStringLiteral("Ports (%1)").arg(cell.ports.size())});
@@ -1043,7 +1039,6 @@ class ProjectPanel : public QWidget {
     }
 
   private:
-    QLabel *projectName_ = nullptr;
     QTreeWidget *tree_ = nullptr;
     QListWidget *packageList_ = nullptr;
     QListWidget *layerList_ = nullptr;
@@ -1061,13 +1056,9 @@ class SimulationPanel : public QWidget {
 
     explicit SimulationPanel(QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(2);
-        layout->addWidget(heading(QStringLiteral("Simulations")));
-
         tree_ = new QTreeWidget;
-        tree_->setHeaderHidden(true);
-        tree_->setAccessibleName(QStringLiteral("Simulations list"));
+        tree_->setHeaderLabel(QStringLiteral("Hierarchy"));
+        tree_->setAccessibleName(QStringLiteral("Simulation hierarchy"));
         tree_->setContextMenuPolicy(Qt::CustomContextMenu);
         layout->addWidget(tree_, 1);
 
@@ -1090,13 +1081,12 @@ class SimulationPanel : public QWidget {
         buttonLayout->addStretch();
         layout->addWidget(buttonRow);
 
-        connect(tree_, &QTreeWidget::currentItemChanged, this,
-                [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
-                    const bool hasSelection = current != nullptr;
-                    deleteButton_->setEnabled(hasSelection);
-                    if (onSelection_)
-                        onSelection_(currentSimulationId(), currentGraphId());
-                });
+        connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
+            const bool hasSelection = current != nullptr;
+            deleteButton_->setEnabled(hasSelection);
+            if (onSelection_)
+                onSelection_(currentSimulationId(), currentGraphId());
+        });
         connect(tree_, &QTreeWidget::customContextMenuRequested, this,
                 [this](const QPoint &pos) { showContextMenu(pos); });
     }
@@ -1108,9 +1098,7 @@ class SimulationPanel : public QWidget {
         connect(deleteButton_, &QPushButton::clicked, this, [cb = std::move(cb)] { cb(); });
     }
     void setOnAddGraph(std::function<void(ice::ObjectId)> cb) { onAddGraph_ = std::move(cb); }
-    void setOnDeleteGraph(std::function<void(ice::ObjectId, ice::ObjectId)> cb) {
-        onDeleteGraph_ = std::move(cb);
-    }
+    void setOnDeleteGraph(std::function<void(ice::ObjectId, ice::ObjectId)> cb) { onDeleteGraph_ = std::move(cb); }
     void setOnSelection(SelectionCallback cb) { onSelection_ = std::move(cb); }
 
     // Rebuild the tree from the project's simulations map.
@@ -1139,28 +1127,22 @@ class SimulationPanel : public QWidget {
                     row->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                     row->setFlags(Qt::ItemIsEnabled);
                 };
-                addPropertyRow(QStringLiteral("Schematic: %1")
-                                   .arg(QString::fromStdString(schematicName)));
-                addPropertyRow(QStringLiteral("Simulator: %1")
-                                   .arg(QString::fromStdString(sim.simulator)));
-                addPropertyRow(QStringLiteral("Analysis: %1")
-                                   .arg(QString::fromStdString(sim.analysis)));
-                addPropertyRow(QStringLiteral("Stop time / end: %1")
-                                   .arg(QString::number(sim.stop, 'g', 6)));
-                addPropertyRow(QStringLiteral("Step / increment: %1")
-                                   .arg(QString::number(sim.step, 'g', 6)));
+                addPropertyRow(QStringLiteral("Schematic: %1").arg(QString::fromStdString(schematicName)));
+                addPropertyRow(QStringLiteral("Simulator: %1").arg(QString::fromStdString(sim.simulator)));
+                addPropertyRow(QStringLiteral("Analysis: %1").arg(QString::fromStdString(sim.analysis)));
+                addPropertyRow(QStringLiteral("Stop time / end: %1").arg(QString::number(sim.stop, 'g', 6)));
+                addPropertyRow(QStringLiteral("Step / increment: %1").arg(QString::number(sim.step, 'g', 6)));
                 // Graphs sub-tree.
                 auto *graphsItem = new QTreeWidgetItem(item, {QStringLiteral("Graphs (%1)").arg(sim.graphs.size())});
                 graphsItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                 graphsItem->setFlags(Qt::ItemIsEnabled);
                 for (const auto &graph : sim.graphs) {
-                    auto *graphItem =
-                        new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
+                    auto *graphItem = new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
                     graphItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                     graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
-                    graphItem->setToolTip(0, QStringLiteral("X: %1  Y: %2")
-                                                 .arg(QString::fromStdString(graph.xAxis),
-                                                      QString::fromStdString(graph.yAxis)));
+                    graphItem->setToolTip(
+                        0, QStringLiteral("X: %1  Y: %2")
+                               .arg(QString::fromStdString(graph.xAxis), QString::fromStdString(graph.yAxis)));
                 }
             }
             tree_->expandAll();
@@ -1210,8 +1192,7 @@ class SimulationPanel : public QWidget {
                     auto *graphsNode = item->child(g);
                     for (int c = 0; graphsNode && c < graphsNode->childCount(); ++c) {
                         auto *graphItem = graphsNode->child(c);
-                        if (static_cast<ice::ObjectId>(graphItem->data(0, Qt::UserRole + 1).toULongLong()) ==
-                            graphId) {
+                        if (static_cast<ice::ObjectId>(graphItem->data(0, Qt::UserRole + 1).toULongLong()) == graphId) {
                             target = graphItem;
                             break;
                         }
@@ -1238,10 +1219,9 @@ class SimulationPanel : public QWidget {
             return;
         const auto simId = static_cast<ice::ObjectId>(simItem->data(0, Qt::UserRole).toULongLong());
         // A graph row additionally carries its graph id.
-        const ice::ObjectId graphId =
-            clicked->data(0, Qt::UserRole + 1).isValid()
-                ? static_cast<ice::ObjectId>(clicked->data(0, Qt::UserRole + 1).toULongLong())
-                : 0;
+        const ice::ObjectId graphId = clicked->data(0, Qt::UserRole + 1).isValid()
+                                          ? static_cast<ice::ObjectId>(clicked->data(0, Qt::UserRole + 1).toULongLong())
+                                          : 0;
         QMenu menu(this);
         auto *addGraphAction = menu.addAction(QStringLiteral("Add graph…"));
         QAction *deleteGraphAction = nullptr;
@@ -1261,8 +1241,6 @@ class SimulationPanel : public QWidget {
     std::function<void(ice::ObjectId)> onAddGraph_;
     std::function<void(ice::ObjectId, ice::ObjectId)> onDeleteGraph_;
 };
-
-
 
 class LayersPanel : public QWidget {
   public:
@@ -1300,54 +1278,79 @@ class LayersPanel : public QWidget {
 
 class PropertiesPanel : public QWidget {
   public:
-    explicit PropertiesPanel(QWidget *parent = nullptr) : QWidget(parent) {
+    using ParameterChanged = std::function<void(ice::ObjectId instanceId, ice::ObjectId parameterId,
+                                                const std::string &name, const std::string &value)>;
+
+    explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
         layout->addWidget(heading(QStringLiteral("Properties")));
+        auto *previewFrame = new QFrame;
+        previewFrame->setObjectName(QStringLiteral("propertiesSymbolPreview"));
+        previewFrame->setFixedHeight(160);
+        previewFrame->setStyleSheet(
+            QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
+                .arg(ice::themeColor(ice::ThemeRole::Background2).name(),
+                     ice::themeColor(ice::ThemeRole::Border1).name()));
+        auto *previewLayout = new QVBoxLayout(previewFrame);
+        preview_ = new SymbolPreview;
+        preview_->setMinimumSize(160, 120);
+        preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        previewLayout->addWidget(preview_);
+        previewFrame_ = previewFrame;
+        previewFrame_->setVisible(false);
+        layout->addWidget(previewFrame_);
         auto *form = new QFormLayout;
         selection_ = addRow(form, QStringLiteral("Selection"));
-        stableId_ = addRow(form, QStringLiteral("Stable ID"));
-        type_ = addRow(form, QStringLiteral("Type"));
-        layerNet_ = addRow(form, QStringLiteral("Layer / Net"));
-        position_ = addRow(form, QStringLiteral("Position"));
         layout->addLayout(form);
         layout->addWidget(heading(QStringLiteral("Parameters")));
-        parameters_ = new QListWidget;
+        parameters_ = new QTableWidget(0, 2);
+        parameters_->setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Value")});
         parameters_->setAccessibleName(QStringLiteral("Instance parameters"));
+        parameters_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        parameters_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        parameters_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        parameters_->verticalHeader()->setVisible(false);
         layout->addWidget(parameters_, 1);
-        layout->addWidget(heading(QStringLiteral("Display")));
-        auto *layerSelector = new QComboBox;
-        layerSelector->addItem(QStringLiteral("All layers"));
-        layerSelector->addItem(QStringLiteral("Visible layers"));
-        layout->addWidget(layerSelector);
+        if (showDisplay) {
+            layout->addWidget(heading(QStringLiteral("Display")));
+            auto *layerSelector = new QComboBox;
+            layerSelector->addItem(QStringLiteral("All layers"));
+            layerSelector->addItem(QStringLiteral("Visible layers"));
+            layout->addWidget(layerSelector);
+        }
         layout->addStretch();
+        connect(parameters_, &QTableWidget::itemChanged, this,
+                [this](QTableWidgetItem *item) { handleParameterEdit(item); });
     }
+
+    void setOnParameterChanged(ParameterChanged callback) { onParameterChanged_ = std::move(callback); }
 
     void clearSelection() {
+        instanceId_ = 0;
         selection_->setText(QStringLiteral("Nothing selected"));
-        stableId_->setText(QStringLiteral("—"));
-        type_->setText(QStringLiteral("—"));
-        layerNet_->setText(QStringLiteral("—"));
-        position_->setText(QStringLiteral("—"));
-        parameters_->clear();
-        parameters_->addItem(QStringLiteral("No parameters"));
+        previewFrame_->setVisible(false);
+        QSignalBlocker blocker(parameters_);
+        parameters_->setRowCount(0);
     }
 
-    void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName) {
-        selection_->setText(QString::fromStdString(instance.name));
-        stableId_->setText(QString::number(instance.id));
-        type_->setText(QStringLiteral("%1 instance")
-                           .arg(QString::fromStdString(symbolName).isEmpty() ? QStringLiteral("Schematic")
-                                                                             : QString::fromStdString(symbolName)));
-        layerNet_->setText(QString::fromStdString(ice::orientationName(instance.orientation)));
-        position_->setText(QStringLiteral("%1, %2").arg(instance.x).arg(instance.y));
-        parameters_->clear();
-        if (instance.parameters.empty()) {
-            parameters_->addItem(QStringLiteral("No parameters"));
-            return;
+    void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
+                     const std::string &symbolSvg) {
+        instanceId_ = instance.id;
+        const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
+        selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
+        preview_->load(QByteArray::fromStdString(symbolSvg));
+        previewFrame_->setVisible(!symbolSvg.empty());
+        QSignalBlocker blocker(parameters_);
+        parameters_->setRowCount(0);
+        for (const auto &parameter : instance.parameters) {
+            const int row = parameters_->rowCount();
+            parameters_->insertRow(row);
+            auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
+            name->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(parameter.id));
+            name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+            parameters_->setItem(row, 0, name);
+            parameters_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(parameter.value)));
         }
-        for (const auto &parameter : instance.parameters)
-            parameters_->addItem(QStringLiteral("%1 = %2").arg(QString::fromStdString(parameter.name),
-                                                               QString::fromStdString(parameter.value)));
     }
 
   private:
@@ -1358,12 +1361,22 @@ class PropertiesPanel : public QWidget {
         return value;
     }
 
+    void handleParameterEdit(QTableWidgetItem *item) {
+        if (!item || item->column() != 1 || instanceId_ == 0 || !onParameterChanged_)
+            return;
+        const auto *name = parameters_->item(item->row(), 0);
+        if (!name)
+            return;
+        const auto parameterId = static_cast<ice::ObjectId>(name->data(Qt::UserRole).toULongLong());
+        onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());
+    }
+
     QLabel *selection_ = nullptr;
-    QLabel *stableId_ = nullptr;
-    QLabel *type_ = nullptr;
-    QLabel *layerNet_ = nullptr;
-    QLabel *position_ = nullptr;
-    QListWidget *parameters_ = nullptr;
+    SymbolPreview *preview_ = nullptr;
+    QFrame *previewFrame_ = nullptr;
+    QTableWidget *parameters_ = nullptr;
+    ice::ObjectId instanceId_ = 0;
+    ParameterChanged onParameterChanged_;
 };
 
 class DiagnosticsPanel : public QWidget {
@@ -1468,6 +1481,32 @@ class CommandPalette : public QDialog {
     QListWidget *list_ = nullptr;
 };
 
+class StatusBar : public QStatusBar {
+  public:
+    explicit StatusBar(QWidget *parent = nullptr) : QStatusBar(parent) {}
+
+    void setProjectName(const QString &name) {
+        if (projectName_ == name)
+            return;
+        projectName_ = name;
+        update();
+    }
+
+  protected:
+    void paintEvent(QPaintEvent *event) override {
+        QStatusBar::paintEvent(event);
+        if (projectName_.isEmpty())
+            return;
+        QPainter painter(this);
+        painter.setPen(palette().windowText().color());
+        const auto text = fontMetrics().elidedText(projectName_, Qt::ElideMiddle, qMax(0, width() - 320));
+        painter.drawText(rect(), Qt::AlignCenter | Qt::TextSingleLine, text);
+    }
+
+  private:
+    QString projectName_;
+};
+
 class DocumentWindow : public QMainWindow {
   public:
     explicit DocumentWindow() {
@@ -1503,6 +1542,7 @@ class DocumentWindow : public QMainWindow {
         refreshSchematic();
         refreshLayout();
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
+        statusBar_->setProjectName(QString::fromStdString(project_->project().name));
         statusBar()->showMessage(QStringLiteral("Project loaded"));
         return true;
     }
@@ -1675,6 +1715,7 @@ class DocumentWindow : public QMainWindow {
         activeSimulationId_ = 0;
         rebuildGraphTabs({});
         setWindowTitle(QStringLiteral("ICE"));
+        statusBar_->setProjectName(QStringLiteral("No project open"));
         updateSelectionStatus();
         statusBar()->showMessage(QStringLiteral("Ready — no project open"));
     }
@@ -2020,13 +2061,41 @@ class DocumentWindow : public QMainWindow {
                 continue;
             const auto symbol = cell.symbols.find(instance->second.symbol);
             const auto symbolName = symbol == cell.symbols.end() ? std::string() : symbol->second.name;
+            const auto symbolSvg = symbol == cell.symbols.end() ? std::string() : symbol->second.artwork;
+            const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
             selectionStatus_->setText(
-                QStringLiteral("Selection: %1").arg(QString::fromStdString(instance->second.name)));
-            schematicPropertiesPanel_->setInstance(instance->second, symbolName);
+                QStringLiteral("Selection: %1 (%2)").arg(QString::fromStdString(instance->second.name), type));
+            schematicPropertiesPanel_->setInstance(instance->second, symbolName, symbolSvg);
             return;
         }
         selectionStatus_->setText(QStringLiteral("Selection: none"));
         schematicPropertiesPanel_->clearSelection();
+    }
+
+    void updateInstanceParameter(ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
+                                 const std::string &value) {
+        if (!project_)
+            return;
+        try {
+            project_->execute("edit parameter", [&](ice::Project &project) {
+                for (auto &[_, cell] : project.schematicCells) {
+                    const auto instance = cell.instances.find(instanceId);
+                    if (instance == cell.instances.end())
+                        continue;
+                    for (auto &parameter : instance->second.parameters) {
+                        if ((parameterId != 0 && parameter.id == parameterId) ||
+                            (parameterId == 0 && parameter.name == name)) {
+                            parameter.value = value;
+                            return;
+                        }
+                    }
+                    return;
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
+            updateSelectionStatus();
+        }
     }
 
     void editSelectedSymbol() {
@@ -2161,16 +2230,14 @@ class DocumentWindow : public QMainWindow {
         const auto &sim = it->second;
 
         // Block signals so we don't re-save while populating.
-        QSignalBlocker b1(schematicSelector_), b2(simulatorSelector_),
-            b3(analysisSelector_), b4(stopTime_), b5(stepTime_), b6(directiveEditor_);
+        QSignalBlocker b1(schematicSelector_), b2(simulatorSelector_), b3(analysisSelector_), b4(stopTime_),
+            b5(stepTime_), b6(directiveEditor_);
 
         const auto schIdx = schematicSelector_->findData(QVariant::fromValue<qulonglong>(sim.schematic));
         if (schIdx >= 0)
             schematicSelector_->setCurrentIndex(schIdx);
-        simulatorSelector_->setCurrentIndex(
-            simulatorSelector_->findData(QString::fromStdString(sim.simulator)));
-        analysisSelector_->setCurrentIndex(
-            analysisSelector_->findData(QString::fromStdString(sim.analysis)));
+        simulatorSelector_->setCurrentIndex(simulatorSelector_->findData(QString::fromStdString(sim.simulator)));
+        analysisSelector_->setCurrentIndex(analysisSelector_->findData(QString::fromStdString(sim.analysis)));
         stopTime_->setValue(sim.stop);
         stepTime_->setValue(sim.step);
         directiveEditor_->setPlainText(QString::fromStdString(sim.directives));
@@ -2204,8 +2271,7 @@ class DocumentWindow : public QMainWindow {
             if (it == project.simulations.end())
                 return;
             auto &sim = it->second;
-            sim.schematic =
-                static_cast<ice::ObjectId>(schematicSelector_->currentData().toULongLong());
+            sim.schematic = static_cast<ice::ObjectId>(schematicSelector_->currentData().toULongLong());
             sim.simulator = simulatorSelector_->currentData().toString().toStdString();
             sim.analysis = analysisSelector_->currentData().toString().toStdString();
             sim.stop = stopTime_->value();
@@ -2223,9 +2289,8 @@ class DocumentWindow : public QMainWindow {
         }
         bool ok = false;
         const auto name =
-            QInputDialog::getText(this, QStringLiteral("Add Simulation"),
-                                  QStringLiteral("Simulation name:"), QLineEdit::Normal,
-                                  QStringLiteral("sim1"), &ok);
+            QInputDialog::getText(this, QStringLiteral("Add Simulation"), QStringLiteral("Simulation name:"),
+                                  QLineEdit::Normal, QStringLiteral("sim1"), &ok);
         if (!ok || name.trimmed().isEmpty())
             return;
         ice::ObjectId newId = 0;
@@ -2255,15 +2320,12 @@ class DocumentWindow : public QMainWindow {
         if (!project_ || activeSimulationId_ == 0)
             return;
         const auto id = activeSimulationId_;
-        const auto res = QMessageBox::question(
-            this, QStringLiteral("Delete Simulation"),
-            QStringLiteral("Delete this simulation and all its graphs?"),
-            QMessageBox::Yes | QMessageBox::No);
+        const auto res = QMessageBox::question(this, QStringLiteral("Delete Simulation"),
+                                               QStringLiteral("Delete this simulation and all its graphs?"),
+                                               QMessageBox::Yes | QMessageBox::No);
         if (res != QMessageBox::Yes)
             return;
-        project_->execute("delete simulation", [id](ice::Project &project) {
-            project.simulations.erase(id);
-        });
+        project_->execute("delete simulation", [id](ice::Project &project) { project.simulations.erase(id); });
         activeSimulationId_ = 0;
         simulationPanel_->setProject(project_->project());
         rebuildGraphTabs({});
@@ -2276,13 +2338,10 @@ class DocumentWindow : public QMainWindow {
             return;
         bool ok = false;
         std::size_t graphCount = 0;
-        if (const auto it = project_->project().simulations.find(simId);
-            it != project_->project().simulations.end())
+        if (const auto it = project_->project().simulations.find(simId); it != project_->project().simulations.end())
             graphCount = it->second.graphs.size();
-        const auto name =
-            QInputDialog::getText(this, QStringLiteral("Add Graph"),
-                                  QStringLiteral("Graph name:"), QLineEdit::Normal,
-                                  QStringLiteral("Graph %1").arg(graphCount + 1), &ok);
+        const auto name = QInputDialog::getText(this, QStringLiteral("Add Graph"), QStringLiteral("Graph name:"),
+                                                QLineEdit::Normal, QStringLiteral("Graph %1").arg(graphCount + 1), &ok);
         if (!ok || name.trimmed().isEmpty())
             return;
         ice::ObjectId newGraphId = 0;
@@ -2318,9 +2377,9 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("A simulation must have at least one graph."));
             return;
         }
-        const auto res = QMessageBox::question(this, QStringLiteral("Delete Graph"),
-                                               QStringLiteral("Delete this graph?"),
-                                               QMessageBox::Yes | QMessageBox::No);
+        const auto res =
+            QMessageBox::question(this, QStringLiteral("Delete Graph"), QStringLiteral("Delete this graph?"),
+                                  QMessageBox::Yes | QMessageBox::No);
         if (res != QMessageBox::Yes)
             return;
         project_->execute("delete graph", [simId, graphId](ice::Project &project) {
@@ -2346,8 +2405,7 @@ class DocumentWindow : public QMainWindow {
         const int tabIdx = graphTabs_->currentIndex();
         if (tabIdx < 0)
             return;
-        const auto graphId =
-            static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
+        const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIdx).toULongLong());
         deleteGraph(activeSimulationId_, graphId);
     }
 
@@ -2535,12 +2593,11 @@ class DocumentWindow : public QMainWindow {
             // Skip analysis/control directives the runner already handles from
             // the simulation properties; keep model cards and includes.
             const bool isControlDirective =
-                trimmed.startsWith('.') &&
-                (trimmed.startsWith(QStringLiteral(".tran"), Qt::CaseInsensitive) ||
-                 trimmed.startsWith(QStringLiteral(".dc"), Qt::CaseInsensitive) ||
-                 trimmed.startsWith(QStringLiteral(".ac"), Qt::CaseInsensitive) ||
-                 trimmed.startsWith(QStringLiteral(".op"), Qt::CaseInsensitive) ||
-                 trimmed.startsWith(QStringLiteral(".end"), Qt::CaseInsensitive));
+                trimmed.startsWith('.') && (trimmed.startsWith(QStringLiteral(".tran"), Qt::CaseInsensitive) ||
+                                            trimmed.startsWith(QStringLiteral(".dc"), Qt::CaseInsensitive) ||
+                                            trimmed.startsWith(QStringLiteral(".ac"), Qt::CaseInsensitive) ||
+                                            trimmed.startsWith(QStringLiteral(".op"), Qt::CaseInsensitive) ||
+                                            trimmed.startsWith(QStringLiteral(".end"), Qt::CaseInsensitive));
             if (trimmed.isEmpty() || isControlDirective)
                 continue;
             request.netlist.push_back(trimmed.toStdString());
@@ -2550,11 +2607,11 @@ class DocumentWindow : public QMainWindow {
         // run returns and plots.
         ice::ObjectId activeGraphId = 0;
         if (graphTabs_ && graphTabs_->currentIndex() >= 0)
-            activeGraphId = static_cast<ice::ObjectId>(
-                graphTabs_->tabBar()->tabData(graphTabs_->currentIndex()).toULongLong());
-        const auto graphIt = std::find_if(
-            sim.graphs.begin(), sim.graphs.end(),
-            [activeGraphId](const ice::SimulationGraph &graph) { return graph.id == activeGraphId; });
+            activeGraphId =
+                static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(graphTabs_->currentIndex()).toULongLong());
+        const auto graphIt =
+            std::find_if(sim.graphs.begin(), sim.graphs.end(),
+                         [activeGraphId](const ice::SimulationGraph &graph) { return graph.id == activeGraphId; });
         if (graphIt != sim.graphs.end())
             request.probeSignals = graphIt->nodes;
 
@@ -2575,8 +2632,8 @@ class DocumentWindow : public QMainWindow {
         return request;
     }
 
-    static QString formatSimulationReport(const ice::SimulationRequest &request,
-                                          const ice::SimulationResult &result, const QStringList &netlistNotes) {
+    static QString formatSimulationReport(const ice::SimulationRequest &request, const ice::SimulationResult &result,
+                                          const QStringList &netlistNotes) {
         std::ostringstream output;
         output << "State: " << ice::jobStateName(result.state) << "\n"
                << "Analysis: " << result.analysis << "\n"
@@ -3222,13 +3279,21 @@ class DocumentWindow : public QMainWindow {
         auto *schematicLayout = new QVBoxLayout(schematicPage);
         schematicLayout->setContentsMargins(0, 0, 0, 0);
         schematicLayout->setSpacing(0);
-        schematicLayout->addWidget(createEditorToolbar(false));
         schematicCellTabs_ = new QTabWidget;
         schematicCellTabs_->setDocumentMode(true);
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
         schematicHierarchy_ = new ProjectPanel(false, false, false);
         schematicContentLayout->addWidget(schematicHierarchy_, 0);
+        auto *schematicToolbar = createEditorToolbar(false);
+        schematicToolbar->setOrientation(Qt::Vertical);
+        auto *schematicToolbarColumn = new QWidget;
+        auto *schematicToolbarLayout = new QVBoxLayout(schematicToolbarColumn);
+        schematicToolbarLayout->setContentsMargins(0, 0, 0, 0);
+        schematicToolbarLayout->addStretch(1);
+        schematicToolbarLayout->addWidget(schematicToolbar, 0, Qt::AlignHCenter);
+        schematicToolbarLayout->addStretch(1);
+        schematicContentLayout->addWidget(schematicToolbarColumn, 0);
         auto *schematicEditorColumn = new QWidget;
         auto *schematicEditorLayout = new QVBoxLayout(schematicEditorColumn);
         schematicEditorLayout->setContentsMargins(0, 0, 0, 0);
@@ -3237,7 +3302,10 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->addWidget(makeEditor(QStringLiteral("Schematic editor"), false), 1);
         schematicContentLayout->addWidget(schematicEditorColumn, 1);
         auto *schematicProperties = new QTabWidget;
-        schematicPropertiesPanel_ = new PropertiesPanel;
+        schematicPropertiesPanel_ = new PropertiesPanel(false);
+        schematicPropertiesPanel_->setOnParameterChanged(
+            [this](ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
+                   const std::string &value) { updateInstanceParameter(instanceId, parameterId, name, value); });
         schematicProperties->addTab(schematicPropertiesPanel_, QStringLiteral("Properties"));
         schematicProperties->addTab(new DiagnosticsPanel, QStringLiteral("Diagnostics"));
         schematicContentLayout->addWidget(schematicProperties, 0);
@@ -3248,13 +3316,21 @@ class DocumentWindow : public QMainWindow {
         auto *layoutLayout = new QVBoxLayout(layoutPage);
         layoutLayout->setContentsMargins(0, 0, 0, 0);
         layoutLayout->setSpacing(0);
-        layoutLayout->addWidget(createEditorToolbar(true));
         layoutCellTabs_ = new QTabWidget;
         layoutCellTabs_->setDocumentMode(true);
         auto *layoutContent = new QWidget;
         auto *layoutContentLayout = new QHBoxLayout(layoutContent);
         layoutHierarchy_ = new ProjectPanel(true, false);
         layoutContentLayout->addWidget(layoutHierarchy_, 0);
+        auto *layoutToolbar = createEditorToolbar(true);
+        layoutToolbar->setOrientation(Qt::Vertical);
+        auto *layoutToolbarColumn = new QWidget;
+        auto *layoutToolbarLayout = new QVBoxLayout(layoutToolbarColumn);
+        layoutToolbarLayout->setContentsMargins(0, 0, 0, 0);
+        layoutToolbarLayout->addStretch(1);
+        layoutToolbarLayout->addWidget(layoutToolbar, 0, Qt::AlignHCenter);
+        layoutToolbarLayout->addStretch(1);
+        layoutContentLayout->addWidget(layoutToolbarColumn, 0);
         auto *layoutEditorColumn = new QWidget;
         auto *layoutEditorLayout = new QVBoxLayout(layoutEditorColumn);
         layoutEditorLayout->setContentsMargins(0, 0, 0, 0);
@@ -3439,7 +3515,6 @@ class DocumentWindow : public QMainWindow {
     QWidget *makeEditor(const QString &title, bool layoutEditor) {
         auto *editor = new QWidget;
         auto *editorLayout = new QVBoxLayout(editor);
-        auto *splitter = new QSplitter(Qt::Vertical, editor);
         QGraphicsView *view = nullptr;
         if (!layoutEditor) {
             schematicCanvas_ = new SchematicCanvas;
@@ -3610,12 +3685,7 @@ class DocumentWindow : public QMainWindow {
         view->setBackgroundBrush(ice::themeColor(ice::ThemeRole::Background2));
         view->setAlignment(Qt::AlignCenter);
         view->setAccessibleName(title);
-        splitter->addWidget(view);
-        auto *editorStatus = new QLabel(QStringLiteral("Grid: 1 dbu    Snap: on    Selection: none"));
-        editorStatus->setMargin(6);
-        splitter->addWidget(editorStatus);
-        splitter->setStretchFactor(0, 1);
-        editorLayout->addWidget(splitter, 1);
+        editorLayout->addWidget(view, 1);
         return editor;
     }
 
@@ -3688,11 +3758,15 @@ class DocumentWindow : public QMainWindow {
     }
 
     void createStatusBar() {
-        statusBar()->showMessage(QStringLiteral("Ready — no project open"));
-        statusBar()->addPermanentWidget(new QLabel(QStringLiteral("DBU: 1 nm")));
-        statusBar()->addPermanentWidget(new QLabel(QStringLiteral("Grid: 1")));
+        auto *bar = new StatusBar(this);
+        setStatusBar(bar);
+        statusBar_ = bar;
+        bar->setProjectName(QStringLiteral("No project open"));
+        bar->showMessage(QStringLiteral("Ready — no project open"));
+        bar->addPermanentWidget(new QLabel(QStringLiteral("DBU: 1 nm")));
+        bar->addPermanentWidget(new QLabel(QStringLiteral("Grid: 1")));
         selectionStatus_ = new QLabel(QStringLiteral("Selection: none"));
-        statusBar()->addPermanentWidget(selectionStatus_);
+        bar->addPermanentWidget(selectionStatus_);
     }
 
     ProjectPanel *projectPanel_ = nullptr;
@@ -3723,6 +3797,7 @@ class DocumentWindow : public QMainWindow {
     bool graphGridVisible_ = true;
     ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
+    StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
     QList<QAction *> commands_;
 };
