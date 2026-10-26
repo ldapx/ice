@@ -1,6 +1,7 @@
 #include "app_window.hpp"
 #include "app_widgets.hpp"
 #include "icelib/core.hpp"
+#include "icelib/drc.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
 #include "icelib/operations.hpp"
@@ -62,6 +63,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
@@ -71,6 +73,7 @@
 #include <QStyleHints>
 #include <QSvgRenderer>
 #include <QTabWidget>
+#include <QTemporaryDir>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -145,6 +148,7 @@ class DocumentWindow : public QMainWindow {
     bool setProject(ice::Project project) {
         if (!ensureProjectPackages(project))
             return false;
+        flattenedLayouts_->clear();
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         for (auto &[_, cell] : project.layoutCells) {
             if (!cell.library && cell.pdk == "ihp.sg13g2" && cell.name.starts_with("IHP "))
@@ -2485,6 +2489,148 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Simulation finished"));
     }
 
+    void ensureDrcProcess() {
+        if (drcProcess_)
+            return;
+        drcProcess_ = new QProcess(this);
+        drcProcess_->setProcessChannelMode(QProcess::MergedChannels);
+        connect(drcProcess_, &QProcess::readyReadStandardOutput, this, [this] {
+            drcLog_ += QString::fromLocal8Bit(drcProcess_->readAllStandardOutput());
+            constexpr int maximumLogSize = 200000;
+            if (drcLog_.size() > maximumLogSize)
+                drcLog_ = drcLog_.right(maximumLogSize);
+        });
+        connect(drcProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            if (error != QProcess::FailedToStart)
+                return;
+            const auto message = QStringLiteral("Unable to start gdscheck: %1").arg(drcProcess_->errorString());
+            if (activityPanel_)
+                activityPanel_->setDrcError(message);
+            statusBar()->showMessage(QStringLiteral("DRC failed: gdscheck could not be started"));
+        });
+        connect(drcProcess_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this](int exitCode, QProcess::ExitStatus status) { finishDrc(exitCode, status); });
+    }
+
+    void runDrc() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Run DRC"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        if (drcProcess_ && drcProcess_->state() != QProcess::NotRunning) {
+            statusBar()->showMessage(QStringLiteral("DRC is already running"));
+            return;
+        }
+        const auto &project = project_->project();
+        if (project.layoutCells.empty()) {
+            QMessageBox::information(this, QStringLiteral("Run DRC"),
+                                     QStringLiteral("Create or import a layout cell first."));
+            return;
+        }
+        auto cellId = activeLayoutId_;
+        if (!project.layoutCells.contains(cellId))
+            cellId = project.layoutCells.begin()->first;
+        const auto &cell = project.layoutCells.at(cellId);
+        const auto processName = ice::gdsCheckProcessForPdk(cell.pdk);
+        if (processName.empty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("Run DRC"),
+                QStringLiteral("The active layout cell uses the Generic PDK. gdscheck requires a PDK process deck. "
+                               "Create the layout with an installed PDK such as IHP SG13G2 first."));
+            return;
+        }
+
+        auto temporary = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/ice-drc-XXXXXX"));
+        if (!temporary->isValid()) {
+            QMessageBox::critical(this, QStringLiteral("Run DRC"),
+                                  QStringLiteral("Unable to create a temporary directory for the DRC run."));
+            return;
+        }
+        const auto gdsPath = temporary->filePath(QStringLiteral("layout.gds"));
+        const auto reportPath = temporary->filePath(QStringLiteral("drc.lyrdb"));
+        const bool flattened = flattenedLayouts_->contains(cellId);
+        try {
+            if (flattened)
+                ice::LayoutInterchange::exportFlattenedGds(project, cellId, gdsPath.toStdString());
+            else
+                ice::LayoutInterchange::exportGds(project, cellId, gdsPath.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Run DRC"), QString::fromStdString(error.what()));
+            return;
+        } catch (const std::exception &error) {
+            QMessageBox::critical(this, QStringLiteral("Run DRC"), QString::fromUtf8(error.what()));
+            return;
+        }
+
+        ensureDrcProcess();
+        drcTempDir_ = std::move(temporary);
+        drcReportPath_ = reportPath;
+        drcLog_.clear();
+        const ice::GdsCheckOptions options{gdsPath.toStdString(), reportPath.toStdString(), processName, "TOP", "main"};
+        QStringList arguments;
+        for (const auto &argument : ice::gdsCheckArguments(options))
+            arguments << QString::fromStdString(argument);
+        drcProcess_->setProgram(QStringLiteral("gdscheck"));
+        drcProcess_->setArguments(arguments);
+        drcProcess_->setWorkingDirectory(drcTempDir_->path());
+
+        if (activityDock_)
+            activityDock_->show();
+        if (activityPanel_) {
+            activityPanel_->setDrcRunning(QStringLiteral("Running gdscheck for %1 with process %2%3...")
+                                              .arg(QString::fromStdString(cell.name),
+                                                   QString::fromStdString(processName),
+                                                   flattened ? QStringLiteral(" (flattened)") : QString()));
+            activityPanel_->showDrcTab();
+        }
+        statusBar()->showMessage(QStringLiteral("Running DRC with gdscheck..."));
+        drcProcess_->start();
+    }
+
+    void finishDrc(int exitCode, QProcess::ExitStatus status) {
+        const bool reportExists = !drcReportPath_.isEmpty() && QFileInfo::exists(drcReportPath_);
+        if (reportExists) {
+            try {
+                const auto report = ice::parseGdsCheckLyrdb(drcReportPath_.toStdString());
+                if (activityPanel_)
+                    activityPanel_->setDrcReport(report, drcReportPath_);
+                if (activityDock_)
+                    activityDock_->show();
+                if (activityPanel_)
+                    activityPanel_->showDrcTab();
+                const auto violations = report.drc.size();
+                statusBar()->showMessage(violations == 0
+                                             ? QStringLiteral("DRC finished: no violations")
+                                             : QStringLiteral("DRC finished: %1 violation(s)").arg(violations));
+                return;
+            } catch (const ice::ProjectError &error) {
+                const auto message =
+                    QStringLiteral("Unable to parse the gdscheck report: %1").arg(QString::fromStdString(error.what()));
+                if (activityPanel_)
+                    activityPanel_->setDrcError(message);
+                statusBar()->showMessage(QStringLiteral("DRC report parsing failed"));
+                return;
+            }
+        }
+
+        auto details = drcLog_.trimmed();
+        if (details.size() > 2000)
+            details = details.right(2000);
+        if (details.isEmpty())
+            details = QStringLiteral("gdscheck did not generate a report.");
+        if (status == QProcess::CrashExit)
+            details.prepend(QStringLiteral("gdscheck crashed. "));
+        const auto message = QStringLiteral("DRC failed (exit code %1): %2").arg(exitCode).arg(details);
+        if (activityPanel_)
+            activityPanel_->setDrcError(message);
+        if (activityDock_)
+            activityDock_->show();
+        if (activityPanel_)
+            activityPanel_->showDrcTab();
+        statusBar()->showMessage(QStringLiteral("DRC failed"));
+    }
+
     void refreshProject() {
         if (!project_)
             return;
@@ -2957,7 +3103,8 @@ class DocumentWindow : public QMainWindow {
         auto *toolsMenu = menuBar()->addMenu(QStringLiteral("&Tools"));
         auto *simulationAction = addCommand(QStringLiteral("Run Simulation"), QKeySequence(QStringLiteral("F6")));
         toolsMenu->addAction(simulationAction);
-        toolsMenu->addAction(addCommand(QStringLiteral("Run DRC")));
+        auto *drcAction = addCommand(QStringLiteral("Run DRC"));
+        toolsMenu->addAction(drcAction);
         toolsMenu->addAction(addCommand(QStringLiteral("Run LVS")));
         toolsMenu->addAction(addCommand(QStringLiteral("Run PEX")));
         toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
@@ -3002,6 +3149,7 @@ class DocumentWindow : public QMainWindow {
         connect(managePackagesAction, &QAction::triggered, this, &DocumentWindow::managePackages);
         connect(placeSymbolAction, &QAction::triggered, this, &DocumentWindow::placeSymbol);
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
+        connect(drcAction, &QAction::triggered, this, &DocumentWindow::runDrc);
         connect(systemAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::System); });
         connect(lightAppearanceAction, &QAction::triggered, this,
@@ -3020,6 +3168,8 @@ class DocumentWindow : public QMainWindow {
         dock->setObjectName(QStringLiteral("projectHierarchyDock"));
         dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
         projectPanel_ = new ProjectPanel;
+        projectPanel_->setLayoutFlattenState(flattenedLayouts_);
+        projectPanel_->setOnFlattenChanged([this] { refreshEmbeddedPanels(); });
         dock->setWidget(projectPanel_);
         addDockWidget(Qt::LeftDockWidgetArea, dock);
     }
@@ -3042,7 +3192,8 @@ class DocumentWindow : public QMainWindow {
         auto *titleBar = new QWidget(activityDock_);
         titleBar->setFixedHeight(0);
         activityDock_->setTitleBarWidget(titleBar);
-        activityDock_->setWidget(new ActivityPanel);
+        activityPanel_ = new ActivityPanel;
+        activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }
 
@@ -3205,6 +3356,8 @@ class DocumentWindow : public QMainWindow {
         auto *layoutContent = new QWidget;
         auto *layoutContentLayout = new QHBoxLayout(layoutContent);
         layoutHierarchy_ = new ProjectPanel(false, false, true, true);
+        layoutHierarchy_->setLayoutFlattenState(flattenedLayouts_);
+        layoutHierarchy_->setOnFlattenChanged([this] { refreshEmbeddedPanels(); });
         layoutHierarchy_->setOnAddClicked([this] { createLayoutCell(); });
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutCell(id); });
         layoutLeftTabs_ = new QTabWidget;
@@ -4034,10 +4187,16 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeLayoutId_ = 0;
     std::set<ice::ObjectId> openLibraryLayoutCellTabs_;
     std::unique_ptr<ice::ProjectSession> project_;
+    std::shared_ptr<std::set<ice::ObjectId>> flattenedLayouts_ = std::make_shared<std::set<ice::ObjectId>>();
     QString projectPath_;
     QStackedWidget *workspaceStack_ = nullptr;
     StartupView *startupView_ = nullptr;
     QDockWidget *activityDock_ = nullptr;
+    ActivityPanel *activityPanel_ = nullptr;
+    QProcess *drcProcess_ = nullptr;
+    std::unique_ptr<QTemporaryDir> drcTempDir_;
+    QString drcReportPath_;
+    QString drcLog_;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;

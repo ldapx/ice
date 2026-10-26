@@ -18,6 +18,8 @@ struct DrcViolation {
     std::string message;
     std::optional<ObjectId> object;
     Rect location;
+    // Cell name reported by an external DRC tool. Empty for local checks.
+    std::string cell;
 };
 
 struct LvsMismatch {

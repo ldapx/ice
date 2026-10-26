@@ -1,9 +1,13 @@
 #include "icelib/interchange.hpp"
 
+#include "icelib/geometry.hpp"
+
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
+#include <vector>
 
 namespace ice {
 
@@ -19,6 +23,7 @@ constexpr std::uint8_t kStrName = 0x06;
 constexpr std::uint8_t kEndStr = 0x07;
 constexpr std::uint8_t kBoundary = 0x08;
 constexpr std::uint8_t kLayer = 0x0D;
+constexpr std::uint8_t kDataType = 0x0E;
 constexpr std::uint8_t kXy = 0x10;
 constexpr std::uint8_t kEndEl = 0x11;
 
@@ -57,29 +62,37 @@ void writeRecord(std::ostream &output, std::uint8_t type, std::uint8_t dataType,
 
 void writeEmptyRecord(std::ostream &output, std::uint8_t type) { writeRecord(output, type, 0x00, {}); }
 
+void writeStringRecord(std::ostream &output, std::uint8_t type, std::string value) {
+    if (value.size() % 2 != 0)
+        value.push_back('\0');
+    writeRecord(output, type, 0x06, std::vector<unsigned char>(value.begin(), value.end()));
+}
+
+const std::vector<unsigned char> &timestampRecord() {
+    // Six 16-bit date fields for last modification and six for last access.
+    static const std::vector<unsigned char> value = {0x07, 0xEA, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0,
+                                                     0x07, 0xEA, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0};
+    return value;
+}
+
 std::int32_t checkedI32(Coordinate value, const char *field) {
     if (value < std::numeric_limits<std::int32_t>::min() || value > std::numeric_limits<std::int32_t>::max())
         throw ProjectError("interchange.export", std::string("Coordinate out of GDSII range: ") + field);
     return static_cast<std::int32_t>(value);
 }
-} // namespace
 
-void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
-    const auto cell = project.layoutCells.find(cellId);
-    if (cell == project.layoutCells.end())
-        throw ProjectError("interchange.cell", "Layout cell does not exist");
+void writeCell(const Project &project, const LayoutCell &cell, const std::filesystem::path &path) {
     std::ofstream output(path, std::ios::binary);
     if (!output)
         throw ProjectError("interchange.export", "Unable to open GDSII output");
-    writeRecord(output, kHeader, 0x02, {0, 6});
-    writeRecord(output, kBgnLib, 0x02, {0x07, 0xEA, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0});
-    writeRecord(output, kLibName, 0x06, {'I', 'C', 'E', ' ', 'L', 'A', 'Y', 'O', 'U', 'T'});
+    writeRecord(output, kHeader, 0x02, {0, 5});
+    writeRecord(output, kBgnLib, 0x02, timestampRecord());
+    writeStringRecord(output, kLibName, "ICE LAYOUT");
     writeRecord(output, kUnits, 0x05,
-                {0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0, 0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0});
-    writeEmptyRecord(output, kBgnStr);
-    writeRecord(output, kStrName, 0x06, {'T', 'O', 'P'});
-    writeEmptyRecord(output, 0x0A);
-    for (const auto &[_, shape] : cell->second.shapes) {
+                {0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0, 0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54});
+    writeRecord(output, kBgnStr, 0x02, timestampRecord());
+    writeStringRecord(output, kStrName, "TOP");
+    for (const auto &[_, shape] : cell.shapes) {
         int layerNumber = 0;
         if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
             layerNumber = layerIt->second.number;
@@ -88,8 +101,9 @@ void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const
         const auto layerValue = static_cast<std::uint32_t>(layerNumber);
         std::vector<unsigned char> layer{static_cast<unsigned char>((layerValue >> 8) & 0xff),
                                          static_cast<unsigned char>(layerValue & 0xff)};
-        writeRecord(output, kLayer, 0x02, layer);
         writeEmptyRecord(output, kBoundary);
+        writeRecord(output, kLayer, 0x02, layer);
+        writeRecord(output, kDataType, 0x02, {0, 0});
         std::vector<LayoutPoint> polygon = shape.polygon;
         if (polygon.empty()) {
             const auto x = shape.rectangle.x;
@@ -116,9 +130,85 @@ void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const
     }
     writeEmptyRecord(output, kEndStr);
     writeEmptyRecord(output, kEndLib);
-    writeEmptyRecord(output, kHeader);
     if (!output)
         throw ProjectError("interchange.export", "Unable to write GDSII output");
+}
+
+Point applyTransformChain(Point point, const std::vector<Transform> &chain) {
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+        point = it->apply(point);
+    return point;
+}
+
+void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::vector<Transform> &chain,
+                            std::set<ObjectId> &ancestors, Project &targetProject, LayoutCell &targetCell) {
+    const auto cellIt = project.layoutCells.find(cellId);
+    if (cellIt == project.layoutCells.end())
+        return;
+    const auto &cell = cellIt->second;
+    for (const auto &[_, shape] : cell.shapes) {
+        std::vector<LayoutPoint> sourcePolygon = shape.polygon;
+        if (sourcePolygon.empty()) {
+            const auto x = shape.rectangle.x;
+            const auto y = shape.rectangle.y;
+            const auto right = shape.rectangle.x + shape.rectangle.width;
+            const auto top = shape.rectangle.y + shape.rectangle.height;
+            sourcePolygon = {{x, y}, {right, y}, {right, top}, {x, top}};
+        }
+        std::vector<LayoutPoint> polygon;
+        polygon.reserve(sourcePolygon.size());
+        Coordinate minX = std::numeric_limits<Coordinate>::max();
+        Coordinate minY = std::numeric_limits<Coordinate>::max();
+        Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+        Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+        for (const auto &sourcePoint : sourcePolygon) {
+            const auto point = applyTransformChain({sourcePoint.x, sourcePoint.y}, chain);
+            polygon.push_back({point.x, point.y});
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        if (polygon.empty() || maxX <= minX || maxY <= minY)
+            continue;
+        const auto shapeId = targetProject.nextId();
+        targetCell.shapes.emplace(
+            shapeId,
+            Shape{shapeId, shape.layer, shape.net, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+    }
+    for (const auto &[_, instance] : cell.instances) {
+        if (!project.layoutCells.contains(instance.cell) || ancestors.contains(instance.cell))
+            continue;
+        ancestors.insert(instance.cell);
+        auto childChain = chain;
+        childChain.push_back(Transform{instance.x, instance.y, instance.orientation});
+        collectFlattenedShapes(project, instance.cell, childChain, ancestors, targetProject, targetCell);
+        ancestors.erase(instance.cell);
+    }
+}
+} // namespace
+
+void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        throw ProjectError("interchange.cell", "Layout cell does not exist");
+    writeCell(project, cell->second, path);
+}
+
+void LayoutInterchange::exportFlattenedGds(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        throw ProjectError("interchange.cell", "Layout cell does not exist");
+    Project flattened = project;
+    LayoutCell flatCell;
+    flatCell.id = cellId;
+    flatCell.name = cell->second.name;
+    flatCell.pdk = cell->second.pdk;
+    std::set<ObjectId> ancestors{cellId};
+    collectFlattenedShapes(project, cellId, {}, ancestors, flattened, flatCell);
+    flattened.layoutCells.clear();
+    flattened.layoutCells.emplace(cellId, std::move(flatCell));
+    writeCell(flattened, flattened.layoutCells.at(cellId), path);
 }
 
 Project LayoutInterchange::importGds(const std::filesystem::path &path) {

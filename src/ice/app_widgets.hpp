@@ -20,6 +20,12 @@ class QLineEdit;
 class QListWidget;
 class QPaintEvent;
 class QPushButton;
+class QTableWidget;
+class QTabWidget;
+
+namespace ice {
+struct VerificationReport;
+}
 
 class DiagnosticsPanel : public QWidget {
   public:
@@ -29,6 +35,17 @@ class DiagnosticsPanel : public QWidget {
 class ActivityPanel : public QWidget {
   public:
     explicit ActivityPanel(QWidget *parent = nullptr);
+
+    void setDrcReport(const ice::VerificationReport &report, const QString &reportPath = {});
+    void setDrcRunning(const QString &message = {});
+    void setDrcError(const QString &message);
+    void showDrcTab();
+
+  private:
+    QLabel *drcSummary_ = nullptr;
+    QTableWidget *drcTable_ = nullptr;
+    QTabWidget *tabs_ = nullptr;
+    int drcTabIndex_ = -1;
 };
 
 class CommandPalette : public QDialog {
