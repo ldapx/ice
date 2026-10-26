@@ -84,6 +84,7 @@ std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
     for (const auto &sidecar : sidecars) {
         FileSymbol symbol;
         std::string artworkFile;
+        std::optional<SymbolLabel> label;
         std::vector<Pin> pins;
         std::vector<Parameter> defaultParameters;
         try {
@@ -94,6 +95,20 @@ std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
             symbol.name = (*header)["name"].value_or(std::string{});
             artworkFile = (*header)["artwork"].value_or(std::string{});
             symbol.category = (*header)["category"].value_or(std::string{});
+            const auto labelX = (*header)["label_x"];
+            const auto labelY = (*header)["label_y"];
+            const bool hasLabelX = labelX.type() != toml::node_type::none;
+            const bool hasLabelY = labelY.type() != toml::node_type::none;
+            if (hasLabelX != hasLabelY)
+                throw ProjectError("symbol.label",
+                                   "label_x and label_y must be specified together: " + sidecar.string());
+            if (hasLabelX) {
+                std::int64_t x = 0;
+                std::int64_t y = 0;
+                if (!hasInteger(labelX, x) || !hasInteger(labelY, y))
+                    throw ProjectError("symbol.label", "Label coordinates must be integers: " + sidecar.string());
+                label = SymbolLabel{x, y};
+            }
             if (symbol.name.empty())
                 throw ProjectError("symbol.manifest", "Symbol name is required: " + sidecar.string());
             if (artworkFile.empty())
@@ -167,6 +182,7 @@ std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
         }
         symbol.svg = readTextFile(artworkPath, "symbol.artwork", "Symbol artwork file is missing");
         rejectUnsafeArtwork(symbol.svg, artworkPath);
+        symbol.label = std::move(label);
         symbol.pins = std::move(pins);
         symbol.defaultParameters = std::move(defaultParameters);
         symbols.push_back(std::move(symbol));

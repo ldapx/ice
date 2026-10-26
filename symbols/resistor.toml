@@ -2,6 +2,8 @@
 name = "Resistor"
 artwork = "resistor.svg"
 category = "Passive"
+label_x = 0
+label_y = 20
 
 [[pin]]
 name = "1"

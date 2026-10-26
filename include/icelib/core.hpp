@@ -58,6 +58,11 @@ struct Parameter {
     std::string value;
 };
 
+struct SymbolLabel {
+    Coordinate x = 0;
+    Coordinate y = 0;
+};
+
 struct Symbol {
     ObjectId id = 0;
     std::string name;
@@ -65,6 +70,9 @@ struct Symbol {
     // Source schematic for hierarchical block symbols. Zero for primitive or
     // library symbols that are not backed by a schematic cell.
     ObjectId sourceCell = 0;
+    // Optional label anchor in symbol coordinates (origin at the artwork
+    // center, positive Y upward). The instance name is centered on this point.
+    std::optional<SymbolLabel> label;
     std::vector<Pin> pins;
 };
 
@@ -154,9 +162,10 @@ struct SimulationGraph {
     ObjectId id = 0;
     std::string name;
     // Axis selections are signal names from the simulation's captured signal
-    // list. The literal "time" selects the simulator's time vector.
+    // list. The literal "time" selects the simulator's time vector. X selects
+    // one signal; Y can contain multiple signals sharing the same X axis.
     std::string xAxis = "time";
-    std::string yAxis;
+    std::vector<std::string> ySignals;
     // Optional display limits. Empty values auto-scale that axis from the
     // result data; they are presentation-only and never affect the simulation
     // request, netlist, or data acquisition.

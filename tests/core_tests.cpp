@@ -28,6 +28,7 @@ TEST_CASE("project serialization and transactions are deterministic") {
     ice::Symbol symbol;
     symbol.id = symbolId;
     symbol.name = "resistor";
+    symbol.label = ice::SymbolLabel{3, 9};
     auto pinId = project.nextId();
     symbol.pins.push_back({pinId, "A", 0, 0});
     schematic.symbols.emplace(symbolId, symbol);
@@ -47,6 +48,9 @@ TEST_CASE("project serialization and transactions are deterministic") {
     auto serialized = project.serialize();
     auto roundTrip = ice::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
+    CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label.has_value());
+    CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label->x == 3);
+    CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label->y == 9);
 
     auto invalid = project;
     invalid.layoutCells.at(cellId).shapes.at(shapeId).layer = 9999;
@@ -178,12 +182,12 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
     ice::SimulationGraph automatic;
     automatic.id = project.nextId();
     automatic.name = "auto";
-    automatic.yAxis = "v(out)";
+    automatic.ySignals = {"v(out)"};
     ice::SimulationGraph limited;
     limited.id = project.nextId();
     limited.name = "limited";
     limited.xAxis = "v(in)";
-    limited.yAxis = "v(out)";
+    limited.ySignals = {"v(out)", "v(in)"};
     limited.xMin = 1e-9;
     limited.xMax = 2e-9;
     limited.yMin = -0.5;
@@ -197,9 +201,9 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
     CHECK(roundTrip.simulations.at(simId).captureSignals == "v(out), v(in)");
     const auto &graphs = roundTrip.simulations.at(simId).graphs;
     CHECK(graphs[0].xAxis == "time");
-    CHECK(graphs[0].yAxis == "v(out)");
+    CHECK((graphs[0].ySignals == std::vector<std::string>{"v(out)"}));
     CHECK(graphs[1].xAxis == "v(in)");
-    CHECK(graphs[1].yAxis == "v(out)");
+    CHECK((graphs[1].ySignals == std::vector<std::string>{"v(out)", "v(in)"}));
     CHECK(graphs.size() == 2);
     CHECK(!graphs[0].xMin.has_value());
     CHECK(!graphs[0].xMax.has_value());
@@ -593,6 +597,7 @@ TEST_CASE("file symbol library loads and validates") {
                                             "<path d=\"M0 4h32\" stroke=\"black\"/></svg>";
     std::ofstream(root / "resistor.toml")
         << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\ncategory = \"Passive\"\n"
+           "label_x = 0\nlabel_y = 12\n"
            "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
            "\n[[pin]]\nname = \"2\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
     const auto symbols = ice::SymbolLibrary::load(root);
@@ -600,6 +605,9 @@ TEST_CASE("file symbol library loads and validates") {
     CHECK(symbols.front().name == "Resistor");
     CHECK(symbols.front().category == "Passive");
     CHECK(symbols.front().svg.find("<svg") != std::string::npos);
+    CHECK(symbols.front().label.has_value());
+    CHECK(symbols.front().label->x == 0);
+    CHECK(symbols.front().label->y == 12);
     CHECK(symbols.front().pins.size() == 2);
     CHECK(symbols.front().pins.front().direction == ice::PinDirection::left);
     CHECK(symbols.front().pins.back().direction == ice::PinDirection::right);
@@ -677,6 +685,7 @@ TEST_CASE("shipped file symbol library loads") {
     for (const auto &symbol : symbols) {
         CHECK(!symbol.svg.empty());
         CHECK(!symbol.pins.empty());
+        CHECK(symbol.label.has_value());
         pinCounts[symbol.name] = symbol.pins.size();
         for (const auto &parameter : symbol.defaultParameters)
             defaults[symbol.name][parameter.name] = parameter.value;

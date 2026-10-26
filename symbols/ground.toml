@@ -2,6 +2,8 @@
 name = "Ground"
 artwork = "ground.svg"
 category = "Power"
+label_x = 0
+label_y = -30
 
 [[pin]]
 name = "GND"

@@ -66,6 +66,7 @@ std::vector<SymbolDefinition> toDefinitions(std::vector<ice::FileSymbol> fileSym
         definition.name = QString::fromStdString(fileSymbol.name);
         definition.category = QString::fromStdString(fileSymbol.category);
         definition.svg = QString::fromStdString(fileSymbol.svg);
+        definition.label = std::move(fileSymbol.label);
         definition.pins = std::move(fileSymbol.pins);
         definition.parameters = std::move(fileSymbol.defaultParameters);
         definitions.push_back(std::move(definition));

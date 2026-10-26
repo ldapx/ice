@@ -231,6 +231,8 @@ std::string Project::serialize() const {
             json s = {{"id", sid}, {"name", symbol.name}, {"artwork", symbol.artwork}, {"pins", json::array()}};
             if (symbol.sourceCell != 0)
                 s["cell"] = symbol.sourceCell;
+            if (symbol.label)
+                s["label"] = {{"x", symbol.label->x}, {"y", symbol.label->y}};
             for (const auto &pin : symbol.pins) {
                 json p;
                 put(p, pin);
@@ -307,7 +309,8 @@ std::string Project::serialize() const {
                   {"signals", sim.captureSignals},
                   {"graphs", json::array()}};
         for (const auto &graph : sim.graphs) {
-            json graphJson = {{"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_axis", graph.yAxis}};
+            json graphJson = {
+                {"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_signals", graph.ySignals}};
             // Limits are optional so older projects keep auto-scaling.
             if (graph.xMin)
                 graphJson["x_min"] = *graph.xMin;
@@ -390,6 +393,10 @@ Project Project::deserialize(const std::string &text) {
             for (const auto &s : c.at("symbols")) {
                 Symbol symbol{s.at("id"), s.at("name"), s.at("artwork")};
                 symbol.sourceCell = s.value("cell", ObjectId{0});
+                if (s.contains("label") && s.at("label").is_object()) {
+                    const auto &label = s.at("label");
+                    symbol.label = SymbolLabel{label.value("x", Coordinate{0}), label.value("y", Coordinate{0})};
+                }
                 for (const auto &pin : s.at("pins"))
                     symbol.pins.push_back({pin.at("id"), pin.at("name"), pin.at("x"), pin.at("y"),
                                            parsePinDirection(pin.value("direction", "right"))});
@@ -456,7 +463,17 @@ Project Project::deserialize(const std::string &text) {
                         graph.id = g.at("id");
                         graph.name = g.value("name", std::string{"Graph"});
                         graph.xAxis = g.value("x_axis", std::string{"time"});
-                        graph.yAxis = g.value("y_axis", std::string{});
+                        if (g.contains("y_signals") && g.at("y_signals").is_array()) {
+                            for (const auto &signal : g.at("y_signals").get<std::vector<std::string>>()) {
+                                if (!signal.empty() && std::find(graph.ySignals.begin(), graph.ySignals.end(),
+                                                                 signal) == graph.ySignals.end())
+                                    graph.ySignals.push_back(signal);
+                            }
+                        } else {
+                            const auto legacyYAxis = g.value("y_axis", std::string{});
+                            if (!legacyYAxis.empty())
+                                graph.ySignals.push_back(legacyYAxis);
+                        }
                         // Older projects stored probe lists per graph. Fold
                         // them into the simulation-level captured-signal list.
                         if (g.contains("nodes")) {

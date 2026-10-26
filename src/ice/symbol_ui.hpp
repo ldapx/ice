@@ -36,6 +36,7 @@ struct SymbolDefinition {
     QString svg;
     // Non-zero when this definition represents a schematic cell.
     ice::ObjectId cell = 0;
+    std::optional<ice::SymbolLabel> label;
     std::vector<ice::Pin> pins;
     // Default instance parameters seeded by the symbol sidecar (e.g. the
     // resistance of a resistor); placed instances copy them at drop time.

@@ -2,6 +2,8 @@
 name = "Op Amp"
 artwork = "opamp.svg"
 category = "Analog"
+label_x = 0
+label_y = 64
 
 [[pin]]
 name = "+"

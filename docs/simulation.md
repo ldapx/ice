@@ -18,12 +18,12 @@ be picked directly; the resulting `v(node)` signal is appended to the list and
 the editor returns to the Simulation tab.
 
 Graphs are presentation-only views over a result. Each graph selects a captured
-signal or the `time` variable for its X and Y axes and can define optional axis
-limits; blank limits auto-scale from the returned data. Axis selections and
-limits change only how the plot is drawn and never alter the simulation
-parameters, netlist, or data acquisition. Plots draw labelled axis ticks and a
-light grid by default; the **Grid** button in the graph header toggles the grid
-on and off.
+signal or the `time` variable for its X axis and one or more captured signals
+(or `time`) for its Y axis. It can also define optional axis limits; blank
+limits auto-scale from the returned data. Axis selections and limits change
+only how the plot is drawn and never alter the simulation parameters, netlist,
+or data acquisition. Plots draw labelled axis ticks and a light grid by
+default; the **Grid** button in the graph header toggles the grid on and off.
 
 `runAsync` executes through a worker future and reports progress through a
 callback. Callers crossing into a GUI event loop must queue those progress

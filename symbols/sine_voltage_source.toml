@@ -2,6 +2,8 @@
 name = "Sine Voltage Source"
 artwork = "sine_voltage_source.svg"
 category = "Sources"
+label_x = 0
+label_y = 48
 
 [[pin]]
 name = "+"

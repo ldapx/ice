@@ -2,6 +2,8 @@
 name = "Diode"
 artwork = "diode.svg"
 category = "Semiconductor"
+label_x = 0
+label_y = 23
 
 [[pin]]
 name = "A"

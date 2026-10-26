@@ -121,7 +121,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     zeroLine.setAlpha(110);
     painter.fillRect(rect(), canvasBackground);
     painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF plot = rect().adjusted(58, 18, -20, -42);
+    const QRectF plot = rect().adjusted(82, 34, -20, -56);
     // Inset the trace area so a constant trace exactly at the minimum or
     // maximum is fully visible instead of being clipped by the plot border.
     const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
@@ -132,43 +132,61 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
                                               : QString::fromStdString(graph_.name);
 
     // Resolve the selected axes to result vectors. Time is always available;
-    // a missing signal falls back to time on X and the first returned trace on
-    // Y, which keeps older projects readable after signals are renamed.
+    // missing signals fall back to time on X and the first returned trace on Y,
+    // which keeps older projects readable after signals are renamed.
     std::string effectiveX = graph_.xAxis;
     const auto *xValues = valuesForSignal(effectiveX);
     if (!xValues || xValues->empty()) {
         effectiveX = "time";
         xValues = &result_.time;
     }
-    std::string effectiveY = graph_.yAxis;
-    const auto *yValues = valuesForSignal(effectiveY);
-    if (!yValues || yValues->empty()) {
-        if (!result_.traces.empty()) {
-            effectiveY = result_.traces.front().name;
-            yValues = &result_.traces.front().values;
-        } else {
-            effectiveY = "time";
-            yValues = &result_.time;
-        }
+
+    struct YTrace {
+        std::string signal;
+        const std::vector<double> *values = nullptr;
+    };
+    std::vector<YTrace> yTraces;
+    for (const auto &signal : graph_.ySignals) {
+        const auto *values = valuesForSignal(signal);
+        if (values && !values->empty())
+            yTraces.push_back({signal, values});
     }
+    if (yTraces.empty()) {
+        if (!result_.traces.empty())
+            yTraces.push_back({result_.traces.front().name, &result_.traces.front().values});
+        else
+            yTraces.push_back({"time", &result_.time});
+    }
+
     const auto axisLabel = [](const std::string &signal) {
         return isTimeSignal(normalizedSignalName(signal)) ? QStringLiteral("Time (s)") : QString::fromStdString(signal);
     };
     const QString xLabel = axisLabel(effectiveX);
-    const QString yLabel = axisLabel(effectiveY);
+    QStringList yLabels;
+    for (const auto &trace : yTraces)
+        yLabels << axisLabel(trace.signal);
+    const QString yLabel = yLabels.join(QStringLiteral(", "));
 
     painter.setPen(QPen(axisText, 1));
-    painter.drawText(QRectF(8, 2, width() - 16, 20), Qt::AlignCenter, title);
-    painter.drawText(QRectF(58, plot.top() - 16, 200, 14), Qt::AlignLeft, yLabel);
-    painter.drawText(QRectF(plot.right() - 200, plot.bottom() + 24, 200, 14), Qt::AlignRight, xLabel);
+    painter.drawText(QRectF(8, 6, width() - 16, 20), Qt::AlignCenter, title);
+    // Rotate the Y title so it reads bottom-to-top along the left edge.
+    painter.save();
+    painter.translate(12, plot.center().y());
+    painter.rotate(-90);
+    painter.drawText(QRectF(-plot.height() / 2.0, -8, plot.height(), 16), Qt::AlignCenter, yLabel);
+    painter.restore();
+    painter.drawText(QRectF(plot.left(), plot.bottom() + 26, plot.width(), 16), Qt::AlignHCenter, xLabel);
     painter.setPen(QPen(tickText, 1));
-    const auto count = xValues && yValues ? std::min(xValues->size(), yValues->size()) : std::size_t{0};
-    if (count == 0)
+
+    std::size_t maxCount = 0;
+    for (const auto &trace : yTraces)
+        maxCount = std::max(maxCount, std::min(xValues->size(), trace.values->size()));
+    if (maxCount == 0)
         return;
 
     double dataXMin = std::numeric_limits<double>::max();
     double dataXMax = std::numeric_limits<double>::lowest();
-    for (std::size_t index = 0; index < count; ++index) {
+    for (std::size_t index = 0; index < maxCount; ++index) {
         const auto value = (*xValues)[index];
         if (!std::isfinite(value))
             continue;
@@ -183,12 +201,15 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         dataXMax = dataXMin + 1.0;
     double dataYMin = std::numeric_limits<double>::max();
     double dataYMax = std::numeric_limits<double>::lowest();
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto value = (*yValues)[index];
-        if (!std::isfinite(value))
-            continue;
-        dataYMin = std::min(dataYMin, value);
-        dataYMax = std::max(dataYMax, value);
+    for (const auto &trace : yTraces) {
+        const auto count = std::min(xValues->size(), trace.values->size());
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto value = (*trace.values)[index];
+            if (!std::isfinite(value))
+                continue;
+            dataYMin = std::min(dataYMin, value);
+            dataYMax = std::max(dataYMax, value);
+        }
     }
     if (dataYMin > dataYMax) {
         dataYMin = 0.0;
@@ -265,7 +286,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     painter.setPen(QPen(tickText, 1));
     for (double value : yTicks) {
         const auto y = mapY(value);
-        painter.drawText(QRectF(4, y - 8, 48, 16), Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
+        painter.drawText(QRectF(24, y - 8, 52, 16), Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
     }
     for (double value : xTicks) {
         const auto x = mapX(value);
@@ -280,25 +301,35 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
     }
 
-    QPainterPath path;
+    auto cyan = ice::uiColor(ice::UiColor::Accent3);
+    cyan = cyan.darker(135);
+    const QColor colors[] = {ice::uiColor(ice::UiColor::Accent2), ice::uiColor(ice::UiColor::Accent4),
+                             ice::uiColor(ice::UiColor::Accent5), ice::uiColor(ice::UiColor::Accent6), cyan};
     painter.save();
     painter.setClipRect(plot.adjusted(1, 1, -1, -1));
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto x = (*xValues)[index];
-        const auto y = (*yValues)[index];
-        if (!std::isfinite(x) || !std::isfinite(y))
-            continue;
-        const auto point = QPointF(mapX(x), mapY(y));
-        if (path.elementCount() == 0)
-            path.moveTo(point);
-        else
-            path.lineTo(point);
+    for (std::size_t traceIndex = 0; traceIndex < yTraces.size(); ++traceIndex) {
+        const auto &trace = yTraces[traceIndex];
+        const auto count = std::min(xValues->size(), trace.values->size());
+        QPainterPath path;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto x = (*xValues)[index];
+            const auto y = (*trace.values)[index];
+            if (!std::isfinite(x) || !std::isfinite(y))
+                continue;
+            const auto point = QPointF(mapX(x), mapY(y));
+            if (path.elementCount() == 0)
+                path.moveTo(point);
+            else
+                path.lineTo(point);
+        }
+        painter.setPen(QPen(colors[traceIndex % 5], 2));
+        painter.drawPath(path);
     }
-    painter.setPen(QPen(ice::uiColor(ice::UiColor::Accent2), 2));
-    painter.drawPath(path);
     painter.restore();
 
-    painter.setPen(QPen(ice::uiColor(ice::UiColor::Accent2), 1));
-    painter.drawText(QRectF(plot.left() + 8, plot.top() + 6, plot.width() - 16, 20), Qt::AlignLeft,
-                     isTimeSignal(normalizedSignalName(effectiveY)) ? xLabel : yLabel);
+    for (std::size_t traceIndex = 0; traceIndex < yTraces.size(); ++traceIndex) {
+        painter.setPen(QPen(colors[traceIndex % 5], 1));
+        painter.drawText(QRectF(plot.left() + 8, plot.top() + 6 + traceIndex * 16.0, plot.width() - 16, 16),
+                         Qt::AlignLeft, axisLabel(yTraces[traceIndex].signal));
+    }
 }

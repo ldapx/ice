@@ -192,6 +192,7 @@ SymbolDefinition generatedSchematicSymbol(const ice::SchematicCell &cell) {
     definition.name = name;
     definition.category = QStringLiteral("Schematics");
     definition.cell = cell.id;
+    definition.label = ice::SymbolLabel{0, static_cast<ice::Coordinate>(height / 2 + 12)};
     definition.parameters = cell.parameters;
     for (std::size_t index = 0; index < inputs.size(); ++index) {
         const auto y = portY(index, inputs.size());
@@ -398,7 +399,7 @@ QPixmap layerPreviewIcon(const LayerStyle &style) {
 }
 
 void drawCanvasAxes(QPainter &painter, const QRectF &exposed) {
-    QPen axisPen(ice::uiColor(ice::UiColor::Axis1));
+    QPen axisPen(ice::uiColor(ice::UiColor::GridAxis));
     axisPen.setCosmetic(true);
     axisPen.setWidthF(1.2);
     painter.setPen(axisPen);
@@ -1663,8 +1664,11 @@ class SimulationPanel : public QWidget {
                     graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
                     const auto xAxis =
                         graph.xAxis.empty() ? QStringLiteral("time") : QString::fromStdString(graph.xAxis);
+                    QStringList ySignals;
+                    for (const auto &signal : graph.ySignals)
+                        ySignals << QString::fromStdString(signal);
                     const auto yAxis =
-                        graph.yAxis.empty() ? QStringLiteral("auto") : QString::fromStdString(graph.yAxis);
+                        ySignals.isEmpty() ? QStringLiteral("auto") : ySignals.join(QStringLiteral(", "));
                     graphItem->setToolTip(0, QStringLiteral("X: %1  Y: %2").arg(xAxis, yAxis));
                 }
             }
@@ -1942,6 +1946,15 @@ class PropertiesPanel : public QWidget {
         preview_->load(symbolSvg.toUtf8());
         previewFrame_->setVisible(!symbolSvg.isEmpty());
         populateParameters(cell.parameters);
+        updateParameterButtons();
+    }
+
+    void setLayoutCell(const ice::LayoutCell &cell) {
+        instanceId_ = 0;
+        cellId_ = 0;
+        selection_->setText(QStringLiteral("%1 (Layout)").arg(QString::fromStdString(cell.name)));
+        previewFrame_->setVisible(false);
+        populateParameters({});
         updateParameterButtons();
     }
 
@@ -3091,6 +3104,8 @@ class DocumentWindow : public QMainWindow {
         schematicSymbolsPdk_.clear();
         if (layoutCanvas_)
             layoutCanvas_->scene()->clear();
+        if (layoutPropertiesPanel_)
+            layoutPropertiesPanel_->clearSelection();
         simulationOutput_->setPlainText(QStringLiteral("No project open."));
         schematicSelector_->clear();
         simulationPlot_->clear();
@@ -3335,11 +3350,16 @@ class DocumentWindow : public QMainWindow {
         const auto &project = project_->project();
         auto cellIt = project.layoutCells.find(activeLayoutId_);
         if (cellIt == project.layoutCells.end()) {
-            if (project.layoutCells.empty())
+            if (project.layoutCells.empty()) {
+                if (layoutPropertiesPanel_)
+                    layoutPropertiesPanel_->clearSelection();
                 return;
+            }
             cellIt = project.layoutCells.begin();
             activeLayoutId_ = cellIt->first;
         }
+        if (layoutPropertiesPanel_)
+            layoutPropertiesPanel_->setLayoutCell(cellIt->second);
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
         for (const auto &[id, shape] : cellIt->second.shapes) {
@@ -3500,6 +3520,7 @@ class DocumentWindow : public QMainWindow {
                 const auto symbolId = ice::addSymbol(project, cellId, definition.name.toStdString(),
                                                      definition.svg.toStdString(), definition.cell);
                 auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+                symbol.label = definition.label;
                 for (auto pin : definition.pins) {
                     pin.id = project.nextId();
                     pin.direction = pin.x < 0   ? ice::PinDirection::left
@@ -4052,7 +4073,7 @@ class DocumentWindow : public QMainWindow {
             graph.name = name.trimmed().toStdString();
             const auto signalNames = parseSignalList(signalsCapture_ ? signalsCapture_->text() : QString());
             if (!signalNames.isEmpty())
-                graph.yAxis = signalNames.front().toStdString();
+                graph.ySignals.push_back(signalNames.front().toStdString());
             it->second.graphs.push_back(std::move(graph));
         });
         if (newGraphId == 0)
@@ -4128,26 +4149,52 @@ class DocumentWindow : public QMainWindow {
         // Build a small dialog for editing the name, axis selections, and limits.
         QDialog dlg(this);
         dlg.setWindowTitle(QStringLiteral("Edit Graph"));
-        dlg.resize(460, 320);
+        dlg.resize(500, 500);
         auto *dlgLayout = new QVBoxLayout(&dlg);
         auto *form = new QFormLayout;
         auto *nameEdit = new QLineEdit(QString::fromStdString(currentGraph.name));
         auto *xAxisCombo = new QComboBox;
-        auto *yAxisCombo = new QComboBox;
         const auto capturedSignals = parseSignalList(signalsCapture_ ? signalsCapture_->text() : QString());
-        const auto fillAxisCombo = [&](QComboBox *combo, const std::string &current, bool preferTime) {
-            combo->addItem(QStringLiteral("Time (s)"), QStringLiteral("time"));
-            for (const auto &signal : capturedSignals)
-                combo->addItem(signal, signal);
-            int index = combo->findData(QString::fromStdString(current));
-            if (index < 0 && current == "Time (s)")
-                index = combo->findData(QStringLiteral("time"));
-            if (index < 0)
-                index = preferTime ? combo->findData(QStringLiteral("time")) : (combo->count() > 1 ? 1 : 0);
-            combo->setCurrentIndex(index >= 0 ? index : 0);
+        xAxisCombo->addItem(QStringLiteral("Time (s)"), QStringLiteral("time"));
+        for (const auto &signal : capturedSignals)
+            xAxisCombo->addItem(signal, signal);
+        int xIndex = xAxisCombo->findData(QString::fromStdString(currentGraph.xAxis));
+        if (xIndex < 0 && currentGraph.xAxis == "Time (s)")
+            xIndex = xAxisCombo->findData(QStringLiteral("time"));
+        if (xIndex < 0)
+            xIndex = 0;
+        xAxisCombo->setCurrentIndex(xIndex);
+
+        auto *ySignalsList = new QListWidget;
+        ySignalsList->setMinimumHeight(130);
+        ySignalsList->setSelectionMode(QAbstractItemView::NoSelection);
+        ySignalsList->setAccessibleName(QStringLiteral("Y axis signals"));
+        const auto selectedYSignal = [&](const QString &data) {
+            for (const auto &signal : currentGraph.ySignals) {
+                const auto current = QString::fromStdString(signal);
+                if (current.compare(data, Qt::CaseInsensitive) == 0)
+                    return true;
+                if (data == QStringLiteral("time") &&
+                    current.compare(QStringLiteral("Time (s)"), Qt::CaseInsensitive) == 0)
+                    return true;
+            }
+            return false;
         };
-        fillAxisCombo(xAxisCombo, currentGraph.xAxis, true);
-        fillAxisCombo(yAxisCombo, currentGraph.yAxis, false);
+        const auto addYSignal = [&](const QString &label, const QString &data) {
+            auto *item = new QListWidgetItem(label, ySignalsList);
+            item->setData(Qt::UserRole, data);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(selectedYSignal(data) ? Qt::Checked : Qt::Unchecked);
+        };
+        addYSignal(QStringLiteral("Time (s)"), QStringLiteral("time"));
+        for (const auto &signal : capturedSignals)
+            addYSignal(signal, signal);
+        bool anyYChecked = false;
+        for (int index = 0; index < ySignalsList->count(); ++index)
+            anyYChecked |= ySignalsList->item(index)->checkState() == Qt::Checked;
+        if (!anyYChecked && ySignalsList->count() > 0)
+            ySignalsList->item(ySignalsList->count() > 1 ? 1 : 0)->setCheckState(Qt::Checked);
+
         const auto makeLimitEdit = [](const std::optional<double> &limit) {
             auto *edit = new QLineEdit;
             edit->setPlaceholderText(QStringLiteral("auto"));
@@ -4170,14 +4217,14 @@ class DocumentWindow : public QMainWindow {
         };
         form->addRow(QStringLiteral("Graph name:"), nameEdit);
         form->addRow(QStringLiteral("X axis:"), xAxisCombo);
-        form->addRow(QStringLiteral("Y axis:"), yAxisCombo);
+        form->addRow(QStringLiteral("Y axis signals:"), ySignalsList);
         form->addRow(QStringLiteral("X limits:"), makeLimitRow(xMinEdit, xMaxEdit));
         form->addRow(QStringLiteral("Y limits:"), makeLimitRow(yMinEdit, yMaxEdit));
         dlgLayout->addLayout(form);
         auto *limitsHint = new QLabel(
-            QStringLiteral("Axes list the captured signals and time. Leave a limit blank to auto-scale that axis. "
-                           "Limits only change how the graph is drawn; they do not affect simulation parameters or "
-                           "data acquisition."));
+            QStringLiteral("X selects one captured signal or time. Check one or more Y signals; they share the X "
+                           "axis. Leave a limit blank to auto-scale that axis. Limits only change how the graph is "
+                           "drawn; they do not affect simulation parameters or data acquisition."));
         limitsHint->setWordWrap(true);
         dlgLayout->addWidget(limitsHint);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -4187,6 +4234,7 @@ class DocumentWindow : public QMainWindow {
         std::optional<double> newXMax;
         std::optional<double> newYMin;
         std::optional<double> newYMax;
+        std::vector<std::string> newYSignals;
         const auto parseLimit = [](const QLineEdit *edit, std::optional<double> &limit) {
             limit.reset();
             const auto text = edit->text().trimmed();
@@ -4200,6 +4248,20 @@ class DocumentWindow : public QMainWindow {
             return true;
         };
         connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
+            newYSignals.clear();
+            for (int index = 0; index < ySignalsList->count(); ++index) {
+                const auto *item = ySignalsList->item(index);
+                if (item->checkState() != Qt::Checked)
+                    continue;
+                const auto signal = item->data(Qt::UserRole).toString().toStdString();
+                if (!signal.empty() && std::find(newYSignals.begin(), newYSignals.end(), signal) == newYSignals.end())
+                    newYSignals.push_back(signal);
+            }
+            if (newYSignals.empty()) {
+                QMessageBox::warning(&dlg, QStringLiteral("Y axis signals"),
+                                     QStringLiteral("Select at least one Y axis signal."));
+                return;
+            }
             if (!parseLimit(xMinEdit, newXMin) || !parseLimit(xMaxEdit, newXMax) || !parseLimit(yMinEdit, newYMin) ||
                 !parseLimit(yMaxEdit, newYMax)) {
                 QMessageBox::warning(&dlg, QStringLiteral("Axis limits"),
@@ -4225,9 +4287,8 @@ class DocumentWindow : public QMainWindow {
 
         const auto newName = nameEdit->text().trimmed();
         const auto newXAxis = xAxisCombo->currentData().toString();
-        const auto newYAxis = yAxisCombo->currentData().toString();
 
-        project_->execute("edit graph", [simId, graphId, newName, newXAxis, newYAxis, newXMin, newXMax, newYMin,
+        project_->execute("edit graph", [simId, graphId, newName, newXAxis, newYSignals, newXMin, newXMax, newYMin,
                                          newYMax](ice::Project &project) {
             auto it = project.simulations.find(simId);
             if (it == project.simulations.end())
@@ -4237,7 +4298,7 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 g.name = newName.toStdString();
                 g.xAxis = newXAxis.toStdString();
-                g.yAxis = newYAxis.toStdString();
+                g.ySignals = newYSignals;
                 g.xMin = newXMin;
                 g.xMax = newXMax;
                 g.yMin = newYMin;
@@ -4715,7 +4776,13 @@ class DocumentWindow : public QMainWindow {
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
             label->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
-            label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
+            if (symbolIt->second.label) {
+                const auto bounds = label->boundingRect();
+                label->setPos(symbolIt->second.label->x - bounds.width() / 2.0,
+                              -symbolIt->second.label->y - bounds.height() / 2.0);
+            } else {
+                label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
+            }
             label->setData(0, QStringLiteral("symbol-label"));
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
@@ -5285,10 +5352,21 @@ class DocumentWindow : public QMainWindow {
         layoutCellTabs_->setDocumentMode(true);
         auto *layoutContent = new QWidget;
         auto *layoutContentLayout = new QHBoxLayout(layoutContent);
-        layoutHierarchy_ = new ProjectPanel(true, false, true, true);
+        layoutHierarchy_ = new ProjectPanel(false, false, true, true);
         layoutHierarchy_->setOnAddClicked([this] { createLayoutCell(); });
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutCell(id); });
-        layoutContentLayout->addWidget(layoutHierarchy_, 0);
+        auto *layoutLeftTabs = new QTabWidget;
+        layoutLeftTabs->addTab(layoutHierarchy_, QStringLiteral("Hierarchy"));
+        auto *layoutDevices = new QWidget;
+        auto *layoutDevicesLayout = new QVBoxLayout(layoutDevices);
+        auto *noLayoutDevices = new QLabel(QStringLiteral("No layout devices available."));
+        noLayoutDevices->setAlignment(Qt::AlignCenter);
+        noLayoutDevices->setWordWrap(true);
+        layoutDevicesLayout->addStretch();
+        layoutDevicesLayout->addWidget(noLayoutDevices);
+        layoutDevicesLayout->addStretch();
+        layoutLeftTabs->addTab(layoutDevices, QStringLiteral("Devices"));
+        layoutContentLayout->addWidget(layoutLeftTabs, 0);
         auto *layoutToolbar = createEditorToolbar(true);
         layoutToolbar->setOrientation(Qt::Vertical);
         layoutToolbarColumn_ = new QWidget;
@@ -5310,8 +5388,12 @@ class DocumentWindow : public QMainWindow {
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
         layoutEditorStack_->addWidget(layoutEditorPage_);
         layoutContentLayout->addWidget(layoutEditorStack_, 1);
+        auto *layoutRightTabs = new QTabWidget;
+        layoutPropertiesPanel_ = new PropertiesPanel(false);
+        layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
-        layoutContentLayout->addWidget(layersPanel_, 0);
+        layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
+        layoutContentLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);
         documents->addTab(layoutPage, QStringLiteral("Layout"));
 
@@ -5429,10 +5511,10 @@ class DocumentWindow : public QMainWindow {
         simulationGraphsPage_ = graphsPage;
         auto *graphsLayout = new QVBoxLayout(graphsPage);
         graphsLayout->setContentsMargins(0, 0, 0, 0);
-        auto *graphHeader = new QWidget;
-        auto *graphHeaderLayout = new QHBoxLayout(graphHeader);
-        graphHeaderLayout->setContentsMargins(0, 4, 0, 0);
-        graphHeaderLayout->addWidget(heading(QStringLiteral("Graphs")));
+        auto *graphControls = new QWidget;
+        auto *graphControlsLayout = new QHBoxLayout(graphControls);
+        graphControlsLayout->setContentsMargins(0, 0, 0, 0);
+        graphControlsLayout->setSpacing(2);
         simulationAddGraphButton_ = new QPushButton;
         simulationAddGraphButton_->setToolTip(QStringLiteral("Add graph to this simulation"));
         simulationAddGraphButton_->setAccessibleName(QStringLiteral("Add graph"));
@@ -5459,16 +5541,15 @@ class DocumentWindow : public QMainWindow {
         simulationGridButton_->setFixedWidth(32);
         simulationGridButton_->setEnabled(false);
         setLucideIcon(simulationGridButton_, QStringLiteral("grid-3x3"), 16);
-        graphHeaderLayout->addWidget(simulationAddGraphButton_);
-        graphHeaderLayout->addWidget(simulationDeleteGraphButton_);
-        graphHeaderLayout->addWidget(simulationEditGraphButton_);
-        graphHeaderLayout->addWidget(simulationGridButton_);
-        graphHeaderLayout->addStretch();
-        graphsLayout->addWidget(graphHeader);
+        graphControlsLayout->addWidget(simulationAddGraphButton_);
+        graphControlsLayout->addWidget(simulationDeleteGraphButton_);
+        graphControlsLayout->addWidget(simulationEditGraphButton_);
+        graphControlsLayout->addWidget(simulationGridButton_);
 
         graphTabs_ = new QTabWidget;
         graphTabs_->setDocumentMode(true);
         graphTabs_->setTabsClosable(false);
+        graphTabs_->setCornerWidget(graphControls, Qt::TopRightCorner);
         simulationPlot_ = new SimulationPlot;
         graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
         graphsLayout->addWidget(graphTabs_, 1);
@@ -5997,6 +6078,7 @@ class DocumentWindow : public QMainWindow {
     bool graphGridVisible_ = true;
     ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
+    PropertiesPanel *layoutPropertiesPanel_ = nullptr;
     SymbolsPanel *schematicSymbolsPanel_ = nullptr;
     QTabWidget *schematicLeftTabs_ = nullptr;
     SchematicNetlistPanel *schematicNetlistPanel_ = nullptr;

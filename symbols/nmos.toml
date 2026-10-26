@@ -2,6 +2,8 @@
 name = "NMOS"
 artwork = "nmos.svg"
 category = "Transistor"
+label_x = 0
+label_y = 42
 
 [[pin]]
 name = "G"

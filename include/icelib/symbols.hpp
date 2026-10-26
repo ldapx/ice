@@ -15,6 +15,9 @@ struct FileSymbol {
     std::string name;
     std::string category;
     std::string svg;
+    // Optional instance-label anchor in symbol coordinates (origin at the
+    // artwork center, positive Y upward).
+    std::optional<SymbolLabel> label;
     std::vector<Pin> pins;
     // Optional default parameters the sidecar seeds into every instance placed
     // from this symbol (ids are assigned by the project at placement time).
@@ -32,6 +35,8 @@ struct FileSymbol {
 // artwork = "resistor.svg"          # sibling artwork
 // # artwork = "generic:resistor.svg" # built-in ICE artwork
 // category = "Passive"
+// label_x = 0                        # instance label anchor
+// label_y = 20
 //
 // [[pin]]
 // name = "1"
@@ -50,7 +55,9 @@ struct FileSymbol {
 // Pin coordinates are integers in symbol units with the origin at the artwork
 // center (Qt places the artwork centered on the symbol origin). `direction`
 // accepts `input`, `output`, or `inout`; the physical pin side is derived
-// from the pin position. Throws ProjectError when a sidecar is malformed,
+// from the pin position. Optional `label_x` and `label_y` place the centered
+// instance label in the same coordinate system; both must be present together.
+// Throws ProjectError when a sidecar is malformed,
 // its artwork file is missing or unsafe (scripts or external references),
 // pin names are empty or duplicated, coordinates are not integers, or the
 // library contains no symbols or duplicate symbol names.

@@ -2,6 +2,8 @@
 name = "Current Source"
 artwork = "current_source.svg"
 category = "Sources"
+label_x = 0
+label_y = 48
 
 [[pin]]
 name = "+"

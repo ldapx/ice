@@ -26,6 +26,7 @@ enum class UiColor {
     Grid1,
     Grid2,
     Axis1,
+    GridAxis,
 };
 
 inline QColor uiColor(UiColor role) {
@@ -43,6 +44,13 @@ inline QColor uiColor(UiColor role) {
                                 foreground.greenF() * amount + background.greenF() * (1.0 - amount),
                                 foreground.blueF() * amount + background.blueF() * (1.0 - amount));
     };
+    const auto grid1 = palette.color(QPalette::Midlight);
+    // The 5-unit grid is intentionally close to the 1-unit grid; separation
+    // comes primarily from line width rather than large contrast.
+    const auto grid2 = blend(palette.color(dark ? QPalette::Light : QPalette::Dark), grid1, 0.25);
+    // Canvas axes are nearly the same tone as the 5-unit grid and rely on
+    // their slightly heavier stroke for separation.
+    const auto gridAxis = blend(grid2, palette.color(QPalette::WindowText), 0.85);
 
     switch (role) {
     case UiColor::Accent1:
@@ -71,11 +79,13 @@ inline QColor uiColor(UiColor role) {
     case UiColor::TextOnAccent:
         return palette.color(QPalette::HighlightedText);
     case UiColor::Grid1:
-        return palette.color(QPalette::Midlight);
+        return grid1;
     case UiColor::Grid2:
-        return palette.color(dark ? QPalette::Light : QPalette::Dark);
+        return grid2;
     case UiColor::Axis1:
         return palette.color(QPalette::WindowText);
+    case UiColor::GridAxis:
+        return gridAxis;
     }
     return palette.color(QPalette::WindowText);
 }

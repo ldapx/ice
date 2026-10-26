@@ -2,6 +2,8 @@
 name = "Input"
 artwork = "input.svg"
 category = "Ports"
+label_x = 0
+label_y = -42
 
 [[pin]]
 name = "IN"

@@ -45,6 +45,8 @@ artwork = "resistor.svg"
 # Or reference ICE's shared artwork from a package sidecar:
 # artwork = "generic:resistor.svg"
 category = "Passive"
+label_x = 0
+label_y = 20
 
 [[pin]]
 name = "1"
@@ -61,6 +63,11 @@ value = "1k"
 `artwork = "generic:<file>.svg"` to reference ICE's built-in symbol artwork
 directory. Only a plain SVG filename is accepted after `generic:`; absolute
 paths and parent-directory traversal are rejected.
+
+`label_x` and `label_y` set the anchor for the centered instance label in
+symbol coordinates, using the same origin (artwork center) and positive-Y-up
+convention as pins. Both fields are optional but must be provided together;
+symbols without them keep the legacy bottom-left label placement.
 
 `direction` accepts `input`, `output`, or `inout`; the physical pin side is
 derived from the pin position. The loader (`ice::SymbolLibrary::load`) rejects

@@ -2,6 +2,8 @@
 name = "Capacitor"
 artwork = "capacitor.svg"
 category = "Passive"
+label_x = 0
+label_y = 26
 
 [[pin]]
 name = "1"
