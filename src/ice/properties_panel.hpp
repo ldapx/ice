@@ -32,6 +32,7 @@ class PropertiesPanel : public QWidget {
                                                           const std::string &name, const std::string &value)>;
     using LayoutDeviceParameterChanged =
         std::function<void(const std::string &deviceName, const std::string &name, const std::string &value)>;
+    using PathWidthChanged = std::function<void(int width)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr);
 
@@ -41,6 +42,7 @@ class PropertiesPanel : public QWidget {
     void setOnCellParametersRemoved(CellParametersRemoved callback);
     void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback);
     void setOnLayoutDeviceParameterChanged(LayoutDeviceParameterChanged callback);
+    void setOnPathWidthChanged(PathWidthChanged callback);
 
     void refreshAppearance();
     void clearSelection();
@@ -49,6 +51,7 @@ class PropertiesPanel : public QWidget {
     void setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg);
     void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell = nullptr);
     void setLayoutDevice(const ice::LayoutDeviceCell *cell);
+    void setPathTool(int width, const std::string &layerName);
 
   private:
     static QLabel *addRow(QFormLayout *form, const QString &label);
@@ -72,10 +75,14 @@ class PropertiesPanel : public QWidget {
     ice::ObjectId cellId_ = 0;
     ice::ObjectId layoutCellId_ = 0;
     std::string layoutDeviceName_;
+    bool pathMode_ = false;
+    int pathWidth_ = 200;
+    std::string pathLayerName_;
     ParameterChanged onParameterChanged_;
     CellParameterChanged onCellParameterChanged_;
     CellParameterAdded onCellParameterAdded_;
     CellParametersRemoved onCellParametersRemoved_;
     LayoutCellParameterChanged onLayoutCellParameterChanged_;
     LayoutDeviceParameterChanged onLayoutDeviceParameterChanged_;
+    PathWidthChanged onPathWidthChanged_;
 };

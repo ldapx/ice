@@ -76,6 +76,7 @@
 #include <QtSvgWidgets/QGraphicsSvgItem>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -737,6 +738,107 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Opened %1").arg(QString::fromStdString(childIt->second.name)));
     }
 
+    void updateLayoutPathConfig() {
+        if (!project_ || !layoutCanvas_)
+            return;
+        const auto &layers = project_->project().layers;
+        const auto findLayer = [&](const char *name) -> ice::ObjectId {
+            const auto wanted = QString::fromLatin1(name);
+            for (const auto &[id, layer] : layers) {
+                if (QString::fromStdString(layer.name).compare(wanted, Qt::CaseInsensitive) == 0)
+                    return id;
+            }
+            return 0;
+        };
+        static constexpr std::array<std::pair<const char *, const char *>, 7> steps = {{
+            {"Metal1", "Via1"},
+            {"Metal2", "Via2"},
+            {"Metal3", "Via3"},
+            {"Metal4", "Via4"},
+            {"Metal5", "TopVia1"},
+            {"TopMetal1", "TopVia2"},
+            {"TopMetal2", nullptr},
+        }};
+        LayoutPathConfig config;
+        config.width = std::max(1, layoutPathWidth_);
+        config.cell = activeLayoutId_;
+        for (const auto &[metal, via] : steps) {
+            const auto layerId = findLayer(metal);
+            if (layerId == 0)
+                break;
+            const auto viaId = via ? findLayer(via) : 0;
+            config.layers.push_back({layerId, viaId, metal});
+        }
+        if (config.layers.empty() && !layers.empty()) {
+            const auto &[id, layer] = *layers.begin();
+            config.layers.push_back({id, 0, layer.name});
+        }
+        layoutCanvas_->setPathConfig(config);
+    }
+
+    void setLayoutPathWidth(int width) {
+        if (width <= 0)
+            return;
+        layoutPathWidth_ = std::min(width, 1000000);
+        if (layoutCanvas_) {
+            layoutCanvas_->setPathWidth(layoutPathWidth_);
+            if (layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
+                updateLayoutPathConfig();
+        }
+        statusBar()->showMessage(QStringLiteral("Path width: %1 nm").arg(layoutPathWidth_));
+    }
+
+    void addLayoutPathSegment(QPointF start, QPointF end, int width, ice::ObjectId layerId,
+                              const std::vector<ice::ObjectId> &viaLayers) {
+        if (!project_ || width <= 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
+            !project_->project().layers.contains(layerId))
+            return;
+        const auto polygon = layoutPathPolygon(start, end, width);
+        if (polygon.size() < 4)
+            return;
+        std::vector<ice::LayoutPoint> points;
+        points.reserve(static_cast<std::size_t>(polygon.size()));
+        ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
+        ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
+        for (const auto &point : polygon) {
+            const auto x = static_cast<ice::Coordinate>(std::lround(point.x()));
+            const auto y = static_cast<ice::Coordinate>(std::lround(-point.y()));
+            points.push_back({x, y});
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        }
+        if (maxX <= minX || maxY <= minY)
+            return;
+        const ice::Rect bounds{minX, minY, maxX - minX, maxY - minY};
+        const auto centerX = static_cast<ice::Coordinate>(std::lround(start.x()));
+        const auto centerY = static_cast<ice::Coordinate>(std::lround(-start.y()));
+        const auto half = static_cast<ice::Coordinate>(width / 2);
+        try {
+            project_->execute("draw layout path", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                const auto shapeId = project.nextId();
+                cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerId, std::nullopt, bounds, points});
+                for (const auto viaLayer : viaLayers) {
+                    if (viaLayer == 0 || !project.layers.contains(viaLayer))
+                        continue;
+                    ice::addRectangle(project, activeLayoutId_, viaLayer,
+                                      {centerX - half, centerY - half, width, width});
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Draw Path"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
     void removeSchematic(ice::ObjectId cellId) {
         if (!project_ || cellId == 0)
             return;
@@ -894,6 +996,8 @@ class DocumentWindow : public QMainWindow {
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
         if (layoutRectangleTool_)
             layoutRectangleTool_->setEnabled(!readOnly);
+        if (layoutPathTool_)
+            layoutPathTool_->setEnabled(!readOnly && !project.layers.empty());
         if (layoutDeleteTool_)
             layoutDeleteTool_->setEnabled(!readOnly);
         if (layoutCanvas_) {
@@ -904,6 +1008,8 @@ class DocumentWindow : public QMainWindow {
                 layoutCanvas_->setTool(LayoutCanvas::Tool::select);
             }
         }
+        if (layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
+            updateLayoutPathConfig();
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
         for (const auto &[id, shape] : cellIt->second.shapes) {
@@ -1055,6 +1161,12 @@ class DocumentWindow : public QMainWindow {
     void refreshLayoutProperties(bool bringToFront = false) {
         if (!layoutPropertiesPanel_)
             return;
+        if (layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path) {
+            layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), layoutCanvas_->pathLayerName());
+            if (bringToFront && layoutRightTabs_)
+                layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+            return;
+        }
         if (project_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::select) {
             const auto instanceId = layoutCanvas_->selectedLayoutInstance();
             if (instanceId != 0) {
@@ -3217,6 +3329,7 @@ class DocumentWindow : public QMainWindow {
             [this](const std::string &deviceName, const std::string &name, const std::string &value) {
                 updateLayoutDeviceParameter(deviceName, name, value);
             });
+        layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
         layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
@@ -3664,6 +3777,17 @@ class DocumentWindow : public QMainWindow {
             view = schematicCanvas_;
         } else {
             layoutCanvas_ = createLayoutCanvas();
+            layoutCanvas_->setPathSegmentCallback([this](QPointF start, QPointF end, int width, ice::ObjectId layer,
+                                                         const std::vector<ice::ObjectId> &viaLayers) {
+                addLayoutPathSegment(start, end, width, layer, viaLayers);
+            });
+            layoutCanvas_->setPathLayerChangedCallback([this](ice::ObjectId, const std::string &name) {
+                statusBar()->showMessage(QStringLiteral("Path layer: %1 · width: %2 nm")
+                                             .arg(QString::fromStdString(name))
+                                             .arg(layoutPathWidth_));
+                if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
+                    layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), name);
+            });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
                     if (!project_ || project_->project().layers.empty()) {
@@ -3770,9 +3894,12 @@ class DocumentWindow : public QMainWindow {
             auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create Rectangle"));
             rectangleTool->setCheckable(true);
             layoutRectangleTool_ = rectangleTool;
+            auto *pathTool = addTool(QStringLiteral("route"), QStringLiteral("Draw Path"));
+            pathTool->setCheckable(true);
+            layoutPathTool_ = pathTool;
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
-            for (auto *action : {selectTool, placeDeviceTool, rectangleTool})
+            for (auto *action : {selectTool, placeDeviceTool, rectangleTool, pathTool})
                 toolGroup->addAction(action);
             connect(selectTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
@@ -3798,6 +3925,29 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::rectangle);
                     layoutCanvas_->setFocus();
                 }
+                refreshLayoutProperties(false);
+            });
+            connect(pathTool, &QAction::triggered, this, [this, pathTool] {
+                if (!pathTool->isChecked() || !layoutCanvas_ || layoutCanvas_->isReadOnly())
+                    return;
+                updateLayoutPathConfig();
+                if (!layoutCanvas_->pathAvailable()) {
+                    statusBar()->showMessage(QStringLiteral("No layout layers are available for paths"));
+                    if (layoutSelectTool_)
+                        layoutSelectTool_->setChecked(true);
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+                    return;
+                }
+                layoutCanvas_->setTool(LayoutCanvas::Tool::path);
+                layoutCanvas_->setFocus();
+                if (layoutRightTabs_)
+                    layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                refreshLayoutProperties(true);
+                statusBar()->showMessage(
+                    QStringLiteral("Path: %1 · %2 nm · Shift = right angles · hold left + wheel = layer · "
+                                   "right-click = finish")
+                        .arg(QString::fromStdString(layoutCanvas_->pathLayerName()))
+                        .arg(layoutCanvas_->pathWidth()));
             });
 
             toolbar->addSeparator();
@@ -4025,7 +4175,9 @@ class DocumentWindow : public QMainWindow {
     QAction *layoutSelectTool_ = nullptr;
     QAction *layoutPlaceDeviceTool_ = nullptr;
     QAction *layoutRectangleTool_ = nullptr;
+    QAction *layoutPathTool_ = nullptr;
     QAction *layoutDeleteTool_ = nullptr;
+    int layoutPathWidth_ = 200;
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
     QList<QAction *> commands_;

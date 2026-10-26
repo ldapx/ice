@@ -173,6 +173,18 @@ repository or through `ICE_IHP_ROOT`, and uses `python3` unless `ICE_PYTHON`
 points to another interpreter. If the checkout or Python module is unavailable,
 ICE reports the error and leaves the existing geometry unchanged.
 
+The layout toolbar also provides a **Draw Path** tool for routing. Click to set
+the path start and click again to commit each segment; right-click or
+double-click finishes the current path and Escape leaves the tool. Holding Shift
+constrains the active segment to horizontal or vertical so all turns are right
+angles. While the Path tool is active, **Properties** shows the current path
+layer and an editable `width (nm)` value (200 nm by default). Hold the left
+mouse button while scrolling the wheel to move the next segment up or down one
+metal layer; ICE inserts the corresponding via at the connection point
+automatically. For the IHP stack, for example, scrolling from Metal2 down to
+Metal1 adds a Via1 at the junction. Path segments are polygon shapes on the
+selected metal layer, and vias are square shapes on the matching via layer.
+
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database
 precision.

@@ -19,6 +19,8 @@
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(heading(QStringLiteral("Properties")));
@@ -104,6 +106,8 @@ void PropertiesPanel::setOnLayoutDeviceParameterChanged(LayoutDeviceParameterCha
     onLayoutDeviceParameterChanged_ = std::move(callback);
 }
 
+void PropertiesPanel::setOnPathWidthChanged(PathWidthChanged callback) { onPathWidthChanged_ = std::move(callback); }
+
 void PropertiesPanel::refreshAppearance() {
     previewFrame_->setStyleSheet(
         QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
@@ -115,6 +119,7 @@ void PropertiesPanel::clearSelection() {
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
+    pathMode_ = false;
     selection_->setText(QStringLiteral("Nothing selected"));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
@@ -128,6 +133,7 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
+    pathMode_ = false;
     const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
     selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
     previewStack_->setCurrentWidget(symbolPreview_);
@@ -142,6 +148,7 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     cellId_ = cell.id;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
+    pathMode_ = false;
     selection_->setText(QStringLiteral("%1 (Schematic)").arg(QString::fromStdString(cell.name)));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(symbolSvg.toUtf8());
@@ -155,6 +162,7 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     cellId_ = 0;
     layoutCellId_ = cell.id;
     layoutDeviceName_.clear();
+    pathMode_ = false;
     const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                        : QString::fromStdString(cell.pdk);
     const auto kind = cell.device.empty() ? QStringLiteral("Layout") : QStringLiteral("Device");
@@ -179,6 +187,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
+    pathMode_ = false;
     if (!cell) {
         selection_->setText(QStringLiteral("No device selected"));
         previewFrame_->setVisible(false);
@@ -192,6 +201,38 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     previewStack_->setCurrentWidget(layoutDevicePreview_);
     previewFrame_->setVisible(true);
     populateLayoutDeviceParameters(cell->parameters);
+    updateParameterButtons();
+}
+
+void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
+    instanceId_ = 0;
+    cellId_ = 0;
+    layoutCellId_ = 0;
+    layoutDeviceName_.clear();
+    pathMode_ = true;
+    pathWidth_ = std::max(1, width);
+    pathLayerName_ = layerName;
+    selection_->setText(QStringLiteral("Path tool"));
+    previewFrame_->setVisible(false);
+    QSignalBlocker blocker(parameters_);
+    parameters_->setRowCount(0);
+    const int layerRow = parameters_->rowCount();
+    parameters_->insertRow(layerRow);
+    auto *layerNameItem = new QTableWidgetItem(QStringLiteral("layer"));
+    layerNameItem->setFlags(layerNameItem->flags() & ~Qt::ItemIsEditable);
+    auto *layerValue = new QTableWidgetItem(QString::fromStdString(pathLayerName_));
+    layerValue->setFlags(layerValue->flags() & ~Qt::ItemIsEditable);
+    parameters_->setItem(layerRow, 0, layerNameItem);
+    parameters_->setItem(layerRow, 1, layerValue);
+
+    const int widthRow = parameters_->rowCount();
+    parameters_->insertRow(widthRow);
+    auto *widthName = new QTableWidgetItem(QStringLiteral("width (nm)"));
+    widthName->setFlags(widthName->flags() & ~Qt::ItemIsEditable);
+    auto *widthValue = new QTableWidgetItem(QString::number(pathWidth_));
+    widthValue->setToolTip(QStringLiteral("Path width in database units (nanometers)"));
+    parameters_->setItem(widthRow, 0, widthName);
+    parameters_->setItem(widthRow, 1, widthValue);
     updateParameterButtons();
 }
 
@@ -241,6 +282,26 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
     const auto *name = parameters_->item(item->row(), 0);
     if (!name)
         return;
+    if (pathMode_) {
+        if (name->text() != QStringLiteral("width (nm)"))
+            return;
+        bool accepted = false;
+        const auto width = item->text().toInt(&accepted);
+        if (!accepted || width <= 0) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(QString::number(pathWidth_));
+            return;
+        }
+        const int clamped = std::clamp(width, 1, 1000000);
+        if (clamped != width) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(QString::number(clamped));
+        }
+        pathWidth_ = clamped;
+        if (onPathWidthChanged_)
+            onPathWidthChanged_(clamped);
+        return;
+    }
     const auto parameterId = static_cast<ice::ObjectId>(name->data(Qt::UserRole).toULongLong());
     if (instanceId_ != 0 && onParameterChanged_)
         onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());

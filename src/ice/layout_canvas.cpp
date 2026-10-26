@@ -7,6 +7,7 @@
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -19,6 +20,39 @@
 
 LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}
 LayoutCanvas::~LayoutCanvas() = default;
+
+QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width) {
+    const qreal dx = end.x() - start.x();
+    const qreal dy = end.y() - start.y();
+    const qreal length = std::hypot(dx, dy);
+    if (length < 1.0e-9 || width <= 0.0)
+        return {};
+    const qreal ux = dx / length;
+    const qreal uy = dy / length;
+    const qreal nx = -uy;
+    const qreal ny = ux;
+    const qreal half = width * 0.5;
+    const QPointF before(start.x() - ux * half, start.y() - uy * half);
+    const QPointF after(end.x() + ux * half, end.y() + uy * half);
+    QPolygonF polygon;
+    polygon << before + QPointF(nx * half, ny * half) << after + QPointF(nx * half, ny * half)
+            << after - QPointF(nx * half, ny * half) << before - QPointF(nx * half, ny * half);
+    return polygon;
+}
+
+namespace {
+QPointF snappedPathPoint(QPointF point) { return {std::round(point.x()), std::round(point.y())}; }
+
+QPointF constrainedPathPoint(QPointF anchor, QPointF point, bool orthogonal) {
+    if (!orthogonal)
+        return point;
+    const qreal dx = point.x() - anchor.x();
+    const qreal dy = point.y() - anchor.y();
+    if (std::abs(dx) >= std::abs(dy))
+        return {point.x(), anchor.y()};
+    return {anchor.x(), point.y()};
+}
+} // namespace
 
 class LayoutCanvasImpl : public LayoutCanvas {
   public:
@@ -39,6 +73,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setTool(Tool tool) {
         if (readOnly_ && tool != Tool::select)
             tool = Tool::select;
+        if (tool != Tool::path)
+            finishPath();
         tool_ = tool;
         if (tool_ == Tool::select)
             unsetCursor();
@@ -152,6 +188,47 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) { layerStyles_ = styles; }
+
+    void setPathConfig(const LayoutPathConfig &config) override {
+        const bool cellChanged = pathCell_ != config.cell;
+        if (pathActive_ && pathCell_ != 0 && config.cell != 0 && cellChanged)
+            finishPath();
+        pathConfig_ = config;
+        pathCell_ = config.cell;
+        if (cellChanged)
+            pathLayerIndex_ = 0;
+        pathWidth_ = std::max(1, config.width);
+        if (pathConfig_.layers.empty())
+            pathLayerIndex_ = 0;
+        else
+            pathLayerIndex_ = std::clamp(pathLayerIndex_, 0, static_cast<int>(pathConfig_.layers.size()) - 1);
+        if (pathAnchorLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
+            pathAnchorLayerIndex_ = pathLayerIndex_;
+        viewport()->update();
+    }
+
+    void setPathWidth(int width) override {
+        pathWidth_ = std::max(1, width);
+        viewport()->update();
+    }
+
+    int pathWidth() const override { return pathWidth_; }
+    bool pathAvailable() const override { return !pathConfig_.layers.empty(); }
+
+    std::string pathLayerName() const override {
+        if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
+            return {};
+        return pathConfig_.layers[pathLayerIndex_].name;
+    }
+
+    void setPathSegmentCallback(LayoutPathSegmentCallback callback) override {
+        pathSegmentCreated_ = std::move(callback);
+    }
+
+    void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) override {
+        pathLayerChanged_ = std::move(callback);
+    }
+
     void setInitialView(const QRectF &bounds) {
         if (!bounds.isValid() || bounds.isNull())
             return;
@@ -184,31 +261,82 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void drawForeground(QPainter *painter, const QRectF &rect) override {
-        if (tool_ != Tool::placeDevice || !devicePreview_ || !viewport()->underMouse())
-            return;
-        painter->save();
-        painter->setClipRect(rect);
-        painter->setRenderHint(QPainter::Antialiasing);
-        const auto &colors = layerPalette();
-        const auto bounds = devicePreview_->bounds;
-        const qreal centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
-        const qreal centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
-        for (const auto &shape : devicePreview_->shapes) {
-            QPolygonF polygon;
-            polygon.reserve(static_cast<int>(shape.polygon.size()));
-            for (const auto &point : shape.polygon) {
-                polygon << QPointF(cursorScenePosition_.x() + point.x - centerX,
-                                   cursorScenePosition_.y() - point.y + centerY);
+        if (tool_ == Tool::placeDevice && devicePreview_ && viewport()->underMouse()) {
+            painter->save();
+            painter->setClipRect(rect);
+            painter->setRenderHint(QPainter::Antialiasing);
+            const auto &colors = layerPalette();
+            const auto bounds = devicePreview_->bounds;
+            const qreal centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
+            const qreal centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
+            for (const auto &shape : devicePreview_->shapes) {
+                QPolygonF polygon;
+                polygon.reserve(static_cast<int>(shape.polygon.size()));
+                for (const auto &point : shape.polygon) {
+                    polygon << QPointF(cursorScenePosition_.x() + point.x - centerX,
+                                       cursorScenePosition_.y() - point.y + centerY);
+                }
+                auto color = colors[(static_cast<std::size_t>(shape.layer) * 31 + shape.datatype) % colors.size()];
+                QPen pen(color);
+                pen.setCosmetic(true);
+                painter->setPen(pen);
+                color.setAlpha(55);
+                painter->setBrush(color);
+                painter->drawPolygon(polygon);
             }
-            auto color = colors[(static_cast<std::size_t>(shape.layer) * 31 + shape.datatype) % colors.size()];
-            QPen pen(color);
-            pen.setCosmetic(true);
-            painter->setPen(pen);
-            color.setAlpha(55);
-            painter->setBrush(color);
-            painter->drawPolygon(polygon);
+            painter->restore();
         }
-        painter->restore();
+        if (tool_ == Tool::path && pathActive_)
+            drawPathPreview(*painter, rect);
+    }
+
+    void drawPathPreview(QPainter &painter, const QRectF &rect) {
+        const auto polygon = layoutPathPolygon(pathAnchor_, pathEnd_, pathWidth_);
+        if (polygon.isEmpty())
+            return;
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QColor color = ice::uiColor(ice::UiColor::Accent4);
+        if (pathLayerIndex_ >= 0 && pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size())) {
+            const auto style = layerStyles_.find(pathConfig_.layers[pathLayerIndex_].layer);
+            if (style != layerStyles_.end())
+                color = style->second.color;
+        }
+        QPen outline(color);
+        outline.setCosmetic(true);
+        outline.setWidthF(1.4);
+        outline.setStyle(Qt::DashLine);
+        QColor fill = color;
+        fill.setAlpha(60);
+        painter.setPen(outline);
+        painter.setBrush(fill);
+        painter.drawPolygon(polygon);
+        QPen centerline(color);
+        centerline.setCosmetic(true);
+        centerline.setWidthF(1.0);
+        centerline.setStyle(Qt::DotLine);
+        painter.setPen(centerline);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(pathAnchor_, pathEnd_);
+
+        const auto viaLayers = pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_);
+        if (pathHasCommitted_ && !viaLayers.empty()) {
+            const qreal half = pathWidth_ * 0.5;
+            const QRectF viaRect(pathAnchor_.x() - half, pathAnchor_.y() - half, pathWidth_, pathWidth_);
+            for (const auto layerId : viaLayers) {
+                QColor viaColor = ice::uiColor(ice::UiColor::Accent3);
+                const auto style = layerStyles_.find(layerId);
+                if (style != layerStyles_.end())
+                    viaColor = style->second.color;
+                QColor viaFill = viaColor;
+                viaFill.setAlpha(110);
+                painter.setPen(QPen(viaColor, 1.0));
+                painter.setBrush(viaFill);
+                painter.drawRect(viaRect);
+            }
+        }
+        painter.restore();
     }
 
     void drawScaleIndicator(QPainter &painter) {
@@ -244,6 +372,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        cursorScenePosition_ = mapToScene(event->pos());
         if (event->button() == Qt::MiddleButton) {
             panning_ = true;
             panStartPosition_ = event->pos();
@@ -277,6 +406,35 @@ class LayoutCanvasImpl : public LayoutCanvas {
                                  QBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 50)));
             event->accept();
             return;
+        }
+        if (tool_ == Tool::path && !readOnly_) {
+            if (event->button() == Qt::RightButton) {
+                finishPath();
+                viewport()->update();
+                event->accept();
+                return;
+            }
+            if (event->button() == Qt::LeftButton) {
+                if (!pathAvailable()) {
+                    QApplication::beep();
+                    event->accept();
+                    return;
+                }
+                const auto point = snappedPathPoint(mapToScene(event->pos()));
+                if (!pathActive_) {
+                    pathActive_ = true;
+                    pathAnchor_ = point;
+                    pathEnd_ = point;
+                    pathAnchorLayerIndex_ = pathLayerIndex_;
+                    pathHasCommitted_ = false;
+                } else {
+                    pathEnd_ = constrainedPathPoint(pathAnchor_, point, event->modifiers().testFlag(Qt::ShiftModifier));
+                }
+                pathDragging_ = true;
+                viewport()->update();
+                event->accept();
+                return;
+            }
         }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
             auto *clicked = itemAt(event->pos());
@@ -328,6 +486,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::path && pathActive_) {
+            pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(cursorScenePosition_),
+                                            event->modifiers().testFlag(Qt::ShiftModifier));
+            viewport()->update();
+            event->accept();
+            return;
+        }
         if (drawing_ && drawPreview_) {
             drawPreview_->setRect(QRectF(drawStart_, mapToScene(event->pos())).normalized());
             event->accept();
@@ -339,6 +504,20 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void wheelEvent(QWheelEvent *event) override {
         if (event->angleDelta().y() == 0) {
             event->ignore();
+            return;
+        }
+        if (tool_ == Tool::path && pathDragging_) {
+            const int next = pathLayerIndex_ + (event->angleDelta().y() > 0 ? 1 : -1);
+            if (next >= 0 && next < static_cast<int>(pathConfig_.layers.size())) {
+                pathLayerIndex_ = next;
+                pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(cursorScenePosition_),
+                                                QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier));
+                if (pathLayerChanged_)
+                    pathLayerChanged_(pathConfig_.layers[pathLayerIndex_].layer,
+                                      pathConfig_.layers[pathLayerIndex_].name);
+                viewport()->update();
+            }
+            event->accept();
             return;
         }
         const auto scenePosition = mapToScene(event->position().toPoint());
@@ -373,6 +552,15 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::path && event->button() == Qt::LeftButton && pathDragging_) {
+            pathDragging_ = false;
+            pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(mapToScene(event->pos())),
+                                            event->modifiers().testFlag(Qt::ShiftModifier));
+            commitPathSegment();
+            viewport()->update();
+            event->accept();
+            return;
+        }
         if (draggingInstance_ && event->button() == Qt::LeftButton) {
             auto *instance = draggingInstance_;
             draggingInstance_ = nullptr;
@@ -392,6 +580,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
+        if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
+            pathDragging_ = false;
+            finishPath();
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
             if (auto *instance = layoutInstanceOwner(itemAt(event->pos()))) {
                 draggingInstance_ = nullptr;
@@ -406,7 +600,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_Escape && (tool_ == Tool::placeDevice || tool_ == Tool::rectangle)) {
+        if (event->key() == Qt::Key_Escape &&
+            (tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -465,6 +660,44 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
     }
 
+    std::vector<ice::ObjectId> pathViasBetween(int from, int to) const {
+        std::vector<ice::ObjectId> vias;
+        if (from == to || from < 0 || to < 0 || from >= static_cast<int>(pathConfig_.layers.size()) ||
+            to >= static_cast<int>(pathConfig_.layers.size()))
+            return vias;
+        const int low = std::min(from, to);
+        const int high = std::max(from, to);
+        for (int index = low; index < high; ++index) {
+            const auto via = pathConfig_.layers[index].viaToNext;
+            if (via != 0)
+                vias.push_back(via);
+        }
+        return vias;
+    }
+
+    void commitPathSegment() {
+        if (!pathActive_ || pathConfig_.layers.empty())
+            return;
+        if (QLineF(pathAnchor_, pathEnd_).length() < 0.5)
+            return;
+        const auto layerId = pathConfig_.layers[pathLayerIndex_].layer;
+        const auto vias =
+            pathHasCommitted_ ? pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_) : std::vector<ice::ObjectId>{};
+        if (pathSegmentCreated_)
+            pathSegmentCreated_(pathAnchor_, pathEnd_, pathWidth_, layerId, vias);
+        pathAnchor_ = pathEnd_;
+        pathAnchorLayerIndex_ = pathLayerIndex_;
+        pathHasCommitted_ = true;
+    }
+
+    void finishPath() {
+        pathActive_ = false;
+        pathDragging_ = false;
+        pathHasCommitted_ = false;
+        pathEnd_ = pathAnchor_;
+        viewport()->update();
+    }
+
     void applyNavigationTransform() {
         setTransform(QTransform(zoom_, 0.0, 0.0, zoom_, 0.0, 0.0), false);
         centerOn(centerScene_);
@@ -482,6 +715,18 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     Tool tool_ = Tool::select;
+    LayoutPathConfig pathConfig_;
+    ice::ObjectId pathCell_ = 0;
+    int pathWidth_ = 200;
+    int pathLayerIndex_ = 0;
+    int pathAnchorLayerIndex_ = 0;
+    bool pathActive_ = false;
+    bool pathDragging_ = false;
+    bool pathHasCommitted_ = false;
+    QPointF pathAnchor_;
+    QPointF pathEnd_;
+    LayoutPathSegmentCallback pathSegmentCreated_;
+    LayoutPathLayerChangedCallback pathLayerChanged_;
     bool panning_ = false;
     bool drawing_ = false;
     QPoint panStartPosition_;
