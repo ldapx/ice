@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLineF>
 #include <QMouseEvent>
@@ -98,6 +99,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setGridVisible(bool visible) {
         gridVisible_ = visible;
         viewport()->update();
+    }
+
+    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; }
+
+    void setGridSpacing(qreal spacing) {
+        if (spacing > 0.0)
+            gridSpacing_ = spacing;
     }
 
     void setDevicePreview(const ice::LayoutDeviceCell *cell) {
@@ -388,7 +396,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 return;
             }
             if (devicePlacementRequested_)
-                devicePlacementRequested_(mapToScene(event->pos()));
+                devicePlacementRequested_(snapPosition(mapToScene(event->pos())));
             event->accept();
             return;
         }
@@ -399,7 +407,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 return;
             }
             drawing_ = true;
-            drawStart_ = mapToScene(event->pos());
+            drawStart_ = snapPosition(mapToScene(event->pos()));
             const auto previewColor = ice::uiColor(ice::UiColor::Accent3);
             drawPreview_ =
                 scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1),
@@ -475,7 +483,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             viewport()->update();
         if (draggingInstance_) {
             const auto delta = mapToScene(event->pos()) - dragStartScene_;
-            draggingInstance_->setPos(dragStartPosition_ + delta);
+            draggingInstance_->setPos(snapPosition(dragStartPosition_ + delta));
             event->accept();
             return;
         }
@@ -494,7 +502,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (drawing_ && drawPreview_) {
-            drawPreview_->setRect(QRectF(drawStart_, mapToScene(event->pos())).normalized());
+            drawPreview_->setRect(QRectF(drawStart_, snapPosition(mapToScene(event->pos()))).normalized());
             event->accept();
             return;
         }
@@ -539,7 +547,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (drawing_ && event->button() == Qt::LeftButton) {
-            const auto end = mapToScene(event->pos());
+            const auto end = snapPosition(mapToScene(event->pos()));
             const auto rectangle = QRectF(drawStart_, end).normalized();
             if (drawPreview_) {
                 scene()->removeItem(drawPreview_);
@@ -572,6 +580,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         QGraphicsView::mouseReleaseEvent(event);
         if (tool_ == Tool::select && event->button() == Qt::LeftButton && movingItem_) {
+            movingItem_->setPos(snapPosition(movingItem_->pos()));
             const auto delta = movingItem_->pos() - movingStartPosition_;
             if ((delta.x() != 0.0 || delta.y() != 0.0) && shapeMoved_)
                 shapeMoved_(movingItem_->data(0).toULongLong(), delta);
@@ -583,6 +592,19 @@ class LayoutCanvasImpl : public LayoutCanvas {
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
             pathDragging_ = false;
             finishPath();
+            event->accept();
+            return;
+        }
+        if (event->button() == Qt::LeftButton && event->pos().y() >= viewport()->height() - 44 &&
+            event->pos().x() < 180) {
+            bool accepted = false;
+            const auto value =
+                QInputDialog::getDouble(this, QStringLiteral("Scale Indicator"), QStringLiteral("Scale length (nm):"),
+                                        scaleIndicatorLength(), 0.0001, 1.0e12, 4, &accepted);
+            if (accepted && value > 0.0) {
+                zoom_ = std::clamp<qreal>(100.0 / value, qreal(1.0e-6), qreal(1.0e6));
+                applyNavigationTransform();
+            }
             event->accept();
             return;
         }
@@ -600,6 +622,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        if (event->key() == Qt::Key_Space) {
+            setTool(Tool::select);
+            if (toolEscapeRequested_)
+                toolEscapeRequested_();
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle)) {
             setTool(Tool::select);
@@ -625,6 +654,22 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
   private:
+    QPointF snapPosition(const QPointF &position) const {
+        if (!snapToGrid_ || gridSpacing_ <= 0.0)
+            return position;
+        return QPointF(std::round(position.x() / gridSpacing_) * gridSpacing_,
+                       std::round(position.y() / gridSpacing_) * gridSpacing_);
+    }
+
+    qreal scaleIndicatorLength() const {
+        const qreal targetPixels = 100.0;
+        const qreal rawLength = targetPixels / zoom_;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawLength)));
+        const qreal normalized = rawLength / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        return magnitude * factor;
+    }
+
     QGraphicsItemGroup *layoutInstanceOwner(QGraphicsItem *item) const {
         for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
             if (cursor->data(1).toString() == QStringLiteral("layout-instance"))
@@ -752,6 +797,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF cursorScenePosition_;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;
     bool gridVisible_ = true;
+    bool snapToGrid_ = true;
+    qreal gridSpacing_ = 1.0;
     bool readOnly_ = false;
     qreal zoom_ = 1.0;
     QPointF centerScene_;

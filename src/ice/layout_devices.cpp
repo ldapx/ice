@@ -541,6 +541,10 @@ void LayoutDevicesPanel::setOnDeviceActivated(std::function<void()> callback) {
     onDeviceActivated_ = std::move(callback);
 }
 
+void LayoutDevicesPanel::focusDeviceList() {
+    list_->setFocus();
+}
+
 void LayoutDevicesPanel::clearDeviceSelection() {
     QSignalBlocker blocker(list_);
     list_->setCurrentRow(-1);

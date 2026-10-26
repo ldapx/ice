@@ -39,6 +39,7 @@ class LayoutDevicesPanel : public QWidget {
     using DeviceSelectedCallback = std::function<void(const ice::LayoutDeviceCell *)>;
     void setOnDeviceSelected(DeviceSelectedCallback callback);
     void setOnDeviceActivated(std::function<void()> callback);
+    void focusDeviceList();
     void clearDeviceSelection();
 
     const ice::LayoutDeviceLibrary &library() const;

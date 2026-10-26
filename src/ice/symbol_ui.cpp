@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -15,6 +16,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QKeyEvent>
 #include <QListWidget>
 #include <QPaintEvent>
 #include <QPainter>
@@ -26,6 +28,7 @@
 #include <QSvgRenderer>
 #include <QSvgWidget>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
@@ -190,6 +193,9 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     tabs_->setDocumentMode(true);
     tabs_->setUsesScrollButtons(true);
     tabs_->setElideMode(Qt::ElideRight);
+    tabs_->installEventFilter(this);
+    tabs_->tabBar()->installEventFilter(this);
+    search_->installEventFilter(this);
     browserLayout->addWidget(tabs_, 1);
     noResults_ = new QLabel(QStringLiteral("No matching devices."));
     noResults_->setAlignment(Qt::AlignCenter);
@@ -275,9 +281,14 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
             item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(index));
         }
         tabs_->addTab(list, category);
+        list->installEventFilter(this);
         connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *current, QListWidgetItem *) {
             if (current && !current->isHidden())
                 updatePreview(static_cast<std::size_t>(current->data(Qt::UserRole).toULongLong()));
+        });
+        connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (item && !item->isHidden())
+                accept();
         });
     }
     connect(tabs_, &QTabWidget::currentChanged, this, [this](int) { showCurrentTab(); });
@@ -293,6 +304,46 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
 }
 
 const SymbolDefinition &SymbolLibraryDialog::selected() const { return symbols_.at(selectedIndex_); }
+
+bool SymbolLibraryDialog::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::KeyPress) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        const auto key = keyEvent->key();
+        if (key == Qt::Key_Left || key == Qt::Key_Right) {
+            const int count = tabs_->count();
+            if (count == 0)
+                return true;
+            const int direction = key == Qt::Key_Right ? 1 : -1;
+            int index = tabs_->currentIndex();
+            for (int step = 0; step < count; ++step) {
+                index = (index + direction + count) % count;
+                if (tabs_->isTabVisible(index)) {
+                    tabs_->setCurrentIndex(index);
+                    if (auto *list = currentList())
+                        list->setFocus();
+                    return true;
+                }
+            }
+        }
+        if (key == Qt::Key_Up || key == Qt::Key_Down) {
+            auto *list = currentList();
+            if (!list)
+                return true;
+            const int direction = key == Qt::Key_Down ? 1 : -1;
+            int row = list->currentRow();
+            if (row < 0)
+                row = direction > 0 ? -1 : list->count();
+            for (row += direction; row >= 0 && row < list->count(); row += direction) {
+                if (!list->item(row)->isHidden()) {
+                    list->setCurrentRow(row);
+                    return true;
+                }
+            }
+            return true;
+        }
+    }
+    return QDialog::eventFilter(watched, event);
+}
 
 QListWidget *SymbolLibraryDialog::currentList() const { return qobject_cast<QListWidget *>(tabs_->currentWidget()); }
 
