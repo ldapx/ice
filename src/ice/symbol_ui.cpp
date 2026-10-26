@@ -279,6 +279,10 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
             if (current && !current->isHidden())
                 updatePreview(static_cast<std::size_t>(current->data(Qt::UserRole).toULongLong()));
         });
+        connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (item && !item->isHidden())
+                accept();
+        });
     }
     connect(tabs_, &QTabWidget::currentChanged, this, [this](int) { showCurrentTab(); });
     connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
