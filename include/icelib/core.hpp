@@ -153,6 +153,9 @@ struct LayoutInstance {
 struct LayoutCell {
     ObjectId id = 0;
     std::string name;
+    std::string pdk = genericPdkId;
+    // True for cells imported from a read-only device library.
+    bool library = false;
     std::map<ObjectId, Shape> shapes;
     std::map<ObjectId, Port> ports;
     std::map<ObjectId, LayoutInstance> instances;

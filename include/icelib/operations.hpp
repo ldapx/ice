@@ -22,7 +22,7 @@ char spiceElementForSymbol(const std::string &symbolName);
 // Returns how many defaults were added.
 std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
                                   const std::vector<Parameter> &defaults);
-ObjectId createLayoutCell(Project &project, std::string name);
+ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = genericPdkId);
 ObjectId addLayer(Project &project, std::string name, int number);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);

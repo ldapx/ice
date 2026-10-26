@@ -266,9 +266,12 @@ std::string Project::serialize() const {
     for (const auto &[id, cell] : layoutCells) {
         json c = {{"id", id},
                   {"name", cell.name},
+                  {"pdk", cell.pdk},
                   {"shapes", json::array()},
                   {"ports", json::array()},
                   {"instances", json::array()}};
+        if (cell.library)
+            c["library"] = true;
         for (const auto &[sid, shape] : cell.shapes) {
             json s = {{"id", sid}, {"layer", shape.layer}, {"rectangle", json::object()}};
             if (shape.net)
@@ -421,6 +424,10 @@ Project Project::deserialize(const std::string &text) {
             p.layers.emplace(l.at("id"), Layer{l.at("id"), l.at("name"), l.at("number"), l.value("visible", true)});
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
+            cell.pdk = c.value("pdk", std::string{genericPdkId});
+            if (cell.pdk.empty())
+                cell.pdk = genericPdkId;
+            cell.library = c.value("library", false);
             for (const auto &s : c.at("shapes")) {
                 Shape shape{s.at("id"),
                             s.at("layer"),

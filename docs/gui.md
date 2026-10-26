@@ -150,6 +150,15 @@ The layout editor should initially provide:
 - diagnostic markers;
 - undo/redo.
 
+The Layout left column contains **Hierarchy** and **Devices** tabs; the right
+column contains **Properties** and **Layers**. The bundled IHP SG13G2 device
+library appears in **Devices**, with search, category filtering, and a geometry
+preview in **Properties**. Selecting a device and choosing **Place Device**
+shows a cursor-following preview; clicking in the canvas imports the device
+geometry into the project and creates a layout instance. Instanced cells appear
+as children in the layout hierarchy, and the placed instances can be selected,
+moved, and deleted directly in the canvas.
+
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database
 precision.

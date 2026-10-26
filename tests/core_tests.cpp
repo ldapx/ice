@@ -1,6 +1,7 @@
 #include "icelib/core.hpp"
 #include "icelib/geometry.hpp"
 #include "icelib/interchange.hpp"
+#include "icelib/layout_library.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/plugins.hpp"
@@ -41,6 +42,7 @@ TEST_CASE("project serialization and transactions are deterministic") {
     ice::LayoutCell cell;
     cell.id = cellId;
     cell.name = "top";
+    cell.pdk = "example.pdk";
     auto shapeId = project.nextId();
     cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerId, std::nullopt, {0, 0, 100, 50}});
     project.layoutCells.emplace(cellId, cell);
@@ -51,6 +53,7 @@ TEST_CASE("project serialization and transactions are deterministic") {
     CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label.has_value());
     CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label->x == 3);
     CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label->y == 9);
+    CHECK(roundTrip.layoutCells.at(cellId).pdk == "example.pdk");
 
     auto invalid = project;
     invalid.layoutCells.at(cellId).shapes.at(shapeId).layer = 9999;
@@ -719,6 +722,55 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(defaults["Sine Voltage Source"]["frequency"] == "1");
     CHECK(defaults["Sine Voltage Source"]["phase"] == "0");
     CHECK(defaults["Current Source"]["current"] == "1m");
+}
+
+TEST_CASE("shipped IHP layout device library loads") {
+    const auto libraryPath = std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json";
+    const auto library = ice::LayoutDeviceLibrary::load(libraryPath);
+    CHECK(library.name == "IHP SG13G2");
+    CHECK(library.pdk == "ihp.sg13g2");
+    CHECK(library.cells.size() >= 100);
+    CHECK(!library.layers.empty());
+    const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
+        for (const auto &cell : library.cells)
+            if (cell.name == name)
+                return &cell;
+        return nullptr;
+    };
+    const auto *nmos = findCell("nmos");
+    CHECK(nmos != nullptr);
+    if (nmos) {
+        CHECK(nmos->category == "Transistors");
+        CHECK(!nmos->shapes.empty());
+        CHECK(nmos->bounds.valid());
+    }
+    const auto *inverter = findCell("sg13g2_inv_1");
+    CHECK(inverter != nullptr);
+    if (inverter) {
+        CHECK(inverter->category == "Standard Cells");
+        CHECK(!inverter->shapes.empty());
+    }
+}
+
+TEST_CASE("layout instances survive serialization") {
+    ice::Project project;
+    project.identity = "layout-instances";
+    project.name = "layout-instances";
+    const auto childId = ice::createLayoutCell(project, "device", "ihp.sg13g2");
+    const auto parentId = ice::createLayoutCell(project, "top", "ihp.sg13g2");
+    project.layoutCells.at(childId).library = true;
+    const auto instanceId = project.nextId();
+    project.layoutCells.at(parentId).instances.emplace(
+        instanceId, ice::LayoutInstance{instanceId, childId, "device_1", 120, -80, ice::Orientation::r0});
+    CHECK(project.validate().empty());
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.layoutCells.at(childId).library);
+    CHECK(!roundTrip.layoutCells.at(parentId).library);
+    const auto &instance = roundTrip.layoutCells.at(parentId).instances.at(instanceId);
+    CHECK(instance.cell == childId);
+    CHECK(instance.name == "device_1");
+    CHECK(instance.x == 120);
+    CHECK(instance.y == -80);
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {

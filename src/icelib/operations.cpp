@@ -183,11 +183,13 @@ std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
     }
     return added;
 }
-ObjectId createLayoutCell(Project &project, std::string name) {
+ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
     if (name.empty())
         throw ProjectError("layout.cell", "Layout cell name must not be empty");
+    if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
     ObjectId id = project.nextId();
-    project.layoutCells.emplace(id, LayoutCell{id, std::move(name)});
+    project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk)});
     return id;
 }
 ObjectId addLayer(Project &project, std::string name, int number) {
