@@ -1169,6 +1169,14 @@ class DocumentWindow : public QMainWindow {
     }
 
     void placeSymbol() {
+        if (documents_ && layoutPage_ && documents_->currentWidget() == layoutPage_) {
+            if (layoutLeftTabs_ && layoutDevicesPanel_)
+                layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
+            if (layoutDevicesPanel_)
+                layoutDevicesPanel_->focusDeviceList();
+            statusBar()->showMessage(QStringLiteral("Select a layout device"));
+            return;
+        }
         if (!project_ || project_->project().schematicCells.empty()) {
             QMessageBox::information(this, QStringLiteral("Place Device"),
                                      QStringLiteral("Create a project and schematic first."));
@@ -3178,6 +3186,7 @@ class DocumentWindow : public QMainWindow {
         documents->addTab(schematicPage, QStringLiteral("Schematic"));
 
         auto *layoutPage = new QWidget;
+        layoutPage_ = layoutPage;
         auto *layoutLayout = new QVBoxLayout(layoutPage);
         layoutLayout->setContentsMargins(0, 0, 0, 0);
         layoutLayout->setSpacing(0);
@@ -3980,6 +3989,7 @@ class DocumentWindow : public QMainWindow {
     QDockWidget *activityDock_ = nullptr;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
+    QWidget *layoutPage_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
