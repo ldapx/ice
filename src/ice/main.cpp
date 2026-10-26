@@ -25,6 +25,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -43,6 +44,9 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -57,6 +61,7 @@
 #include <QPainterPathStroker>
 #include <QPixmap>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -65,12 +70,14 @@
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStringList>
 #include <QStyleHints>
 #include <QSvgRenderer>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
@@ -86,6 +93,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -175,6 +183,380 @@ std::filesystem::path layoutDeviceLibraryPath() {
             return candidate;
     }
     return {};
+}
+
+std::map<std::string, std::string> parameterValues(const std::vector<ice::LayoutDeviceParameter> &parameters) {
+    std::map<std::string, std::string> values;
+    for (const auto &parameter : parameters)
+        values[parameter.name] = parameter.value;
+    return values;
+}
+
+class WaitCursorGuard {
+  public:
+    WaitCursorGuard() { QApplication::setOverrideCursor(Qt::WaitCursor); }
+    ~WaitCursorGuard() { QApplication::restoreOverrideCursor(); }
+    WaitCursorGuard(const WaitCursorGuard &) = delete;
+    WaitCursorGuard &operator=(const WaitCursorGuard &) = delete;
+};
+
+void syncLayoutDeviceParameters(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceCell &device) {
+    std::map<std::string, ice::Parameter> existing;
+    for (const auto &parameter : cell.parameters)
+        existing[parameter.name] = parameter;
+    std::vector<ice::Parameter> updated;
+    updated.reserve(device.parameters.size());
+    auto nextId = project.nextId();
+    for (const auto &parameter : device.parameters) {
+        const auto current = existing.find(parameter.name);
+        if (current != existing.end() && current->second.id != 0)
+            updated.push_back(current->second);
+        else
+            updated.push_back({nextId++, parameter.name, parameter.value});
+    }
+    cell.parameters = std::move(updated);
+}
+
+const ice::LayoutDeviceCell *findLayoutDevice(const ice::LayoutDeviceLibrary &library, const std::string &cellName) {
+    const auto name = cellName.starts_with("IHP ") ? cellName.substr(4) : cellName;
+    const auto it = std::find_if(library.cells.begin(), library.cells.end(),
+                                 [&](const auto &candidate) { return candidate.name == name; });
+    return it == library.cells.end() ? nullptr : &*it;
+}
+
+const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
+                                                         const std::string &cellName);
+
+const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibrary &library,
+                                                     const ice::LayoutCell &cell) {
+    if (!cell.device.empty()) {
+        const auto it = std::find_if(library.cells.begin(), library.cells.end(),
+                                     [&](const auto &candidate) { return candidate.name == cell.device; });
+        if (it != library.cells.end())
+            return &*it;
+    }
+    return findLayoutDeviceForCellName(library, cell.name);
+}
+
+const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
+                                                         const std::string &cellName) {
+    const auto name = cellName.starts_with("IHP ") ? cellName.substr(4) : cellName;
+    const auto exact = std::find_if(library.cells.begin(), library.cells.end(),
+                                    [&](const auto &candidate) { return candidate.name == name; });
+    if (exact != library.cells.end())
+        return &*exact;
+    const ice::LayoutDeviceCell *best = nullptr;
+    std::size_t bestLength = 0;
+    for (const auto &candidate : library.cells) {
+        if (candidate.name.size() <= bestLength || !name.starts_with(candidate.name + "_"))
+            continue;
+        best = &candidate;
+        bestLength = candidate.name.size();
+    }
+    return best;
+}
+
+std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName) {
+    const auto base = "IHP " + deviceName;
+    for (int index = 1;; ++index) {
+        const auto candidate = base + "_" + std::to_string(index);
+        const bool exists = std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                                        [&](const auto &entry) { return entry.second.name == candidate; });
+        if (!exists)
+            return candidate;
+    }
+}
+
+ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCell &source, const std::string &name) {
+    ice::LayoutCell clone = source;
+    auto nextId = project.nextId();
+    clone.id = nextId++;
+    clone.name = name;
+    clone.parameters.clear();
+    for (const auto &parameter : source.parameters)
+        clone.parameters.push_back({nextId++, parameter.name, parameter.value});
+    clone.shapes.clear();
+    for (const auto &[_, shape] : source.shapes) {
+        const auto id = nextId++;
+        clone.shapes.emplace(id, ice::Shape{id, shape.layer, shape.net, shape.rectangle, shape.polygon});
+    }
+    clone.ports.clear();
+    for (const auto &[_, port] : source.ports) {
+        const auto id = nextId++;
+        clone.ports.emplace(id, ice::Port{id, port.name, port.layer, port.rectangle});
+    }
+    clone.instances.clear();
+    for (const auto &[_, instance] : source.instances) {
+        const auto id = nextId++;
+        clone.instances.emplace(
+            id, ice::LayoutInstance{id, instance.cell, instance.name, instance.x, instance.y, instance.orientation});
+    }
+    const auto cloneId = clone.id;
+    project.layoutCells.emplace(cloneId, std::move(clone));
+    return cloneId;
+}
+
+std::filesystem::path layoutPcellScriptPath() {
+    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+    const std::vector<std::filesystem::path> candidates = {
+        std::filesystem::path(appDir) / "assets" / "layout" / "ihp_pcell.py",
+        std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "layout" / "ihp_pcell.py",
+#ifdef ICE_SOURCE_DIR
+        std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp_pcell.py",
+#endif
+        std::filesystem::path("assets") / "layout" / "ihp_pcell.py",
+        std::filesystem::path("/usr/share/ice/assets/layout/ihp_pcell.py"),
+    };
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        if (std::filesystem::is_regular_file(candidate, status) && !status)
+            return candidate;
+    }
+    return {};
+}
+
+std::filesystem::path ihpSourceRoot() {
+    const auto valid = [](const std::filesystem::path &path) {
+        std::error_code status;
+        return std::filesystem::is_directory(path / "cni", status) && !status &&
+               std::filesystem::is_directory(path / "ihp" / "refs" / "ihp_pycell", status) && !status;
+    };
+    std::vector<std::filesystem::path> candidates;
+    const auto configured = qEnvironmentVariable("ICE_IHP_ROOT");
+    if (!configured.isEmpty())
+        candidates.emplace_back(configured.toStdString());
+#ifdef ICE_SOURCE_DIR
+    candidates.push_back(std::filesystem::path(ICE_SOURCE_DIR).parent_path() / "IHP");
+#endif
+    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+    candidates.push_back(std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / ".." / "IHP");
+    candidates.push_back(std::filesystem::current_path() / "IHP");
+    candidates.push_back(std::filesystem::current_path().parent_path() / "IHP");
+    candidates.push_back(std::filesystem::path(QDir::homePath().toStdString()) / "repositories" / "IHP");
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        const auto normalized = std::filesystem::weakly_canonical(candidate, status);
+        if (!status && valid(normalized))
+            return normalized;
+    }
+    return {};
+}
+
+QString pythonExecutable() {
+    const auto configured = qEnvironmentVariable("ICE_PYTHON");
+    if (!configured.isEmpty())
+        return configured;
+    for (const auto &candidate : {QStringLiteral("python3"), QStringLiteral("python")}) {
+        const auto path = QStandardPaths::findExecutable(candidate);
+        if (!path.isEmpty())
+            return path;
+    }
+    return {};
+}
+
+void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
+                             const std::vector<ice::LayoutDeviceShape> &sourceShapes) {
+    cell.shapes.clear();
+    cell.ports.clear();
+    cell.instances.clear();
+    std::map<std::pair<int, int>, std::string> layerNames;
+    for (const auto &layer : library.layers)
+        layerNames[{layer.number, layer.datatype}] = layer.name;
+    std::map<std::pair<int, int>, ice::ObjectId> layerIds;
+    for (const auto &sourceShape : sourceShapes) {
+        if (sourceShape.polygon.size() < 3)
+            continue;
+        const auto key = std::make_pair(sourceShape.layer, sourceShape.datatype);
+        auto layerIt = layerIds.find(key);
+        if (layerIt == layerIds.end()) {
+            const auto nameIt = layerNames.find(key);
+            std::string layerName;
+            if (nameIt != layerNames.end() && !nameIt->second.empty())
+                layerName = nameIt->second;
+            else if (sourceShape.datatype == 0)
+                layerName = "Layer " + std::to_string(sourceShape.layer);
+            else
+                layerName =
+                    "Layer " + std::to_string(sourceShape.layer) + " (dt " + std::to_string(sourceShape.datatype) + ")";
+            ice::ObjectId layerId = 0;
+            for (const auto &[id, layer] : project.layers) {
+                if (layer.number == sourceShape.layer && layer.name == layerName) {
+                    layerId = id;
+                    break;
+                }
+            }
+            if (layerId == 0)
+                layerId = ice::addLayer(project, layerName, sourceShape.layer);
+            layerIt = layerIds.emplace(key, layerId).first;
+        }
+        ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
+        ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
+        for (const auto &point : sourceShape.polygon) {
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        std::vector<ice::LayoutPoint> polygon;
+        polygon.reserve(sourceShape.polygon.size());
+        for (const auto &point : sourceShape.polygon)
+            polygon.push_back({point.x, point.y});
+        const auto shapeId = project.nextId();
+        cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerIt->second, std::nullopt,
+                                                ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+    }
+}
+
+std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &project, const ice::LayoutCell &cell,
+                                                           const ice::LayoutDeviceLibrary &library) {
+    std::map<std::pair<int, std::string>, int> datatypes;
+    for (const auto &layer : library.layers)
+        datatypes[{layer.number, layer.name}] = layer.datatype;
+
+    ice::LayoutDeviceCell preview;
+    preview.name = cell.name;
+    preview.category = "Device";
+    ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
+    ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
+    ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
+    ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
+    for (const auto &[_, shape] : cell.shapes) {
+        const auto layerIt = project.layers.find(shape.layer);
+        if (layerIt == project.layers.end())
+            continue;
+        ice::LayoutDeviceShape previewShape;
+        previewShape.layer = layerIt->second.number;
+        const auto datatype = datatypes.find({layerIt->second.number, layerIt->second.name});
+        previewShape.datatype = datatype == datatypes.end() ? 0 : datatype->second;
+        if (shape.polygon.size() >= 3) {
+            previewShape.polygon.reserve(shape.polygon.size());
+            for (const auto &point : shape.polygon)
+                previewShape.polygon.push_back({point.x, point.y});
+        } else {
+            const auto &rect = shape.rectangle;
+            previewShape.polygon = {{rect.x, rect.y},
+                                    {rect.x + rect.width, rect.y},
+                                    {rect.x + rect.width, rect.y + rect.height},
+                                    {rect.x, rect.y + rect.height}};
+        }
+        for (const auto &point : previewShape.polygon) {
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        preview.shapes.push_back(std::move(previewShape));
+    }
+    if (preview.shapes.empty() || maxX <= minX || maxY <= minY)
+        return std::nullopt;
+    preview.bounds = ice::Rect{minX, minY, maxX - minX, maxY - minY};
+    return preview;
+}
+
+std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
+                                                                      const std::map<std::string, std::string> &values,
+                                                                      QString *error) {
+    if (error)
+        error->clear();
+    if (!device.generator) {
+        if (error)
+            *error = QStringLiteral("This device does not have a PCell generator.");
+        return std::nullopt;
+    }
+    const auto script = layoutPcellScriptPath();
+    if (script.empty()) {
+        if (error)
+            *error = QStringLiteral("The IHP PCell generator script was not found.");
+        return std::nullopt;
+    }
+    const auto ihpRoot = ihpSourceRoot();
+    if (ihpRoot.empty()) {
+        if (error)
+            *error = QStringLiteral("The IHP source tree was not found. Set ICE_IHP_ROOT to its location.");
+        return std::nullopt;
+    }
+    const auto python = pythonExecutable();
+    if (python.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("Python 3 was not found. Set ICE_PYTHON to the interpreter path.");
+        return std::nullopt;
+    }
+
+    QTemporaryDir temporary;
+    if (!temporary.isValid()) {
+        if (error)
+            *error = QStringLiteral("Unable to create a temporary directory for PCell generation.");
+        return std::nullopt;
+    }
+    QJsonObject parameterObject;
+    for (const auto &[name, value] : values)
+        parameterObject.insert(QString::fromStdString(name), QString::fromStdString(value));
+    const auto paramsPath = temporary.filePath(QStringLiteral("params.json"));
+    const auto outputPath = temporary.filePath(QStringLiteral("geometry.json"));
+    {
+        QFile paramsFile(paramsPath);
+        if (!paramsFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (error)
+                *error = QStringLiteral("Unable to write the PCell parameter file.");
+            return std::nullopt;
+        }
+        paramsFile.write(QJsonDocument(parameterObject).toJson(QJsonDocument::Compact));
+    }
+
+    QStringList arguments{QString::fromStdString(script.string()),
+                          QStringLiteral("--ihp-root"),
+                          QString::fromStdString(ihpRoot.string()),
+                          QStringLiteral("--module"),
+                          QString::fromStdString(device.generator->module),
+                          QStringLiteral("--class"),
+                          QString::fromStdString(device.generator->class_name),
+                          QStringLiteral("--params-file"),
+                          paramsPath,
+                          QStringLiteral("--output"),
+                          outputPath};
+    QProcess process;
+    process.setProgram(python);
+    process.setArguments(arguments);
+    process.setWorkingDirectory(QString::fromStdString(ihpRoot.string()));
+    process.start();
+    if (!process.waitForStarted(5000)) {
+        if (error)
+            *error = QStringLiteral("Unable to start the IHP PCell generator: %1").arg(process.errorString());
+        return std::nullopt;
+    }
+    if (!process.waitForFinished(60000)) {
+        process.kill();
+        process.waitForFinished(2000);
+        if (error)
+            *error = QStringLiteral("The IHP PCell generator timed out.");
+        return std::nullopt;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (error) {
+            auto message = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+            if (message.isEmpty())
+                message = QStringLiteral("The IHP PCell generator exited with code %1.").arg(process.exitCode());
+            if (message.size() > 4000)
+                message = message.right(4000);
+            *error = message;
+        }
+        return std::nullopt;
+    }
+    QFile outputFile(outputPath);
+    if (!outputFile.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = QStringLiteral("The IHP PCell generator did not produce geometry.");
+        return std::nullopt;
+    }
+    try {
+        return ice::parseLayoutDeviceGeometry(outputFile.readAll().toStdString());
+    } catch (const ice::ProjectError &exception) {
+        if (error)
+            *error = QString::fromStdString(exception.what());
+        return std::nullopt;
+    }
 }
 
 SymbolDefinition generatedSchematicSymbol(const ice::SchematicCell &cell) {
@@ -498,6 +880,7 @@ class LayoutCanvas : public QGraphicsView {
     }
 
     bool isReadOnly() const { return readOnly_; }
+    Tool currentTool() const { return tool_; }
 
     void setGridVisible(bool visible) {
         gridVisible_ = visible;
@@ -518,6 +901,12 @@ class LayoutCanvas : public QGraphicsView {
     void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) {
         instanceActivated_ = std::move(callback);
     }
+
+    void setInstanceSelectionCallback(std::function<void(ice::ObjectId)> callback) {
+        instanceSelectionChanged_ = std::move(callback);
+    }
+
+    ice::ObjectId selectedLayoutInstance() const { return selectedLayoutInstance_; }
 
     void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
 
@@ -892,6 +1281,11 @@ class LayoutCanvas : public QGraphicsView {
         }
         if (!found)
             selectedLayoutInstance_ = 0;
+        if (notifiedLayoutInstance_ != selectedLayoutInstance_) {
+            notifiedLayoutInstance_ = selectedLayoutInstance_;
+            if (instanceSelectionChanged_)
+                instanceSelectionChanged_(selectedLayoutInstance_);
+        }
     }
 
     void applyNavigationTransform() {
@@ -929,7 +1323,9 @@ class LayoutCanvas : public QGraphicsView {
     std::function<void()> changed_;
     std::function<void(QPointF)> devicePlacementRequested_;
     std::function<void(ice::ObjectId)> instanceActivated_;
+    std::function<void(ice::ObjectId)> instanceSelectionChanged_;
     std::function<void()> toolEscapeRequested_;
+    ice::ObjectId notifiedLayoutInstance_ = 0;
     const ice::LayoutDeviceCell *devicePreview_ = nullptr;
     QPointF cursorScenePosition_;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;
@@ -1782,17 +2178,22 @@ class ProjectPanel : public QWidget {
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
             item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked);
         }
-        std::map<ice::ObjectId, std::vector<ice::ObjectId>> children;
+        struct LayoutChild {
+            std::string instanceName;
+            ice::ObjectId cellId = 0;
+        };
+        std::map<ice::ObjectId, std::vector<LayoutChild>> children;
         for (const auto &[cellId, cell] : project.layoutCells) {
-            auto &childCells = children[cellId];
+            auto &childInstances = children[cellId];
             for (const auto &[_, instance] : cell.instances) {
                 if (instance.cell == 0 || instance.cell == cellId || !project.layoutCells.contains(instance.cell))
                     continue;
-                if (std::find(childCells.begin(), childCells.end(), instance.cell) == childCells.end())
-                    childCells.push_back(instance.cell);
+                childInstances.push_back({instance.name, instance.cell});
             }
-            std::sort(childCells.begin(), childCells.end(), [&](ice::ObjectId left, ice::ObjectId right) {
-                return project.layoutCells.at(left).name < project.layoutCells.at(right).name;
+            std::sort(childInstances.begin(), childInstances.end(), [&](const auto &left, const auto &right) {
+                if (left.instanceName != right.instanceName)
+                    return left.instanceName < right.instanceName;
+                return project.layoutCells.at(left.cellId).name < project.layoutCells.at(right.cellId).name;
             });
         }
         std::function<void(QTreeWidgetItem *, ice::ObjectId, std::vector<ice::ObjectId> &)> addChildren;
@@ -1800,16 +2201,17 @@ class ProjectPanel : public QWidget {
             const auto childIt = children.find(parentId);
             if (childIt == children.end())
                 return;
-            for (const auto childId : childIt->second) {
-                const auto cellIt = project.layoutCells.find(childId);
+            for (const auto &child : childIt->second) {
+                const auto cellIt = project.layoutCells.find(child.cellId);
                 if (cellIt == project.layoutCells.end())
                     continue;
-                auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(cellIt->second.name)});
-                childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
-                if (std::find(ancestors.begin(), ancestors.end(), childId) != ancestors.end())
+                auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(child.instanceName)});
+                childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(child.cellId));
+                childItem->setToolTip(0, QString::fromStdString("Cell: " + cellIt->second.name));
+                if (std::find(ancestors.begin(), ancestors.end(), child.cellId) != ancestors.end())
                     continue;
-                ancestors.push_back(childId);
-                addChildren(childItem, childId, ancestors);
+                ancestors.push_back(child.cellId);
+                addChildren(childItem, child.cellId, ancestors);
                 ancestors.pop_back();
             }
         };
@@ -2193,6 +2595,10 @@ class PropertiesPanel : public QWidget {
     using CellParameterAdded = std::function<void(ice::ObjectId cellId, const std::string &name)>;
     using CellParametersRemoved =
         std::function<void(ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds)>;
+    using LayoutCellParameterChanged = std::function<void(ice::ObjectId cellId, ice::ObjectId parameterId,
+                                                          const std::string &name, const std::string &value)>;
+    using LayoutDeviceParameterChanged =
+        std::function<void(const std::string &deviceName, const std::string &name, const std::string &value)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
@@ -2261,6 +2667,12 @@ class PropertiesPanel : public QWidget {
     void setOnCellParameterChanged(CellParameterChanged callback) { onCellParameterChanged_ = std::move(callback); }
     void setOnCellParameterAdded(CellParameterAdded callback) { onCellParameterAdded_ = std::move(callback); }
     void setOnCellParametersRemoved(CellParametersRemoved callback) { onCellParametersRemoved_ = std::move(callback); }
+    void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback) {
+        onLayoutCellParameterChanged_ = std::move(callback);
+    }
+    void setOnLayoutDeviceParameterChanged(LayoutDeviceParameterChanged callback) {
+        onLayoutDeviceParameterChanged_ = std::move(callback);
+    }
 
     void refreshAppearance() {
         previewFrame_->setStyleSheet(
@@ -2271,6 +2683,8 @@ class PropertiesPanel : public QWidget {
     void clearSelection() {
         instanceId_ = 0;
         cellId_ = 0;
+        layoutCellId_ = 0;
+        layoutDeviceName_.clear();
         selection_->setText(QStringLiteral("Nothing selected"));
         previewFrame_->setVisible(false);
         QSignalBlocker blocker(parameters_);
@@ -2282,6 +2696,8 @@ class PropertiesPanel : public QWidget {
                      const std::string &symbolSvg) {
         instanceId_ = instance.id;
         cellId_ = 0;
+        layoutCellId_ = 0;
+        layoutDeviceName_.clear();
         const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
         selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
         previewStack_->setCurrentWidget(symbolPreview_);
@@ -2294,6 +2710,8 @@ class PropertiesPanel : public QWidget {
     void setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg) {
         instanceId_ = 0;
         cellId_ = cell.id;
+        layoutCellId_ = 0;
+        layoutDeviceName_.clear();
         selection_->setText(QStringLiteral("%1 (Schematic)").arg(QString::fromStdString(cell.name)));
         previewStack_->setCurrentWidget(symbolPreview_);
         symbolPreview_->load(symbolSvg.toUtf8());
@@ -2302,23 +2720,35 @@ class PropertiesPanel : public QWidget {
         updateParameterButtons();
     }
 
-    void setLayoutCell(const ice::LayoutCell &cell) {
+    void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell = nullptr) {
         instanceId_ = 0;
         cellId_ = 0;
+        layoutCellId_ = cell.id;
+        layoutDeviceName_.clear();
         const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                            : QString::fromStdString(cell.pdk);
-        auto text = QStringLiteral("%1 (Layout · %2)").arg(QString::fromStdString(cell.name), pdk);
+        const auto kind = cell.device.empty() ? QStringLiteral("Layout") : QStringLiteral("Device");
+        auto text = QStringLiteral("%1 (%2 · %3)").arg(QString::fromStdString(cell.name), kind, pdk);
         if (cell.library)
-            text += QStringLiteral(" · Read-only");
+            text += QStringLiteral(" · Read-only geometry");
         selection_->setText(text);
-        previewFrame_->setVisible(false);
-        populateParameters({});
+        if (previewCell && !previewCell->shapes.empty()) {
+            layoutCellPreview_ = *previewCell;
+            layoutDevicePreview_->setCell(&layoutCellPreview_);
+            previewStack_->setCurrentWidget(layoutDevicePreview_);
+            previewFrame_->setVisible(true);
+        } else {
+            previewFrame_->setVisible(false);
+        }
+        populateParameters(cell.parameters);
         updateParameterButtons();
     }
 
     void setLayoutDevice(const ice::LayoutDeviceCell *cell) {
         instanceId_ = 0;
         cellId_ = 0;
+        layoutCellId_ = 0;
+        layoutDeviceName_.clear();
         if (!cell) {
             selection_->setText(QStringLiteral("No device selected"));
             previewFrame_->setVisible(false);
@@ -2326,11 +2756,12 @@ class PropertiesPanel : public QWidget {
             updateParameterButtons();
             return;
         }
+        layoutDeviceName_ = cell->name;
         selection_->setText(QStringLiteral("%1 (Device)").arg(QString::fromStdString(cell->name)));
         layoutDevicePreview_->setCell(cell);
         previewStack_->setCurrentWidget(layoutDevicePreview_);
         previewFrame_->setVisible(true);
-        populateParameters({});
+        populateLayoutDeviceParameters(cell->parameters);
         updateParameterButtons();
     }
 
@@ -2356,6 +2787,25 @@ class PropertiesPanel : public QWidget {
         }
     }
 
+    void populateLayoutDeviceParameters(const std::vector<ice::LayoutDeviceParameter> &parameters) {
+        QSignalBlocker blocker(parameters_);
+        parameters_->setRowCount(0);
+        for (const auto &parameter : parameters) {
+            const int row = parameters_->rowCount();
+            parameters_->insertRow(row);
+            const auto description = QString::fromStdString(parameter.description);
+            auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
+            name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+            if (!description.isEmpty())
+                name->setToolTip(description);
+            parameters_->setItem(row, 0, name);
+            auto *value = new QTableWidgetItem(QString::fromStdString(parameter.value));
+            if (!description.isEmpty())
+                value->setToolTip(description);
+            parameters_->setItem(row, 1, value);
+        }
+    }
+
     void handleParameterEdit(QTableWidgetItem *item) {
         if (!item || item->column() != 1)
             return;
@@ -2367,6 +2817,11 @@ class PropertiesPanel : public QWidget {
             onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());
         else if (cellId_ != 0 && onCellParameterChanged_)
             onCellParameterChanged_(cellId_, parameterId, name->text().toStdString(), item->text().toStdString());
+        else if (layoutCellId_ != 0 && onLayoutCellParameterChanged_)
+            onLayoutCellParameterChanged_(layoutCellId_, parameterId, name->text().toStdString(),
+                                          item->text().toStdString());
+        else if (!layoutDeviceName_.empty() && onLayoutDeviceParameterChanged_)
+            onLayoutDeviceParameterChanged_(layoutDeviceName_, name->text().toStdString(), item->text().toStdString());
     }
 
     void updateParameterButtons() {
@@ -2408,16 +2863,21 @@ class PropertiesPanel : public QWidget {
     QStackedWidget *previewStack_ = nullptr;
     SymbolPreview *symbolPreview_ = nullptr;
     LayoutDevicePreview *layoutDevicePreview_ = nullptr;
+    ice::LayoutDeviceCell layoutCellPreview_;
     QFrame *previewFrame_ = nullptr;
     QTableWidget *parameters_ = nullptr;
     QPushButton *addParameterButton_ = nullptr;
     QPushButton *removeParameterButton_ = nullptr;
     ice::ObjectId instanceId_ = 0;
     ice::ObjectId cellId_ = 0;
+    ice::ObjectId layoutCellId_ = 0;
+    std::string layoutDeviceName_;
     ParameterChanged onParameterChanged_;
     CellParameterChanged onCellParameterChanged_;
     CellParameterAdded onCellParameterAdded_;
     CellParametersRemoved onCellParametersRemoved_;
+    LayoutCellParameterChanged onLayoutCellParameterChanged_;
+    LayoutDeviceParameterChanged onLayoutDeviceParameterChanged_;
 };
 
 class SymbolsPanel : public QWidget {
@@ -3263,10 +3723,12 @@ class LayoutDevicesPanel : public QWidget {
         } catch (const ice::ProjectError &error) {
             loadError_ = QString::fromStdString(error.what());
         }
+        for (const auto &cell : library_.cells) {
+            defaultParameters_[cell.name] = cell.parameters;
+            defaultGeometry_[cell.name] = ice::LayoutDeviceGeometry{cell.bounds, cell.shapes};
+        }
         rebuildCategories();
         rebuildList();
-        if (list_->count() > 0 && list_->item(0)->data(Qt::UserRole).isValid())
-            list_->setCurrentRow(0);
 
         connect(search_, &QLineEdit::textChanged, this, [this] { rebuildList(); });
         connect(category_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { rebuildList(); });
@@ -3281,6 +3743,13 @@ class LayoutDevicesPanel : public QWidget {
     void setOnDeviceSelected(DeviceSelectedCallback callback) { onDeviceSelected_ = std::move(callback); }
     void setOnDeviceActivated(std::function<void()> callback) { onDeviceActivated_ = std::move(callback); }
 
+    void clearDeviceSelection() {
+        QSignalBlocker blocker(list_);
+        list_->setCurrentRow(-1);
+        list_->clearSelection();
+        notifySelection();
+    }
+
     const ice::LayoutDeviceLibrary &library() const { return library_; }
 
     const ice::LayoutDeviceCell *selectedDevice() const {
@@ -3291,6 +3760,43 @@ class LayoutDevicesPanel : public QWidget {
         if (index < 0 || index >= static_cast<int>(library_.cells.size()))
             return nullptr;
         return &library_.cells[index];
+    }
+
+    bool setParameterValue(const std::string &deviceName, const std::string &parameterName, const std::string &value) {
+        for (auto &cell : library_.cells) {
+            if (cell.name != deviceName)
+                continue;
+            for (auto &parameter : cell.parameters) {
+                if (parameter.name != parameterName)
+                    continue;
+                parameter.value = value;
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    bool setDeviceGeometry(const std::string &deviceName, const ice::LayoutDeviceGeometry &geometry) {
+        for (auto &cell : library_.cells) {
+            if (cell.name != deviceName)
+                continue;
+            cell.bounds = geometry.bounds;
+            cell.shapes = geometry.shapes;
+            return true;
+        }
+        return false;
+    }
+
+    void resetDevices() {
+        for (auto &cell : library_.cells) {
+            if (const auto defaults = defaultParameters_.find(cell.name); defaults != defaultParameters_.end())
+                cell.parameters = defaults->second;
+            if (const auto geometry = defaultGeometry_.find(cell.name); geometry != defaultGeometry_.end()) {
+                cell.bounds = geometry->second.bounds;
+                cell.shapes = geometry->second.shapes;
+            }
+        }
     }
 
   private:
@@ -3356,13 +3862,16 @@ class LayoutDevicesPanel : public QWidget {
             notifySelection();
             return;
         }
-        if (selectedRow < 0)
-            selectedRow = 0;
         list_->setCurrentRow(selectedRow);
+        list_->clearSelection();
+        if (selectedRow >= 0)
+            list_->setCurrentRow(selectedRow);
         notifySelection();
     }
 
     ice::LayoutDeviceLibrary library_;
+    std::map<std::string, std::vector<ice::LayoutDeviceParameter>> defaultParameters_;
+    std::map<std::string, ice::LayoutDeviceGeometry> defaultGeometry_;
     QString loadError_;
     QLineEdit *search_ = nullptr;
     QComboBox *category_ = nullptr;
@@ -3438,9 +3947,64 @@ class DocumentWindow : public QMainWindow {
             if (!cell.library && cell.pdk == "ihp.sg13g2" && cell.name.starts_with("IHP "))
                 cell.library = true;
         }
+        if (layoutDevicesPanel_) {
+            layoutDevicesPanel_->resetDevices();
+            const auto &library = layoutDevicesPanel_->library();
+            for (auto &[_, cell] : project.layoutCells) {
+                if (!cell.library || cell.pdk != "ihp.sg13g2" || !cell.name.starts_with("IHP "))
+                    continue;
+                if (cell.device.empty()) {
+                    if (const auto *device = findLayoutDeviceForCellName(library, cell.name))
+                        cell.device = device->name;
+                }
+            }
+
+            struct InstanceReference {
+                ice::ObjectId parent = 0;
+                ice::ObjectId instance = 0;
+            };
+            std::map<ice::ObjectId, std::vector<InstanceReference>> references;
+            for (const auto &[parentId, parent] : project.layoutCells) {
+                for (const auto &[instanceId, instance] : parent.instances) {
+                    const auto childIt = project.layoutCells.find(instance.cell);
+                    if (childIt == project.layoutCells.end() || !childIt->second.library ||
+                        childIt->second.device.empty())
+                        continue;
+                    references[instance.cell].push_back({parentId, instanceId});
+                }
+            }
+            for (const auto &[childId, childReferences] : references) {
+                if (childReferences.size() <= 1)
+                    continue;
+                const auto source = project.layoutCells.at(childId);
+                for (std::size_t index = 1; index < childReferences.size(); ++index) {
+                    const auto cloneId =
+                        cloneLibraryDeviceCell(project, source, uniqueDeviceCellName(project, source.device));
+                    project.layoutCells.at(childReferences[index].parent)
+                        .instances.at(childReferences[index].instance)
+                        .cell = cloneId;
+                }
+            }
+
+            for (auto &[_, cell] : project.layoutCells) {
+                if (!cell.library)
+                    continue;
+                const auto *device = findLayoutDeviceForCell(library, cell);
+                if (!device)
+                    continue;
+                if (cell.device.empty())
+                    cell.device = device->name;
+                syncLayoutDeviceParameters(project, cell, *device);
+            }
+        }
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         layoutViewInitialized_ = false;
         openLibraryLayoutCellTabs_.clear();
+        clearLayoutDeviceSelection();
+        if (layoutSelectTool_)
+            layoutSelectTool_->setChecked(true);
+        if (layoutCanvas_)
+            layoutCanvas_->setTool(LayoutCanvas::Tool::select);
         projectPath_.clear();
         schematicSymbolsLoaded_ = false;
         schematicSymbolsPdk_.clear();
@@ -3705,6 +4269,9 @@ class DocumentWindow : public QMainWindow {
 
     void closeProject() {
         project_.reset();
+        clearLayoutDeviceSelection();
+        if (layoutDevicesPanel_)
+            layoutDevicesPanel_->resetDevices();
         openLibraryLayoutCellTabs_.clear();
         projectPath_.clear();
         refreshEmbeddedPanels();
@@ -3872,59 +4439,14 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    ice::ObjectId ensureLayoutDeviceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
-                                         const ice::LayoutDeviceLibrary &library) const {
-        const auto cellName = "IHP " + device.name;
-        for (const auto &[id, cell] : project.layoutCells)
-            if (cell.name == cellName)
-                return id;
-        const auto cellId = ice::createLayoutCell(project, cellName, library.pdk);
+    ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
+                                                 const ice::LayoutDeviceLibrary &library) const {
+        const auto cellId = ice::createLayoutCell(project, uniqueDeviceCellName(project, device.name), library.pdk);
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
-        std::map<std::pair<int, int>, std::string> layerNames;
-        for (const auto &layer : library.layers)
-            layerNames[{layer.number, layer.datatype}] = layer.name;
-        std::map<std::pair<int, int>, ice::ObjectId> layerIds;
-        for (const auto &sourceShape : device.shapes) {
-            if (sourceShape.polygon.size() < 3)
-                continue;
-            const auto key = std::make_pair(sourceShape.layer, sourceShape.datatype);
-            auto layerIt = layerIds.find(key);
-            if (layerIt == layerIds.end()) {
-                const auto nameIt = layerNames.find(key);
-                const auto layerName = nameIt != layerNames.end() && !nameIt->second.empty()
-                                           ? nameIt->second
-                                           : "Layer " + std::to_string(sourceShape.layer);
-                ice::ObjectId layerId = 0;
-                for (const auto &[id, layer] : project.layers) {
-                    if (layer.number == sourceShape.layer && layer.name == layerName) {
-                        layerId = id;
-                        break;
-                    }
-                }
-                if (layerId == 0)
-                    layerId = ice::addLayer(project, layerName, sourceShape.layer);
-                layerIt = layerIds.emplace(key, layerId).first;
-            }
-            ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
-            ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
-            ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
-            ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
-            for (const auto &point : sourceShape.polygon) {
-                minX = std::min(minX, point.x);
-                minY = std::min(minY, point.y);
-                maxX = std::max(maxX, point.x);
-                maxY = std::max(maxY, point.y);
-            }
-            std::vector<ice::LayoutPoint> polygon;
-            polygon.reserve(sourceShape.polygon.size());
-            for (const auto &point : sourceShape.polygon)
-                polygon.push_back({point.x, point.y});
-            const auto shapeId = project.nextId();
-            cell.shapes.emplace(shapeId,
-                                ice::Shape{shapeId, layerIt->second, std::nullopt,
-                                           ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
-        }
+        cell.device = device.name;
+        syncLayoutDeviceParameters(project, cell, device);
+        applyLayoutDeviceShapes(project, cell, library, device.shapes);
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         return cellId;
     }
@@ -3959,7 +4481,7 @@ class DocumentWindow : public QMainWindow {
         bool placed = false;
         try {
             project_->execute("place layout device", [&](ice::Project &project) {
-                const auto childId = ensureLayoutDeviceCell(project, *selectedLayoutDevice_, library);
+                const auto childId = createLayoutDeviceInstanceCell(project, *selectedLayoutDevice_, library);
                 if (childId == activeId)
                     return;
                 auto &cell = project.layoutCells.at(activeId);
@@ -4153,29 +4675,16 @@ class DocumentWindow : public QMainWindow {
             return;
         layoutCanvas_->scene()->clear();
         const auto &project = project_->project();
-        const auto showDevicePreview =
-            layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_;
         auto cellIt = project.layoutCells.find(activeLayoutId_);
         if (cellIt == project.layoutCells.end()) {
             if (project.layoutCells.empty()) {
-                if (layoutPropertiesPanel_) {
-                    if (showDevicePreview)
-                        layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
-                    else
-                        layoutPropertiesPanel_->clearSelection();
-                }
+                refreshLayoutProperties();
                 return;
             }
             cellIt = project.layoutCells.begin();
             activeLayoutId_ = cellIt->first;
         }
         const bool readOnly = cellIt->second.library;
-        if (layoutPropertiesPanel_) {
-            if (showDevicePreview)
-                layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
-            else
-                layoutPropertiesPanel_->setLayoutCell(cellIt->second);
-        }
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
         if (layoutRectangleTool_)
@@ -4326,6 +4835,59 @@ class DocumentWindow : public QMainWindow {
         if (!layoutViewInitialized_) {
             layoutCanvas_->fitToContent();
             layoutViewInitialized_ = true;
+        }
+        refreshLayoutProperties();
+    }
+
+    void clearLayoutDeviceSelection() {
+        if (layoutDevicesPanel_)
+            layoutDevicesPanel_->clearDeviceSelection();
+        selectedLayoutDevice_ = nullptr;
+        if (layoutCanvas_)
+            layoutCanvas_->setDevicePreview(nullptr);
+    }
+
+    void refreshLayoutProperties(bool bringToFront = false) {
+        if (!layoutPropertiesPanel_)
+            return;
+        if (project_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::select) {
+            const auto instanceId = layoutCanvas_->selectedLayoutInstance();
+            if (instanceId != 0) {
+                const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
+                if (activeIt != project_->project().layoutCells.end()) {
+                    const auto instanceIt = activeIt->second.instances.find(instanceId);
+                    if (instanceIt != activeIt->second.instances.end()) {
+                        const auto childIt = project_->project().layoutCells.find(instanceIt->second.cell);
+                        if (childIt != project_->project().layoutCells.end()) {
+                            std::optional<ice::LayoutDeviceCell> preview;
+                            if (childIt->second.library && !childIt->second.device.empty() && layoutDevicesPanel_)
+                                preview = makeLayoutCellPreview(project_->project(), childIt->second,
+                                                                layoutDevicesPanel_->library());
+                            layoutPropertiesPanel_->setLayoutCell(childIt->second, preview ? &*preview : nullptr);
+                            if (bringToFront && layoutRightTabs_)
+                                layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if (layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+            layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            return;
+        }
+        if (!project_) {
+            layoutPropertiesPanel_->clearSelection();
+            return;
+        }
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt != project_->project().layoutCells.end()) {
+            std::optional<ice::LayoutDeviceCell> preview;
+            if (cellIt->second.library && !cellIt->second.device.empty() && layoutDevicesPanel_)
+                preview = makeLayoutCellPreview(project_->project(), cellIt->second, layoutDevicesPanel_->library());
+            layoutPropertiesPanel_->setLayoutCell(cellIt->second, preview ? &*preview : nullptr);
+        } else {
+            layoutPropertiesPanel_->clearSelection();
         }
     }
 
@@ -4593,6 +5155,122 @@ class DocumentWindow : public QMainWindow {
             QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
             updateSelectionStatus();
         }
+    }
+
+    void updateLayoutCellParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
+                                   const std::string &value) {
+        if (!project_)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(cellId);
+        if (cellIt == project_->project().layoutCells.end())
+            return;
+        const auto cellName = cellIt->second.name;
+        const auto *device =
+            layoutDevicesPanel_ ? findLayoutDeviceForCell(layoutDevicesPanel_->library(), cellIt->second) : nullptr;
+        if (!device || !device->generator) {
+            try {
+                project_->execute("edit layout parameter", [&](ice::Project &project) {
+                    const auto editIt = project.layoutCells.find(cellId);
+                    if (editIt == project.layoutCells.end())
+                        return;
+                    for (auto &parameter : editIt->second.parameters) {
+                        if ((parameterId != 0 && parameter.id == parameterId) ||
+                            (parameterId == 0 && parameter.name == name)) {
+                            parameter.value = value;
+                            return;
+                        }
+                    }
+                });
+            } catch (const ice::ProjectError &error) {
+                QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
+                updateSelectionStatus();
+            }
+            return;
+        }
+
+        auto values = parameterValues(device->parameters);
+        for (const auto &parameter : cellIt->second.parameters)
+            values[parameter.name] = parameter.value;
+        values[name] = value;
+
+        QString generationError;
+        std::optional<ice::LayoutDeviceGeometry> geometry;
+        {
+            WaitCursorGuard waitCursor;
+            statusBar()->showMessage(QStringLiteral("Regenerating %1…").arg(QString::fromStdString(device->name)));
+            geometry = generateLayoutDeviceGeometry(*device, values, &generationError);
+        }
+        if (!geometry) {
+            QMessageBox::warning(this, QStringLiteral("Regenerate Device"),
+                                 QStringLiteral("Could not regenerate %1 geometry:\n\n%2")
+                                     .arg(QString::fromStdString(device->name), generationError));
+            refreshLayoutProperties();
+            return;
+        }
+
+        try {
+            project_->execute("regenerate layout parameter", [&](ice::Project &project) {
+                const auto editIt = project.layoutCells.find(cellId);
+                if (editIt == project.layoutCells.end())
+                    return;
+                auto &cell = editIt->second;
+                syncLayoutDeviceParameters(project, cell, *device);
+                for (auto &parameter : cell.parameters) {
+                    if (const auto generated = values.find(parameter.name); generated != values.end())
+                        parameter.value = generated->second;
+                }
+                if (cell.library)
+                    applyLayoutDeviceShapes(project, cell, layoutDevicesPanel_->library(), geometry->shapes);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Regenerate Device"), QString::fromStdString(error.what()));
+            refreshLayoutProperties();
+            return;
+        }
+
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Regenerated %1 geometry (%2 polygons)")
+                                     .arg(QString::fromStdString(cellName))
+                                     .arg(geometry->shapes.size()));
+    }
+
+    void updateLayoutDeviceParameter(const std::string &deviceName, const std::string &name, const std::string &value) {
+        if (!layoutDevicesPanel_)
+            return;
+        const auto *device = findLayoutDevice(layoutDevicesPanel_->library(), deviceName);
+        if (!device)
+            return;
+        auto values = parameterValues(device->parameters);
+        values[name] = value;
+        if (!device->generator) {
+            layoutDevicesPanel_->setParameterValue(deviceName, name, value);
+            return;
+        }
+
+        QString generationError;
+        std::optional<ice::LayoutDeviceGeometry> geometry;
+        {
+            WaitCursorGuard waitCursor;
+            statusBar()->showMessage(QStringLiteral("Regenerating %1…").arg(QString::fromStdString(deviceName)));
+            geometry = generateLayoutDeviceGeometry(*device, values, &generationError);
+        }
+        if (!geometry) {
+            QMessageBox::warning(this, QStringLiteral("Regenerate Device"),
+                                 QStringLiteral("Could not regenerate %1 geometry:\n\n%2")
+                                     .arg(QString::fromStdString(deviceName), generationError));
+            refreshLayoutProperties();
+            return;
+        }
+
+        for (const auto &[parameterName, parameterValue] : values)
+            layoutDevicesPanel_->setParameterValue(deviceName, parameterName, parameterValue);
+        layoutDevicesPanel_->setDeviceGeometry(deviceName, *geometry);
+        selectedLayoutDevice_ = device;
+        if (layoutCanvas_)
+            layoutCanvas_->setDevicePreview(device);
+        refreshLayoutProperties();
+        statusBar()->showMessage(QStringLiteral("Updated default %1 PCell parameters for new placements")
+                                     .arg(QString::fromStdString(deviceName)));
     }
 
     void addSchematicParameter(ice::ObjectId cellId, const std::string &name) {
@@ -6323,8 +7001,17 @@ class DocumentWindow : public QMainWindow {
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
         layoutEditorStack_->addWidget(layoutEditorPage_);
         layoutContentLayout->addWidget(layoutEditorStack_, 1);
-        auto *layoutRightTabs = new QTabWidget;
+        layoutRightTabs_ = new QTabWidget;
+        auto *layoutRightTabs = layoutRightTabs_;
         layoutPropertiesPanel_ = new PropertiesPanel(false);
+        layoutPropertiesPanel_->setOnLayoutCellParameterChanged(
+            [this](ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name, const std::string &value) {
+                updateLayoutCellParameter(cellId, parameterId, name, value);
+            });
+        layoutPropertiesPanel_->setOnLayoutDeviceParameterChanged(
+            [this](const std::string &deviceName, const std::string &name, const std::string &value) {
+                updateLayoutDeviceParameter(deviceName, name, value);
+            });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
         layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
@@ -6338,8 +7025,11 @@ class DocumentWindow : public QMainWindow {
                 if (layoutCanvas_)
                     layoutCanvas_->setDevicePreview(cell);
                 if (layoutPropertiesPanel_ && layoutLeftTabs_ &&
-                    layoutLeftTabs_->currentWidget() == layoutDevicesPanel_)
+                    layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
                     layoutPropertiesPanel_->setLayoutDevice(cell);
+                    if (layoutRightTabs_)
+                        layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                }
             });
             layoutDevicesPanel_->setOnDeviceActivated([this] {
                 if (!selectedLayoutDevice_ || (layoutCanvas_ && layoutCanvas_->isReadOnly()))
@@ -6359,11 +7049,14 @@ class DocumentWindow : public QMainWindow {
                 layoutCanvas_->setDevicePlacementCallback([this](QPointF position) { placeLayoutDevice(position); });
                 layoutCanvas_->setInstanceActivatedCallback(
                     [this](ice::ObjectId instanceId) { openLayoutInstanceCell(instanceId); });
+                layoutCanvas_->setInstanceSelectionCallback([this](ice::ObjectId) { refreshLayoutProperties(true); });
                 layoutCanvas_->setToolEscapeCallback([this] {
                     if (layoutSelectTool_)
                         layoutSelectTool_->setChecked(true);
                     if (layoutCanvas_)
                         layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+                    clearLayoutDeviceSelection();
+                    refreshLayoutProperties(true);
                 });
             }
         }
@@ -6371,8 +7064,9 @@ class DocumentWindow : public QMainWindow {
             if (!layoutLeftTabs_ || !layoutDevicesPanel_)
                 return;
             if (layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
-                if (layoutPropertiesPanel_)
-                    layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+                refreshLayoutProperties();
+                if (layoutRightTabs_)
+                    layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             } else {
                 refreshLayout();
             }
@@ -6878,6 +7572,8 @@ class DocumentWindow : public QMainWindow {
             connect(selectTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
                     layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+                clearLayoutDeviceSelection();
+                refreshLayoutProperties(true);
             });
             connect(placeDeviceTool, &QAction::triggered, this, [this] {
                 if (layoutLeftTabs_ && layoutDevicesPanel_)
@@ -7107,6 +7803,7 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeSimulationId_ = 0;
     PropertiesPanel *schematicPropertiesPanel_ = nullptr;
     PropertiesPanel *layoutPropertiesPanel_ = nullptr;
+    QTabWidget *layoutRightTabs_ = nullptr;
     LayoutDevicesPanel *layoutDevicesPanel_ = nullptr;
     QTabWidget *layoutLeftTabs_ = nullptr;
     const ice::LayoutDeviceCell *selectedLayoutDevice_ = nullptr;

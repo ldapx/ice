@@ -731,6 +731,10 @@ TEST_CASE("shipped IHP layout device library loads") {
     CHECK(library.pdk == "ihp.sg13g2");
     CHECK(library.cells.size() >= 100);
     CHECK(!library.layers.empty());
+    for (const auto &cell : library.cells) {
+        if (!cell.parameters.empty())
+            CHECK(cell.generator.has_value());
+    }
     const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
         for (const auto &cell : library.cells)
             if (cell.name == name)
@@ -743,13 +747,42 @@ TEST_CASE("shipped IHP layout device library loads") {
         CHECK(nmos->category == "Transistors");
         CHECK(!nmos->shapes.empty());
         CHECK(nmos->bounds.valid());
+        CHECK(nmos->parameters.size() == 9);
+        CHECK(nmos->generator.has_value());
+        if (nmos->generator) {
+            CHECK(nmos->generator->module == "nmos_code");
+            CHECK(nmos->generator->class_name == "nmos");
+        }
+        if (nmos->parameters.size() == 9) {
+            CHECK(nmos->parameters[0].name == "model");
+            CHECK(nmos->parameters[0].value == "sg13_lv_nmos");
+            CHECK(nmos->parameters[1].name == "w");
+            CHECK(nmos->parameters[1].value == "0.15u");
+            CHECK(!nmos->parameters[1].description.empty());
+        }
     }
     const auto *inverter = findCell("sg13g2_inv_1");
     CHECK(inverter != nullptr);
     if (inverter) {
         CHECK(inverter->category == "Standard Cells");
         CHECK(!inverter->shapes.empty());
+        CHECK(inverter->parameters.empty());
+        CHECK(!inverter->generator.has_value());
     }
+}
+
+TEST_CASE("generated layout device geometry parses") {
+    const auto geometry = ice::parseLayoutDeviceGeometry(
+        R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}]})");
+    CHECK(geometry.bounds.x == 0);
+    CHECK(geometry.bounds.y == -1);
+    CHECK(geometry.bounds.width == 10);
+    CHECK(geometry.bounds.height == 21);
+    CHECK(geometry.shapes.size() == 1);
+    CHECK(geometry.shapes.front().layer == 1);
+    CHECK(geometry.shapes.front().datatype == 2);
+    CHECK(geometry.shapes.front().polygon.size() == 4);
+    CHECK_THROWS_AS(ice::parseLayoutDeviceGeometry(R"({"bounds":[0,0,0,0],"shapes":[]})"), ice::ProjectError);
 }
 
 TEST_CASE("layout instances survive serialization") {
@@ -759,13 +792,22 @@ TEST_CASE("layout instances survive serialization") {
     const auto childId = ice::createLayoutCell(project, "device", "ihp.sg13g2");
     const auto parentId = ice::createLayoutCell(project, "top", "ihp.sg13g2");
     project.layoutCells.at(childId).library = true;
+    project.layoutCells.at(childId).device = "nmos";
     const auto instanceId = project.nextId();
     project.layoutCells.at(parentId).instances.emplace(
         instanceId, ice::LayoutInstance{instanceId, childId, "device_1", 120, -80, ice::Orientation::r0});
+    const auto widthId = project.nextId();
+    project.layoutCells.at(childId).parameters.push_back({widthId, "width", "0.15"});
     CHECK(project.validate().empty());
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    auto roundTrip = ice::Project::deserialize(project.serialize());
     CHECK(roundTrip.layoutCells.at(childId).library);
+    CHECK(roundTrip.layoutCells.at(childId).device == "nmos");
     CHECK(!roundTrip.layoutCells.at(parentId).library);
+    CHECK(roundTrip.layoutCells.at(childId).parameters.size() == 1);
+    CHECK(roundTrip.layoutCells.at(childId).parameters.front().id == widthId);
+    CHECK(roundTrip.layoutCells.at(childId).parameters.front().name == "width");
+    CHECK(roundTrip.layoutCells.at(childId).parameters.front().value == "0.15");
+    CHECK(roundTrip.nextId() > widthId);
     const auto &instance = roundTrip.layoutCells.at(parentId).instances.at(instanceId);
     CHECK(instance.cell == childId);
     CHECK(instance.name == "device_1");

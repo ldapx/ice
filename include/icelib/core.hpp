@@ -156,6 +156,12 @@ struct LayoutCell {
     std::string pdk = genericPdkId;
     // True for cells imported from a read-only device library.
     bool library = false;
+    // Source device name in the bundled layout library. Empty for ordinary
+    // user cells and non-device library cells.
+    std::string device;
+    // PCell metadata for imported library cells. Geometry is stored as
+    // flattened polygons and can be regenerated from these values.
+    std::vector<Parameter> parameters;
     std::map<ObjectId, Shape> shapes;
     std::map<ObjectId, Port> ports;
     std::map<ObjectId, LayoutInstance> instances;

@@ -10,4 +10,9 @@ open-source PDK:
 
 The geometry in this file was extracted from the GDS files under
 `ihp/gds/` in the upstream repository and flattened into ICE layout cell
-polygons for the Layout editor's device browser.
+polygons for the Layout editor's device browser. For cells with a PyCell
+generator, the stored geometry and parameter metadata were regenerated from
+the matching implementation under `ihp/refs/ihp_pycell/` using the repository's
+pure-Python CNI compatibility layer. Parameter names, defaults, and
+descriptions follow the PyCell parameter declarations. The same PyCell layer is
+used at runtime when a parameter value is edited.

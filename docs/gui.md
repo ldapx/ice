@@ -153,11 +153,25 @@ The layout editor should initially provide:
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
 column contains **Properties** and **Layers**. The bundled IHP SG13G2 device
 library appears in **Devices**, with search, category filtering, and a geometry
-preview in **Properties**. Selecting a device and choosing **Place Device**
-shows a cursor-following preview; clicking in the canvas imports the device
-geometry into the project and creates a layout instance. Instanced cells appear
-as children in the layout hierarchy, and the placed instances can be selected,
-moved, and deleted directly in the canvas.
+preview in **Properties**. The device list starts with no selection; selecting a
+device switches to **Place Device** and shows a cursor-following preview, while
+activating **Select** clears the list selection. Clicking in the canvas imports
+the device geometry into the project and creates a layout instance. Every placed device
+gets its own read-only library cell, so repeated placements do not share
+parameters or geometry. Each instance appears separately under its parent
+layout in the hierarchy and can be selected, moved, and deleted directly in the
+canvas. PCell parameter names, values, and descriptions are shown in
+**Properties** for the device preview and for imported library cells. Selecting
+a placed device instance shows that instance's own geometry preview and
+parameter values. Editing a parameter regenerates that instance's geometry
+through the IHP PyCell implementation without changing other instances. Editing
+a device in the **Devices** tab changes the defaults used by future placements.
+
+Regeneration uses the pure-Python PyCell layer from an IHP source checkout,
+including KLayout's `pya` module. ICE looks for the checkout next to the ICE
+repository or through `ICE_IHP_ROOT`, and uses `python3` unless `ICE_PYTHON`
+points to another interpreter. If the checkout or Python module is unavailable,
+ICE reports the error and leaves the existing geometry unchanged.
 
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database

@@ -88,6 +88,8 @@ ObjectId Project::nextId() {
         highest = std::max(highest, id);
     for (const auto &[id, cell] : layoutCells) {
         update(id);
+        for (const auto &parameter : cell.parameters)
+            update(parameter.id);
         for (const auto &[shapeId, shape] : cell.shapes)
             update(shapeId);
         for (const auto &[portId, port] : cell.ports)
@@ -272,6 +274,16 @@ std::string Project::serialize() const {
                   {"instances", json::array()}};
         if (cell.library)
             c["library"] = true;
+        if (!cell.device.empty())
+            c["device"] = cell.device;
+        if (!cell.parameters.empty()) {
+            c["parameters"] = json::array();
+            for (const auto &parameter : cell.parameters) {
+                json entry;
+                put(entry, parameter);
+                c["parameters"].push_back(std::move(entry));
+            }
+        }
         for (const auto &[sid, shape] : cell.shapes) {
             json s = {{"id", sid}, {"layer", shape.layer}, {"rectangle", json::object()}};
             if (shape.net)
@@ -428,6 +440,11 @@ Project Project::deserialize(const std::string &text) {
             if (cell.pdk.empty())
                 cell.pdk = genericPdkId;
             cell.library = c.value("library", false);
+            cell.device = c.value("device", std::string{});
+            if (c.contains("parameters")) {
+                for (const auto &parameter : c.at("parameters"))
+                    cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
+            }
             for (const auto &s : c.at("shapes")) {
                 Shape shape{s.at("id"),
                             s.at("layer"),

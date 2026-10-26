@@ -61,6 +61,29 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
                 if (shape.polygon.size() >= 3)
                     cell.shapes.push_back(std::move(shape));
             }
+            if (cellJson.contains("parameters")) {
+                const auto &parametersJson = cellJson.at("parameters");
+                if (!parametersJson.is_array())
+                    throw ProjectError("layout.library", "Layout library cell parameters are invalid: " + cell.name);
+                for (const auto &parameterJson : parametersJson) {
+                    LayoutDeviceParameter parameter;
+                    parameter.name = parameterJson.at("name").get<std::string>();
+                    if (parameter.name.empty())
+                        throw ProjectError("layout.library", "Layout library parameter name is empty: " + cell.name);
+                    parameter.value = parameterJson.value("value", std::string{});
+                    parameter.description = parameterJson.value("description", std::string{});
+                    cell.parameters.push_back(std::move(parameter));
+                }
+            }
+            if (cellJson.contains("generator")) {
+                const auto &generatorJson = cellJson.at("generator");
+                LayoutDeviceGenerator generator;
+                generator.module = generatorJson.at("module").get<std::string>();
+                generator.class_name = generatorJson.at("class").get<std::string>();
+                if (generator.module.empty() || generator.class_name.empty())
+                    throw ProjectError("layout.library", "Layout library generator is invalid: " + cell.name);
+                cell.generator = std::move(generator);
+            }
             library.cells.push_back(std::move(cell));
         }
         return library;
@@ -68,6 +91,45 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
         throw;
     } catch (const std::exception &error) {
         throw ProjectError("layout.library", "Unable to load layout device library: " + std::string(error.what()));
+    }
+}
+
+LayoutDeviceGeometry parseLayoutDeviceGeometry(const std::string &text) {
+    try {
+        const auto document = json::parse(text);
+        const auto &bounds = document.at("bounds");
+        if (!bounds.is_array() || bounds.size() != 4)
+            throw ProjectError("layout.library", "Generated layout device bounds are invalid");
+        const auto minX = coordinateAt(bounds.at(0), "generated minimum X");
+        const auto minY = coordinateAt(bounds.at(1), "generated minimum Y");
+        const auto maxX = coordinateAt(bounds.at(2), "generated maximum X");
+        const auto maxY = coordinateAt(bounds.at(3), "generated maximum Y");
+        if (maxX <= minX || maxY <= minY)
+            throw ProjectError("layout.library", "Generated layout device bounds are empty");
+
+        LayoutDeviceGeometry geometry;
+        geometry.bounds = Rect{minX, minY, maxX - minX, maxY - minY};
+        for (const auto &shapeJson : document.at("shapes")) {
+            LayoutDeviceShape shape;
+            shape.layer = shapeJson.at("layer").get<int>();
+            shape.datatype = shapeJson.at("datatype").get<int>();
+            for (const auto &point : shapeJson.at("points")) {
+                if (!point.is_array() || point.size() != 2)
+                    throw ProjectError("layout.library", "Generated layout device point is invalid");
+                shape.polygon.push_back(Point{coordinateAt(point.at(0), "generated point X"),
+                                              coordinateAt(point.at(1), "generated point Y")});
+            }
+            if (shape.polygon.size() < 3)
+                throw ProjectError("layout.library", "Generated layout device polygon is invalid");
+            geometry.shapes.push_back(std::move(shape));
+        }
+        if (geometry.shapes.empty())
+            throw ProjectError("layout.library", "Generated layout device contains no shapes");
+        return geometry;
+    } catch (const ProjectError &) {
+        throw;
+    } catch (const std::exception &error) {
+        throw ProjectError("layout.library", "Unable to parse generated layout geometry: " + std::string(error.what()));
     }
 }
 
