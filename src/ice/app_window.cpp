@@ -5,6 +5,7 @@
 #include "icelib/layout_library.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
+#include "icelib/routing.hpp"
 #include "icelib/simulation.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
@@ -84,7 +85,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
@@ -2776,150 +2776,66 @@ class DocumentWindow : public QMainWindow {
         schematicCanvas_->refreshPinVisibility();
     }
 
+    static QRectF symbolObstacleRect(QGraphicsItem *symbol) {
+        for (auto *child : symbol->childItems())
+            if (child->data(0).toString() == QStringLiteral("symbol-artwork"))
+                return child->sceneBoundingRect();
+        return symbol->sceneBoundingRect();
+    }
+
     QPainterPath routeWire(QPointF start, ice::PinDirection startDirection, QPointF target,
                            ice::PinDirection targetDirection, QGraphicsScene *scene, ice::ObjectId startPin,
                            ice::ObjectId targetPin) const {
-        constexpr qreal minimum = 30.0;
+        constexpr qreal minimumExtension = 30.0;
         const auto startVector = directionVector(startDirection);
         const auto targetVector = directionVector(targetDirection);
-        const QPointF startExit = start + startVector * minimum;
-        // The target entry point must be outside the symbol. The final route
-        // segment then travels opposite the pin's outward-facing direction.
-        const QPointF targetEntry = target + targetVector * minimum;
-        const auto key = [](int node, int direction) { return std::pair<int, int>{node, direction}; };
-        std::vector<QRectF> obstacles;
+        const QPointF startExit = start + startVector * minimumExtension;
+        const QPointF targetExit = target + targetVector * minimumExtension;
+
+        ice::SchematicRouteRequest request;
+        request.start = {start.x(), start.y()};
+        request.startExit = {startExit.x(), startExit.y()};
+        request.target = {target.x(), target.y()};
+        request.targetExit = {targetExit.x(), targetExit.y()};
+        request.clearance = 2.0;
+
         for (auto *item : scene->items()) {
-            if (item->data(0).toString() == QStringLiteral("symbol") && item->data(1).toULongLong() != startPin &&
-                item->data(1).toULongLong() != targetPin)
-                obstacles.push_back(item->sceneBoundingRect().adjusted(-12, -12, 12, 12));
-        }
-        const auto blocked = [&](QPointF point) {
-            return std::any_of(obstacles.begin(), obstacles.end(),
-                               [&](const QRectF &obstacle) { return obstacle.contains(point); });
-        };
-        const auto directionIndex = [](QPointF vector) {
-            if (vector.x() < 0)
-                return 0;
-            if (vector.x() > 0)
-                return 1;
-            if (vector.y() < 0)
-                return 2;
-            return 3;
-        };
-        std::vector<qreal> xCoordinates{startExit.x(), targetEntry.x(), start.x(), target.x()};
-        std::vector<qreal> yCoordinates{startExit.y(), targetEntry.y(), start.y(), target.y()};
-        for (const auto &obstacle : obstacles) {
-            xCoordinates.push_back(obstacle.left());
-            xCoordinates.push_back(obstacle.right());
-            yCoordinates.push_back(obstacle.top());
-            yCoordinates.push_back(obstacle.bottom());
-        }
-        const auto uniqueCoordinates = [](std::vector<qreal> &coordinates) {
-            std::sort(coordinates.begin(), coordinates.end());
-            coordinates.erase(
-                std::unique(coordinates.begin(), coordinates.end(),
-                            [](qreal left, qreal right) { return qFuzzyCompare(left + 1.0, right + 1.0); }),
-                coordinates.end());
-        };
-        uniqueCoordinates(xCoordinates);
-        uniqueCoordinates(yCoordinates);
-        std::vector<QPointF> nodes;
-        for (qreal x : xCoordinates)
-            for (qreal y : yCoordinates)
-                if (!blocked({x, y}))
-                    nodes.emplace_back(x, y);
-        const auto nodeIndex = [&nodes](QPointF point) {
-            for (std::size_t index = 0; index < nodes.size(); ++index)
-                if (qFuzzyCompare(nodes[index].x() + 1.0, point.x() + 1.0) &&
-                    qFuzzyCompare(nodes[index].y() + 1.0, point.y() + 1.0))
-                    return static_cast<int>(index);
-            return -1;
-        };
-        const int startNode = nodeIndex(startExit);
-        const int targetNode = nodeIndex(targetEntry);
-        std::vector<std::vector<int>> adjacency(nodes.size());
-        const auto clearSegment = [&blocked](QPointF from, QPointF to) {
-            const int samples = std::max(
-                2,
-                static_cast<int>(std::ceil(std::max(std::abs(to.x() - from.x()), std::abs(to.y() - from.y())) / 10.0)));
-            for (int index = 1; index < samples; ++index) {
-                const qreal fraction = static_cast<qreal>(index) / samples;
-                if (blocked(from + (to - from) * fraction))
-                    return false;
-            }
-            return true;
-        };
-        for (std::size_t first = 0; first < nodes.size(); ++first) {
-            for (std::size_t second = first + 1; second < nodes.size(); ++second) {
-                const bool sameX = qFuzzyCompare(nodes[first].x() + 1.0, nodes[second].x() + 1.0);
-                const bool sameY = qFuzzyCompare(nodes[first].y() + 1.0, nodes[second].y() + 1.0);
-                if ((sameX || sameY) && clearSegment(nodes[first], nodes[second])) {
-                    adjacency[first].push_back(static_cast<int>(second));
-                    adjacency[second].push_back(static_cast<int>(first));
-                }
-            }
-        }
-        struct QueueNode {
-            int cost;
-            int length;
-            int node;
-            int direction;
-            bool operator>(const QueueNode &other) const {
-                return std::tie(cost, length) > std::tie(other.cost, other.length);
-            }
-        };
-        const int firstDirection = directionIndex(startVector);
-        const int finalDirection = directionIndex(-targetVector);
-        std::priority_queue<QueueNode, std::vector<QueueNode>, std::greater<>> queue;
-        std::map<std::pair<int, int>, std::pair<int, int>> best;
-        std::map<std::pair<int, int>, std::pair<int, int>> parent;
-        queue.push({0, 0, startNode, firstDirection});
-        best[key(startNode, firstDirection)] = {0, 0};
-        std::pair<int, int> endState{};
-        bool found = false;
-        while (!queue.empty()) {
-            auto current = queue.top();
-            queue.pop();
-            if (current.node == targetNode && current.direction == finalDirection) {
-                endState = key(current.node, current.direction);
-                found = true;
-                break;
-            }
-            for (const int neighbor : adjacency[current.node]) {
-                const auto delta = nodes[neighbor] - nodes[current.node];
-                const int direction = directionIndex(delta);
-                const int length = current.length + static_cast<int>(std::abs(delta.x()) + std::abs(delta.y()));
-                const int cost = current.cost + (direction == current.direction ? 0 : 100000) +
-                                 static_cast<int>(std::abs(delta.x()) + std::abs(delta.y()));
-                const auto state = key(neighbor, direction);
-                auto it = best.find(state);
-                const auto candidate = std::make_pair(cost, length);
-                if (it != best.end() && it->second <= candidate)
+            const auto kind = item->data(0).toString();
+            if (kind == QStringLiteral("symbol")) {
+                const auto rect = symbolObstacleRect(item);
+                if (rect.isValid() && !rect.isEmpty())
+                    request.obstacleRects.push_back({rect.left(), rect.top(), rect.right(), rect.bottom()});
+            } else if (kind == QStringLiteral("pin")) {
+                const auto pinId = item->data(1).toULongLong();
+                if (pinId == startPin || pinId == targetPin)
                     continue;
-                best[state] = candidate;
-                parent[state] = key(current.node, current.direction);
-                queue.push({cost, length, neighbor, direction});
+                const auto position = item->scenePos();
+                const auto direction = static_cast<ice::PinDirection>(item->data(2).toInt());
+                const auto exit = position + directionVector(direction) * minimumExtension;
+                request.obstacleSegments.push_back({{position.x(), position.y()}, {exit.x(), exit.y()}});
             }
         }
-        std::vector<QPointF> points{start, startExit};
-        if (found) {
-            std::vector<QPointF> middle;
-            auto state = endState;
-            while (state != key(startNode, firstDirection)) {
-                middle.push_back(nodes[state.first]);
-                state = parent.at(state);
-            }
-            std::reverse(middle.begin(), middle.end());
-            points.insert(points.end(), middle.begin(), middle.end());
-        } else {
-            points.push_back({targetEntry.x(), startExit.y()});
-            points.push_back(targetEntry);
+
+        // A minimum-extension point must remain reachable even when projected
+        // artwork bounds extend slightly past the pin.
+        const auto contains = [](const ice::RouteRect &rect, const ice::RoutePoint &point) {
+            return point.x > std::min(rect.left, rect.right) && point.x < std::max(rect.left, rect.right) &&
+                   point.y > std::min(rect.top, rect.bottom) && point.y < std::max(rect.top, rect.bottom);
+        };
+        std::erase_if(request.obstacleRects, [&](const ice::RouteRect &rect) {
+            return contains(rect, request.startExit) || contains(rect, request.targetExit);
+        });
+
+        const auto route = ice::routeSchematicWire(request);
+        QPainterPath path;
+        if (route.points.empty()) {
+            path.moveTo(start);
+            path.lineTo(target);
+            return path;
         }
-        points.push_back(target);
-        QPainterPath path(points.front());
-        for (std::size_t index = 1; index < points.size(); ++index)
-            if (points[index] != points[index - 1])
-                path.lineTo(points[index]);
+        path.moveTo(route.points.front().x, route.points.front().y);
+        for (std::size_t index = 1; index < route.points.size(); ++index)
+            path.lineTo(route.points[index].x, route.points[index].y);
         return path;
     }
 
