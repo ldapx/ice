@@ -513,6 +513,19 @@ void SymbolsPanel::clearSymbolSelection() {
         onSelectionChanged_();
 }
 
+void SymbolsPanel::selectSymbol(const QString &name) {
+    // A popup selection should be visible in the panel even when the panel
+    // was filtered to a different device or category.
+    search_->clear();
+    category_->setCurrentIndex(0);
+    for (int row = 0; row < list_->count(); ++row) {
+        if (list_->item(row)->text() == name) {
+            list_->setCurrentItem(list_->item(row));
+            return;
+        }
+    }
+}
+
 void SymbolsPanel::setSymbols(std::vector<SymbolDefinition> symbols) {
     QString selectedName;
     if (const auto *item = list_->currentItem(); item && item->data(Qt::UserRole).isValid()) {

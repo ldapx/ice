@@ -85,6 +85,7 @@ class SymbolsPanel : public QWidget {
     void setOnSelectionChanged(std::function<void()> callback);
     void setOnSymbolSelected(std::function<void()> callback);
     void clearSymbolSelection();
+    void selectSymbol(const QString &name);
     void setSymbols(std::vector<SymbolDefinition> symbols);
     void clear();
     const SymbolDefinition *selectedSymbol() const;

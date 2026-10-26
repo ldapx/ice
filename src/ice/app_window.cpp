@@ -3039,7 +3039,7 @@ class DocumentWindow : public QMainWindow {
             schematicLeftTabs_->setCurrentWidget(schematicSymbolsPanel_);
         selectedSchematicSymbol_ = definition;
         if (clearPanelSelection && schematicSymbolsPanel_)
-            schematicSymbolsPanel_->clearSymbolSelection();
+            schematicSymbolsPanel_->selectSymbol(definition.name);
         if (schematicCanvas_) {
             schematicCanvas_->setPlaceSymbolPreview(definition.svg.toUtf8());
             schematicCanvas_->setNetLabelMode(false);
