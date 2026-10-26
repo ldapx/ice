@@ -26,6 +26,7 @@
 #include <QSettings>
 #include <QSizePolicy>
 #include <QStringList>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -239,12 +240,7 @@ class MissingPackagesDialog : public QDialog {
 } // namespace
 
 std::filesystem::path defaultPackageIndexDirectory() {
-    const std::filesystem::path home(QDir::homePath().toStdString());
-    const auto checkout = home / "repositories" / "ice-packages";
-    std::error_code error;
-    if (std::filesystem::is_directory(checkout, error) && !error)
-        return checkout;
-    return home / ".ice" / "package-index";
+    return std::filesystem::path(QDir::homePath().toStdString()) / ".ice" / "package-index";
 }
 
 std::filesystem::path defaultPackageInstallDirectory() {
@@ -256,7 +252,23 @@ std::string defaultPackageIndexUrl() { return "https://github.com/ldapx/ice-pack
 std::filesystem::path configuredPackageIndexDirectory() {
     QSettings settings;
     const auto stored = settings.value(QStringLiteral("packages/indexDirectory")).toString();
-    return stored.isEmpty() ? defaultPackageIndexDirectory() : std::filesystem::path(stored.toStdString());
+    const auto home = std::filesystem::path(QDir::homePath().toStdString());
+    const auto legacyCheckout = (home / "repositories" / "ice-packages").lexically_normal();
+    const bool migrated = settings.value(QStringLiteral("packages/indexDirectoryMigrated"), false).toBool();
+    if (!migrated) {
+        settings.setValue(QStringLiteral("packages/indexDirectoryMigrated"), true);
+        if (stored.isEmpty())
+            return defaultPackageIndexDirectory();
+        const auto storedPath = std::filesystem::path(stored.toStdString()).lexically_normal();
+        if (storedPath == legacyCheckout) {
+            settings.remove(QStringLiteral("packages/indexDirectory"));
+            return defaultPackageIndexDirectory();
+        }
+        return storedPath;
+    }
+    if (stored.isEmpty())
+        return defaultPackageIndexDirectory();
+    return std::filesystem::path(stored.toStdString()).lexically_normal();
 }
 
 std::filesystem::path configuredPackageInstallDirectory() {
@@ -436,6 +448,11 @@ PackageManagerDialog::PackageManagerDialog(PackageManagerOptions options, QWidge
     connect(close, &QPushButton::clicked, this, &QDialog::reject);
 
     refreshIndex(false);
+    if (entries_.empty()) {
+        setStatus(QStringLiteral("Fetching the default package index from %1…")
+                      .arg(QString::fromStdString(defaultPackageIndexUrl())));
+        QTimer::singleShot(0, this, [this] { refreshIndex(true); });
+    }
 }
 
 std::filesystem::path PackageManagerDialog::indexDirectory() const {
@@ -465,7 +482,16 @@ void PackageManagerDialog::refreshIndex(bool refreshRepository) {
         try {
             WaitCursor wait;
             std::error_code error;
-            if (!std::filesystem::exists(options_.indexDirectory, error) || error) {
+            const bool indexExists = std::filesystem::is_directory(options_.indexDirectory, error) && !error;
+            const bool indexEmpty = indexExists && std::filesystem::is_empty(options_.indexDirectory, error) && !error;
+            const bool hasGit =
+                indexExists && std::filesystem::exists(options_.indexDirectory / ".git", error) && !error;
+            if (!indexExists || (indexEmpty && !hasGit)) {
+                if (indexExists) {
+                    std::filesystem::remove_all(options_.indexDirectory, error);
+                    if (error)
+                        throw ice::ProjectError("package.index", error.message());
+                }
                 ice::PackageManager::cloneIndex(options_.indexDirectory, defaultPackageIndexUrl());
             } else {
                 ice::PackageManager::updateIndex(options_.indexDirectory);

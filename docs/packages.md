@@ -60,9 +60,10 @@ integers; non-zero GDS datatypes are not represented by the layout model.
 ## Package indexes
 
 The GUI reads available packages from a Git package index. The default index is
-https://github.com/ldapx/ice-packages. During local development ICE prefers an
-existing `~/repositories/ice-packages` checkout; otherwise it uses
-`~/.ice/package-index` and clones the default index when **Refresh** is used.
+https://github.com/ldapx/ice-packages, cloned into `~/.ice/package-index`.
+Opening **Manage Packages** automatically clones the default index when it is
+missing or empty, so the repository's packages are shown without pressing
+**Refresh**. **Refresh** still performs an explicit pull and submodule update.
 
 Indexed packages are Git submodules. Each package directory contains a
 `package.toml` manifest and may provide `.github/logo.png`, which the package

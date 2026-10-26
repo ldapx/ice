@@ -839,8 +839,11 @@ class DocumentWindow : public QMainWindow {
 
         PackageManagerDialog dialog(std::move(options), this);
         dialog.exec();
-        settings.setValue(QStringLiteral("packages/indexDirectory"),
-                          QString::fromStdString(dialog.indexDirectory().string()));
+        if (dialog.indexDirectory() == defaultPackageIndexDirectory())
+            settings.remove(QStringLiteral("packages/indexDirectory"));
+        else
+            settings.setValue(QStringLiteral("packages/indexDirectory"),
+                              QString::fromStdString(dialog.indexDirectory().string()));
         settings.setValue(QStringLiteral("packages/localRepository"),
                           QString::fromStdString(dialog.installDirectory().string()));
     }
