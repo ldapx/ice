@@ -25,6 +25,8 @@ class SimulationPlot : public QWidget {
     void paintEvent(QPaintEvent *) override;
 
   private:
+    const std::vector<double> *valuesForSignal(const std::string &signal) const;
+
     ice::SimulationResult result_;
     ice::SimulationGraph graph_;
     bool gridVisible_ = true;

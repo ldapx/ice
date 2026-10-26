@@ -24,6 +24,7 @@ struct SimulationRequest {
     double time_constant = 0.1;
     std::string simulator = "ngspice";
     std::string simulator_version = "1";
+    bool use_initial_conditions = false;
     // SPICE element/card lines. If the first line is not already a comment,
     // the adapter prepends a title comment because ngspice treats the first
     // netlist line as the circuit title.

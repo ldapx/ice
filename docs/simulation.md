@@ -11,8 +11,15 @@ Simulation jobs have explicit terminal states: `succeeded`, `failed`,
 identity, an input fingerprint, time samples, named traces, and an actionable
 error string when a job does not succeed.
 
-Graphs are presentation-only views over a result. Each graph can define
-optional X/Y axis limits; blank limits auto-scale from the returned data. Axis
+Simulation properties define the **Signals to capture** list, a comma-separated
+set of vectors requested from the simulator (for example `v(out), v(in)`). The
+adjacent **Select** button switches to the schematic so a node, pin, or wire can
+be picked directly; the resulting `v(node)` signal is appended to the list and
+the editor returns to the Simulation tab.
+
+Graphs are presentation-only views over a result. Each graph selects a captured
+signal or the `time` variable for its X and Y axes and can define optional axis
+limits; blank limits auto-scale from the returned data. Axis selections and
 limits change only how the plot is drawn and never alter the simulation
 parameters, netlist, or data acquisition. Plots draw labelled axis ticks and a
 light grid by default; the **Grid** button in the graph header toggles the grid

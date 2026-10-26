@@ -156,6 +156,14 @@ Point Transform::apply(Point point) const {
     case Orientation::my:
         x = -x;
         break;
+    case Orientation::m45:
+        std::swap(x, y);
+        break;
+    case Orientation::m135:
+        std::swap(x, y);
+        x = -x;
+        y = -y;
+        break;
     }
     return {x + this->x, y + this->y};
 }

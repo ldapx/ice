@@ -41,6 +41,7 @@ std::string fingerprintRequest(const SimulationRequest &request) {
     mixString(request.simulator_version);
     mix(reinterpret_cast<const char *>(&request.stop), sizeof(request.stop));
     mix(reinterpret_cast<const char *>(&request.step), sizeof(request.step));
+    mix(reinterpret_cast<const char *>(&request.use_initial_conditions), sizeof(request.use_initial_conditions));
     for (const auto &line : request.netlist)
         mixString(line);
     for (const auto &signal : request.probeSignals)
@@ -99,6 +100,8 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
     }
     std::ostringstream command;
     command << "tran " << request.step << " " << request.stop;
+    if (request.use_initial_conditions)
+        command << " uic";
     if (token.cancelled()) {
         result.state = JobState::cancelled;
         result.error = "simulation cancelled";
@@ -177,7 +180,7 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
             listed += signal;
         }
         result.error = "ngspice did not produce the requested vectors (" + listed +
-                       ") — check the graph's Nodes/signals match the schematic's nets";
+                       ") — check the Signals to capture list matches the schematic's nets";
         return result;
     }
     if (progress)

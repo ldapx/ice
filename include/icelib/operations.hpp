@@ -9,7 +9,8 @@
 namespace ice {
 
 ObjectId createSchematicCell(Project &project, std::string name, std::string pdk = genericPdkId);
-ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {});
+ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {},
+                   ObjectId sourceCell = 0);
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y);
 // The SPICE element letter a schematic symbol maps to, or 0 when unsupported.

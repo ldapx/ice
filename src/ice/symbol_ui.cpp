@@ -167,7 +167,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     : QDialog(parent), symbols_(std::move(generic)) {
     symbols_.insert(symbols_.end(), std::make_move_iterator(pdk.begin()), std::make_move_iterator(pdk.end()));
 
-    setWindowTitle(QStringLiteral("Symbol Library"));
+    setWindowTitle(QStringLiteral("Device Library"));
     resize(960, 620);
     setMinimumSize(720, 480);
 
@@ -175,9 +175,9 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     auto *searchRow = new QHBoxLayout;
     searchRow->addWidget(new QLabel(QStringLiteral("Search:")));
     search_ = new QLineEdit;
-    search_->setPlaceholderText(QStringLiteral("Search by symbol or category…"));
+    search_->setPlaceholderText(QStringLiteral("Search by device or category…"));
     search_->setClearButtonEnabled(true);
-    search_->setAccessibleName(QStringLiteral("Symbol search"));
+    search_->setAccessibleName(QStringLiteral("Device search"));
     searchRow->addWidget(search_, 1);
     layout->addLayout(searchRow);
 
@@ -190,7 +190,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     tabs_->setUsesScrollButtons(true);
     tabs_->setElideMode(Qt::ElideRight);
     browserLayout->addWidget(tabs_, 1);
-    noResults_ = new QLabel(QStringLiteral("No matching symbols."));
+    noResults_ = new QLabel(QStringLiteral("No matching devices."));
     noResults_->setAlignment(Qt::AlignCenter);
     noResults_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     noResults_->setVisible(false);
@@ -268,7 +268,7 @@ SymbolLibraryDialog::SymbolLibraryDialog(std::vector<SymbolDefinition> generic, 
     }
     for (const auto &[category, indices] : categories) {
         auto *list = new QListWidget;
-        list->setAccessibleName(QStringLiteral("%1 symbols").arg(category));
+        list->setAccessibleName(QStringLiteral("%1 devices").arg(category));
         for (const auto index : indices) {
             auto *item = new QListWidgetItem(symbols_[index].name, list);
             item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(index));
@@ -384,7 +384,7 @@ void SymbolLibraryDialog::applyFilter(const QString &text) {
 SymbolPropertiesDialog::SymbolPropertiesDialog(const std::string &symbolName, const ice::SchematicInstance &instance,
                                                QWidget *parent)
     : QDialog(parent) {
-    setWindowTitle(QStringLiteral("Symbol Properties"));
+    setWindowTitle(QStringLiteral("Device Properties"));
     setModal(true);
     resize(430, 420);
 
@@ -474,6 +474,7 @@ const std::vector<SymbolPropertiesDialog::OrientationEntry> &SymbolPropertiesDia
         {QStringLiteral("r0"), ice::Orientation::r0},     {QStringLiteral("r90"), ice::Orientation::r90},
         {QStringLiteral("r180"), ice::Orientation::r180}, {QStringLiteral("r270"), ice::Orientation::r270},
         {QStringLiteral("mx"), ice::Orientation::mx},     {QStringLiteral("my"), ice::Orientation::my},
+        {QStringLiteral("m45"), ice::Orientation::m45},   {QStringLiteral("m135"), ice::Orientation::m135},
     };
     return entries;
 }

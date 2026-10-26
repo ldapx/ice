@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <initializer_list>
 #include <map>
 #include <set>
-#include <initializer_list>
 #include <sstream>
 #include <string_view>
 
@@ -26,8 +26,7 @@ std::string lower(std::string text) {
 // Reads an instance parameter by one of the accepted names (case-insensitive),
 // else the sole parameter, else empty. Passive/source symbols name their value
 // by quantity (resistance, capacitance, ...), so callers pass a fallback list.
-std::string parameterValue(const SchematicInstance &instance,
-                           std::initializer_list<std::string_view> wanted) {
+std::string parameterValue(const SchematicInstance &instance, std::initializer_list<std::string_view> wanted) {
     std::string fallback;
     for (const auto &parameter : instance.parameters) {
         const auto name = lower(parameter.name);
@@ -150,12 +149,12 @@ ObjectId createSchematicCell(Project &project, std::string name, std::string pdk
     project.schematicCells.emplace(id, SchematicCell{id, std::move(name), std::move(pdk)});
     return id;
 }
-ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork) {
+ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork, ObjectId sourceCell) {
     if (name.empty())
         throw ProjectError("schematic.symbol", "Symbol name must not be empty");
     auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     ObjectId id = project.nextId();
-    cell.symbols.emplace(id, Symbol{id, std::move(name), std::move(artwork)});
+    cell.symbols.emplace(id, Symbol{id, std::move(name), std::move(artwork), sourceCell});
     return id;
 }
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,

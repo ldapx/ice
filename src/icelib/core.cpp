@@ -1,6 +1,7 @@
 #include "icelib/core.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -9,6 +10,25 @@
 
 namespace ice {
 using json = nlohmann::ordered_json;
+
+namespace {
+std::string trimCopy(std::string text) {
+    const auto notSpace = [](unsigned char character) { return !std::isspace(character); };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
+    text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
+    return text;
+}
+
+std::string joinedSignalList(const std::vector<std::string> &signalNames) {
+    std::string text;
+    for (const auto &signal : signalNames) {
+        if (!text.empty())
+            text += ", ";
+        text += signal;
+    }
+    return text;
+}
+} // namespace
 
 ProjectError::ProjectError(std::string code, std::string message)
     : std::runtime_error(message), code_(std::move(code)) {}
@@ -36,6 +56,10 @@ std::string orientationName(Orientation value) {
         return "mx";
     case Orientation::my:
         return "my";
+    case Orientation::m45:
+        return "m45";
+    case Orientation::m135:
+        return "m135";
     }
     throw ProjectError("project.orientation", "Unknown orientation value");
 }
@@ -205,6 +229,8 @@ std::string Project::serialize() const {
         }
         for (const auto &[sid, symbol] : cell.symbols) {
             json s = {{"id", sid}, {"name", symbol.name}, {"artwork", symbol.artwork}, {"pins", json::array()}};
+            if (symbol.sourceCell != 0)
+                s["cell"] = symbol.sourceCell;
             for (const auto &pin : symbol.pins) {
                 json p;
                 put(p, pin);
@@ -276,14 +302,12 @@ std::string Project::serialize() const {
                   {"analysis", sim.analysis},
                   {"stop", sim.stop},
                   {"step", sim.step},
+                  {"use_initial_conditions", sim.use_initial_conditions},
                   {"directives", sim.directives},
+                  {"signals", sim.captureSignals},
                   {"graphs", json::array()}};
         for (const auto &graph : sim.graphs) {
-            json graphJson = {{"id", graph.id},
-                              {"name", graph.name},
-                              {"x_axis", graph.xAxis},
-                              {"y_axis", graph.yAxis},
-                              {"nodes", graph.nodes}};
+            json graphJson = {{"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_axis", graph.yAxis}};
             // Limits are optional so older projects keep auto-scaling.
             if (graph.xMin)
                 graphJson["x_min"] = *graph.xMin;
@@ -301,9 +325,9 @@ std::string Project::serialize() const {
 }
 
 static Orientation parseOrientation(const std::string &value) {
-    static const std::map<std::string, Orientation> values = {{"r0", Orientation::r0},     {"r90", Orientation::r90},
-                                                              {"r180", Orientation::r180}, {"r270", Orientation::r270},
-                                                              {"mx", Orientation::mx},     {"my", Orientation::my}};
+    static const std::map<std::string, Orientation> values = {
+        {"r0", Orientation::r0}, {"r90", Orientation::r90}, {"r180", Orientation::r180}, {"r270", Orientation::r270},
+        {"mx", Orientation::mx}, {"my", Orientation::my},   {"m45", Orientation::m45},   {"m135", Orientation::m135}};
     auto it = values.find(value);
     if (it == values.end())
         throw ProjectError("project.orientation", "Unknown orientation: " + value);
@@ -365,6 +389,7 @@ Project Project::deserialize(const std::string &text) {
             }
             for (const auto &s : c.at("symbols")) {
                 Symbol symbol{s.at("id"), s.at("name"), s.at("artwork")};
+                symbol.sourceCell = s.value("cell", ObjectId{0});
                 for (const auto &pin : s.at("pins"))
                     symbol.pins.push_back({pin.at("id"), pin.at("name"), pin.at("x"), pin.at("y"),
                                            parsePinDirection(pin.value("direction", "right"))});
@@ -421,16 +446,27 @@ Project Project::deserialize(const std::string &text) {
                 sim.analysis = s.value("analysis", std::string{"transient"});
                 sim.stop = s.value("stop", 1.0);
                 sim.step = s.value("step", 0.01);
+                sim.use_initial_conditions = s.value("use_initial_conditions", false);
                 sim.directives = s.value("directives", std::string{});
+                sim.captureSignals = s.value("signals", std::string{});
+                std::vector<std::string> legacySignals;
                 if (s.contains("graphs")) {
                     for (const auto &g : s.at("graphs")) {
                         SimulationGraph graph;
                         graph.id = g.at("id");
                         graph.name = g.value("name", std::string{"Graph"});
-                        graph.xAxis = g.value("x_axis", std::string{"Time (s)"});
-                        graph.yAxis = g.value("y_axis", std::string{"Voltage (V)"});
-                        if (g.contains("nodes"))
-                            graph.nodes = g.at("nodes").get<std::vector<std::string>>();
+                        graph.xAxis = g.value("x_axis", std::string{"time"});
+                        graph.yAxis = g.value("y_axis", std::string{});
+                        // Older projects stored probe lists per graph. Fold
+                        // them into the simulation-level captured-signal list.
+                        if (g.contains("nodes")) {
+                            for (const auto &node : g.at("nodes").get<std::vector<std::string>>()) {
+                                const auto signal = trimCopy(node);
+                                if (!signal.empty() && std::find(legacySignals.begin(), legacySignals.end(), signal) ==
+                                                           legacySignals.end())
+                                    legacySignals.push_back(signal);
+                            }
+                        }
                         if (g.contains("x_min") && !g.at("x_min").is_null())
                             graph.xMin = g.at("x_min").get<double>();
                         if (g.contains("x_max") && !g.at("x_max").is_null())
@@ -442,6 +478,8 @@ Project Project::deserialize(const std::string &text) {
                         sim.graphs.push_back(std::move(graph));
                     }
                 }
+                if (sim.captureSignals.empty() && !legacySignals.empty())
+                    sim.captureSignals = joinedSignalList(legacySignals);
                 p.simulations.emplace(sim.id, std::move(sim));
             }
         }

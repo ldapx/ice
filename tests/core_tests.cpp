@@ -129,6 +129,20 @@ TEST_CASE("schematic instance parameters survive serialization") {
     CHECK(restored.front().value == "1k");
 }
 
+TEST_CASE("hierarchical symbols keep their source schematic") {
+    ice::Project project;
+    project.identity = "hierarchy";
+    project.name = "hierarchy";
+    const auto childCellId = ice::createSchematicCell(project, "child");
+    const auto parentCellId = ice::createSchematicCell(project, "parent");
+    const auto symbolId = ice::addSymbol(project, parentCellId, "child", {}, childCellId);
+    const auto instanceId = ice::addSchematicInstance(project, parentCellId, symbolId, "child1", 0, 0);
+    CHECK(project.validate().empty());
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.schematicCells.at(parentCellId).symbols.at(symbolId).sourceCell == childCellId);
+    CHECK(roundTrip.schematicCells.at(parentCellId).instances.contains(instanceId));
+}
+
 TEST_CASE("symbol default parameters are seeded without duplicates") {
     ice::Project project;
     project.identity = "defaults";
@@ -159,12 +173,17 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
     ice::SimulationItem sim;
     sim.id = simId;
     sim.name = "tran";
+    sim.use_initial_conditions = true;
+    sim.captureSignals = "v(out), v(in)";
     ice::SimulationGraph automatic;
     automatic.id = project.nextId();
     automatic.name = "auto";
+    automatic.yAxis = "v(out)";
     ice::SimulationGraph limited;
     limited.id = project.nextId();
     limited.name = "limited";
+    limited.xAxis = "v(in)";
+    limited.yAxis = "v(out)";
     limited.xMin = 1e-9;
     limited.xMax = 2e-9;
     limited.yMin = -0.5;
@@ -174,7 +193,13 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
 
     const auto serialized = project.serialize();
     const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.simulations.at(simId).use_initial_conditions);
+    CHECK(roundTrip.simulations.at(simId).captureSignals == "v(out), v(in)");
     const auto &graphs = roundTrip.simulations.at(simId).graphs;
+    CHECK(graphs[0].xAxis == "time");
+    CHECK(graphs[0].yAxis == "v(out)");
+    CHECK(graphs[1].xAxis == "v(in)");
+    CHECK(graphs[1].yAxis == "v(out)");
     CHECK(graphs.size() == 2);
     CHECK(!graphs[0].xMin.has_value());
     CHECK(!graphs[0].xMax.has_value());
@@ -193,6 +218,8 @@ TEST_CASE("geometry transforms match Qt rotation convention") {
     CHECK((ice::Transform{0, 0, ice::Orientation::r90}.apply(point) == ice::Point{0, 10}));
     CHECK((ice::Transform{0, 0, ice::Orientation::r180}.apply(point) == ice::Point{-10, 0}));
     CHECK((ice::Transform{0, 0, ice::Orientation::r270}.apply(point) == ice::Point{0, -10}));
+    CHECK((ice::Transform{0, 0, ice::Orientation::m45}.apply(point) == ice::Point{0, 10}));
+    CHECK((ice::Transform{0, 0, ice::Orientation::m135}.apply(point) == ice::Point{0, -10}));
 }
 
 TEST_CASE("ngspice simulation reports missing netlists explicitly") {

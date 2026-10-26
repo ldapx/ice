@@ -33,7 +33,7 @@ class ProjectError : public std::runtime_error {
     std::string code_;
 };
 
-enum class Orientation { r0, r90, r180, r270, mx, my };
+enum class Orientation { r0, r90, r180, r270, mx, my, m45, m135 };
 
 struct DatabaseUnits {
     std::int64_t nanometers_per_unit = 1;
@@ -62,6 +62,9 @@ struct Symbol {
     ObjectId id = 0;
     std::string name;
     std::string artwork;
+    // Source schematic for hierarchical block symbols. Zero for primitive or
+    // library symbols that are not backed by a schematic cell.
+    ObjectId sourceCell = 0;
     std::vector<Pin> pins;
 };
 
@@ -150,9 +153,10 @@ struct LayoutCell {
 struct SimulationGraph {
     ObjectId id = 0;
     std::string name;
-    std::string xAxis = "Time (s)";
-    std::string yAxis = "Voltage (V)";
-    std::vector<std::string> nodes;
+    // Axis selections are signal names from the simulation's captured signal
+    // list. The literal "time" selects the simulator's time vector.
+    std::string xAxis = "time";
+    std::string yAxis;
     // Optional display limits. Empty values auto-scale that axis from the
     // result data; they are presentation-only and never affect the simulation
     // request, netlist, or data acquisition.
@@ -170,7 +174,11 @@ struct SimulationItem {
     std::string analysis = "transient";
     double stop = 1.0;
     double step = 0.01;
+    bool use_initial_conditions = false;
     std::string directives;
+    // Comma-separated signals requested from the simulator. Axis selections in
+    // each graph reference entries in this list, or the special "time" value.
+    std::string captureSignals;
     std::vector<SimulationGraph> graphs;
 };
 
