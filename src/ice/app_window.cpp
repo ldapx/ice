@@ -1204,21 +1204,19 @@ class DocumentWindow : public QMainWindow {
             if (dialog.exec() != QDialog::Accepted)
                 return;
             const auto definition = dialog.selected();
-            placeSymbolDefinition(definition);
+            activateSchematicPlaceSymbolTool(definition, true);
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Place Device"), QString::fromStdString(error.what()));
         }
     }
 
-    bool placeSymbolDefinition(const SymbolDefinition &definition, std::optional<QPointF> position = std::nullopt) {
+    bool placeSymbolDefinition(const SymbolDefinition &definition, QPointF position) {
         if (!project_ || !schematicCanvas_ || project_->project().schematicCells.empty())
             return false;
         try {
             const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
                                     ? activeSchematicId_
                                     : project_->project().schematicCells.begin()->first;
-            const auto scenePosition =
-                position.value_or(schematicCanvas_->mapToScene(schematicCanvas_->viewport()->rect().center()));
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId = ice::addSymbol(project, cellId, definition.name.toStdString(),
                                                      definition.svg.toStdString(), definition.cell);
@@ -1235,8 +1233,8 @@ class DocumentWindow : public QMainWindow {
                 const auto instanceName =
                     nextInstanceName(project.schematicCells.at(cellId), definition.name.toStdString());
                 const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, instanceName,
-                                                                  static_cast<ice::Coordinate>(scenePosition.x()),
-                                                                  static_cast<ice::Coordinate>(-scenePosition.y()));
+                                                                  static_cast<ice::Coordinate>(position.x()),
+                                                                  static_cast<ice::Coordinate>(-position.y()));
                 // Seed the symbol's default parameters (resistance, capacitance,
                 // ...) so they are editable in the properties panel right away.
                 auto &placedInstance = project.schematicCells.at(cellId).instances.at(instanceId);
@@ -3034,14 +3032,16 @@ class DocumentWindow : public QMainWindow {
             activityDock_->show();
     }
 
-    void activateSchematicPlaceSymbolTool() {
+    void activateSchematicPlaceSymbolTool(const SymbolDefinition &definition, bool clearPanelSelection = false) {
         if (schematicPlaceSymbolTool_)
             schematicPlaceSymbolTool_->setChecked(true);
         if (schematicLeftTabs_ && schematicSymbolsPanel_)
             schematicLeftTabs_->setCurrentWidget(schematicSymbolsPanel_);
+        selectedSchematicSymbol_ = definition;
+        if (clearPanelSelection && schematicSymbolsPanel_)
+            schematicSymbolsPanel_->clearSymbolSelection();
         if (schematicCanvas_) {
-            const auto *symbol = schematicSymbolsPanel_ ? schematicSymbolsPanel_->selectedSymbol() : nullptr;
-            schematicCanvas_->setPlaceSymbolPreview(symbol ? symbol->svg.toUtf8() : QByteArray());
+            schematicCanvas_->setPlaceSymbolPreview(definition.svg.toUtf8());
             schematicCanvas_->setNetLabelMode(false);
             schematicCanvas_->setPlaceSymbolMode(true);
         }
@@ -3049,6 +3049,12 @@ class DocumentWindow : public QMainWindow {
             toolEscapeShortcut_->setEnabled(true);
         statusBar()->showMessage(
             QStringLiteral("Select a device in the Devices tab, then click in the schematic to place it"));
+    }
+
+    void activateSchematicPlaceSymbolTool() {
+        const auto *symbol = schematicSymbolsPanel_ ? schematicSymbolsPanel_->selectedSymbol() : nullptr;
+        if (symbol)
+            activateSchematicPlaceSymbolTool(*symbol);
     }
 
     void selectSchematicTool() {
@@ -3061,6 +3067,7 @@ class DocumentWindow : public QMainWindow {
         }
         if (schematicSymbolsPanel_)
             schematicSymbolsPanel_->clearSymbolSelection();
+        selectedSchematicSymbol_.reset();
         if (toolEscapeShortcut_)
             toolEscapeShortcut_->setEnabled(false);
         statusBar()->showMessage(QStringLiteral("Select tool"));
@@ -3117,6 +3124,8 @@ class DocumentWindow : public QMainWindow {
             if (!schematicCanvas_)
                 return;
             const auto *symbol = schematicSymbolsPanel_ ? schematicSymbolsPanel_->selectedSymbol() : nullptr;
+            if (symbol)
+                selectedSchematicSymbol_ = *symbol;
             schematicCanvas_->setPlaceSymbolPreview(symbol ? symbol->svg.toUtf8() : QByteArray());
         });
         schematicSymbolsPanel_->setOnSymbolSelected([this] { activateSchematicPlaceSymbolTool(); });
@@ -3614,15 +3623,12 @@ class DocumentWindow : public QMainWindow {
                 refreshProject();
             });
             schematicCanvas_->setSymbolPlacementCallback([this](QPointF position) {
-                if (!schematicSymbolsPanel_)
-                    return;
-                const auto *symbol = schematicSymbolsPanel_->selectedSymbol();
-                if (!symbol) {
+                if (!selectedSchematicSymbol_) {
                     statusBar()->showMessage(QStringLiteral("Select a device in the Devices tab first"));
                     return;
                 }
-                const auto symbolName = symbol->name;
-                if (placeSymbolDefinition(*symbol, position))
+                const auto symbolName = selectedSchematicSymbol_->name;
+                if (placeSymbolDefinition(*selectedSchematicSymbol_, position))
                     statusBar()->showMessage(QStringLiteral("Placed %1").arg(symbolName));
             });
             schematicCanvas_->setToolEscapeCallback([this] { selectSchematicTool(); });
@@ -4018,6 +4024,7 @@ class DocumentWindow : public QMainWindow {
     std::string schematicSymbolsPdk_;
     bool schematicSymbolsLoaded_ = false;
     std::vector<SymbolDefinition> schematicBaseSymbols_;
+    std::optional<SymbolDefinition> selectedSchematicSymbol_;
     StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
     QAction *schematicSelectTool_ = nullptr;
