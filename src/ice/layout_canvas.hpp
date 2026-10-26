@@ -26,6 +26,8 @@ class LayoutCanvas : public QGraphicsView {
     virtual bool isReadOnly() const = 0;
     virtual Tool currentTool() const = 0;
     virtual void setGridVisible(bool visible) = 0;
+    virtual void setSnapToGrid(bool enabled) = 0;
+    virtual void setGridSpacing(qreal spacing) = 0;
     virtual void setDevicePreview(const ice::LayoutDeviceCell *cell) = 0;
     virtual void restoreLayoutInstanceSelection() = 0;
     virtual void setDevicePlacementCallback(std::function<void(QPointF)> callback) = 0;

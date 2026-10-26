@@ -880,6 +880,7 @@ class DocumentWindow : public QMainWindow {
             return;
         layoutCanvas_->scene()->clear();
         const auto &project = project_->project();
+        layoutCanvas_->setGridSpacing(static_cast<qreal>(project.grid));
         auto cellIt = project.layoutCells.find(activeLayoutId_);
         if (cellIt == project.layoutCells.end()) {
             if (project.layoutCells.empty()) {
@@ -1050,6 +1051,44 @@ class DocumentWindow : public QMainWindow {
         selectedLayoutDevice_ = nullptr;
         if (layoutCanvas_)
             layoutCanvas_->setDevicePreview(nullptr);
+    }
+
+    void transformSelectedLayoutInstance(ice::Orientation step, const QString &operation) {
+        if (!project_ || !layoutCanvas_)
+            return;
+        const auto instanceId = layoutCanvas_->selectedLayoutInstance();
+        if (instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Select a layout device first"));
+            return;
+        }
+        project_->execute(operation.toStdString(), [&](ice::Project &project) {
+            const auto cellIt = project.layoutCells.find(activeLayoutId_);
+            if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                return;
+            if (auto instance = cellIt->second.instances.find(instanceId); instance != cellIt->second.instances.end())
+                instance->second.orientation = composeOrientation(instance->second.orientation, step);
+        });
+        refreshProject();
+    }
+
+    void snapSelectedLayoutInstance() {
+        if (!project_ || !layoutCanvas_)
+            return;
+        const auto instanceId = layoutCanvas_->selectedLayoutInstance();
+        if (instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Select a layout device first"));
+            return;
+        }
+        project_->execute("snap layout device", [&](ice::Project &project) {
+            const auto cellIt = project.layoutCells.find(activeLayoutId_);
+            if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                return;
+            if (auto instance = cellIt->second.instances.find(instanceId); instance != cellIt->second.instances.end()) {
+                instance->second.x = project.snap(instance->second.x);
+                instance->second.y = project.snap(instance->second.y);
+            }
+        });
+        refreshProject();
     }
 
     void refreshLayoutProperties(bool bringToFront = false) {
@@ -3795,6 +3834,22 @@ class DocumentWindow : public QMainWindow {
                 clearLayoutDeviceSelection();
                 refreshLayoutProperties(true);
             });
+            auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
+            connect(rotateTool, &QAction::triggered, this, [this] {
+                transformSelectedLayoutInstance(ice::Orientation::r90, QStringLiteral("rotate layout device"));
+            });
+            auto *flipTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontal"));
+            connect(flipTool, &QAction::triggered, this, [this] {
+                transformSelectedLayoutInstance(ice::Orientation::my, QStringLiteral("flip layout device"));
+            });
+            auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
+            snapTool->setCheckable(true);
+            snapTool->setChecked(true);
+            connect(snapTool, &QAction::toggled, this, [this](bool enabled) {
+                if (layoutCanvas_)
+                    layoutCanvas_->setSnapToGrid(enabled);
+            });
+
             connect(placeDeviceTool, &QAction::triggered, this, [this] {
                 if (layoutLeftTabs_ && layoutDevicesPanel_)
                     layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
