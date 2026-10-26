@@ -62,6 +62,9 @@ class SymbolLibraryDialog : public QDialog {
                                  QWidget *parent = nullptr);
     const SymbolDefinition &selected() const;
 
+  protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
   private:
     void applyFilter(const QString &text);
     void showCurrentTab();
