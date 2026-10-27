@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 
 import icepy
 
@@ -43,6 +44,17 @@ def test_layout_builder() -> None:
     round_trip = icepy.Project.deserialize(serialized)
     assert round_trip.serialize() == serialized
     assert len(round_trip.layout_cells) == 1
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / "split-project"
+        project.save(str(root))
+        assert (root / "project.icepro").is_file()
+        assert (root / "lay" / "top.icelay").is_file()
+        assert (root / "reports").is_dir()
+        assert (root / "build").is_dir()
+        loaded = icepy.load_project(str(root / "project.icepro"))
+        assert loaded.name == project.name
+        assert len(loaded.layout_cells) == 1
 
 
 def test_ihp_pcell_runtime() -> None:

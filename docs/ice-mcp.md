@@ -19,7 +19,7 @@ ice-mcp
 Or open a project at startup:
 
 ```sh
-ice-mcp --project design.ice.json
+ice-mcp --project design/project.icepro
 ```
 
 The process is silent on stdout except for JSON-RPC messages; diagnostic logs

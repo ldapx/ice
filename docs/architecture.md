@@ -1437,21 +1437,28 @@ However, the serialized representation should remain an ICE-defined format rathe
 
 ## 33. Project Files
 
-An ICE project should be self-describing and reproducible.
-
-Conceptually:
+An ICE project is a directory with one JSON project file and per-document JSON
+files:
 
 ```text
 project/
-├── project.toml
-├── schematic/
-├── layout/
-├── simulation/
-├── benchmarks/
-├── scripts/
-├── results/
-└── lockfile
+├── project.icepro       # project metadata only
+├── sch/
+│   └── <cell>.icesch    # one schematic cell per file
+├── lay/
+│   └── <cell>.icelay    # one layout cell or procedural layout per file
+├── sim/
+│   └── <sim>.icesim     # one simulation per file
+├── reports/
+├── build/
+├── .gitignore           # ignores reports/ and build/
+└── AGENTS.md
 ```
+
+The `.icepro` file contains identity, name, units, grid, package
+dependencies, and layer metadata. It does not contain schematic, layout, or
+simulation objects. The `reports/` and `build/` directories are generated
+output locations and are ignored by Git.
 
 A lockfile should eventually record exact package/PDK versions used by the project.
 

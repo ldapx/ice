@@ -316,12 +316,12 @@ class DocumentWindow : public QMainWindow {
             startupView_->setRecentProjects(projects);
     }
 
-    void createProject(const QString &rawName, const QString &rawLocation) {
+    void createProject(const QString &rawName, const QString &rawFolder, bool createFolder) {
         const auto name = rawName.trimmed();
-        const auto location = rawLocation.trimmed();
-        if (name.isEmpty() || location.isEmpty()) {
+        const auto folder = rawFolder.trimmed();
+        if (name.isEmpty() || folder.isEmpty()) {
             QMessageBox::information(this, QStringLiteral("Create Project"),
-                                     QStringLiteral("A project name and location are required."));
+                                     QStringLiteral("A project name and project folder are required."));
             return;
         }
         if (std::any_of(name.begin(), name.end(),
@@ -331,31 +331,32 @@ class DocumentWindow : public QMainWindow {
                                                     "file name."));
             return;
         }
-        QDir directory(location);
-        if (!directory.exists() && !QDir().mkpath(location)) {
-            QMessageBox::critical(this, QStringLiteral("Create Project"),
-                                  QStringLiteral("The project location could not be created:\n%1").arg(location));
+        std::filesystem::path root(folder.toStdString());
+        if (createFolder)
+            root /= name.toStdString();
+        const auto projectFile = root / "project.icepro";
+        std::error_code status;
+        if (std::filesystem::exists(projectFile, status) && !status) {
+            QMessageBox::information(
+                this, QStringLiteral("Create Project"),
+                QStringLiteral("A project already exists at:\n%1").arg(QString::fromStdString(root.string())));
             return;
         }
-        const auto path = directory.filePath(name + QStringLiteral(".ice.json"));
-        if (QFileInfo::exists(path) &&
-            QMessageBox::question(this, QStringLiteral("Create Project"),
-                                  QStringLiteral("A project file already exists at:\n%1\n\nOverwrite it?").arg(path),
-                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-            return;
-        auto project = makeNewProject(name);
         try {
-            project.save(path.toStdString());
+            std::filesystem::create_directories(root);
+            auto project = makeNewProject(name);
+            project.save(root);
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Project"), QString::fromStdString(error.what()));
             return;
         }
+        auto project = makeNewProject(name);
         if (!setProject(std::move(project)))
             return;
-        projectPath_ = path;
+        projectPath_ = QString::fromStdString(projectFile.string());
         if (activityPanel_)
-            activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
-        addRecentProject(path);
+            activityPanel_->setProjectPath(QString::fromStdString(root.string()));
+        addRecentProject(projectPath_);
         if (startupView_)
             startupView_->clearCreateForm();
         statusBar()->showMessage(QStringLiteral("New project created"));
@@ -364,20 +365,22 @@ class DocumentWindow : public QMainWindow {
     void openProjectPath(const QString &path) {
         if (path.isEmpty())
             return;
-        if (!QFileInfo::exists(path)) {
+        QFileInfo info(path);
+        const auto projectPath = info.isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
+        if (!QFileInfo::exists(projectPath)) {
             QMessageBox::warning(this, QStringLiteral("Open Project"),
-                                 QStringLiteral("The project file no longer exists:\n%1").arg(path));
+                                 QStringLiteral("The project file no longer exists:\n%1").arg(projectPath));
             removeRecentProject(path);
             return;
         }
         try {
-            auto project = ice::Project::load(path.toStdString());
+            auto project = ice::Project::load(projectPath.toStdString());
             if (!setProject(std::move(project)))
                 return;
-            projectPath_ = path;
+            projectPath_ = projectPath;
             if (activityPanel_)
-                activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
-            addRecentProject(path);
+                activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
+            addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project opened"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Open Project"), QString::fromStdString(error.what()));
@@ -385,32 +388,15 @@ class DocumentWindow : public QMainWindow {
     }
 
     void newProject() {
-        bool accepted = false;
-        const auto name = QInputDialog::getText(this, QStringLiteral("New Project"), QStringLiteral("Project name:"),
-                                                QLineEdit::Normal, QStringLiteral("untitled"), &accepted);
-        if (!accepted || name.trimmed().isEmpty())
+        CreateProjectDialog dialog(this);
+        if (dialog.exec() != QDialog::Accepted)
             return;
-        setProject(makeNewProject(name.trimmed()));
-        const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Choose New Project Path"),
-                                                       name.trimmed() + QStringLiteral(".ice.json"),
-                                                       QStringLiteral("ICE projects (*.ice.json);;All files (*)"));
-        if (!path.isEmpty()) {
-            try {
-                project_->save(path.toStdString());
-                projectPath_ = path;
-                if (activityPanel_)
-                    activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
-                addRecentProject(path);
-            } catch (const ice::ProjectError &error) {
-                QMessageBox::critical(this, QStringLiteral("New Project"), QString::fromStdString(error.what()));
-            }
-        }
-        statusBar()->showMessage(QStringLiteral("New project created"));
+        createProject(dialog.projectName(), dialog.projectFolder(), dialog.createFolder());
     }
 
     void openProject() {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Open ICE Project"), QString(),
-                                                       QStringLiteral("ICE projects (*.ice.json);;All files (*)"));
+                                                       QStringLiteral("ICE projects (*.icepro);;All files (*)"));
         if (!path.isEmpty())
             openProjectPath(path);
     }
@@ -424,17 +410,17 @@ class DocumentWindow : public QMainWindow {
 
         auto path = projectPath_;
         if (path.isEmpty())
-            path = QFileDialog::getSaveFileName(this, QStringLiteral("Save ICE Project"),
-                                                QStringLiteral("project.ice.json"),
-                                                QStringLiteral("ICE projects (*.ice.json);;All files (*)"));
+            path =
+                QFileDialog::getSaveFileName(this, QStringLiteral("Save ICE Project"), QStringLiteral("project.icepro"),
+                                             QStringLiteral("ICE projects (*.icepro);;All files (*)"));
         if (path.isEmpty())
             return;
         try {
             project_->save(path.toStdString());
-            projectPath_ = path;
+            projectPath_ = QFileInfo(path).isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
             if (activityPanel_)
-                activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
-            addRecentProject(path);
+                activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save Project"), QString::fromStdString(error.what()));
@@ -4547,8 +4533,9 @@ class DocumentWindow : public QMainWindow {
         documents->addTab(simulationPage_, QStringLiteral("Simulation"));
         workspaceStack_ = new WorkspaceStack;
         startupView_ = new StartupView;
-        startupView_->setOnCreateProject(
-            [this](const QString &name, const QString &location) { createProject(name, location); });
+        startupView_->setOnCreateProject([this](const QString &name, const QString &location, bool createFolder) {
+            createProject(name, location, createFolder);
+        });
         startupView_->setOnOpenProject([this] { openProject(); });
         startupView_->setOnOpenRecent([this](const QString &path) { openProjectPath(path); });
         startupView_->setRecentProjects(loadRecentProjects());

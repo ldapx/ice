@@ -265,6 +265,9 @@ class Project {
     std::vector<Diagnostic> validate() const;
     std::string serialize() const;
     static Project deserialize(const std::string &text);
+    // Saves/loads an ICE project directory. `path` may be the project root or
+    // its project.icepro file. The project file contains only project metadata;
+    // schematics, layouts, and simulations are stored in sch/, lay/, and sim/.
     void save(const std::filesystem::path &path) const;
     static Project load(const std::filesystem::path &path);
 };

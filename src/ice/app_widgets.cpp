@@ -9,6 +9,7 @@
 
 #include <QAbstractButton>
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -799,14 +800,19 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     name_->setPlaceholderText(QStringLiteral("My design"));
     name_->setClearButtonEnabled(true);
     location_ = new QLineEdit(QDir::homePath());
-    auto *browseButton = new QPushButton(QStringLiteral("Browse…"));
+    auto *browseButton = new QPushButton(QStringLiteral("…"));
+    browseButton->setFixedWidth(32);
+    browseButton->setToolTip(QStringLiteral("Choose project folder"));
     auto *locationRow = new QWidget;
     auto *locationLayout = new QHBoxLayout(locationRow);
     locationLayout->setContentsMargins(0, 0, 0, 0);
     locationLayout->addWidget(location_, 1);
     locationLayout->addWidget(browseButton);
+    createFolder_ = new QCheckBox(QStringLiteral("Create project folder"));
+    createFolder_->setChecked(true);
     form->addRow(QStringLiteral("Project name"), name_);
-    form->addRow(QStringLiteral("Location"), locationRow);
+    form->addRow(QStringLiteral("Project folder"), locationRow);
+    form->addRow(QString(), createFolder_);
     auto *buttonRow = new QHBoxLayout;
     auto *openButton = new QPushButton(QStringLiteral("Open Project…"));
     createButton_ = new QPushButton(QStringLiteral("Create Project"));
@@ -861,7 +867,7 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     });
     connect(createButton_, &QPushButton::clicked, this, [this] {
         if (onCreateProject_)
-            onCreateProject_(name_->text().trimmed(), location_->text().trimmed());
+            onCreateProject_(name_->text().trimmed(), location_->text().trimmed(), createFolder_->isChecked());
     });
     auto submit = [this] {
         if (createButton_->isEnabled())
@@ -897,7 +903,9 @@ void StartupView::setRecentProjects(const QStringList &paths) {
         return;
     }
     for (const auto &path : paths) {
-        auto *item = new QListWidgetItem(QFileInfo(path).fileName(), recent_);
+        const QFileInfo info(path);
+        const auto label = info.fileName() == QStringLiteral("project.icepro") ? info.dir().dirName() : info.fileName();
+        auto *item = new QListWidgetItem(label, recent_);
         item->setData(Qt::UserRole, path);
         item->setToolTip(path);
     }
@@ -921,6 +929,64 @@ QLabel *StartupView::makeLink(const QString &text, const QString &url) {
     label->setTextInteractionFlags(Qt::TextBrowserInteraction);
     return label;
 }
+
+CreateProjectDialog::CreateProjectDialog(QWidget *parent) : QDialog(parent) {
+    setWindowTitle(QStringLiteral("Create Project"));
+    setModal(true);
+    resize(560, 230);
+
+    auto *layout = new QVBoxLayout(this);
+    auto *form = new QFormLayout;
+    name_ = new QLineEdit(QStringLiteral("untitled"));
+    name_->setClearButtonEnabled(true);
+    folder_ = new QLineEdit(QDir::homePath());
+    auto *browse = new QPushButton(QStringLiteral("…"));
+    browse->setFixedWidth(32);
+    browse->setToolTip(QStringLiteral("Choose project folder"));
+    auto *folderRow = new QWidget;
+    auto *folderLayout = new QHBoxLayout(folderRow);
+    folderLayout->setContentsMargins(0, 0, 0, 0);
+    folderLayout->addWidget(folder_, 1);
+    folderLayout->addWidget(browse);
+    createFolder_ = new QCheckBox(QStringLiteral("Create project folder"));
+    createFolder_->setChecked(true);
+    form->addRow(QStringLiteral("Project name"), name_);
+    form->addRow(QStringLiteral("Project folder"), folderRow);
+    form->addRow(QString(), createFolder_);
+    layout->addLayout(form);
+    layout->addStretch();
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Create"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Cancel"));
+    layout->addWidget(buttons);
+    connect(browse, &QPushButton::clicked, this, [this] {
+        const auto directory =
+            QFileDialog::getExistingDirectory(this, QStringLiteral("Choose Project Folder"), folder_->text());
+        if (!directory.isEmpty())
+            folder_->setText(directory);
+    });
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (name_->text().trimmed().isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Create Project"), QStringLiteral("Enter a project name."));
+            name_->setFocus();
+            return;
+        }
+        if (folder_->text().trimmed().isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Create Project"), QStringLiteral("Choose a project folder."));
+            folder_->setFocus();
+            return;
+        }
+        QDialog::accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    name_->selectAll();
+    name_->setFocus();
+}
+
+QString CreateProjectDialog::projectName() const { return name_->text().trimmed(); }
+QString CreateProjectDialog::projectFolder() const { return folder_->text().trimmed(); }
+bool CreateProjectDialog::createFolder() const { return createFolder_->isChecked(); }
 
 EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);

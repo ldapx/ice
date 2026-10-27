@@ -16,6 +16,7 @@
 #include <string>
 
 class QComboBox;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -108,7 +109,7 @@ class StatusBar : public QStatusBar {
 
 class StartupView : public QWidget {
   public:
-    using CreateProjectCallback = std::function<void(const QString &name, const QString &location)>;
+    using CreateProjectCallback = std::function<void(const QString &name, const QString &folder, bool createFolder)>;
     using OpenProjectCallback = std::function<void()>;
     using OpenRecentCallback = std::function<void(const QString &path)>;
 
@@ -125,6 +126,7 @@ class StartupView : public QWidget {
 
     QLineEdit *name_ = nullptr;
     QLineEdit *location_ = nullptr;
+    QCheckBox *createFolder_ = nullptr;
     QPushButton *createButton_ = nullptr;
     QListWidget *recent_ = nullptr;
     QLabel *subtitle_ = nullptr;
@@ -132,6 +134,20 @@ class StartupView : public QWidget {
     CreateProjectCallback onCreateProject_;
     OpenProjectCallback onOpenProject_;
     OpenRecentCallback onOpenRecent_;
+};
+
+class CreateProjectDialog : public QDialog {
+  public:
+    explicit CreateProjectDialog(QWidget *parent = nullptr);
+
+    QString projectName() const;
+    QString projectFolder() const;
+    bool createFolder() const;
+
+  private:
+    QLineEdit *name_ = nullptr;
+    QLineEdit *folder_ = nullptr;
+    QCheckBox *createFolder_ = nullptr;
 };
 
 class EmptySchematicPanel : public QWidget {

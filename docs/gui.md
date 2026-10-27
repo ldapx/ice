@@ -65,6 +65,12 @@ The GUI should support:
 - reporting missing packages, PDKs, or incompatible schema versions;
 - recovering from failed external jobs without losing in-memory state.
 
+Creating a project asks for a project name, a project folder, and whether to
+create a folder named after the project. The project root is initialized with
+`project.icepro`, `sch/`, `lay/`, `sim/`, `reports/`, `build/`, `.gitignore`,
+and `AGENTS.md`. Schematics, layouts, and simulations are stored as individual
+JSON files with `.icesch`, `.icelay`, and `.icesim` extensions.
+
 Project state, view state, and transient job state should be separate:
 
 | State | Examples | Persistence |

@@ -466,16 +466,16 @@ class IceMcpServer {
         tools.push_back(tool_builder("ice_version").with_description("Return the ICE version.").build());
         tools.push_back(tool_builder("project_create")
                             .with_description("Create and open a new ICE project.")
-                            .with_string_param("path", "Project file path")
+                            .with_string_param("path", "Project folder or project.icepro path")
                             .with_string_param("name", "Project name")
                             .build());
         tools.push_back(tool_builder("project_open")
                             .with_description("Open an existing ICE project.")
-                            .with_string_param("path", "Project file path")
+                            .with_string_param("path", "Project folder or project.icepro path")
                             .build());
         tools.push_back(tool_builder("project_save")
                             .with_description("Save the open project.")
-                            .with_string_param("path", "Optional new project path", false)
+                            .with_string_param("path", "Optional project folder or project.icepro path", false)
                             .build());
         tools.push_back(
             tool_builder("project_summary").with_description("Summarize the open project and its cells.").build());

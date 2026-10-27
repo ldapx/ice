@@ -36,6 +36,26 @@ Python scientific stack.
 - External tools are accessed through versioned adapters; their types do not leak into the core model.
 - Results are deterministic and reproducible from declared inputs and recorded versions.
 
+## Project layout
+
+An ICE project is a directory:
+
+```text
+project/
+├── project.icepro       # project metadata
+├── sch/                 # *.icesch schematic cells
+├── lay/                 # *.icelay layout cells and procedural layouts
+├── sim/                 # *.icesim simulations
+├── reports/             # generated reports, ignored by Git
+├── build/               # generated build output, ignored by Git
+├── .gitignore
+└── AGENTS.md
+```
+
+All project files are JSON. `project.icepro` contains only project-level
+metadata, such as identity, name, units, grid, package dependencies, and
+layers. Schematics, layouts, and simulations are stored as individual files.
+
 ## Prerequisites
 
 - C++20 compiler

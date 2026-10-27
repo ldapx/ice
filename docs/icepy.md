@@ -56,8 +56,13 @@ builder.parameter("w", "1u")
 cell = builder.cell()
 print(cell.name, len(cell.shapes), cell.bounds)
 print(project.diagnostics())
-project.save("demo.ice.json")
+project.save("demo")
 ```
+
+`Project.save()` and `Project.load()` use the split project-directory
+format. The root contains `project.icepro`, `sch/*.icesch`,
+`lay/*.icelay`, `sim/*.icesim`, `reports/`, `build/`, `.gitignore`, and
+`AGENTS.md`.
 
 ## PCell runtime
 

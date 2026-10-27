@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <unordered_set>
@@ -633,32 +634,232 @@ Project Project::deserialize(const std::string &text) {
     }
 }
 
+namespace {
+
+std::filesystem::path projectRoot(const std::filesystem::path &path) {
+    if (path.empty())
+        throw ProjectError("project.path", "Project path must not be empty");
+    std::error_code status;
+    if (std::filesystem::is_directory(path, status) && !status)
+        return path;
+    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
+        return path.parent_path();
+    return path;
+}
+
+std::string safeFileStem(const std::string &name) {
+    std::string stem;
+    stem.reserve(name.size());
+    for (const unsigned char character : name) {
+        if (std::isalnum(character) || character == '-' || character == '_' || character == ' ' || character == '.')
+            stem.push_back(static_cast<char>(character));
+        else
+            stem.push_back('_');
+    }
+    while (!stem.empty() && stem.front() == '.')
+        stem.erase(stem.begin());
+    if (stem.empty())
+        stem = "cell";
+    return stem;
+}
+
+json readJsonFile(const std::filesystem::path &path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+        throw ProjectError("project.load", "Unable to open file: " + path.string());
+    try {
+        return json::parse(stream);
+    } catch (const std::exception &error) {
+        throw ProjectError("project.parse", "Unable to parse " + path.string() + ": " + error.what());
+    }
+}
+
+void writeJsonFile(const std::filesystem::path &path, const json &value) {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream)
+        throw ProjectError("project.save", "Unable to open file for writing: " + path.string());
+    stream << value.dump(2) << "\n";
+    if (!stream)
+        throw ProjectError("project.save", "Unable to write file: " + path.string());
+}
+
+void prepareDirectory(const std::filesystem::path &path, const std::string &extension) {
+    std::filesystem::create_directories(path);
+    std::error_code status;
+    for (std::filesystem::directory_iterator iterator(path, status), end; !status && iterator != end;
+         iterator.increment(status)) {
+        if (!iterator->is_regular_file())
+            continue;
+        if (iterator->path().extension() == extension)
+            std::filesystem::remove(iterator->path(), status);
+        status.clear();
+    }
+}
+
+void ensureGitignore(const std::filesystem::path &root) {
+    const auto path = root / ".gitignore";
+    std::string text;
+    {
+        std::ifstream input(path);
+        if (input)
+            text.assign(std::istreambuf_iterator<char>(input), {});
+    }
+    const auto ensureLine = [&](const std::string &line) {
+        if (text.find(line + "\n") == std::string::npos && text != line)
+            text += (text.empty() || text.back() == '\n' ? "" : "\n") + line + "\n";
+    };
+    ensureLine("reports/");
+    ensureLine("build/");
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw ProjectError("project.save", "Unable to write .gitignore");
+    output << text;
+}
+
+void ensureAgentsFile(const std::filesystem::path &root, const std::string &projectName) {
+    const auto path = root / "AGENTS.md";
+    std::error_code status;
+    if (std::filesystem::exists(path, status) && !status)
+        return;
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw ProjectError("project.save", "Unable to write AGENTS.md");
+    output << "# " << projectName << "\n\n"
+           << "This directory is an ICE project.\n\n"
+           << "- `project.icepro` contains project metadata.\n"
+           << "- `sch/*.icesch` contains schematic cells.\n"
+           << "- `lay/*.icelay` contains layout cells and procedural layouts.\n"
+           << "- `sim/*.icesim` contains simulations.\n"
+           << "- `reports/` and `build/` are generated output directories.\n\n"
+           << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";
+}
+
+std::string uniqueStem(const std::string &name, ObjectId id, std::set<std::string> &used) {
+    auto stem = safeFileStem(name);
+    if (used.insert(stem).second)
+        return stem;
+    auto candidate = stem + "-" + std::to_string(id);
+    if (used.insert(candidate).second)
+        return candidate;
+    auto suffix = 2;
+    while (!used.insert(candidate = stem + "-" + std::to_string(id) + "-" + std::to_string(suffix++)).second) {
+    }
+    return candidate;
+}
+
+} // namespace
+
 void Project::save(const std::filesystem::path &path) const {
     auto diagnostics = validate();
     if (!diagnostics.empty())
         throw ProjectError(diagnostics.front().code, diagnostics.front().message);
-    const auto tmpPath = path.string() + ".tmp";
-    {
-        std::ofstream stream(tmpPath, std::ios::binary | std::ios::trunc);
-        if (!stream)
-            throw ProjectError("project.save", "Unable to open project file for writing");
-        stream << serialize();
-        stream.flush();
-        if (!stream)
-            throw ProjectError("project.save", "Unable to write project file");
+
+    const auto root = projectRoot(path);
+    const auto full = json::parse(serialize());
+    json projectJson = full;
+    const auto schematicCells = full.at("schematic_cells");
+    const auto layoutCells = full.at("layout_cells");
+    const auto proceduralLayouts = full.at("procedural_layouts");
+    const auto simulations = full.at("simulations");
+    projectJson.erase("schematic_cells");
+    projectJson.erase("layout_cells");
+    projectJson.erase("procedural_layouts");
+    projectJson.erase("simulations");
+
+    std::filesystem::create_directories(root);
+    const auto schematicDir = root / "sch";
+    const auto layoutDir = root / "lay";
+    const auto simulationDir = root / "sim";
+    prepareDirectory(schematicDir, ".icesch");
+    prepareDirectory(layoutDir, ".icelay");
+    prepareDirectory(simulationDir, ".icesim");
+    std::filesystem::create_directories(root / "reports");
+    std::filesystem::create_directories(root / "build");
+
+    writeJsonFile(root / "project.icepro", projectJson);
+    ensureGitignore(root);
+    ensureAgentsFile(root, name);
+
+    std::set<std::string> usedSchematics;
+    for (const auto &cell : schematicCells) {
+        const auto id = cell.at("id").get<ObjectId>();
+        const auto stem = uniqueStem(cell.value("name", std::string{}), id, usedSchematics);
+        writeJsonFile(schematicDir / (stem + ".icesch"),
+                      json{{"format", "ice-schematic"}, {"schema_version", 1}, {"cell", cell}});
     }
-    std::error_code renameError;
-    std::filesystem::rename(tmpPath, path, renameError);
-    if (renameError)
-        throw ProjectError("project.save", "Unable to replace project file: " + renameError.message());
-    spdlog::info("Saved project {}", path.string());
+
+    std::set<std::string> usedLayouts;
+    for (const auto &cell : layoutCells) {
+        const auto id = cell.at("id").get<ObjectId>();
+        const auto stem = uniqueStem(cell.value("name", std::string{}), id, usedLayouts);
+        writeJsonFile(layoutDir / (stem + ".icelay"),
+                      json{{"format", "ice-layout"}, {"schema_version", 1}, {"layout", cell}});
+    }
+    for (const auto &layout : proceduralLayouts) {
+        const auto id = layout.at("id").get<ObjectId>();
+        const auto stem = uniqueStem(layout.value("name", std::string{}), id, usedLayouts);
+        writeJsonFile(layoutDir / (stem + ".icelay"),
+                      json{{"format", "ice-layout"}, {"schema_version", 1}, {"procedural_layout", layout}});
+    }
+
+    std::set<std::string> usedSimulations;
+    for (const auto &simulation : simulations) {
+        const auto id = simulation.at("id").get<ObjectId>();
+        const auto stem = uniqueStem(simulation.value("name", std::string{}), id, usedSimulations);
+        writeJsonFile(simulationDir / (stem + ".icesim"),
+                      json{{"format", "ice-simulation"}, {"schema_version", 1}, {"simulation", simulation}});
+    }
+    spdlog::info("Saved project {}", (root / "project.icepro").string());
 }
 
 Project Project::load(const std::filesystem::path &path) {
-    std::ifstream stream(path);
-    if (!stream)
-        throw ProjectError("project.load", "Unable to open project file");
-    return deserialize({std::istreambuf_iterator<char>(stream), {}});
+    const auto root = projectRoot(path);
+    auto full = readJsonFile(root / "project.icepro");
+    if (full.value("format", std::string{}) != "ice-project")
+        throw ProjectError("project.format", "Unsupported project format");
+    full["schematic_cells"] = json::array();
+    full["layout_cells"] = json::array();
+    full["procedural_layouts"] = json::array();
+    full["simulations"] = json::array();
+
+    const auto readDirectory = [&](const std::filesystem::path &directory, const std::string &extension,
+                                   const auto &consume) {
+        std::vector<std::filesystem::path> files;
+        std::error_code status;
+        if (std::filesystem::is_directory(directory, status) && !status) {
+            for (std::filesystem::directory_iterator iterator(directory, status), end; !status && iterator != end;
+                 iterator.increment(status)) {
+                if (iterator->is_regular_file() && iterator->path().extension() == extension)
+                    files.push_back(iterator->path());
+            }
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto &file : files)
+            consume(readJsonFile(file));
+    };
+
+    readDirectory(root / "sch", ".icesch", [&](const json &document) {
+        if (document.value("format", std::string{}) != "ice-schematic" || !document.contains("cell"))
+            throw ProjectError("project.format", "Invalid schematic file");
+        full["schematic_cells"].push_back(document.at("cell"));
+    });
+    readDirectory(root / "lay", ".icelay", [&](const json &document) {
+        if (document.value("format", std::string{}) != "ice-layout")
+            throw ProjectError("project.format", "Invalid layout file");
+        if (document.contains("layout"))
+            full["layout_cells"].push_back(document.at("layout"));
+        else if (document.contains("procedural_layout"))
+            full["procedural_layouts"].push_back(document.at("procedural_layout"));
+        else
+            throw ProjectError("project.format", "Invalid layout file");
+    });
+    readDirectory(root / "sim", ".icesim", [&](const json &document) {
+        if (document.value("format", std::string{}) != "ice-simulation" || !document.contains("simulation"))
+            throw ProjectError("project.format", "Invalid simulation file");
+        full["simulations"].push_back(document.at("simulation"));
+    });
+
+    return deserialize(full.dump());
 }
 
 ProjectSession::ProjectSession(Project project) : project_(std::move(project)), historyStates_{project_} {}

@@ -118,6 +118,57 @@ TEST_CASE("selection, cross-probing, and grid snapping are stable") {
     CHECK(selection.related().empty());
 }
 
+TEST_CASE("projects save as split directory files") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-split-project-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "split-project";
+    project.name = "split-project";
+    project.packageDependencies = {"example.pdk"};
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto schematic = ice::createSchematicCell(project, "amp", "example.pdk");
+    const auto textSchematic = ice::createTextSchematicCell(project, "spice_top", "example.pdk", ".title spice_top\n");
+    const auto layout = ice::createLayoutCell(project, "top", "example.pdk");
+    ice::addRectangle(project, layout, layer, {0, 0, 1000, 500});
+    ice::SimulationItem simulation;
+    simulation.id = project.nextId();
+    simulation.name = "tran1";
+    simulation.schematic = schematic;
+    project.simulations.emplace(simulation.id, simulation);
+
+    project.save(root);
+    CHECK(std::filesystem::is_regular_file(root / "project.icepro"));
+    CHECK(std::filesystem::is_directory(root / "sch"));
+    CHECK(std::filesystem::is_directory(root / "lay"));
+    CHECK(std::filesystem::is_directory(root / "sim"));
+    CHECK(std::filesystem::is_directory(root / "reports"));
+    CHECK(std::filesystem::is_directory(root / "build"));
+    CHECK(std::filesystem::is_regular_file(root / ".gitignore"));
+    CHECK(std::filesystem::is_regular_file(root / "AGENTS.md"));
+
+    std::ifstream projectStream(root / "project.icepro");
+    const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
+    CHECK(projectJson.find("schematic_cells") == std::string::npos);
+    CHECK(projectJson.find("layout_cells") == std::string::npos);
+    CHECK(projectJson.find("simulations") == std::string::npos);
+
+    const auto loaded = ice::Project::load(root / "project.icepro");
+    CHECK(loaded.name == project.name);
+    CHECK(loaded.schematicCells.contains(schematic));
+    CHECK(loaded.schematicCells.contains(textSchematic));
+    CHECK(loaded.layoutCells.contains(layout));
+    CHECK(loaded.simulations.contains(simulation.id));
+    CHECK(loaded.serialize() == project.serialize());
+
+    std::ifstream ignoreStream(root / ".gitignore");
+    const std::string ignoreText((std::istreambuf_iterator<char>(ignoreStream)), {});
+    CHECK(ignoreText.find("reports/") != std::string::npos);
+    CHECK(ignoreText.find("build/") != std::string::npos);
+
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("schematic instance parameters survive serialization") {
     ice::Project project;
     project.identity = "params";

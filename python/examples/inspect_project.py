@@ -6,6 +6,6 @@ The binding module is named ``icepy`` when the optional Python target is built.
 import icepy
 
 
-project = icepy.load_project("demo.ice.json")
+project = icepy.load_project("demo/project.icepro")
 print(project.name)
 print(project.schema_version)
