@@ -742,6 +742,38 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Opened %1").arg(QString::fromStdString(childIt->second.name)));
     }
 
+    void openLayoutParentCell() {
+        if (!project_)
+            return;
+        for (const auto &[id, cell] : project_->project().layoutCells) {
+            if (id == activeLayoutId_)
+                continue;
+            for (const auto &[_, instance] : cell.instances) {
+                if (instance.cell != activeLayoutId_)
+                    continue;
+                openLibraryLayoutCellTabs_.insert(id);
+                activeLayoutId_ = id;
+                layoutViewInitialized_ = false;
+                refreshEmbeddedPanels();
+                refreshLayout();
+                statusBar()->showMessage(QStringLiteral("Opened %1").arg(QString::fromStdString(cell.name)));
+                return;
+            }
+        }
+        statusBar()->showMessage(QStringLiteral("Already at the top of the layout hierarchy"));
+    }
+
+    void openSelectedLayoutCell() {
+        if (!layoutCanvas_)
+            return;
+        const auto instanceId = layoutCanvas_->selectedLayoutInstance();
+        if (instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Select a layout instance first"));
+            return;
+        }
+        openLayoutInstanceCell(instanceId);
+    }
+
     void updateLayoutPathConfig() {
         if (!project_ || !layoutCanvas_)
             return;
@@ -3312,6 +3344,8 @@ class DocumentWindow : public QMainWindow {
             schematicToolbarColumn_->setVisible(hasSchematics);
         if (layoutToolbarColumn_)
             layoutToolbarColumn_->setVisible(hasLayouts);
+        if (layoutOptionsColumn_)
+            layoutOptionsColumn_->setVisible(hasLayouts);
 
         if (schematicEditorStack_ && schematicEditorPage_ && schematicEmptyPanel_) {
             const bool showingEmpty = schematicEditorStack_->currentWidget() == schematicEmptyPanel_;
@@ -3450,6 +3484,15 @@ class DocumentWindow : public QMainWindow {
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
         layoutEditorStack_->addWidget(layoutEditorPage_);
         layoutContentLayout->addWidget(layoutEditorStack_, 1);
+        auto *layoutOptionsToolbar = createLayoutOptionsToolbar();
+        layoutOptionsToolbar->setOrientation(Qt::Vertical);
+        layoutOptionsColumn_ = new QWidget;
+        auto *layoutOptionsLayout = new QVBoxLayout(layoutOptionsColumn_);
+        layoutOptionsLayout->setContentsMargins(0, 0, 0, 0);
+        layoutOptionsLayout->addStretch(1);
+        layoutOptionsLayout->addWidget(layoutOptionsToolbar, 0, Qt::AlignHCenter);
+        layoutOptionsLayout->addStretch(1);
+        layoutContentLayout->addWidget(layoutOptionsColumn_, 0);
         layoutRightTabs_ = new QTabWidget;
         auto *layoutRightTabs = layoutRightTabs_;
         layoutPropertiesPanel_ = new PropertiesPanel(false);
@@ -4077,42 +4120,43 @@ class DocumentWindow : public QMainWindow {
             selectTool->setCheckable(true);
             selectTool->setChecked(true);
             layoutSelectTool_ = selectTool;
-            auto *placeDeviceTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Device"));
-            placeDeviceTool->setCheckable(true);
-            layoutPlaceDeviceTool_ = placeDeviceTool;
+
+            auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Symbol"));
+            placeSymbolTool->setCheckable(true);
+            layoutPlaceDeviceTool_ = placeSymbolTool;
+
             auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create Rectangle"));
             rectangleTool->setCheckable(true);
             layoutRectangleTool_ = rectangleTool;
+
+            auto *polygonTool = addTool(QStringLiteral("pentagon"), QStringLiteral("Create Polygon"));
+            connect(polygonTool, &QAction::triggered, this,
+                    [this] { statusBar()->showMessage(QStringLiteral("Create Polygon is not available yet")); });
+
             auto *pathTool = addTool(QStringLiteral("route"), QStringLiteral("Draw Path"));
             pathTool->setCheckable(true);
             layoutPathTool_ = pathTool;
+
+            auto *textTool = addTool(QStringLiteral("type"), QStringLiteral("Draw Text"));
+            connect(textTool, &QAction::triggered, this,
+                    [this] { statusBar()->showMessage(QStringLiteral("Draw Text is not available yet")); });
+
+            auto *rulerTool = addTool(QStringLiteral("ruler"), QStringLiteral("Ruler"));
+            connect(rulerTool, &QAction::triggered, this,
+                    [this] { statusBar()->showMessage(QStringLiteral("Ruler is not available yet")); });
+
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
-            for (auto *action : {selectTool, placeDeviceTool, rectangleTool, pathTool})
+            for (auto *action : {selectTool, placeSymbolTool, rectangleTool, pathTool})
                 toolGroup->addAction(action);
+
             connect(selectTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_)
                     layoutCanvas_->setTool(LayoutCanvas::Tool::select);
                 clearLayoutDeviceSelection();
                 refreshLayoutProperties(true);
             });
-            auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
-            connect(rotateTool, &QAction::triggered, this, [this] {
-                transformSelectedLayoutInstance(ice::Orientation::r90, QStringLiteral("rotate layout device"));
-            });
-            auto *flipTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontal"));
-            connect(flipTool, &QAction::triggered, this, [this] {
-                transformSelectedLayoutInstance(ice::Orientation::my, QStringLiteral("flip layout device"));
-            });
-            auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
-            snapTool->setCheckable(true);
-            snapTool->setChecked(true);
-            connect(snapTool, &QAction::toggled, this, [this](bool enabled) {
-                if (layoutCanvas_)
-                    layoutCanvas_->setSnapToGrid(enabled);
-            });
-
-            connect(placeDeviceTool, &QAction::triggered, this, [this] {
+            connect(placeSymbolTool, &QAction::triggered, this, [this] {
                 if (layoutLeftTabs_ && layoutDevicesPanel_)
                     layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
                 if (layoutCanvas_) {
@@ -4153,28 +4197,6 @@ class DocumentWindow : public QMainWindow {
                                    "right-click = finish")
                         .arg(QString::fromStdString(layoutCanvas_->pathLayerName()))
                         .arg(layoutCanvas_->pathWidth()));
-            });
-
-            toolbar->addSeparator();
-            auto *gridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
-            gridTool->setCheckable(true);
-            gridTool->setChecked(true);
-            connect(gridTool, &QAction::toggled, this, [this](bool checked) {
-                if (layoutCanvas_)
-                    layoutCanvas_->setGridVisible(checked);
-            });
-            auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to View"));
-            connect(fitTool, &QAction::triggered, this, [this] {
-                if (layoutCanvas_)
-                    layoutCanvas_->fitToContent();
-            });
-
-            toolbar->addSeparator();
-            auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
-            layoutDeleteTool_ = deleteTool;
-            connect(deleteTool, &QAction::triggered, this, [this] {
-                if (layoutCanvas_)
-                    layoutCanvas_->deleteSelectedShapes();
             });
             return toolbar;
         }
@@ -4293,6 +4315,71 @@ class DocumentWindow : public QMainWindow {
         return toolbar;
     }
 
+    QToolBar *createLayoutOptionsToolbar() {
+        auto *toolbar = new QToolBar(QStringLiteral("Layout options"), this);
+        toolbar->setMovable(false);
+        toolbar->setIconSize(QSize(18, 18));
+        toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        toolbar->setAccessibleName(QStringLiteral("Layout options toolbar"));
+
+        auto addTool = [toolbar](const QString &iconName, const QString &name) {
+            auto *action = toolbar->addAction(name);
+            setLucideIcon(action, iconName);
+            action->setToolTip(name);
+            action->setStatusTip(name);
+            return action;
+        };
+
+        auto *gridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
+        gridTool->setCheckable(true);
+        gridTool->setChecked(true);
+        connect(gridTool, &QAction::toggled, this, [this](bool checked) {
+            if (layoutCanvas_)
+                layoutCanvas_->setGridVisible(checked);
+        });
+        auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
+        snapTool->setCheckable(true);
+        snapTool->setChecked(true);
+        connect(snapTool, &QAction::toggled, this, [this](bool enabled) {
+            if (layoutCanvas_)
+                layoutCanvas_->setSnapToGrid(enabled);
+        });
+        auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to View"));
+        connect(fitTool, &QAction::triggered, this, [this] {
+            if (layoutCanvas_)
+                layoutCanvas_->fitToContent();
+        });
+
+        toolbar->addSeparator();
+        auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
+        connect(rotateTool, &QAction::triggered, this, [this] {
+            transformSelectedLayoutInstance(ice::Orientation::r90, QStringLiteral("rotate layout device"));
+        });
+        auto *flipHorizontalTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontally"));
+        connect(flipHorizontalTool, &QAction::triggered, this, [this] {
+            transformSelectedLayoutInstance(ice::Orientation::my, QStringLiteral("flip layout device"));
+        });
+        auto *flipVerticalTool = addTool(QStringLiteral("flip-vertical-2"), QStringLiteral("Flip Vertically"));
+        connect(flipVerticalTool, &QAction::triggered, this, [this] {
+            transformSelectedLayoutInstance(ice::Orientation::mx, QStringLiteral("flip layout device"));
+        });
+
+        toolbar->addSeparator();
+        auto *upTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Hierarchy Go Up"));
+        connect(upTool, &QAction::triggered, this, [this] { openLayoutParentCell(); });
+        auto *downTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Hierarchy Go Down"));
+        connect(downTool, &QAction::triggered, this, [this] { openSelectedLayoutCell(); });
+
+        toolbar->addSeparator();
+        auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+        layoutDeleteTool_ = deleteTool;
+        connect(deleteTool, &QAction::triggered, this, [this] {
+            if (layoutCanvas_)
+                layoutCanvas_->deleteSelectedShapes();
+        });
+        return toolbar;
+    }
+
     void createStatusBar() {
         auto *bar = new StatusBar(this);
         setStatusBar(bar);
@@ -4319,6 +4406,7 @@ class DocumentWindow : public QMainWindow {
     QWidget *layoutEditorPage_ = nullptr;
     EmptyLayoutPanel *layoutEmptyPanel_ = nullptr;
     QWidget *layoutToolbarColumn_ = nullptr;
+    QWidget *layoutOptionsColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
     std::set<ice::ObjectId> openLibraryLayoutCellTabs_;
