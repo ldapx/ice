@@ -1049,7 +1049,13 @@ class DocumentWindow : public QMainWindow {
             updateLayoutPathConfig();
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
+        const auto layerVisible = [&](ice::ObjectId layerId) {
+            const auto layer = project.layers.find(layerId);
+            return layer == project.layers.end() || layer->second.visible;
+        };
         for (const auto &[id, shape] : cellIt->second.shapes) {
+            if (!layerVisible(shape.layer))
+                continue;
             const auto style = styles.contains(shape.layer)
                                    ? styles.at(shape.layer)
                                    : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
@@ -1088,6 +1094,8 @@ class DocumentWindow : public QMainWindow {
                            const std::function<ice::Point(ice::Point)> &currentMapper,
                            std::vector<ice::ObjectId> &currentAncestors) {
                 for (const auto &[_, shape] : currentCell.shapes) {
+                    if (!layerVisible(shape.layer))
+                        continue;
                     const auto style = styles.contains(shape.layer)
                                            ? styles.at(shape.layer)
                                            : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
@@ -3507,6 +3515,34 @@ class DocumentWindow : public QMainWindow {
         layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
+        layersPanel_->setOnLayerVisibilityChanged([this](ice::ObjectId layerId, bool visible) {
+            if (!project_)
+                return;
+            project_->execute("toggle layer visibility", [&](ice::Project &project) {
+                const auto layer = project.layers.find(layerId);
+                if (layer == project.layers.end() || layer->second.visible == visible)
+                    return;
+                layer->second.visible = visible;
+            });
+            refreshLayout();
+        });
+        layersPanel_->setOnAllLayersVisibilityChanged([this](bool visible) {
+            if (!project_)
+                return;
+            bool changed = false;
+            project_->execute(visible ? "show all layers" : "hide all layers", [&](ice::Project &project) {
+                for (auto &[_, layer] : project.layers) {
+                    if (layer.visible == visible)
+                        continue;
+                    layer.visible = visible;
+                    changed = true;
+                }
+            });
+            if (!changed)
+                return;
+            layersPanel_->setProject(project_->project());
+            refreshLayout();
+        });
         layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
         layoutContentLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);

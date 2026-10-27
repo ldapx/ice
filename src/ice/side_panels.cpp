@@ -526,6 +526,27 @@ void SimulationPanel::showContextMenu(const QPoint &pos) {
 
 LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
+    auto *controls = new QHBoxLayout;
+    controls->setContentsMargins(0, 0, 0, 0);
+    search_ = new QLineEdit;
+    search_->setPlaceholderText(QStringLiteral("Search layers…"));
+    search_->setClearButtonEnabled(true);
+    search_->setAccessibleName(QStringLiteral("Search layers"));
+    controls->addWidget(search_, 1);
+    auto *showAllButton = new QPushButton;
+    showAllButton->setFixedWidth(28);
+    showAllButton->setToolTip(QStringLiteral("Show all layers"));
+    showAllButton->setAccessibleName(QStringLiteral("Show all layers"));
+    setLucideIcon(showAllButton, QStringLiteral("eye"), 16);
+    auto *hideAllButton = new QPushButton;
+    hideAllButton->setFixedWidth(28);
+    hideAllButton->setToolTip(QStringLiteral("Hide all layers"));
+    hideAllButton->setAccessibleName(QStringLiteral("Hide all layers"));
+    setLucideIcon(hideAllButton, QStringLiteral("eye-off"), 16);
+    controls->addWidget(showAllButton);
+    controls->addWidget(hideAllButton);
+    layout->addLayout(controls);
+
     tree_ = new QTreeWidget;
     tree_->setHeaderLabel(QStringLiteral("Layers"));
     tree_->setAccessibleName(QStringLiteral("Layer visibility"));
@@ -536,9 +557,43 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(tree_, 1);
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
+        if (!item || column != 0 || !onLayerVisibilityChanged_)
+            return;
+        const auto layerId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        if (layerId != 0)
+            onLayerVisibilityChanged_(layerId, item->checkState(0) == Qt::Checked);
+    });
+    connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
+    connect(showAllButton, &QPushButton::clicked, this, [this] {
+        if (onAllLayersVisibilityChanged_)
+            onAllLayersVisibilityChanged_(true);
+    });
+    connect(hideAllButton, &QPushButton::clicked, this, [this] {
+        if (onAllLayersVisibilityChanged_)
+            onAllLayersVisibilityChanged_(false);
+    });
+}
+
+void LayersPanel::setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback) {
+    onLayerVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> callback) {
+    onAllLayersVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::applyFilter(const QString &text) {
+    QSignalBlocker blocker(tree_);
+    const auto needle = text.trimmed();
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+        auto *item = tree_->topLevelItem(index);
+        item->setHidden(!needle.isEmpty() && !item->text(0).contains(needle, Qt::CaseInsensitive));
+    }
 }
 
 void LayersPanel::setProject(const ice::Project &project) {
+    QSignalBlocker blocker(tree_);
     tree_->clear();
     const auto styles = layerStylesFor(project);
     for (const auto &[id, layer] : project.layers) {
@@ -551,6 +606,8 @@ void LayersPanel::setProject(const ice::Project &project) {
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
     }
+    if (search_)
+        applyFilter(search_->text());
 }
 
 SymbolsPanel::SymbolsPanel(QWidget *parent) : QWidget(parent) {
