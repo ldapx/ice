@@ -42,6 +42,11 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
 ObjectId addLayer(Project &project, std::string name, int number);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);
+ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const std::vector<LayoutPoint> &points,
+                    std::optional<ObjectId> net = std::nullopt);
+ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle);
+ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
+                           Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
 
 // Converts a schematic cell into a SPICE netlist so a simulation can run the

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -22,6 +23,20 @@ std::string lower(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(),
                    [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
     return text;
+}
+
+bool schematicNameTaken(const Project &project, const std::string &name) {
+    return std::any_of(project.schematicCells.begin(), project.schematicCells.end(),
+                       [&](const auto &entry) { return entry.second.name == name; });
+}
+
+bool layoutNameTaken(const Project &project, const std::string &name) {
+    const auto layoutCell = std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                                        [&](const auto &entry) { return entry.second.name == name; });
+    if (layoutCell)
+        return true;
+    return std::any_of(project.proceduralLayouts.begin(), project.proceduralLayouts.end(),
+                       [&](const auto &entry) { return entry.second.name == name; });
 }
 
 // Reads an instance parameter by one of the accepted names (case-insensitive),
@@ -144,6 +159,8 @@ char spiceElementForSymbol(const std::string &symbolName) {
 ObjectId createSchematicCell(Project &project, std::string name, std::string pdk) {
     if (name.empty())
         throw ProjectError("schematic.cell", "Schematic cell name must not be empty");
+    if (schematicNameTaken(project, name))
+        throw ProjectError("schematic.name", "A schematic named '" + name + "' already exists");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("schematic.pdk", "Schematic PDK must be a valid PDK identifier");
     ObjectId id = project.nextId();
@@ -194,6 +211,8 @@ std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
 ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
     if (name.empty())
         throw ProjectError("layout.cell", "Layout cell name must not be empty");
+    if (layoutNameTaken(project, name))
+        throw ProjectError("layout.name", "A layout named '" + name + "' already exists");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
     ObjectId id = project.nextId();
@@ -207,23 +226,9 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
 
-    const auto staticNameTaken = [&](const std::string &candidate) {
-        return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
-                           [&](const auto &entry) { return entry.second.name == candidate; });
-    };
-    const auto proceduralNameTaken = [&](const std::string &candidate) {
-        return std::any_of(project.proceduralLayouts.begin(), project.proceduralLayouts.end(),
-                           [&](const auto &entry) { return entry.second.name == candidate; });
-    };
-    const auto nameTaken = [&](const std::string &candidate) {
-        return staticNameTaken(candidate) || proceduralNameTaken(candidate);
-    };
-    if (nameTaken(name)) {
-        const auto stem = name + " Procedural";
-        name = stem;
-        for (int index = 2; nameTaken(name); ++index)
-            name = stem + " " + std::to_string(index);
-    }
+    const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
+    if (nameTaken(name))
+        throw ProjectError("layout.name", "A layout named '" + name + "' already exists");
 
     auto generatedName = name + " (generated)";
     if (nameTaken(generatedName)) {
@@ -248,10 +253,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     std::string layoutName = name.empty() ? schematic.name : std::move(name);
     if (layoutName.empty())
         layoutName = "Layout";
-    const auto nameTaken = [&](const std::string &candidate) {
-        return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
-                           [&](const auto &entry) { return entry.second.name == candidate; });
-    };
+    const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
     if (nameTaken(layoutName)) {
         const auto stem = layoutName + " Layout";
         layoutName = stem;
@@ -359,6 +361,53 @@ ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect 
         throw ProjectError("layout.layer", "Layer does not exist");
     ObjectId id = project.nextId();
     cell.shapes.emplace(id, Shape{id, layerId, net, rectangle});
+    return id;
+}
+ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const std::vector<LayoutPoint> &points,
+                    std::optional<ObjectId> net) {
+    if (points.size() < 3)
+        throw ProjectError("layout.polygon", "Polygon must contain at least three points");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (!project.layers.contains(layerId))
+        throw ProjectError("layout.layer", "Layer does not exist");
+    Coordinate minX = std::numeric_limits<Coordinate>::max();
+    Coordinate minY = std::numeric_limits<Coordinate>::max();
+    Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+    Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+    for (const auto &point : points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    if (maxX <= minX || maxY <= minY)
+        throw ProjectError("layout.polygon", "Polygon must have a positive bounding box");
+    ObjectId id = project.nextId();
+    cell.shapes.emplace(id, Shape{id, layerId, net, Rect{minX, minY, maxX - minX, maxY - minY}, points});
+    return id;
+}
+ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle) {
+    if (name.empty())
+        throw ProjectError("layout.port", "Port name must not be empty");
+    if (!rectangle.valid())
+        throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (!project.layers.contains(layerId))
+        throw ProjectError("layout.layer", "Layer does not exist");
+    ObjectId id = project.nextId();
+    cell.ports.emplace(id, Port{id, std::move(name), layerId, rectangle});
+    return id;
+}
+ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
+                           Coordinate x, Coordinate y, Orientation orientation) {
+    if (name.empty())
+        throw ProjectError("layout.instance", "Instance name must not be empty");
+    if (parentCellId == childCellId)
+        throw ProjectError("layout.instance", "A layout cell cannot instance itself");
+    auto &parent = require(project.layoutCells, parentCellId, "layout.cell", "Parent layout cell does not exist");
+    require(project.layoutCells, childCellId, "layout.cell", "Child layout cell does not exist");
+    ObjectId id = project.nextId();
+    parent.instances.emplace(id, LayoutInstance{id, childCellId, std::move(name), x, y, orientation});
     return id;
 }
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy) {

@@ -27,6 +27,8 @@ Python scientific stack.
 - `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
 - Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
 - `clang-format` (formatting via `xmake format`)
+- Optional: an `agentsdk-cpp` checkout next to this repository, or
+  `AGENTSDK_CPP_DIR` pointing to one, for the Agent Client Protocol tab
 
 ## Build
 

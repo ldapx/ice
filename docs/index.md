@@ -50,6 +50,7 @@ symbols
 simulation
 packages
 icepy
+ice-mcp
 plugins
 ```
 

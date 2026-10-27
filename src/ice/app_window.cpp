@@ -353,6 +353,8 @@ class DocumentWindow : public QMainWindow {
         if (!setProject(std::move(project)))
             return;
         projectPath_ = path;
+        if (activityPanel_)
+            activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
         addRecentProject(path);
         if (startupView_)
             startupView_->clearCreateForm();
@@ -373,6 +375,8 @@ class DocumentWindow : public QMainWindow {
             if (!setProject(std::move(project)))
                 return;
             projectPath_ = path;
+            if (activityPanel_)
+                activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
             addRecentProject(path);
             statusBar()->showMessage(QStringLiteral("Project opened"));
         } catch (const ice::ProjectError &error) {
@@ -394,6 +398,8 @@ class DocumentWindow : public QMainWindow {
             try {
                 project_->save(path.toStdString());
                 projectPath_ = path;
+                if (activityPanel_)
+                    activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
                 addRecentProject(path);
             } catch (const ice::ProjectError &error) {
                 QMessageBox::critical(this, QStringLiteral("New Project"), QString::fromStdString(error.what()));
@@ -426,6 +432,8 @@ class DocumentWindow : public QMainWindow {
         try {
             project_->save(path.toStdString());
             projectPath_ = path;
+            if (activityPanel_)
+                activityPanel_->setProjectPath(QFileInfo(path).absolutePath());
             addRecentProject(path);
             statusBar()->showMessage(QStringLiteral("Project saved"));
         } catch (const ice::ProjectError &error) {
@@ -447,6 +455,8 @@ class DocumentWindow : public QMainWindow {
                 throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
             setProject(ice::LayoutInterchange::importGds(path.toStdString()));
             projectPath_.clear();
+            if (activityPanel_)
+                activityPanel_->setProjectPath({});
             statusBar()->showMessage(QStringLiteral("Layout interchange opened"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Open GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -493,6 +503,8 @@ class DocumentWindow : public QMainWindow {
             layoutDevicesPanel_->resetDevices();
         openLibraryLayoutCellTabs_.clear();
         projectPath_.clear();
+        if (activityPanel_)
+            activityPanel_->setProjectPath({});
         refreshEmbeddedPanels();
         if (schematicCanvas_) {
             schematicCanvas_->scene()->clear();
@@ -3820,7 +3832,14 @@ class DocumentWindow : public QMainWindow {
         auto *viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
         viewMenu->addAction(addCommand(QStringLiteral("Project / Hierarchy")));
         viewMenu->addAction(addCommand(QStringLiteral("Properties / Diagnostics")));
-        viewMenu->addAction(addCommand(QStringLiteral("Activity / Agent")));
+        auto *agentAction = addCommand(QStringLiteral("Activity / Agent"));
+        viewMenu->addAction(agentAction);
+        connect(agentAction, &QAction::triggered, this, [this] {
+            if (activityDock_)
+                activityDock_->show();
+            if (activityPanel_)
+                activityPanel_->showAgentTab();
+        });
         viewMenu->addSeparator();
         auto *paletteAction = addCommand(QStringLiteral("Command Palette"), QKeySequence(QStringLiteral("Ctrl+K")));
         viewMenu->addAction(paletteAction);

@@ -150,6 +150,30 @@ TEST_CASE("hierarchical symbols keep their source schematic") {
     CHECK(roundTrip.schematicCells.at(parentCellId).instances.contains(instanceId));
 }
 
+TEST_CASE("schematic and layout names are unique") {
+    ice::Project project;
+    project.identity = "unique-names";
+    project.name = "unique-names";
+
+    const auto schematicId = ice::createSchematicCell(project, "top");
+    CHECK_THROWS_AS(ice::createSchematicCell(project, "top"), ice::ProjectError);
+    CHECK_THROWS_AS(ice::createTextSchematicCell(project, "top"), ice::ProjectError);
+    const auto textId = ice::createTextSchematicCell(project, "spice_top");
+    CHECK(textId != 0);
+    CHECK_THROWS_AS(ice::createTextSchematicCell(project, "spice_top"), ice::ProjectError);
+    CHECK(project.schematicCells.at(schematicId).name == "top");
+
+    const auto layoutId = ice::createLayoutCell(project, "layout_top");
+    CHECK_THROWS_AS(ice::createLayoutCell(project, "layout_top"), ice::ProjectError);
+    const auto proceduralId = ice::createProceduralLayout(project, "procedural_top");
+    CHECK_THROWS_AS(ice::createProceduralLayout(project, "procedural_top"), ice::ProjectError);
+    CHECK_THROWS_AS(ice::createLayoutCell(project, "procedural_top"), ice::ProjectError);
+    CHECK_THROWS_AS(ice::createProceduralLayout(project, "layout_top"), ice::ProjectError);
+    CHECK(project.layoutCells.at(layoutId).name == "layout_top");
+    CHECK(project.proceduralLayouts.at(proceduralId).name == "procedural_top");
+    CHECK(project.validate().empty());
+}
+
 TEST_CASE("text SPICE schematics survive serialization") {
     ice::Project project;
     project.identity = "spice-text";
@@ -855,10 +879,30 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(roundTrip.layoutCells.at(procedural.generatedCell).generatedBy == proceduralId);
     CHECK(roundTrip.nextId() > proceduralId);
 
-    const auto secondId = ice::createProceduralLayout(project, "generated_top");
-    CHECK(project.proceduralLayouts.at(secondId).name != procedural.name);
+    CHECK_THROWS_AS(ice::createProceduralLayout(project, "generated_top"), ice::ProjectError);
+    const auto secondId = ice::createProceduralLayout(project, "generated_second");
+    CHECK(project.proceduralLayouts.at(secondId).name == "generated_second");
     CHECK(project.proceduralLayouts.at(secondId).generatedCell != procedural.generatedCell);
     CHECK(project.validate().empty());
+}
+
+TEST_CASE("layout polygons ports and instances use core operations") {
+    ice::Project project;
+    project.identity = "layout-ops";
+    project.name = "layout-ops";
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto parent = ice::createLayoutCell(project, "parent");
+    const auto child = ice::createLayoutCell(project, "child");
+    const auto polygon = ice::addPolygon(project, parent, layer, {{0, 0}, {1000, 0}, {500, 800}});
+    const auto port = ice::addPort(project, parent, "P1", layer, {0, 0, 100, 100});
+    const auto instance = ice::addLayoutInstance(project, parent, child, "child_1", 200, 300);
+    CHECK(project.layoutCells.at(parent).shapes.contains(polygon));
+    CHECK(project.layoutCells.at(parent).ports.contains(port));
+    CHECK(project.layoutCells.at(parent).instances.contains(instance));
+    CHECK(project.layoutCells.at(parent).shapes.at(polygon).polygon.size() == 3);
+    CHECK(project.validate().empty());
+    const auto serialized = project.serialize();
+    CHECK(ice::Project::deserialize(serialized).serialize() == serialized);
 }
 
 TEST_CASE("planned devices are projected from a schematic") {

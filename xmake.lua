@@ -5,6 +5,21 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("spdlog", "nlohmann_json")
 
+-- Agent Client Protocol support. Point AGENTSDK_CPP_DIR at an agentsdk-cpp
+-- checkout, or keep the checkout next to the ICE repository.
+local agentsdk_dir = os.getenv("AGENTSDK_CPP_DIR")
+if not agentsdk_dir or not os.isdir(agentsdk_dir) then
+    local sibling = path.join(os.projectdir(), "..", "agentsdk-cpp")
+    if os.isdir(sibling) then
+        agentsdk_dir = sibling
+    end
+end
+local has_agentsdk = agentsdk_dir and os.isdir(path.join(agentsdk_dir, "src", "agentsdk"))
+if has_agentsdk then
+    agentsdk_dir = path.absolute(agentsdk_dir)
+    add_requires("simdjson", "libcurl")
+end
+
 -- First-party warnings. Third-party headers are included via system paths, so
 -- -Werror is intentionally not enabled.
 local first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
@@ -36,6 +51,17 @@ target("ice")
     add_cxxflags("-fPIC", {force = true})
     add_cxxflags(first_party_warnings)
     add_ldflags("-no-pie", {force = true})
+    if has_agentsdk then
+        add_includedirs(path.join(agentsdk_dir, "src"))
+        add_files(path.join(agentsdk_dir, "src", "agentsdk", "**.cpp"))
+        add_packages("spdlog", "simdjson", "libcurl")
+        add_defines("ICE_HAVE_AGENTSDK=1")
+        if is_plat("linux") then
+            add_syslinks("pthread")
+        elseif is_plat("windows") then
+            add_syslinks("ws2_32", "wsock32")
+        end
+    end
 
 target("ice-cli")
     set_kind("binary")
@@ -57,6 +83,21 @@ target("ice-mcp")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    add_packages("nlohmann_json")
+    if has_agentsdk then
+        add_includedirs(path.join(agentsdk_dir, "src"))
+        add_files(path.join(agentsdk_dir, "src", "agentsdk", "common", "json_builder.cpp"),
+                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_server.cpp"),
+                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_json.cpp"),
+                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_types.cpp"))
+        add_packages("spdlog", "simdjson")
+        add_defines("ICE_HAVE_AGENTSDK=1")
+        if is_plat("linux") then
+            add_syslinks("pthread")
+        elseif is_plat("windows") then
+            add_syslinks("ws2_32", "wsock32")
+        end
+    end
 
 target("doctest")
     set_kind("binary")

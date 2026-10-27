@@ -90,33 +90,12 @@ class LayoutBuilder {
     }
 
     ObjectId polygon(const std::string &layer, const std::vector<LayoutPoint> &points) {
-        if (points.size() < 3)
-            throw ProjectError("icepy.polygon", "Polygon must contain at least three points");
-        Coordinate minX = std::numeric_limits<Coordinate>::max();
-        Coordinate minY = std::numeric_limits<Coordinate>::max();
-        Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
-        Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
-        for (const auto &point : points) {
-            minX = std::min(minX, point.x);
-            minY = std::min(minY, point.y);
-            maxX = std::max(maxX, point.x);
-            maxY = std::max(maxY, point.y);
-        }
-        auto &cell = project_->layoutCells.at(cellId_);
-        const auto id = project_->nextId();
-        cell.shapes.emplace(
-            id, Shape{id, layerId(layer), std::nullopt, Rect{minX, minY, maxX - minX, maxY - minY}, points});
-        return id;
+        return ice::addPolygon(*project_, cellId_, layerId(layer), points);
     }
 
     ObjectId port(const std::string &name, const std::string &layer, Coordinate x, Coordinate y, Coordinate width,
                   Coordinate height) {
-        if (name.empty())
-            throw ProjectError("icepy.port", "Port name must not be empty");
-        auto &cell = project_->layoutCells.at(cellId_);
-        const auto id = project_->nextId();
-        cell.ports.emplace(id, Port{id, name, layerId(layer), Rect{x, y, width, height}});
-        return id;
+        return ice::addPort(*project_, cellId_, name, layerId(layer), Rect{x, y, width, height});
     }
 
     ObjectId instance(const std::string &cellName, Coordinate x, Coordinate y, const std::string &instanceName = {},

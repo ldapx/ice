@@ -7,7 +7,7 @@ growing in one file.
 - `app_window.*` — `AppWindow` interface and the `DocumentWindow` shell: menus,
   toolbars, document tabs, commands, and project lifecycle.
 - `app_widgets.*` — startup view, empty-cell cards, status bar, command palette,
-  activity/diagnostics panels, and the create-layout dialog.
+  activity/diagnostics panels, the ACP agent tab, and the create-layout dialog.
 - `layout_canvas.*` — layout canvas interaction, selection, movement, and device
   placement preview.
 - `schematic_canvas.*` — schematic canvas interaction, wiring, symbol movement,

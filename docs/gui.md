@@ -233,6 +233,28 @@ layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
 
+## Agent tab
+
+The **Agent** tab is the Agent Client Protocol (ACP) chat interface. It uses
+`agentsdk-cpp` (`acp_client`, `acp_session`, and `acp_agent_manager`) to launch a
+local ACP-capable agent as a subprocess over newline-delimited JSON-RPC on
+stdio.
+
+- Agents discovered on `PATH` appear in the agent selector.
+- **Connect** launches the selected agent and creates a new ACP session in the
+  current project directory.
+- The prompt box sends a user turn; the transcript shows assistant text,
+  thoughts, plans, tool-call updates, and turn completion.
+- Agent permission requests open a modal dialog listing the options supplied by
+  the agent.
+- Token usage updates the session panel when the agent reports `usage_update`.
+- **Cancel turn** sends an ACP cancellation for the active prompt.
+- **Disconnect** terminates the agent process and clears the session.
+
+ACP support is compiled in when an `agentsdk-cpp` checkout is available next to
+the ICE repository or through `AGENTSDK_CPP_DIR`. Without it, the Agent tab is
+disabled and explains that the SDK is unavailable.
+
 ## Styling
 
 The application uses Qt's **Fusion** style. By default it follows the system

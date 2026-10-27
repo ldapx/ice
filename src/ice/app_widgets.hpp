@@ -12,6 +12,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 
 class QComboBox;
@@ -19,6 +20,8 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPaintEvent;
+class QPlainTextEdit;
+class QProgressBar;
 class QPushButton;
 class QTableWidget;
 class QTabWidget;
@@ -35,17 +38,51 @@ class DiagnosticsPanel : public QWidget {
 class ActivityPanel : public QWidget {
   public:
     explicit ActivityPanel(QWidget *parent = nullptr);
+    ~ActivityPanel() override;
 
+    void setProjectPath(const QString &path);
     void setDrcReport(const ice::VerificationReport &report, const QString &reportPath = {});
     void setDrcRunning(const QString &message = {});
     void setDrcError(const QString &message);
     void showDrcTab();
+    void showAgentTab();
 
   private:
+    struct AgentBackend;
+
+    void connectAgent();
+    void disconnectAgent();
+    void sendPrompt();
+    void cancelPrompt();
+    void setPromptRunning(bool running);
+    void updateAgentControls();
+    void appendTranscript(const QString &text);
+    void handleAgentUpdate(const std::string &params);
+    std::string handleAgentPermission(const std::string &params);
+    void updateAgentUsage(qint64 used, qint64 size);
+
     QLabel *drcSummary_ = nullptr;
     QTableWidget *drcTable_ = nullptr;
     QTabWidget *tabs_ = nullptr;
     int drcTabIndex_ = -1;
+    int agentTabIndex_ = -1;
+
+    QComboBox *agentSelector_ = nullptr;
+    QLabel *agentStatus_ = nullptr;
+    QLabel *sessionTitle_ = nullptr;
+    QLabel *tokens_ = nullptr;
+    QProgressBar *contextUsage_ = nullptr;
+    QPlainTextEdit *transcript_ = nullptr;
+    QLineEdit *prompt_ = nullptr;
+    QPushButton *agentConnectButton_ = nullptr;
+    QPushButton *sendButton_ = nullptr;
+    QPushButton *cancelButton_ = nullptr;
+    QListWidget *mcpServers_ = nullptr;
+    std::unique_ptr<AgentBackend> agentBackend_;
+    QString projectPath_;
+    bool agentConnected_ = false;
+    bool agentConnecting_ = false;
+    bool promptRunning_ = false;
 };
 
 class CommandPalette : public QDialog {
