@@ -11,8 +11,10 @@ Coordinates are integer database units (one nanometer by default).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
+from pathlib import Path
 import sys
 import traceback
 
@@ -32,6 +34,17 @@ def _positive(value, label):
     if number <= 0:
         raise ValueError(f"{label} must be greater than zero")
     return number
+
+
+def _shape_points(shape):
+    if "rectangle" in shape:
+        rectangle = shape["rectangle"]
+        x = rectangle["x"]
+        y = rectangle["y"]
+        width = rectangle["width"]
+        height = rectangle["height"]
+        return [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+    return [(point["x"], point["y"]) for point in shape.get("polygon", [])]
 
 
 class Layer:
@@ -55,11 +68,15 @@ class Layer:
 class Layout:
     """Builder exposed to procedural layout scripts."""
 
-    def __init__(self):
+    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0):
+        self.pdk = pdk
+        self.pdk_root = pdk_root
+        self.db_unit_nm = float(db_unit_nm)
         self.layers = {}
         self.shapes = []
         self.ports = []
         self.instances = []
+        self.dummy_fill_requests = []
 
     def layer(self, name, number=None):
         if not isinstance(name, str) or not name.strip():
@@ -163,6 +180,71 @@ class Layout:
             }
         )
 
+    def add_dummy_fill(
+        self, layers=None, density=None, deviation=None, area=None, **options
+    ):
+        """Queue a PDK-provided dummy metal fill pass.
+
+        ICE runs the implementation shipped by the active PDK package after the
+        script finishes, so the fill sees the complete layout. ``layers`` may be
+        a layer name or a list of layer names. ``density`` and ``deviation`` are
+        percentages and may be scalars or per-layer mappings. ``area`` optionally
+        limits fill to ``(x0, y0, x1, y1)`` database units or a polygon point
+        list. Additional keyword options are forwarded to the PDK implementation.
+        """
+        if isinstance(layers, str):
+            layers = [layers]
+        elif layers is not None:
+            layers = [str(layer) for layer in layers]
+        if layers is not None and not layers:
+            raise ValueError("layers must not be empty")
+        request = {
+            "layers": layers,
+            "density": density,
+            "deviation": deviation,
+            "area": area,
+        }
+        request.update(options)
+        self.dummy_fill_requests.append(request)
+
+    def iter_polygons(self, layer=None):
+        """Yield ``(layer_name, [(x, y), ...])`` for every shape in the layout."""
+        for shape in self.shapes:
+            if layer is not None and shape["layer"] != layer:
+                continue
+            points = _shape_points(shape)
+            if len(points) >= 3:
+                yield shape["layer"], points
+
+    def bounds(self, layer=None):
+        """Return ``(min_x, min_y, max_x, max_y)`` for the selected geometry."""
+        min_x = math.inf
+        min_y = math.inf
+        max_x = -math.inf
+        max_y = -math.inf
+        for _, points in self.iter_polygons(layer):
+            for x, y in points:
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+        if not math.isfinite(min_x):
+            return None
+        return (int(min_x), int(min_y), int(max_x), int(max_y))
+
+    def layer_number(self, name):
+        """Return the GDS layer number registered for ``name``, if any."""
+        if not isinstance(name, str):
+            return None
+        for layer_name, number in self.layers.items():
+            if layer_name == name:
+                return number
+        lowered = name.lower()
+        for layer_name, number in self.layers.items():
+            if layer_name.lower() == lowered:
+                return number
+        return None
+
     def to_dict(self):
         return {
             "layers": [
@@ -174,15 +256,62 @@ class Layout:
         }
 
 
+def _load_dummy_fill_extension(layout):
+    if not layout.pdk_root:
+        pdk = layout.pdk or "unknown"
+        raise RuntimeError(
+            f"PDK '{pdk}' does not provide a dummy fill implementation. "
+            "The implementation is expected at <pdk-root>/layout/dummy_fill.py."
+        )
+    extension_path = Path(layout.pdk_root) / "layout" / "dummy_fill.py"
+    if not extension_path.is_file():
+        pdk = layout.pdk or "unknown"
+        raise RuntimeError(
+            f"PDK '{pdk}' does not provide {extension_path}. "
+            "Install a PDK package with a layout/dummy_fill.py implementation."
+        )
+    spec = importlib.util.spec_from_file_location("ice_pdk_dummy_fill", extension_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Unable to load the dummy fill implementation at {extension_path}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    sys.path.insert(0, str(extension_path.parent))
+    spec.loader.exec_module(module)
+    return module
+
+
+def _apply_dummy_fill_requests(layout):
+    if not layout.dummy_fill_requests:
+        return
+    module = _load_dummy_fill_extension(layout)
+    handler = getattr(module, "add_dummy_fill", None)
+    if not callable(handler):
+        raise RuntimeError(
+            "The PDK dummy fill implementation has no add_dummy_fill() function."
+        )
+    for request in layout.dummy_fill_requests:
+        handler(layout, **request)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--script", required=True, help="Procedural layout Python script"
     )
     parser.add_argument("--output", required=True, help="Generated geometry JSON path")
+    parser.add_argument("--pdk", default=None, help="Active PDK identifier")
+    parser.add_argument("--pdk-root", default=None, help="Installed PDK package root")
+    parser.add_argument(
+        "--db-unit-nm",
+        type=float,
+        default=1.0,
+        help="Database unit size in nanometers",
+    )
     args = parser.parse_args()
 
-    builder = Layout()
+    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm)
     with open(args.script, "r", encoding="utf-8") as handle:
         source = handle.read()
     globals_dict = {
@@ -192,6 +321,7 @@ def main():
     }
     try:
         exec(compile(source, args.script, "exec"), globals_dict)
+        _apply_dummy_fill_requests(builder)
     except Exception:  # noqa: BLE001 - surface user script failures verbatim
         raise RuntimeError(traceback.format_exc()) from None
 

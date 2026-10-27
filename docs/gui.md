@@ -172,7 +172,13 @@ procedural layout and choose **Regenerate layout** (or use the editor's
 **Regenerate layout** button) to replace the generated child's geometry from
 the current script. Scripts run with `python3`, or the interpreter selected by
 `ICE_PYTHON`. A failed run reports the Python error and leaves the previous
-generated geometry unchanged. The bundled IHP SG13G2 device library appears in
+generated geometry unchanged. The layout API also exposes
+`layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: ICE forwards
+the request to the active package's `layout/dummy_fill.py` implementation after
+the user script finishes. The IHP SG13G2 package implements square dummy metal
+fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
+project. A PDK without that implementation reports a clear error when the API
+is used. The bundled IHP SG13G2 device library appears in
 **Devices**, with search, category filtering, and a geometry preview in
 **Properties**. The device list starts with no selection; selecting a device
 switches to **Place Device** and shows a cursor-following preview, while

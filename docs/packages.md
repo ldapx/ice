@@ -108,8 +108,42 @@ package's `symbols/` library. Activating a PDK package adds its declared
 technology layers to the Layout editor and records the package as a project
 dependency.
 
+## PDK-provided procedural layout operations
+
+Procedural layout scripts can request process-specific geometry through the
+generic layout builder API. ICE dispatches these requests to the active PDK
+package after the user script finishes:
+
+```python
+layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)
+```
+
+For dummy fill, the package contract is `layout/dummy_fill.py` with an
+`add_dummy_fill(layout, **options)` function. The implementation may inspect
+the builder through `layout.iter_polygons()`, `layout.bounds()`, and
+`layout.layer_number()`, and it adds geometry through the normal
+`layout.layer(...).rectangle()` / `.polygon()` API. Calling
+`layout.add_dummy_fill(...)` is an explicit request to execute package code;
+PDKs without the implementation report a clear error. The IHP SG13G2 package
+implements dummy metal fill for its metal stack using rules adapted from
+`gdsfill`.
+
 The File menu also provides **Open GDS/OASIS Layout** and **Save GDS/OASIS
 Layout**. These actions use native GDSII (`*.gds`, `*.gdsii`) for the documented
 deterministic BOUNDARY-only subset. OASIS extensions are accepted for workflow
 compatibility but OASIS import/export is explicitly rejected until a native
 OASIS adapter exists.
+
+## PDK-provided device generators
+
+Layout device libraries declare PCell generator metadata (`module` and `class`).
+ICE loads the generator from the active PDK package:
+
+```text
+<pdk-root>/layout/device_generator.py
+```
+
+The IHP SG13G2 package supplies this hook and routes generation through
+`icepy.pcells`, which evaluates the upstream IHP PyCell implementation and
+transfers polygons into an `icepy` layout cell. Building `icepy` is required for
+PDK device regeneration.

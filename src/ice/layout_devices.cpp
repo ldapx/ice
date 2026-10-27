@@ -16,6 +16,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
@@ -55,6 +56,40 @@ void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &i
             addPdkLayers(project, *package->spec.pdk);
     }
 }
+
+namespace {
+
+std::filesystem::path pdkPackageRoot(const std::string &pdk) {
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return {};
+    const auto packages = installedPackages(configuredPackageInstallDirectory());
+    for (const auto &package : packages) {
+        if (package.spec.name == pdk)
+            return package.spec.root;
+    }
+    return {};
+}
+
+QString icepyPythonPath() {
+    QStringList paths;
+    const auto appDir = QCoreApplication::applicationDirPath();
+    paths << appDir;
+    paths << appDir + QStringLiteral("/python");
+#ifdef ICE_SOURCE_DIR
+    paths << QString::fromStdString((std::filesystem::path(ICE_SOURCE_DIR) / "python").string());
+#endif
+    const auto inherited = qEnvironmentVariable("PYTHONPATH");
+    if (!inherited.isEmpty())
+        paths << inherited;
+    return paths.join(QDir::listSeparator());
+}
+
+bool regularFile(const std::filesystem::path &path) {
+    std::error_code status;
+    return std::filesystem::is_regular_file(path, status) && !status;
+}
+
+} // namespace
 
 std::filesystem::path layoutDeviceLibraryPath() {
     const auto appDir = QCoreApplication::applicationDirPath().toStdString();
@@ -176,25 +211,6 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     const auto cloneId = clone.id;
     project.layoutCells.emplace(cloneId, std::move(clone));
     return cloneId;
-}
-
-std::filesystem::path layoutPcellScriptPath() {
-    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
-    const std::vector<std::filesystem::path> candidates = {
-        std::filesystem::path(appDir) / "assets" / "layout" / "ihp_pcell.py",
-        std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "layout" / "ihp_pcell.py",
-#ifdef ICE_SOURCE_DIR
-        std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp_pcell.py",
-#endif
-        std::filesystem::path("assets") / "layout" / "ihp_pcell.py",
-        std::filesystem::path("/usr/share/ice/assets/layout/ihp_pcell.py"),
-    };
-    for (const auto &candidate : candidates) {
-        std::error_code status;
-        if (std::filesystem::is_regular_file(candidate, status) && !status)
-            return candidate;
-    }
-    return {};
 }
 
 std::filesystem::path ihpSourceRoot() {
@@ -339,7 +355,7 @@ std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &p
 
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
                                                                       const std::map<std::string, std::string> &values,
-                                                                      QString *error) {
+                                                                      QString *error, const std::string &pdk) {
     if (error)
         error->clear();
     if (!device.generator) {
@@ -347,10 +363,17 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
             *error = QStringLiteral("This device does not have a PCell generator.");
         return std::nullopt;
     }
-    const auto script = layoutPcellScriptPath();
-    if (script.empty()) {
+    const auto packageRoot = pdkPackageRoot(pdk);
+    if (packageRoot.empty()) {
         if (error)
-            *error = QStringLiteral("The IHP PCell generator script was not found.");
+            *error = QStringLiteral("The PDK package '%1' is not installed.").arg(QString::fromStdString(pdk));
+        return std::nullopt;
+    }
+    const auto script = packageRoot / "layout" / "device_generator.py";
+    if (!regularFile(script)) {
+        if (error)
+            *error = QStringLiteral("The PDK package '%1' does not provide layout/device_generator.py.")
+                         .arg(QString::fromStdString(pdk));
         return std::nullopt;
     }
     const auto ihpRoot = ihpSourceRoot();
@@ -402,6 +425,9 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
     process.setProgram(python);
     process.setArguments(arguments);
     process.setWorkingDirectory(QString::fromStdString(ihpRoot.string()));
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("PYTHONPATH"), icepyPythonPath());
+    process.setProcessEnvironment(environment);
     process.start();
     if (!process.waitForStarted(5000)) {
         if (error)
@@ -541,9 +567,7 @@ void LayoutDevicesPanel::setOnDeviceActivated(std::function<void()> callback) {
     onDeviceActivated_ = std::move(callback);
 }
 
-void LayoutDevicesPanel::focusDeviceList() {
-    list_->setFocus();
-}
+void LayoutDevicesPanel::focusDeviceList() { list_->setFocus(); }
 
 void LayoutDevicesPanel::clearDeviceSelection() {
     QSignalBlocker blocker(list_);

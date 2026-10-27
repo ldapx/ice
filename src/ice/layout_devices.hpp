@@ -67,7 +67,6 @@ class LayoutDevicesPanel : public QWidget {
 };
 
 std::filesystem::path layoutDeviceLibraryPath();
-std::filesystem::path layoutPcellScriptPath();
 std::filesystem::path ihpSourceRoot();
 QString pythonExecutable();
 
@@ -91,4 +90,4 @@ std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &p
                                                            const ice::LayoutDeviceLibrary &library);
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
                                                                       const std::map<std::string, std::string> &values,
-                                                                      QString *error);
+                                                                      QString *error, const std::string &pdk = {});

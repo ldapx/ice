@@ -3,6 +3,7 @@
 #include "icelib/operations.hpp"
 #include "icons.hpp"
 #include "layout_devices.hpp"
+#include "package_ui.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
@@ -416,6 +417,7 @@ std::string defaultProceduralLayoutScript() {
 # layer.polygon([(x, y), (x, y), (x, y)])
 # layout.port("P1", "Metal1", x, y, width, height)
 # layout.instance("other_layout_cell", x, y, name="I1", orientation="r0")
+# layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)
 
 metal1 = layout.layer("Metal1", 1)
 metal2 = layout.layer("Metal2", 2)
@@ -466,10 +468,34 @@ bool regenerateProceduralLayout(Project &project, ObjectId proceduralLayoutId, Q
         scriptFile.write(proceduralIt->second.script.data(), static_cast<qint64>(proceduralIt->second.script.size()));
     }
 
+    std::filesystem::path pdkRoot;
+    if (proceduralIt->second.pdk != genericPdkId) {
+        const auto packages = installedPackages(configuredPackageInstallDirectory());
+        const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
+            return entry.spec.name == proceduralIt->second.pdk;
+        });
+        if (package != packages.end())
+            pdkRoot = package->spec.root;
+    }
+    double nanometersPerUnit = 1.0;
+    if (project.units.denominator > 0)
+        nanometersPerUnit =
+            static_cast<double>(project.units.nanometers_per_unit) / static_cast<double>(project.units.denominator);
+    QStringList arguments{QString::fromStdString(runner.string()),
+                          QStringLiteral("--script"),
+                          scriptPath,
+                          QStringLiteral("--output"),
+                          outputPath,
+                          QStringLiteral("--pdk"),
+                          QString::fromStdString(proceduralIt->second.pdk),
+                          QStringLiteral("--db-unit-nm"),
+                          QString::number(nanometersPerUnit, 'g', 17)};
+    if (!pdkRoot.empty())
+        arguments << QStringLiteral("--pdk-root") << QString::fromStdString(pdkRoot.string());
+
     QProcess process;
     process.setProgram(python);
-    process.setArguments({QString::fromStdString(runner.string()), QStringLiteral("--script"), scriptPath,
-                          QStringLiteral("--output"), outputPath});
+    process.setArguments(arguments);
     process.start();
     if (!process.waitForStarted(5000)) {
         if (error)
@@ -532,7 +558,9 @@ ProceduralLayoutEditor::ProceduralLayoutEditor(QWidget *parent) : QWidget(parent
     auto *hint = new QLabel(
         QStringLiteral("This procedural layout is generated from the Python script below. Right-click the "
                        "procedural layout in Hierarchy and choose Regenerate layout (or use the button above) "
-                       "to rebuild its static layout child."));
+                       "to rebuild its static layout child. PDK packages can also add process-specific geometry; "
+                       "for example, layout.add_dummy_fill(...) invokes the active PDK package's dummy fill "
+                       "implementation."));
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(hint);

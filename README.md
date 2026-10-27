@@ -23,7 +23,7 @@ implementations.
 | `ice-cli` | Headless automation CLI over the same `icelib` operations. |
 | `ice-pkg` | Package and PDK installation, resolution, verification, and lockfile management. |
 | `ice-mcp` | MCP server exposing approved `icelib` operations to external agents. |
-| `icepy` | Optional Python bindings (`nanobind`) for project automation. |
+| `icepy` | Optional Python bindings (`nanobind`) for project automation, layout building, and PDK PCell generation. |
 
 Key integrations (behind adapter boundaries): Qt 6, Clipper2 geometry,
 ngspice (`libngspice`), ALIGN, GDSII/OASIS interchange, TOML packages,

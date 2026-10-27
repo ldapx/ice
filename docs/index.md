@@ -49,6 +49,7 @@ gui
 symbols
 simulation
 packages
+icepy
 plugins
 ```
 

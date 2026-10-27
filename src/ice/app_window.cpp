@@ -1954,7 +1954,8 @@ class DocumentWindow : public QMainWindow {
         {
             WaitCursorGuard waitCursor;
             statusBar()->showMessage(QStringLiteral("Regenerating %1…").arg(QString::fromStdString(device->name)));
-            geometry = generateLayoutDeviceGeometry(*device, values, &generationError);
+            geometry =
+                generateLayoutDeviceGeometry(*device, values, &generationError, layoutDevicesPanel_->library().pdk);
         }
         if (!geometry) {
             QMessageBox::warning(this, QStringLiteral("Regenerate Device"),
@@ -2008,7 +2009,8 @@ class DocumentWindow : public QMainWindow {
         {
             WaitCursorGuard waitCursor;
             statusBar()->showMessage(QStringLiteral("Regenerating %1…").arg(QString::fromStdString(deviceName)));
-            geometry = generateLayoutDeviceGeometry(*device, values, &generationError);
+            geometry =
+                generateLayoutDeviceGeometry(*device, values, &generationError, layoutDevicesPanel_->library().pdk);
         }
         if (!geometry) {
             QMessageBox::warning(this, QStringLiteral("Regenerate Device"),

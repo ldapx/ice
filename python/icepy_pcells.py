@@ -1,17 +1,14 @@
-#!/usr/bin/env python3
-"""Generate IHP SG13G2 PyCell geometry for the ICE layout editor.
+"""IHP PCell runtime for :mod:`icepy`.
 
-The script intentionally has no gdsfactory dependency. It uses the pure-Python
-CNI compatibility layer and PyCell implementations from the IHP Open PDK
-repository. ICE invokes this script when a layout-device parameter changes.
+The upstream IHP PyCell implementations are kept in the IHP checkout and are not
+copied into ICE. This module provides the ICE-side runtime:
 
-Runtime mode:
-    ihp_pcell.py --ihp-root /path/to/IHP --module nmos_code --class nmos \
-                 --params-file params.json --output geometry.json
+* bootstrap the IHP pure-Python CNI/PyCell layer,
+* evaluate a PCell with parameters,
+* transfer the resulting polygons into an ``icepy`` project/layout cell.
 
-Metadata mode:
-    ihp_pcell.py --ihp-root /path/to/IHP --module nmos_code --class nmos \
-                 --list-params
+The ``main_cli`` entry point is the command-line contract used by the IHP
+package's ``layout/device_generator.py``.
 """
 
 from __future__ import annotations
@@ -61,9 +58,9 @@ EXTRA_LAYERS = {
 }
 
 META_PARAMETERS = {"cdf_version", "Display"}
+DEFAULT_PDK = "ihp.sg13g2"
 
 # Bare numbers entered for geometry parameters are interpreted as micrometers.
-# Electrical and dimensionless parameters keep their raw numeric form.
 LENGTH_PARAMETERS = {
     "w",
     "ws",
@@ -112,7 +109,7 @@ def normalize_override(name: str, value: str, default) -> str:
     return value + "u"
 
 
-def find_ihp_root(explicit: str | None) -> Path:
+def find_ihp_root(explicit: str | None = None) -> Path:
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit))
@@ -122,7 +119,7 @@ def find_ihp_root(explicit: str | None) -> Path:
     script_dir = Path(__file__).resolve().parent
     candidates.extend(
         [
-            script_dir.parent.parent.parent / "IHP",
+            script_dir.parent.parent / "IHP",
             Path.cwd() / "IHP",
             Path.cwd().parent / "IHP",
             Path.home() / "repositories" / "IHP",
@@ -141,7 +138,7 @@ def find_ihp_root(explicit: str | None) -> Path:
 
 
 def bootstrap(ihp_root: Path):
-    ihp_root = ihp_root.resolve()
+    ihp_root = Path(ihp_root).resolve()
     sys.path.insert(0, str(ihp_root))
     import cni  # noqa: F401  (registers SG13_dev)
     from cni.tech import Tech
@@ -215,12 +212,24 @@ def parameter_values(wrapper, overrides: dict[str, str]):
     return values
 
 
-def extract_geometry(layout, cell) -> dict:
+def _produce(
+    ihp_root: Path, module_name: str, class_name: str, overrides: dict[str, str]
+):
     import pya
 
-    shapes = []
-    min_x = min_y = None
-    max_x = max_y = None
+    tech = bootstrap(ihp_root)
+    wrapper = create_wrapper(tech, module_name, class_name)
+    layout = pya.Layout()
+    cell = layout.create_cell(class_name)
+    values = parameter_values(wrapper, overrides)
+    wrapper.produce(layout=layout, layers={}, parameters=values, cell=cell)
+    return tech, wrapper, values, layout, cell
+
+
+def _extract_pya_polygons(layout, cell):
+    import pya
+
+    polygons = []
     for layer_index in layout.layer_indexes():
         info = layout.get_info(layer_index)
         iterator = cell.begin_shapes_rec(layer_index)
@@ -240,91 +249,196 @@ def extract_geometry(layout, cell) -> dict:
                     found = True
                 except Exception:
                     pass
-            # Text shapes are intentionally omitted from the polygon model.
             iterator.next()
         if not found:
             continue
         region.merge()
         for polygon in region.each():
             simple = polygon.to_simple_polygon()
-            points = [[point.x, point.y] for point in simple.each_point()]
-            if len(points) < 3:
-                continue
-            for x, y in points:
-                min_x = x if min_x is None else min(min_x, x)
-                min_y = y if min_y is None else min(min_y, y)
-                max_x = x if max_x is None else max(max_x, x)
-                max_y = y if max_y is None else max(max_y, y)
-            shapes.append(
-                {
-                    "layer": info.layer,
-                    "datatype": info.datatype,
-                    "points": points,
-                }
-            )
-    if not shapes or min_x is None:
+            points = [(point.x, point.y) for point in simple.each_point()]
+            if len(points) >= 3:
+                polygons.append(
+                    {"number": info.layer, "datatype": info.datatype, "points": points}
+                )
+    if not polygons:
         raise RuntimeError("the PyCell produced no polygon geometry")
-    # Library assets use [min_x, min_y, max_x, max_y], matching KLayout bbox.
+    return polygons
+
+
+def _layer_names(tech):
+    result = {}
+    for name, value in tech.stream_layers().items():
+        current = result.get(value)
+        if current is None:
+            result[value] = str(name)
+            continue
+        # Prefer the compact base name (Metal1) over a datatype-qualified alias
+        # (Metal1.drawing) when both describe the same stream layer.
+        if "." in current and "." not in str(name):
+            result[value] = str(name)
+        elif "." not in current and "." in str(name):
+            continue
+        elif len(str(name)) < len(current):
+            result[value] = str(name)
+    return result
+
+
+def _layer_name(reverse, number: int, datatype: int) -> str:
+    name = reverse.get((number, datatype))
+    if name:
+        return str(name)
+    return f"Layer {number} (dt {datatype})" if datatype else f"Layer {number}"
+
+
+def generate_cell(
+    project,
+    cell_name: str,
+    ihp_root: str | Path | None,
+    module_name: str,
+    class_name: str,
+    parameters: dict[str, str] | None = None,
+    *,
+    pdk: str = DEFAULT_PDK,
+    library: bool = True,
+    device: str | None = None,
+):
+    """Generate one IHP PCell into an ``icepy.Project`` layout cell.
+
+    Returns the generated ``icepy.LayoutCell`` snapshot. The project keeps the
+    real cell and can save it normally.
+    """
+    root = find_ihp_root(str(ihp_root) if ihp_root else None)
+    tech, wrapper, values, layout, pya_cell = _produce(
+        root, module_name, class_name, parameters or {}
+    )
+    reverse = _layer_names(tech)
+    builder = project.create_layout_cell(cell_name, pdk)
+    builder.set_library(library)
+    builder.set_device(device or class_name)
+    for declaration, value in zip(wrapper.param_decls, values):
+        if declaration.name in META_PARAMETERS:
+            continue
+        builder.parameter(declaration.name, value_text(value))
+    for polygon in _extract_pya_polygons(layout, pya_cell):
+        layer = _layer_name(reverse, polygon["number"], polygon["datatype"])
+        builder.layer(layer, polygon["number"])
+        points = [make_point(x, y) for x, y in polygon["points"]]
+        builder.polygon(layer, points)
+    return builder.cell()
+
+
+def make_point(x, y):
+    import icepy
+
+    return icepy.LayoutPoint(int(x), int(y))
+
+
+def generate_geometry(
+    ihp_root: str | Path | None,
+    module_name: str,
+    class_name: str,
+    parameters: dict[str, str] | None = None,
+) -> dict:
+    """Generate a PCell through ``icepy`` and return the legacy JSON geometry."""
+    import icepy
+
+    root = find_ihp_root(str(ihp_root) if ihp_root else None)
+    tech = bootstrap(root)
+    stream_by_name = {str(name): value for name, value in tech.stream_layers().items()}
+    project = icepy.new_project(class_name)
+    cell = generate_cell(
+        project,
+        class_name,
+        root,
+        module_name,
+        class_name,
+        parameters,
+        pdk=DEFAULT_PDK,
+        library=True,
+        device=class_name,
+    )
+    layers_by_id = {layer.id: layer for layer in project.layers}
+    shapes = []
+    for shape in cell.shapes:
+        layer = layers_by_id.get(shape.layer)
+        name = layer.name if layer is not None else ""
+        number, datatype = stream_by_name.get(name, (layer.number if layer else 0, 0))
+        points = [[point.x, point.y] for point in shape.polygon]
+        if len(points) < 3:
+            continue
+        shapes.append(
+            {"layer": int(number), "datatype": int(datatype), "points": points}
+        )
+    if not shapes:
+        raise RuntimeError(
+            "the PyCell produced no polygon geometry after transfer to icepy"
+        )
+    bounds = cell.bounds
+    if bounds is None:
+        raise RuntimeError("the PyCell produced an empty bounding box")
     return {
-        "bounds": [min_x, min_y, max_x, max_y],
+        "bounds": [
+            bounds.x,
+            bounds.y,
+            bounds.x + bounds.width,
+            bounds.y + bounds.height,
+        ],
         "shapes": shapes,
     }
 
 
-def generate(
-    ihp_root: Path, module_name: str, class_name: str, overrides: dict[str, str]
-) -> dict:
-    import pya
-
-    tech = bootstrap(ihp_root)
+def parameter_specs_for(ihp_root: str | Path | None, module_name: str, class_name: str):
+    root = find_ihp_root(str(ihp_root) if ihp_root else None)
+    tech = bootstrap(root)
     wrapper = create_wrapper(tech, module_name, class_name)
-    layout = pya.Layout()
-    cell = layout.create_cell(class_name)
-    wrapper.produce(
-        layout=layout,
-        layers={},
-        parameters=parameter_values(wrapper, overrides),
-        cell=cell,
-    )
-    return extract_geometry(layout, cell)
+    return parameter_specs(wrapper)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+def main_cli(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ihp-root")
     parser.add_argument("--module", required=True)
     parser.add_argument("--class", dest="class_name", required=True)
     parser.add_argument("--params-file")
     parser.add_argument("--output")
     parser.add_argument("--list-params", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--pdk-root", help="Accepted for package-generator compatibility"
+    )
+    args = parser.parse_args(argv)
 
     try:
-        ihp_root = find_ihp_root(args.ihp_root)
         if args.list_params:
-            tech = bootstrap(ihp_root)
-            wrapper = create_wrapper(tech, args.module, args.class_name)
-            output = {"parameters": parameter_specs(wrapper)}
+            output = {
+                "parameters": parameter_specs_for(
+                    args.ihp_root, args.module, args.class_name
+                )
+            }
         else:
             overrides = {}
             if args.params_file:
                 overrides = json.loads(Path(args.params_file).read_text())
                 if not isinstance(overrides, dict):
                     raise RuntimeError("--params-file must contain a JSON object")
-            output = generate(ihp_root, args.module, args.class_name, overrides)
+            output = generate_geometry(
+                args.ihp_root, args.module, args.class_name, overrides
+            )
         text = json.dumps(output, separators=(",", ":"))
         if args.output:
             Path(args.output).write_text(text)
         else:
             print(text)
         return 0
-    except Exception as error:
-        import traceback
-
-        traceback.print_exc()
-        print(f"ihp_pcell: {error}", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - CLI boundary
+        print(f"IHP PCell generation failed: {error}", file=sys.stderr)
         return 1
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+__all__ = [
+    "DEFAULT_PDK",
+    "find_ihp_root",
+    "generate_cell",
+    "generate_geometry",
+    "main_cli",
+    "parameter_specs_for",
+]
