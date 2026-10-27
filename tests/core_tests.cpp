@@ -150,6 +150,24 @@ TEST_CASE("hierarchical symbols keep their source schematic") {
     CHECK(roundTrip.schematicCells.at(parentCellId).instances.contains(instanceId));
 }
 
+TEST_CASE("text SPICE schematics survive serialization") {
+    ice::Project project;
+    project.identity = "spice-text";
+    project.name = "spice-text";
+    const auto cellId =
+        ice::createTextSchematicCell(project, "amp", "ihp.sg13g2", "* SPICE schematic: amp\n.title amp\n.end\n");
+    const auto &cell = project.schematicCells.at(cellId);
+    CHECK(cell.textSchematic);
+    CHECK(cell.spiceText.find(".title") != std::string::npos);
+    CHECK(project.validate().empty());
+
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.serialize() == serialized);
+    CHECK(roundTrip.schematicCells.at(cellId).textSchematic);
+    CHECK(roundTrip.schematicCells.at(cellId).spiceText == cell.spiceText);
+}
+
 TEST_CASE("symbol default parameters are seeded without duplicates") {
     ice::Project project;
     project.identity = "defaults";

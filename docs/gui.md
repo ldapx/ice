@@ -129,6 +129,12 @@ The schematic editor should initially provide:
 
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
+The **+** button in Schematic **Hierarchy** offers **Schematic** and **Text
+SPICE Schematic**. Text SPICE schematics use a notebook-text icon, appear in the
+schematic tab bar, and open a plain-text SPICE editor in place of the canvas.
+Their source is stored directly in the project and saved with it. They are not
+projected into generated hierarchy symbols and are excluded from the current
+canvas-based simulation selector.
 
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.

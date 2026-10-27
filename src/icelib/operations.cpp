@@ -150,6 +150,13 @@ ObjectId createSchematicCell(Project &project, std::string name, std::string pdk
     project.schematicCells.emplace(id, SchematicCell{id, std::move(name), std::move(pdk)});
     return id;
 }
+ObjectId createTextSchematicCell(Project &project, std::string name, std::string pdk, std::string spiceText) {
+    const auto id = createSchematicCell(project, std::move(name), std::move(pdk));
+    auto &cell = project.schematicCells.at(id);
+    cell.textSchematic = true;
+    cell.spiceText = std::move(spiceText);
+    return id;
+}
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork, ObjectId sourceCell) {
     if (name.empty())
         throw ProjectError("schematic.symbol", "Symbol name must not be empty");

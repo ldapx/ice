@@ -104,6 +104,10 @@ struct SchematicCell {
     std::map<ObjectId, Symbol> symbols;
     std::map<ObjectId, SchematicInstance> instances;
     std::map<ObjectId, Net> nets;
+    // True for a schematic authored as a raw SPICE text document rather than
+    // as a drawn symbol-and-net canvas.
+    bool textSchematic = false;
+    std::string spiceText;
 };
 
 struct Layer {

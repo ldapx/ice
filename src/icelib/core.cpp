@@ -254,6 +254,10 @@ std::string Project::serialize() const {
                   {"symbols", json::array()},
                   {"instances", json::array()},
                   {"nets", json::array()}};
+        if (cell.textSchematic)
+            c["text_schematic"] = true;
+        if (!cell.spiceText.empty())
+            c["spice_text"] = cell.spiceText;
         for (const auto &parameter : cell.parameters) {
             json entry;
             put(entry, parameter);
@@ -453,6 +457,8 @@ Project Project::deserialize(const std::string &text) {
             cell.pdk = c.value("pdk", std::string{genericPdkId});
             if (cell.pdk.empty())
                 cell.pdk = genericPdkId;
+            cell.textSchematic = c.value("text_schematic", false);
+            cell.spiceText = c.value("spice_text", std::string{});
             if (c.contains("parameters")) {
                 for (const auto &parameter : c.at("parameters"))
                     cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});

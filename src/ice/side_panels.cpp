@@ -32,7 +32,14 @@
 namespace {
 constexpr int kItemKindRole = Qt::UserRole + 1;
 
-enum class HierarchyItemKind : int { layout = 1, device = 2, rootLayer = 3, plannedDevice = 4, proceduralLayout = 5 };
+enum class HierarchyItemKind : int {
+    layout = 1,
+    device = 2,
+    rootLayer = 3,
+    plannedDevice = 4,
+    proceduralLayout = 5,
+    textSchematic = 6
+};
 
 QIcon hierarchyIcon(const char *name) { return ice::lucideIcon(QString::fromLatin1(name), 16); }
 } // namespace
@@ -113,14 +120,20 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
     connect(tree_, &QTreeWidget::currentItemChanged, this,
             [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateRemoveButton(); });
     connect(tree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item, int) {
-        if (!showLayoutHierarchy_ || !item || !item->data(0, Qt::UserRole).isValid())
+        if (!item || !item->data(0, Qt::UserRole).isValid())
             return;
+        const auto id = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        if (!showLayoutHierarchy_) {
+            if (onActivateSchematic_)
+                onActivateSchematic_(id);
+            return;
+        }
         const auto kind = item->data(0, kItemKindRole).toInt();
         if (kind != static_cast<int>(HierarchyItemKind::layout) &&
             kind != static_cast<int>(HierarchyItemKind::proceduralLayout))
             return;
         if (onActivateLayout_)
-            onActivateLayout_(static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong()));
+            onActivateLayout_(id);
     });
 }
 
@@ -130,6 +143,10 @@ void ProjectPanel::setOnRemoveClicked(std::function<void(ice::ObjectId)> callbac
 
 void ProjectPanel::setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback) {
     onMakeLayoutFromSchematic_ = std::move(callback);
+}
+
+void ProjectPanel::setOnActivateSchematic(std::function<void(ice::ObjectId)> callback) {
+    onActivateSchematic_ = std::move(callback);
 }
 
 void ProjectPanel::setOnActivateLayout(std::function<void(ice::ObjectId)> callback) {
@@ -171,6 +188,8 @@ void ProjectPanel::rebuildTree() {
     if (!showLayoutHierarchy_) {
         std::map<ice::ObjectId, std::vector<ice::ObjectId>> children;
         for (const auto &[cellId, cell] : project.schematicCells) {
+            if (cell.textSchematic)
+                continue;
             auto &childCells = children[cellId];
             for (const auto &[_, instance] : cell.instances) {
                 const auto symbol = cell.symbols.find(instance.symbol);
@@ -209,6 +228,13 @@ void ProjectPanel::rebuildTree() {
         for (const auto &[id, cell] : project.schematicCells) {
             auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            if (cell.textSchematic) {
+                cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::textSchematic));
+                cellItem->setIcon(0, hierarchyIcon("notebook-text"));
+                cellItem->setToolTip(0,
+                                     QStringLiteral("Text SPICE schematic: %1").arg(QString::fromStdString(cell.name)));
+                continue;
+            }
             cellItem->setIcon(0, hierarchyIcon("microchip"));
             cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
             std::vector<ice::ObjectId> ancestors{id};
@@ -337,7 +363,8 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         if (!onMakeLayoutFromSchematic_ || !item->data(0, Qt::UserRole).isValid())
             return;
         const auto cellId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
-        if (cellId == 0 || !project_->schematicCells.contains(cellId))
+        const auto cell = project_->schematicCells.find(cellId);
+        if (cellId == 0 || cell == project_->schematicCells.end() || cell->second.textSchematic)
             return;
         QMenu menu(this);
         auto *makeLayoutAction = menu.addAction(QStringLiteral("Make Layout from Schematic"));

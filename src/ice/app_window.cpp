@@ -21,6 +21,7 @@
 #include "procedural_layout.hpp"
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
+#include "text_document_editor.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
@@ -211,6 +212,8 @@ class DocumentWindow : public QMainWindow {
         resetSectionHistories();
         layoutViewInitialized_ = false;
         activeProceduralLayoutId_ = 0;
+        if (schematicViewStack_ && schematicCanvasPage_)
+            schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         if (layoutViewStack_ && layoutCanvasPage_)
             layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
         openLibraryLayoutCellTabs_.clear();
@@ -495,6 +498,10 @@ class DocumentWindow : public QMainWindow {
             schematicCanvas_->scene()->clear();
             schematicCanvas_->clearSelection();
         }
+        if (schematicViewStack_ && schematicCanvasPage_)
+            schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
+        if (textSchematicEditor_)
+            textSchematicEditor_->setText({});
         if (schematicSymbolsPanel_)
             schematicSymbolsPanel_->clear();
         if (schematicNetlistPanel_)
@@ -519,6 +526,44 @@ class DocumentWindow : public QMainWindow {
         showStartup();
     }
 
+    bool resolveSchematicPdk(const std::string &pdk, QString *pdkLabel, bool *addDependency) {
+        *pdkLabel = QStringLiteral("Generic PDK");
+        *addDependency = false;
+        if (pdk == ice::genericPdkId)
+            return true;
+        const auto installDirectory = configuredPackageInstallDirectory();
+        const auto packages = installedPackages(installDirectory);
+        const auto package =
+            std::find_if(packages.begin(), packages.end(), [&](const auto &entry) { return entry.spec.name == pdk; });
+        if (package == packages.end()) {
+            QMessageBox::critical(
+                this, QStringLiteral("Create Schematic"),
+                QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
+            return false;
+        }
+        if (!packageProvidesPdk(package->spec)) {
+            QMessageBox::critical(
+                this, QStringLiteral("Create Schematic"),
+                QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
+            return false;
+        }
+        *pdkLabel = packagePdkDisplayName(package->spec);
+        const auto &dependencies = project_->project().packageDependencies;
+        if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
+            const auto displayName = packagePdkDisplayName(package->spec);
+            const auto response = QMessageBox::question(
+                this, QStringLiteral("Add Package Dependency"),
+                QStringLiteral("This schematic uses the %1 PDK from package %2. Add %2 to the project's "
+                               "package dependency list?")
+                    .arg(displayName, QString::fromStdString(pdk)),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (response != QMessageBox::Yes)
+                return false;
+            *addDependency = true;
+        }
+        return true;
+    }
+
     void createSchematic() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Create Schematic"),
@@ -540,40 +585,10 @@ class DocumentWindow : public QMainWindow {
         }
         if (name.trimmed().isEmpty())
             return;
-        const auto installDirectory = configuredPackageInstallDirectory();
-        auto pdkLabel = QStringLiteral("Generic PDK");
+        QString pdkLabel;
         bool addDependency = false;
-        if (pdk != ice::genericPdkId) {
-            const auto packages = installedPackages(installDirectory);
-            const auto package = std::find_if(packages.begin(), packages.end(),
-                                              [&](const auto &entry) { return entry.spec.name == pdk; });
-            if (package == packages.end()) {
-                QMessageBox::critical(
-                    this, QStringLiteral("Create Schematic"),
-                    QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
-                return;
-            }
-            if (!packageProvidesPdk(package->spec)) {
-                QMessageBox::critical(
-                    this, QStringLiteral("Create Schematic"),
-                    QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
-                return;
-            }
-            pdkLabel = packagePdkDisplayName(package->spec);
-            const auto &dependencies = project_->project().packageDependencies;
-            if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
-                const auto displayName = packagePdkDisplayName(package->spec);
-                const auto response = QMessageBox::question(
-                    this, QStringLiteral("Add Package Dependency"),
-                    QStringLiteral("This schematic uses the %1 PDK from package %2. Add %2 to the project's "
-                                   "package dependency list?")
-                        .arg(displayName, QString::fromStdString(pdk)),
-                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-                if (response != QMessageBox::Yes)
-                    return;
-                addDependency = true;
-            }
-        }
+        if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
+            return;
         try {
             project_->execute("create schematic", [&](ice::Project &project) {
                 if (addDependency)
@@ -585,6 +600,72 @@ class DocumentWindow : public QMainWindow {
             statusBar()->showMessage(QStringLiteral("Schematic created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Schematic"), QString::fromStdString(error.what()));
+        }
+    }
+
+    void showAddSchematicMenu() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create Schematic"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        QMenu menu(this);
+        auto *schematicAction = menu.addAction(QStringLiteral("Schematic"));
+        setLucideIcon(schematicAction, QStringLiteral("microchip"));
+        auto *textAction = menu.addAction(QStringLiteral("Text SPICE Schematic"));
+        setLucideIcon(textAction, QStringLiteral("notebook-text"));
+        const auto *chosen = menu.exec(QCursor::pos());
+        if (chosen == schematicAction)
+            createSchematic();
+        else if (chosen == textAction)
+            createTextSchematic();
+    }
+
+    void createTextSchematic() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create Text SPICE Schematic"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto installDirectory = configuredPackageInstallDirectory();
+        CreateSchematicDialog dialog(installDirectory, this);
+        dialog.setWindowTitle(QStringLiteral("Create Text SPICE Schematic"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        createTextSchematic(dialog.schematicName(), dialog.pdkId());
+    }
+
+    void createTextSchematic(const QString &name, const std::string &pdk) {
+        if (!project_)
+            return;
+        const auto trimmedName = name.trimmed();
+        if (trimmedName.isEmpty())
+            return;
+        QString pdkLabel;
+        bool addDependency = false;
+        if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
+            return;
+        ice::ObjectId createdId = 0;
+        try {
+            project_->execute("create text schematic", [&](ice::Project &project) {
+                if (addDependency)
+                    project.packageDependencies.push_back(pdk);
+                const auto text =
+                    QStringLiteral(
+                        "* SPICE schematic: %1\n.title %1\n* Add SPICE devices and directives below.\n.end\n")
+                        .arg(trimmedName);
+                createdId = ice::createTextSchematicCell(project, trimmedName.toStdString(), pdk, text.toStdString());
+            });
+            project_->setLastHistoryLabel("Created text SPICE schematic " + trimmedName.toStdString());
+            activeSchematicId_ = createdId;
+            refreshProject();
+            selectSchematicTab(createdId);
+            if (documents_ && schematicPage_)
+                documents_->setCurrentWidget(schematicPage_);
+            statusBar()->showMessage(QStringLiteral("Text SPICE schematic created with %1").arg(pdkLabel));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create Text SPICE Schematic"),
+                                  QString::fromStdString(error.what()));
         }
     }
 
@@ -788,6 +869,73 @@ class DocumentWindow : public QMainWindow {
         if (proceduralEditor_)
             proceduralEditor_->showMessage(QStringLiteral("Script changed. Regenerate layout to update the "
                                                           "static layout child."));
+    }
+
+    void onTextSchematicEdited(const QString &text) {
+        if (!project_ || activeSchematicId_ == 0)
+            return;
+        auto &cells = project_->project().schematicCells;
+        const auto it = cells.find(activeSchematicId_);
+        if (it == cells.end() || !it->second.textSchematic)
+            return;
+        const auto value = text.toStdString();
+        if (it->second.spiceText == value)
+            return;
+        it->second.spiceText = value;
+        project_->markDirty();
+        if (textSchematicEditor_)
+            textSchematicEditor_->showMessage(QStringLiteral("Text changed. The netlist is stored with the project."));
+    }
+
+    void showTextSchematicEditor(ice::ObjectId schematicId) {
+        if (!project_)
+            return;
+        const auto it = project_->project().schematicCells.find(schematicId);
+        if (it == project_->project().schematicCells.end() || !it->second.textSchematic)
+            return;
+        activeSchematicId_ = schematicId;
+        if (schematicViewStack_ && textSchematicEditorPage_)
+            schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
+        if (textSchematicEditor_) {
+            const auto text = QString::fromStdString(it->second.spiceText);
+            if (textSchematicEditor_->text() != text)
+                textSchematicEditor_->setText(text);
+            textSchematicEditor_->showMessage(
+                QStringLiteral("Editing text SPICE schematic '%1'.").arg(QString::fromStdString(it->second.name)));
+        }
+    }
+
+    void activateSchematicTab(int index) {
+        if (!schematicCellTabs_ || index < 0 || !project_)
+            return;
+        const auto id = static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong());
+        const auto it = project_->project().schematicCells.find(id);
+        if (it == project_->project().schematicCells.end())
+            return;
+        activeSchematicId_ = id;
+        if (it->second.textSchematic) {
+            showTextSchematicEditor(id);
+            return;
+        }
+        if (schematicViewStack_ && schematicCanvasPage_)
+            schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
+        refreshSchematic();
+    }
+
+    void selectSchematicTab(ice::ObjectId id) {
+        if (!schematicCellTabs_)
+            return;
+        for (int index = 0; index < schematicCellTabs_->count(); ++index) {
+            if (static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong()) != id)
+                continue;
+            if (schematicCellTabs_->currentIndex() == index)
+                activateSchematicTab(index);
+            else
+                schematicCellTabs_->setCurrentIndex(index);
+            if (documents_ && schematicPage_)
+                documents_->setCurrentWidget(schematicPage_);
+            return;
+        }
     }
 
     void showProceduralLayoutEditor(ice::ObjectId proceduralId) {
@@ -3214,7 +3362,9 @@ class DocumentWindow : public QMainWindow {
                 schematicCellTabs_->tabBar()->setTabData(tab, QVariant::fromValue<qulonglong>(id));
                 const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                                    : QString::fromStdString(cell.pdk);
-                schematicCellTabs_->setTabToolTip(tab, QStringLiteral("PDK: %1").arg(pdk));
+                schematicCellTabs_->setTabToolTip(tab, cell.textSchematic
+                                                           ? QStringLiteral("Text SPICE schematic · PDK: %1").arg(pdk)
+                                                           : QStringLiteral("PDK: %1").arg(pdk));
             }
             for (int index = 0; index < schematicCellTabs_->count(); ++index)
                 if (schematicCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
@@ -3262,8 +3412,11 @@ class DocumentWindow : public QMainWindow {
         QSignalBlocker blocker(schematicSelector_);
         schematicSelector_->clear();
         if (project_) {
-            for (const auto &[id, cell] : project_->project().schematicCells)
+            for (const auto &[id, cell] : project_->project().schematicCells) {
+                if (cell.textSchematic)
+                    continue;
                 schematicSelector_->addItem(QString::fromStdString(cell.name), QVariant::fromValue<qulonglong>(id));
+            }
         }
         const int index = schematicSelector_->findData(QVariant::fromValue<qulonglong>(selected));
         if (index >= 0)
@@ -3328,6 +3481,15 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project_->project().schematicCells.end())
             return;
         const auto &cell = cellIt->second;
+        if (cell.textSchematic) {
+            if (schematicSymbolsPanel_)
+                schematicSymbolsPanel_->clear();
+            if (schematicNetlistPanel_)
+                schematicNetlistPanel_->clear();
+            schematicSymbolsLoaded_ = false;
+            schematicSymbolsPdk_.clear();
+            return;
+        }
         const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
         if (schematicSymbolsPanel_) {
             if (!schematicSymbolsLoaded_ || schematicSymbolsPdk_ != pdk) {
@@ -3337,7 +3499,7 @@ class DocumentWindow : public QMainWindow {
             }
             auto symbols = schematicBaseSymbols_;
             for (const auto &[id, other] : project_->project().schematicCells) {
-                if (id == cell.id)
+                if (id == cell.id || other.textSchematic)
                     continue;
                 symbols.push_back(generatedSchematicSymbol(other));
             }
@@ -3880,9 +4042,10 @@ class DocumentWindow : public QMainWindow {
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
         schematicHierarchy_ = new ProjectPanel(false, false, false, true);
-        schematicHierarchy_->setOnAddClicked([this] { createSchematic(); });
+        schematicHierarchy_->setOnAddClicked([this] { showAddSchematicMenu(); });
         schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
         schematicHierarchy_->setOnMakeLayoutFromSchematic([this](ice::ObjectId id) { makeLayoutFromSchematic(id); });
+        schematicHierarchy_->setOnActivateSchematic([this](ice::ObjectId id) { selectSchematicTab(id); });
         schematicSymbolsPanel_ = new SymbolsPanel;
         schematicSymbolsPanel_->setOnSelectionChanged([this] {
             if (!schematicCanvas_)
@@ -3911,7 +4074,17 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->setContentsMargins(0, 0, 0, 0);
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
-        schematicEditorLayout->addWidget(makeEditor(QStringLiteral("Schematic editor"), false), 1);
+        schematicCanvasPage_ = makeEditor(QStringLiteral("Schematic editor"), false);
+        textSchematicEditor_ = new TextDocumentEditor(
+            QStringLiteral("SPICE netlist"),
+            QStringLiteral("This text SPICE schematic stores its netlist directly in the project. "
+                           "Use normal SPICE syntax; changes are saved with the project."));
+        textSchematicEditor_->setOnTextEdited([this](const QString &text) { onTextSchematicEdited(text); });
+        textSchematicEditorPage_ = textSchematicEditor_;
+        schematicViewStack_ = new QStackedWidget;
+        schematicViewStack_->addWidget(schematicCanvasPage_);
+        schematicViewStack_->addWidget(textSchematicEditorPage_);
+        schematicEditorLayout->addWidget(schematicViewStack_, 1);
         schematicEmptyPanel_ = new EmptySchematicPanel;
         schematicEmptyPanel_->setOnCreate(
             [this](const QString &name, const std::string &pdk) { createSchematic(name, pdk); });
@@ -4338,8 +4511,7 @@ class DocumentWindow : public QMainWindow {
         connect(schematicCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (index < 0)
                 return;
-            activeSchematicId_ = schematicCellTabs_->tabBar()->tabData(index).toULongLong();
-            refreshSchematic();
+            activateSchematicTab(index);
         });
         connect(layoutCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (index < 0)
@@ -5014,6 +5186,10 @@ class DocumentWindow : public QMainWindow {
     QTabWidget *layoutCellTabs_ = nullptr;
     QStackedWidget *schematicEditorStack_ = nullptr;
     QWidget *schematicEditorPage_ = nullptr;
+    QStackedWidget *schematicViewStack_ = nullptr;
+    QWidget *schematicCanvasPage_ = nullptr;
+    QWidget *textSchematicEditorPage_ = nullptr;
+    TextDocumentEditor *textSchematicEditor_ = nullptr;
     EmptySchematicPanel *schematicEmptyPanel_ = nullptr;
     QWidget *schematicToolbarColumn_ = nullptr;
     QStackedWidget *layoutEditorStack_ = nullptr;

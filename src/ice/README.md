@@ -19,6 +19,8 @@ growing in one file.
 - `properties_panel.*` — the shared schematic/layout properties panel.
 - `side_panels.*` — project/layout hierarchy, layers, simulations, symbols, and
   schematic netlist panels.
+- `text_document_editor.*` — source-text editor used by text SPICE schematic
+  tabs.
 - `schematic_utils.*` — generated hierarchical schematic symbol artwork.
 - `ui_helpers.*` — shared icons, headings, layer styles, transforms, and cursor
   guards.
