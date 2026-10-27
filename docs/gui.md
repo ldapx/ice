@@ -157,17 +157,23 @@ child with a network icon that contains its devices by default. Right-click a
 layout entry and toggle **Flatten Layout** to promote its descendants directly
 under the layout; toggling it again restores the Root Layer grouping. When the
 active layout is flattened, **Run DRC** exports the flattened instance geometry
-instead of only the layout cell's own shapes. The bundled IHP SG13G2 device
-library appears in **Devices**, with search, category filtering, and a geometry
-preview in **Properties**. The device list starts with no selection; selecting a
-device switches to **Place Device** and shows a cursor-following preview, while
-activating **Select** clears the list selection. Clicking in the canvas imports
-the device geometry into the project and creates a layout instance. Every placed device
-gets its own read-only library cell, so repeated placements do not share
-parameters or geometry. Each instance appears separately under its parent
-layout in the hierarchy and can be selected, moved, and deleted directly in the
-canvas. PCell parameter names, values, and descriptions are shown in
-**Properties** for the device preview and for imported library cells. Selecting
+instead of only the layout cell's own shapes. Right-clicking a schematic in the
+Schematic **Hierarchy** tab offers **Make Layout from Schematic**. This creates
+a layout with the schematic's technology and projects every schematic instance
+into a movable **Planned Device** box under the new layout's Root Layer. Nets
+are drawn as straight connections between the boxes; planned devices use a box
+icon in the hierarchy and can be selected and moved directly on the canvas. The
+bundled IHP SG13G2 device library appears in **Devices**, with search, category
+filtering, and a geometry preview in **Properties**. The device list starts with
+no selection; selecting a device switches to **Place Device** and shows a
+cursor-following preview, while activating **Select** clears the list selection.
+Clicking in the canvas imports the device geometry into the project and creates
+a layout instance. Every placed device gets its own read-only library cell, so
+repeated placements do not share parameters or geometry. Each instance appears
+separately under its parent layout in the hierarchy and can be selected, moved,
+and deleted directly in the canvas. PCell parameter names, values, and
+descriptions are shown in **Properties** for the device preview and for imported
+library cells. Selecting
 a placed device instance shows that instance's own geometry preview and
 parameter values. Editing a parameter regenerates that instance's geometry
 through the IHP PyCell implementation without changing other instances. Editing

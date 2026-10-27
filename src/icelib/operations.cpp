@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <initializer_list>
 #include <map>
 #include <set>
@@ -191,6 +192,107 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
     ObjectId id = project.nextId();
     project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk)});
     return id;
+}
+
+ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name) {
+    const auto &schematic =
+        require(project.schematicCells, schematicId, "schematic.cell", "Schematic cell does not exist");
+
+    std::string layoutName = name.empty() ? schematic.name : std::move(name);
+    if (layoutName.empty())
+        layoutName = "Layout";
+    const auto nameTaken = [&](const std::string &candidate) {
+        return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                           [&](const auto &entry) { return entry.second.name == candidate; });
+    };
+    if (nameTaken(layoutName)) {
+        const auto stem = layoutName + " Layout";
+        layoutName = stem;
+        for (int index = 2; nameTaken(layoutName); ++index)
+            layoutName = stem + " " + std::to_string(index);
+    }
+
+    const auto pdk = schematic.pdk.empty() ? std::string{genericPdkId} : schematic.pdk;
+    const auto layoutId = createLayoutCell(project, layoutName, pdk);
+    auto &layout = project.layoutCells.at(layoutId);
+
+    std::vector<const SchematicInstance *> orderedInstances;
+    orderedInstances.reserve(schematic.instances.size());
+    for (const auto &[_, instance] : schematic.instances)
+        orderedInstances.push_back(&instance);
+    std::sort(orderedInstances.begin(), orderedInstances.end(), [](const auto *left, const auto *right) {
+        if (left->y != right->y)
+            return left->y > right->y;
+        if (left->x != right->x)
+            return left->x < right->x;
+        if (left->name != right->name)
+            return left->name < right->name;
+        return left->id < right->id;
+    });
+
+    // Keep planned-device boxes on the project grid even for coarse grids.
+    const auto gridStep = [&](Coordinate value) { return std::max(project.grid, project.snap(value)); };
+    const auto boxWidth = gridStep(1200);
+    const auto boxHeight = gridStep(700);
+    const auto horizontalGap = gridStep(900);
+    const auto verticalGap = gridStep(700);
+    const auto columnStep = boxWidth + horizontalGap;
+    const auto rowStep = boxHeight + verticalGap;
+
+    const auto count = static_cast<int>(orderedInstances.size());
+    const auto columns = std::max(1, std::min(4, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))))));
+    const auto rows = (count + columns - 1) / columns;
+
+    std::map<ObjectId, std::vector<ObjectId>> pinDevices;
+    for (int index = 0; index < count; ++index) {
+        const auto *instance = orderedInstances[static_cast<std::size_t>(index)];
+        std::string deviceName = instance->name;
+        const auto symbol = schematic.symbols.find(instance->symbol);
+        if (deviceName.empty() && symbol != schematic.symbols.end())
+            deviceName = symbol->second.name;
+        if (deviceName.empty())
+            deviceName = "Device " + std::to_string(index + 1);
+
+        const auto deviceId = project.nextId();
+        const auto row = index / columns;
+        const auto column = index % columns;
+        const auto x = static_cast<Coordinate>(column) * columnStep;
+        const auto y = static_cast<Coordinate>(rows - 1 - row) * rowStep;
+        layout.plannedDevices.emplace(
+            deviceId, PlannedDevice{deviceId, std::move(deviceName), instance->id, x, y, boxWidth, boxHeight});
+        if (symbol == schematic.symbols.end())
+            continue;
+        for (const auto &pin : symbol->second.pins)
+            pinDevices[pin.id].push_back(deviceId);
+    }
+
+    std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
+    for (const auto &[_, net] : schematic.nets) {
+        std::vector<ObjectId> devices;
+        for (const auto pinId : net.pins) {
+            const auto entry = pinDevices.find(pinId);
+            if (entry == pinDevices.end())
+                continue;
+            for (const auto deviceId : entry->second) {
+                if (std::find(devices.begin(), devices.end(), deviceId) == devices.end())
+                    devices.push_back(deviceId);
+            }
+        }
+        if (devices.size() < 2)
+            continue;
+        const auto from = devices.front();
+        for (std::size_t index = 1; index < devices.size(); ++index) {
+            const auto to = devices[index];
+            if (from == to)
+                continue;
+            const auto pair = from < to ? std::make_pair(from, to) : std::make_pair(to, from);
+            if (!connectedPairs.insert(pair).second)
+                continue;
+            const auto connectionId = project.nextId();
+            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, net.name});
+        }
+    }
+    return layoutId;
 }
 ObjectId addLayer(Project &project, std::string name, int number) {
     if (name.empty())

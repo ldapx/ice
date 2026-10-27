@@ -25,6 +25,7 @@ class ProjectPanel : public QWidget {
                           bool showActions = false, QWidget *parent = nullptr);
     void setOnAddClicked(std::function<void()> callback);
     void setOnRemoveClicked(std::function<void(ice::ObjectId)> callback);
+    void setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback);
     void setOnFlattenChanged(std::function<void()> callback);
     void setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state);
     void setProject(const ice::Project &project);
@@ -48,6 +49,7 @@ class ProjectPanel : public QWidget {
     QPushButton *removeButton_ = nullptr;
     std::function<void()> onAdd_;
     std::function<void(ice::ObjectId)> onRemove_;
+    std::function<void(ice::ObjectId)> onMakeLayoutFromSchematic_;
     bool showLayoutHierarchy_ = true;
 };
 

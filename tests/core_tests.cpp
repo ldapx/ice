@@ -815,6 +815,71 @@ TEST_CASE("layout instances survive serialization") {
     CHECK(instance.y == -80);
 }
 
+TEST_CASE("planned devices are projected from a schematic") {
+    ice::Project project;
+    project.identity = "planned";
+    project.name = "planned";
+    const auto schematicId = ice::createSchematicCell(project, "amp", "example.pdk");
+
+    const auto resistorId = ice::addSymbol(project, schematicId, "resistor");
+    auto &resistor = project.schematicCells.at(schematicId).symbols.at(resistorId);
+    const auto resistorLeft = project.nextId();
+    const auto resistorRight = project.nextId();
+    resistor.pins.push_back({resistorLeft, "A", -10, 0, ice::PinDirection::left});
+    resistor.pins.push_back({resistorRight, "B", 10, 0, ice::PinDirection::right});
+
+    const auto capacitorId = ice::addSymbol(project, schematicId, "capacitor");
+    auto &capacitor = project.schematicCells.at(schematicId).symbols.at(capacitorId);
+    const auto capacitorLeft = project.nextId();
+    const auto capacitorRight = project.nextId();
+    capacitor.pins.push_back({capacitorLeft, "A", -10, 0, ice::PinDirection::left});
+    capacitor.pins.push_back({capacitorRight, "B", 10, 0, ice::PinDirection::right});
+
+    ice::addSchematicInstance(project, schematicId, resistorId, "R1", 0, 0);
+    ice::addSchematicInstance(project, schematicId, capacitorId, "C1", 100, 0);
+    const auto netId = project.nextId();
+    project.schematicCells.at(schematicId).nets.emplace(netId, ice::Net{netId, "out", {resistorRight, capacitorLeft}});
+    CHECK(project.validate().empty());
+
+    const auto layoutId = ice::createLayoutFromSchematic(project, schematicId);
+    const auto &layout = project.layoutCells.at(layoutId);
+    CHECK(layout.pdk == "example.pdk");
+    CHECK(layout.name == "amp");
+    CHECK(layout.plannedDevices.size() == 2);
+    CHECK(layout.plannedConnections.size() == 1);
+    const auto &connection = layout.plannedConnections.begin()->second;
+    CHECK(connection.name == "out");
+
+    ice::ObjectId resistorDevice = 0;
+    ice::ObjectId capacitorDevice = 0;
+    for (const auto &[_, device] : layout.plannedDevices) {
+        CHECK(device.width > 0);
+        CHECK(device.height > 0);
+        CHECK(device.x % project.grid == 0);
+        CHECK(device.y % project.grid == 0);
+        if (device.name == "R1")
+            resistorDevice = device.id;
+        if (device.name == "C1")
+            capacitorDevice = device.id;
+    }
+    CHECK(resistorDevice != 0);
+    CHECK(capacitorDevice != 0);
+    CHECK(connection.from == resistorDevice);
+    CHECK(connection.to == capacitorDevice);
+    CHECK(project.validate().empty());
+
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.serialize() == serialized);
+    CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.size() == 2);
+    CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.size() == 1);
+    CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.at(resistorDevice).name == "R1");
+    CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.begin()->second.name == "out");
+
+    const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
+    CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);
+}
+
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {
     ice::Project project;
     project.identity = "design";

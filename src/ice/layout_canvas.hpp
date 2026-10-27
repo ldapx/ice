@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+class QGraphicsItem;
 class QPainter;
 class QRectF;
 
@@ -73,5 +74,10 @@ class LayoutCanvas : public QGraphicsView {
 // Builds the rounded-rectangle polygon for one path segment. Points are in
 // scene coordinates (positive Y downwards).
 QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
+
+// Creates the selectable/movable canvas box used for a planned device. The
+// rectangle is given in scene coordinates and the item is positioned at its
+// top-left corner so drag deltas map directly onto layout coordinates.
+QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &name, const QRectF &rect, bool readOnly);
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent = nullptr);

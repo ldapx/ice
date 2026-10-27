@@ -4,6 +4,7 @@
 #include "ui_helpers.hpp"
 
 #include <QApplication>
+#include <QFontMetricsF>
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
 #include <QInputDialog>
@@ -53,6 +54,71 @@ QPointF constrainedPathPoint(QPointF anchor, QPointF point, bool orthogonal) {
         return {point.x(), anchor.y()};
     return {anchor.x(), point.y()};
 }
+
+// Planned devices are schematic-level placeholders, so their canvas item draws
+// its own label and selection feedback instead of depending on a child text
+// item (which would steal drag events from the box).
+class PlannedDeviceItem : public QGraphicsItem {
+  public:
+    PlannedDeviceItem(QString name, QSizeF size) : name_(std::move(name)), size_(size) {}
+
+    QRectF boundingRect() const override { return QRectF(QPointF(0.0, 0.0), size_); }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.addRect(boundingRect());
+        return path;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        const auto rect = boundingRect();
+        const bool selected = isSelected();
+        const auto accent = ice::uiColor(ice::UiColor::Accent4);
+        const auto outline = ice::uiColor(selected ? ice::UiColor::Accent5 : ice::UiColor::Accent4);
+        const auto radius = std::min(rect.width(), rect.height()) * 0.08;
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        if (selected) {
+            QColor halo = outline;
+            halo.setAlpha(70);
+            QPen haloPen(halo);
+            haloPen.setCosmetic(true);
+            haloPen.setWidthF(6.0);
+            painter->setPen(haloPen);
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(rect, radius, radius);
+        }
+
+        QColor fill = accent;
+        fill.setAlpha(selected ? 70 : 35);
+        QPen pen(outline);
+        pen.setCosmetic(true);
+        pen.setWidthF(selected ? 2.5 : 1.5);
+        painter->setPen(pen);
+        painter->setBrush(fill);
+        painter->drawRoundedRect(rect, radius, radius);
+
+        if (name_.isEmpty())
+            return;
+        QFont font = painter->font();
+        qreal pixelSize = std::max<qreal>(1.0, rect.height() * 0.28);
+        font.setPixelSize(std::max(1, static_cast<int>(std::lround(pixelSize))));
+        QFontMetricsF metrics(font);
+        const auto available = rect.width() * 0.86;
+        const auto textWidth = metrics.horizontalAdvance(name_);
+        if (textWidth > available && textWidth > 0.0) {
+            pixelSize *= available / textWidth;
+            font.setPixelSize(std::max(1, static_cast<int>(std::lround(pixelSize))));
+        }
+        painter->setFont(font);
+        painter->setPen(ice::uiColor(ice::UiColor::Text1));
+        painter->drawText(rect, Qt::AlignCenter | Qt::TextSingleLine, name_);
+    }
+
+  private:
+    QString name_;
+    QSizeF size_;
+};
 } // namespace
 
 class LayoutCanvasImpl : public LayoutCanvas {
@@ -809,4 +875,18 @@ class LayoutCanvasImpl : public LayoutCanvas {
 // role 0: item kind ("symbol", "symbol-artwork", "symbol-label",
 //        "symbol-highlight", "pin", "wire", "net-label")
 // role 1: the stable domain id of the object the item projects
+QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &name, const QRectF &rect, bool readOnly) {
+    auto *item = new PlannedDeviceItem(name, rect.size());
+    item->setPos(rect.topLeft());
+    item->setData(0, QVariant::fromValue<qulonglong>(id));
+    item->setData(2, QStringLiteral("planned-device"));
+    item->setZValue(10.0);
+    item->setToolTip(name.isEmpty() ? QStringLiteral("Planned device") : name);
+    if (!readOnly) {
+        item->setFlag(QGraphicsItem::ItemIsSelectable);
+        item->setFlag(QGraphicsItem::ItemIsMovable);
+    }
+    return item;
+}
+
 LayoutCanvas *createLayoutCanvas(QWidget *parent) { return new LayoutCanvasImpl(parent); }
