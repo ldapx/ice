@@ -120,3 +120,15 @@ class SchematicNetlistPanel : public QWidget {
     QString currentNetlist_;
     QString builtNetlist_;
 };
+
+class HistoryPanel : public QWidget {
+  public:
+    explicit HistoryPanel(QWidget *parent = nullptr);
+    void setOnHistorySelected(std::function<void(std::size_t)> callback);
+    void setHistory(const QStringList &entries, const std::vector<std::size_t> &positions);
+
+  private:
+    QListWidget *list_ = nullptr;
+    std::vector<std::size_t> positions_;
+    std::function<void(std::size_t)> onHistorySelected_;
+};

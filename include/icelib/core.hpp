@@ -243,6 +243,11 @@ class ProjectSession {
     Project &project() noexcept;
     const Project &project() const noexcept;
     bool dirty() const noexcept;
+    const std::vector<std::string> &history() const noexcept;
+    std::size_t historyPosition() const noexcept;
+    void setLastHistoryLabel(std::string label);
+    bool jumpToHistory(std::size_t position);
+    void replaceProject(Project project);
     void markDirty();
     void subscribe(Observer observer);
     void beginTransaction(std::string label);
@@ -260,6 +265,9 @@ class ProjectSession {
     std::optional<Project> transactionSnapshot_;
     std::string transactionLabel_;
     bool dirty_ = false;
+    std::vector<std::string> historyLabels_;
+    std::vector<Project> historyStates_;
+    std::size_t historyPosition_ = 0;
     std::vector<Observer> observers_;
     void notify();
 };

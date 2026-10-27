@@ -563,10 +563,32 @@ Project Project::load(const std::filesystem::path &path) {
     return deserialize({std::istreambuf_iterator<char>(stream), {}});
 }
 
-ProjectSession::ProjectSession(Project project) : project_(std::move(project)) {}
+ProjectSession::ProjectSession(Project project) : project_(std::move(project)), historyStates_{project_} {}
 Project &ProjectSession::project() noexcept { return project_; }
 const Project &ProjectSession::project() const noexcept { return project_; }
 bool ProjectSession::dirty() const noexcept { return dirty_; }
+const std::vector<std::string> &ProjectSession::history() const noexcept { return historyLabels_; }
+std::size_t ProjectSession::historyPosition() const noexcept { return historyPosition_; }
+void ProjectSession::setLastHistoryLabel(std::string label) {
+    if (historyPosition_ != 0 && historyPosition_ <= historyLabels_.size())
+        historyLabels_[historyPosition_ - 1] = std::move(label);
+}
+bool ProjectSession::jumpToHistory(std::size_t position) {
+    if (position > historyPosition_ || position >= historyStates_.size())
+        return false;
+    if (position == historyPosition_)
+        return true;
+    project_ = historyStates_[position];
+    historyPosition_ = position;
+    dirty_ = true;
+    notify();
+    return true;
+}
+void ProjectSession::replaceProject(Project project) {
+    project_ = std::move(project);
+    dirty_ = true;
+    notify();
+}
 void ProjectSession::markDirty() {
     dirty_ = true;
     notify();
@@ -582,11 +604,11 @@ void ProjectSession::commitTransaction() {
     if (!transactionSnapshot_)
         throw ProjectError("transaction.missing", "No transaction is active");
     if (project_.serialize() != transactionSnapshot_->serialize()) {
-        constexpr std::size_t kMaxUndoDepth = 100;
-        if (undo_.size() >= kMaxUndoDepth)
-            undo_.erase(undo_.begin());
-        undo_.push_back(*transactionSnapshot_);
-        redo_.clear();
+        historyLabels_.resize(historyPosition_);
+        historyStates_.resize(historyPosition_ + 1);
+        historyLabels_.push_back(transactionLabel_);
+        historyStates_.push_back(project_);
+        ++historyPosition_;
         dirty_ = true;
         notify();
     }
@@ -615,27 +637,19 @@ void ProjectSession::execute(std::string label, const std::function<void(Project
     }
 }
 bool ProjectSession::undo() {
-    if (undo_.empty())
+    if (historyPosition_ == 0)
         return false;
-    constexpr std::size_t kMaxUndoDepth = 100;
-    if (redo_.size() >= kMaxUndoDepth)
-        redo_.erase(redo_.begin());
-    redo_.push_back(project_);
-    project_ = undo_.back();
-    undo_.pop_back();
+    --historyPosition_;
+    project_ = historyStates_[historyPosition_];
     dirty_ = true;
     notify();
     return true;
 }
 bool ProjectSession::redo() {
-    if (redo_.empty())
+    if (historyPosition_ >= historyLabels_.size())
         return false;
-    constexpr std::size_t kMaxUndoDepth = 100;
-    if (undo_.size() >= kMaxUndoDepth)
-        undo_.erase(undo_.begin());
-    undo_.push_back(project_);
-    project_ = redo_.back();
-    redo_.pop_back();
+    ++historyPosition_;
+    project_ = historyStates_[historyPosition_];
     dirty_ = true;
     notify();
     return true;

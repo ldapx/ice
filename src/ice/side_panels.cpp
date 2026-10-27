@@ -683,3 +683,30 @@ void SchematicNetlistPanel::updateBuildButton() {
     const bool upToDate = builtCellId_ == currentCellId_ && builtNetlist_ == currentNetlist_ && builtCellId_ != 0;
     buildButton_->setEnabled(hasCell && !upToDate);
 }
+
+HistoryPanel::HistoryPanel(QWidget *parent) : QWidget(parent) {
+    auto *layout = new QVBoxLayout(this);
+    list_ = new QListWidget;
+    list_->setAccessibleName(QStringLiteral("Operation history"));
+    list_->setSelectionMode(QAbstractItemView::SingleSelection);
+    list_->setFocusPolicy(Qt::StrongFocus);
+    layout->addWidget(list_);
+    connect(list_, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        const auto row = list_->row(item);
+        if (onHistorySelected_ && row >= 0 && row < static_cast<int>(positions_.size()))
+            onHistorySelected_(positions_[row]);
+    });
+}
+
+void HistoryPanel::setOnHistorySelected(std::function<void(std::size_t)> callback) {
+    onHistorySelected_ = std::move(callback);
+}
+
+void HistoryPanel::setHistory(const QStringList &entries, const std::vector<std::size_t> &positions) {
+    list_->clear();
+    positions_.clear();
+    for (int index = entries.size() - 1; index >= 0; --index) {
+        list_->addItem(entries[index]);
+        positions_.push_back(positions[static_cast<std::size_t>(index)]);
+    }
+}
