@@ -16,6 +16,7 @@
 class QGraphicsItem;
 class QPainter;
 class QRectF;
+class QLineEdit;
 
 struct LayoutPathLayer {
     ice::ObjectId layer = 0;

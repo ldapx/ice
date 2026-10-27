@@ -206,6 +206,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
+        resetSectionHistories();
         layoutViewInitialized_ = false;
         openLibraryLayoutCellTabs_.clear();
         clearLayoutDeviceSelection();
@@ -477,6 +478,8 @@ class DocumentWindow : public QMainWindow {
 
     void closeProject() {
         project_.reset();
+        resetSectionHistories();
+        updateHistoryPanels();
         clearLayoutDeviceSelection();
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->resetDevices();
@@ -572,6 +575,7 @@ class DocumentWindow : public QMainWindow {
                     project.packageDependencies.push_back(pdk);
                 activeSchematicId_ = ice::createSchematicCell(project, name.trimmed().toStdString(), pdk);
             });
+            project_->setLastHistoryLabel("Created schematic " + name.trimmed().toStdString());
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Schematic created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
@@ -640,6 +644,7 @@ class DocumentWindow : public QMainWindow {
                     addPdkLayers(project, *selectedPdk);
                 activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk);
             });
+            project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Layout cell created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
@@ -715,6 +720,7 @@ class DocumentWindow : public QMainWindow {
         const auto y = static_cast<ice::Coordinate>(std::lround(-position.y() - centerY));
         const auto &library = layoutDevicesPanel_->library();
         bool placed = false;
+        std::string placedName;
         try {
             project_->execute("place layout device", [&](ice::Project &project) {
                 const auto childId = createLayoutDeviceInstanceCell(project, *selectedLayoutDevice_, library);
@@ -733,12 +739,14 @@ class DocumentWindow : public QMainWindow {
                 const auto instanceId = project.nextId();
                 cell.instances.emplace(instanceId,
                                        ice::LayoutInstance{instanceId, childId, name, x, y, ice::Orientation::r0});
+                placedName = name;
                 placed = true;
             });
             if (!placed) {
                 statusBar()->showMessage(QStringLiteral("Cannot place a cell inside itself"));
                 return;
             }
+            project_->setLastHistoryLabel("Placed layout device " + selectedLayoutDevice_->name + " " + placedName);
             activeLayoutId_ = activeId;
             refreshProject();
             if (layoutPropertiesPanel_ && layoutLeftTabs_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_)
@@ -991,6 +999,7 @@ class DocumentWindow : public QMainWindow {
         number = static_cast<int>(existingLayers) + 1;
         project_->execute("create layer",
                           [&](ice::Project &project) { ice::addLayer(project, name.trimmed().toStdString(), number); });
+        project_->setLastHistoryLabel("Created layer " + name.trimmed().toStdString());
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Layer created"));
     }
@@ -1287,6 +1296,12 @@ class DocumentWindow : public QMainWindow {
             if (auto instance = cellIt->second.instances.find(instanceId); instance != cellIt->second.instances.end())
                 instance->second.orientation = composeOrientation(instance->second.orientation, step);
         });
+        if (const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+            cellIt != project_->project().layoutCells.end()) {
+            if (const auto instance = cellIt->second.instances.find(instanceId);
+                instance != cellIt->second.instances.end())
+                project_->setLastHistoryLabel(operation.toStdString() + " " + instance->second.name);
+        }
         refreshProject();
     }
 
@@ -1307,6 +1322,12 @@ class DocumentWindow : public QMainWindow {
                 instance->second.y = project.snap(instance->second.y);
             }
         });
+        if (const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+            cellIt != project_->project().layoutCells.end()) {
+            if (const auto instance = cellIt->second.instances.find(instanceId);
+                instance != cellIt->second.instances.end())
+                project_->setLastHistoryLabel("Snapped " + instance->second.name + " to grid");
+        }
         refreshProject();
     }
 
@@ -1489,6 +1510,7 @@ class DocumentWindow : public QMainWindow {
             const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
                                     ? activeSchematicId_
                                     : project_->project().schematicCells.begin()->first;
+            std::string placedName;
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId = ice::addSymbol(project, cellId, definition.name.toStdString(),
                                                      definition.svg.toStdString(), definition.cell);
@@ -1504,6 +1526,7 @@ class DocumentWindow : public QMainWindow {
                 }
                 const auto instanceName =
                     nextInstanceName(project.schematicCells.at(cellId), definition.name.toStdString());
+                placedName = instanceName;
                 const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, instanceName,
                                                                   static_cast<ice::Coordinate>(position.x()),
                                                                   static_cast<ice::Coordinate>(-position.y()));
@@ -1512,6 +1535,7 @@ class DocumentWindow : public QMainWindow {
                 auto &placedInstance = project.schematicCells.at(cellId).instances.at(instanceId);
                 ice::seedDefaultParameters(project, placedInstance, instanceDefaults(definition));
             });
+            project_->setLastHistoryLabel("Placed " + definition.name.toStdString() + " " + placedName);
             refreshProject();
             return true;
         } catch (const ice::ProjectError &error) {
@@ -2792,8 +2816,126 @@ class DocumentWindow : public QMainWindow {
         refreshEmbeddedPanels();
         refreshSchematic();
         refreshLayout();
+        updateHistoryPanels();
         updateSimulationNetlistState();
     }
+
+    struct SectionHistoryEntry {
+        QString label;
+        ice::Project project;
+    };
+
+    int historyScope(const QString &label) const {
+        const auto lower = label.toLower();
+        const bool layout = lower.contains(QStringLiteral("layout")) || lower.contains(QStringLiteral("layer"));
+        const bool schematic = !layout && (lower.contains(QStringLiteral("schematic")) ||
+                               lower.contains(QStringLiteral("symbol")) || lower.contains(QStringLiteral("net")) ||
+                               lower.contains(QStringLiteral("pin")) || lower.contains(QStringLiteral("label")) ||
+                               lower.contains(QStringLiteral("parameter")) || lower.contains(QStringLiteral("rotat")) ||
+                               lower.contains(QStringLiteral("flip")) || lower.contains(QStringLiteral("mov")) ||
+                               lower.contains(QStringLiteral("delet")) || lower.contains(QStringLiteral("connect")) ||
+                               lower.startsWith(QStringLiteral("placed ")));
+        return (layout ? 2 : 0) | (schematic || lower.contains(QStringLiteral("pdk technology")) ? 1 : 0);
+    }
+
+    void resetSectionHistories() {
+        schematicHistory_.clear();
+        layoutHistory_.clear();
+        schematicHistoryPosition_ = 0;
+        layoutHistoryPosition_ = 0;
+        syncedGlobalHistoryPosition_ = project_ ? project_->historyPosition() : 0;
+        const auto snapshot = project_ ? project_->project() : ice::Project{};
+        schematicHistory_.push_back({QStringLiteral("Initial state"), snapshot});
+        layoutHistory_.push_back({QStringLiteral("Initial state"), snapshot});
+    }
+
+    void syncSectionHistories() {
+        if (!project_)
+            return;
+        const auto globalPosition = project_->historyPosition();
+        if (globalPosition < syncedGlobalHistoryPosition_) {
+            resetSectionHistories();
+            return;
+        }
+        const auto &history = project_->history();
+        while (syncedGlobalHistoryPosition_ < globalPosition &&
+               syncedGlobalHistoryPosition_ < history.size()) {
+            const auto label = QString::fromStdString(history[syncedGlobalHistoryPosition_]);
+            const auto scope = historyScope(label);
+            if (scope & 1) {
+                schematicHistory_.resize(schematicHistoryPosition_ + 1);
+                schematicHistory_.push_back({label, project_->project()});
+                ++schematicHistoryPosition_;
+            }
+            if (scope & 2) {
+                layoutHistory_.resize(layoutHistoryPosition_ + 1);
+                layoutHistory_.push_back({label, project_->project()});
+                ++layoutHistoryPosition_;
+            }
+            ++syncedGlobalHistoryPosition_;
+        }
+    }
+
+    void restoreSectionHistory(bool schematic, std::size_t position) {
+        if (!project_)
+            return;
+        auto restored = project_->project();
+        const auto &entries = schematic ? schematicHistory_ : layoutHistory_;
+        if (position >= entries.size())
+            return;
+        if (schematic)
+            restored.schematicCells = entries[position].project.schematicCells;
+        else {
+            restored.layers = entries[position].project.layers;
+            restored.layoutCells = entries[position].project.layoutCells;
+        }
+        project_->replaceProject(std::move(restored));
+        if (schematic)
+            schematicHistoryPosition_ = position;
+        else
+            layoutHistoryPosition_ = position;
+        refreshProject();
+    }
+
+    void undoCurrentSection() {
+        syncSectionHistories();
+        const bool schematic = !documents_ || documents_->currentWidget() == schematicPage_;
+        auto &position = schematic ? schematicHistoryPosition_ : layoutHistoryPosition_;
+        if (position > 0)
+            restoreSectionHistory(schematic, position - 1);
+    }
+
+    void redoCurrentSection() {
+        syncSectionHistories();
+        const bool schematic = !documents_ || documents_->currentWidget() == schematicPage_;
+        const auto &entries = schematic ? schematicHistory_ : layoutHistory_;
+        auto &position = schematic ? schematicHistoryPosition_ : layoutHistoryPosition_;
+        if (position + 1 < entries.size())
+            restoreSectionHistory(schematic, position + 1);
+    }
+
+    void updateHistoryPanels() {
+        if (!schematicHistoryPanel_ || !layoutHistoryPanel_)
+            return;
+        syncSectionHistories();
+        QStringList schematic;
+        QStringList layout;
+        std::vector<std::size_t> schematicPositions;
+        std::vector<std::size_t> layoutPositions;
+        for (std::size_t index = 1; index <= schematicHistoryPosition_; ++index) {
+            schematic.append(schematicHistory_[index].label);
+            schematicPositions.push_back(index);
+        }
+        for (std::size_t index = 1; index <= layoutHistoryPosition_; ++index) {
+            layout.append(layoutHistory_[index].label);
+            layoutPositions.push_back(index);
+        }
+        schematicHistoryPanel_->setHistory(schematic, schematicPositions);
+        layoutHistoryPanel_->setHistory(layout, layoutPositions);
+    }
+
+    void jumpToSchematicHistory(std::size_t position) { restoreSectionHistory(true, position); }
+    void jumpToLayoutHistory(std::size_t position) { restoreSectionHistory(false, position); }
 
     void refreshEmbeddedPanels() {
         const ice::Project empty;
@@ -3221,8 +3363,12 @@ class DocumentWindow : public QMainWindow {
         connect(exitAction, &QAction::triggered, this, [this] { close(); });
 
         auto *editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
-        editMenu->addAction(addCommand(QStringLiteral("Undo"), QKeySequence::Undo));
-        editMenu->addAction(addCommand(QStringLiteral("Redo"), QKeySequence::Redo));
+        auto *undoAction = addCommand(QStringLiteral("Undo"), QKeySequence(QStringLiteral("Ctrl+Z")));
+        auto *redoAction = addCommand(QStringLiteral("Redo"), QKeySequence(QStringLiteral("Ctrl+Y")));
+        editMenu->addAction(undoAction);
+        editMenu->addAction(redoAction);
+        connect(undoAction, &QAction::triggered, this, [this] { undoCurrentSection(); });
+        connect(redoAction, &QAction::triggered, this, [this] { redoCurrentSection(); });
         editMenu->addSeparator();
         editMenu->addAction(addCommand(QStringLiteral("Cut"), QKeySequence::Cut));
         editMenu->addAction(addCommand(QStringLiteral("Copy"), QKeySequence::Copy));
@@ -3517,6 +3663,11 @@ class DocumentWindow : public QMainWindow {
         schematicProperties->addTab(schematicPropertiesPanel_, QStringLiteral("Properties"));
         schematicNetlistPanel_ = new SchematicNetlistPanel;
         schematicProperties->addTab(schematicNetlistPanel_, QStringLiteral("Netlist"));
+        schematicHistoryPanel_ = new HistoryPanel;
+        schematicHistoryPanel_->setOnHistorySelected([this](std::size_t position) {
+            jumpToSchematicHistory(position);
+        });
+        schematicProperties->addTab(schematicHistoryPanel_, QStringLiteral("History"));
         schematicContentLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
         documents->addTab(schematicPage, QStringLiteral("Schematic"));
@@ -3614,6 +3765,9 @@ class DocumentWindow : public QMainWindow {
             refreshLayout();
         });
         layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
+        layoutHistoryPanel_ = new HistoryPanel;
+        layoutHistoryPanel_->setOnHistorySelected([this](std::size_t position) { jumpToLayoutHistory(position); });
+        layoutRightTabs->addTab(layoutHistoryPanel_, QStringLiteral("History"));
         layoutContentLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);
         documents->addTab(layoutPage, QStringLiteral("Layout"));
@@ -3938,19 +4092,44 @@ class DocumentWindow : public QMainWindow {
                 [this](ice::ObjectId id, QPointF position) {
                     if (!project_)
                         return;
+                    std::string historyLabel;
+                    bool moved = false;
+                    for (const auto &[_, cell] : project_->project().schematicCells) {
+                        if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
+                            const auto symbol = cell.symbols.find(instance->second.symbol);
+                            historyLabel = "Moved " +
+                                           (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) +
+                                           " " + instance->second.name;
+                            break;
+                        }
+                    }
                     project_->execute("move symbol", [&](ice::Project &project) {
                         for (auto &[_, cell] : project.schematicCells)
                             if (auto it = cell.instances.find(id); it != cell.instances.end()) {
+                                moved = it->second.x != static_cast<ice::Coordinate>(position.x()) ||
+                                        it->second.y != static_cast<ice::Coordinate>(-position.y());
                                 it->second.x = static_cast<ice::Coordinate>(position.x());
                                 it->second.y = static_cast<ice::Coordinate>(-position.y());
                                 updateAutomaticNetLabelPositions(project);
                                 return;
                             }
                     });
+                    if (moved && !historyLabel.empty())
+                        project_->setLastHistoryLabel(std::move(historyLabel));
                 },
                 [this](ice::ObjectId id) {
                     if (!project_)
                         return;
+                    std::string historyLabel;
+                    for (const auto &[_, cell] : project_->project().schematicCells) {
+                        if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
+                            const auto symbol = cell.symbols.find(instance->second.symbol);
+                            historyLabel = "Rotated " +
+                                           (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) +
+                                           " " + instance->second.name + " - 90°";
+                            break;
+                        }
+                    }
                     project_->execute("rotate symbol", [&](ice::Project &project) {
                         for (auto &[_, cell] : project.schematicCells)
                             if (auto it = cell.instances.find(id); it != cell.instances.end()) {
@@ -3960,6 +4139,8 @@ class DocumentWindow : public QMainWindow {
                                 return;
                             }
                     });
+                    if (!historyLabel.empty())
+                        project_->setLastHistoryLabel(std::move(historyLabel));
                     refreshProject();
                 },
                 [this](ice::ObjectId firstPin, ice::ObjectId secondPin) {
@@ -4057,6 +4238,16 @@ class DocumentWindow : public QMainWindow {
             schematicCanvas_->setFlipCallback([this](ice::ObjectId id) {
                 if (!project_)
                     return;
+                std::string historyLabel;
+                for (const auto &[_, cell] : project_->project().schematicCells) {
+                    if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
+                        const auto symbol = cell.symbols.find(instance->second.symbol);
+                        historyLabel = "Flipped " +
+                                       (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) +
+                                       " " + instance->second.name + " horizontally";
+                        break;
+                    }
+                }
                 project_->execute("flip symbol", [&](ice::Project &project) {
                     for (auto &[_, cell] : project.schematicCells)
                         if (auto it = cell.instances.find(id); it != cell.instances.end()) {
@@ -4065,6 +4256,8 @@ class DocumentWindow : public QMainWindow {
                             return;
                         }
                 });
+                if (!historyLabel.empty())
+                    project_->setLastHistoryLabel(std::move(historyLabel));
                 refreshProject();
             });
             schematicCanvas_->setSymbolPlacementCallback([this](QPointF position) {
@@ -4083,6 +4276,17 @@ class DocumentWindow : public QMainWindow {
             schematicCanvas_->setDeleteCallback([this](std::vector<ice::ObjectId> ids) {
                 if (!project_)
                     return;
+                std::vector<std::string> deletedNames;
+                for (const auto &[_, cell] : project_->project().schematicCells) {
+                    for (const auto id : ids) {
+                        if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
+                            const auto symbol = cell.symbols.find(instance->second.symbol);
+                            deletedNames.push_back((symbol == cell.symbols.end() ? std::string("device")
+                                                                                  : symbol->second.name) +
+                                                    " " + instance->second.name);
+                        }
+                    }
+                }
                 project_->execute("delete symbols", [&](ice::Project &project) {
                     for (auto &[_, cell] : project.schematicCells) {
                         std::vector<ice::ObjectId> removedPins;
@@ -4110,6 +4314,11 @@ class DocumentWindow : public QMainWindow {
                                 ++it;
                     }
                 });
+                if (deletedNames.size() == 1)
+                    project_->setLastHistoryLabel("Deleted " + deletedNames.front());
+                else
+                    project_->setLastHistoryLabel("Deleted " + std::to_string(deletedNames.size()) +
+                                                  " schematic devices");
                 refreshProject();
             });
             view = schematicCanvas_;
@@ -4583,6 +4792,13 @@ class DocumentWindow : public QMainWindow {
     SymbolsPanel *schematicSymbolsPanel_ = nullptr;
     QTabWidget *schematicLeftTabs_ = nullptr;
     SchematicNetlistPanel *schematicNetlistPanel_ = nullptr;
+    HistoryPanel *schematicHistoryPanel_ = nullptr;
+    HistoryPanel *layoutHistoryPanel_ = nullptr;
+    std::vector<SectionHistoryEntry> schematicHistory_;
+    std::vector<SectionHistoryEntry> layoutHistory_;
+    std::size_t schematicHistoryPosition_ = 0;
+    std::size_t layoutHistoryPosition_ = 0;
+    std::size_t syncedGlobalHistoryPosition_ = 0;
     std::string schematicSymbolsPdk_;
     bool schematicSymbolsLoaded_ = false;
     std::vector<SymbolDefinition> schematicBaseSymbols_;
