@@ -178,6 +178,8 @@ void ProjectPanel::rebuildTree() {
                     continue;
                 auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(cellIt->second.name)});
                 childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
+                childItem->setIcon(0, hierarchyIcon("puzzle"));
+                childItem->setToolTip(0, QStringLiteral("Cell: %1").arg(QString::fromStdString(cellIt->second.name)));
                 if (std::find(ancestors.begin(), ancestors.end(), childId) != ancestors.end())
                     continue;
                 ancestors.push_back(childId);
@@ -188,6 +190,8 @@ void ProjectPanel::rebuildTree() {
         for (const auto &[id, cell] : project.schematicCells) {
             auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            cellItem->setIcon(0, hierarchyIcon("microchip"));
+            cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
             std::vector<ice::ObjectId> ancestors{id};
             addChildren(cellItem, id, ancestors);
         }
@@ -353,6 +357,7 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     tree_ = new QTreeWidget;
     tree_->setHeaderLabel(QStringLiteral("Hierarchy"));
     tree_->setAccessibleName(QStringLiteral("Simulation hierarchy"));
+    tree_->setIconSize(QSize(16, 16));
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(tree_, 1);
 
@@ -388,13 +393,16 @@ void SimulationPanel::setProject(const ice::Project &project) {
         for (const auto &[id, sim] : project.simulations) {
             auto *item = new QTreeWidgetItem(tree_, {QString::fromStdString(sim.name)});
             item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setIcon(0, hierarchyIcon("microscope"));
             auto *graphsItem = new QTreeWidgetItem(item, {QStringLiteral("Graphs (%1)").arg(sim.graphs.size())});
             graphsItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             graphsItem->setFlags(Qt::ItemIsEnabled);
+            graphsItem->setIcon(0, hierarchyIcon("chart-spline"));
             for (const auto &graph : sim.graphs) {
                 auto *graphItem = new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
                 graphItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                 graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
+                graphItem->setIcon(0, hierarchyIcon("chart-spline"));
                 const auto xAxis = graph.xAxis.empty() ? QStringLiteral("time") : QString::fromStdString(graph.xAxis);
                 QStringList ySignals;
                 for (const auto &signal : graph.ySignals)

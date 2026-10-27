@@ -32,6 +32,8 @@ class SchematicCanvas : public QGraphicsView {
     virtual void setSymbolPlacementCallback(std::function<void(QPointF)> callback) = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
     virtual void setDeleteCallback(std::function<void(std::vector<ice::ObjectId>)> callback) = 0;
+    virtual void setDisconnectCallback(std::function<void(ice::ObjectId)> callback) = 0;
+    virtual void setNetLabelMovedCallback(std::function<void(ice::ObjectId, QPointF)> callback) = 0;
     virtual void setPlaceSymbolPreview(const QByteArray &artwork) = 0;
     virtual void refreshPinVisibility() = 0;
     virtual ice::ObjectId selectedInstanceId() const = 0;

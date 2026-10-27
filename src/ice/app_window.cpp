@@ -2949,11 +2949,17 @@ class DocumentWindow : public QMainWindow {
         for (const auto &[netId, net] : cell.nets) {
             if (net.pins.size() < 2)
                 continue;
-            const auto first = pinViews.find(net.pins.front());
-            const auto second = pinViews.find(net.pins.back());
-            if (first != pinViews.end() && second != pinViews.end()) {
-                auto path = routeWire(first->second.point, first->second.direction, second->second.point,
-                                      second->second.direction, scene, net.pins.front(), net.pins.back());
+            const auto root = pinViews.find(net.pins.front());
+            if (root == pinViews.end())
+                continue;
+            // A net is a tree rooted at its first pin. Route one branch to
+            // every other member so multi-pin nets remain fully visible.
+            for (std::size_t index = 1; index < net.pins.size(); ++index) {
+                const auto target = pinViews.find(net.pins[index]);
+                if (target == pinViews.end())
+                    continue;
+                auto path = routeWire(root->second.point, root->second.direction, target->second.point,
+                                      target->second.direction, scene, net.pins.front(), net.pins[index]);
                 auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
                 wire->setZValue(-1);
                 wire->setData(0, QStringLiteral("wire"));
@@ -3839,6 +3845,66 @@ class DocumentWindow : public QMainWindow {
                 },
                 [this](ice::ObjectId) { updateSelectionStatus(); },
                 [this](ice::ObjectId instanceId) { openSymbolProperties(instanceId); });
+            schematicCanvas_->setDisconnectCallback([this](ice::ObjectId pinId) {
+                if (!project_)
+                    return;
+                auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                if (cellIt == project_->project().schematicCells.end())
+                    cellIt = project_->project().schematicCells.begin();
+                if (cellIt == project_->project().schematicCells.end())
+                    return;
+                const auto cellId = cellIt->first;
+                bool changed = false;
+                project_->execute("disconnect pin", [&](ice::Project &project) {
+                    auto &cell = project.schematicCells.at(cellId);
+                    for (auto netIt = cell.nets.begin(); netIt != cell.nets.end();) {
+                        auto &pins = netIt->second.pins;
+                        const auto before = pins.size();
+                        pins.erase(std::remove(pins.begin(), pins.end(), pinId), pins.end());
+                        if (pins.size() == before) {
+                            ++netIt;
+                            continue;
+                        }
+                        changed = true;
+                        if (pins.size() < 2)
+                            netIt = cell.nets.erase(netIt);
+                        else
+                            ++netIt;
+                    }
+                    if (changed)
+                        updateAutomaticNetLabelPositions(project);
+                });
+                if (changed)
+                    refreshProject();
+            });
+            schematicCanvas_->setNetLabelMovedCallback([this](ice::ObjectId netId, QPointF position) {
+                if (!project_)
+                    return;
+                auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                if (cellIt == project_->project().schematicCells.end())
+                    cellIt = project_->project().schematicCells.begin();
+                if (cellIt == project_->project().schematicCells.end())
+                    return;
+                const auto cellId = cellIt->first;
+                bool changed = false;
+                project_->execute("move net label", [&](ice::Project &project) {
+                    auto &cell = project.schematicCells.at(cellId);
+                    auto netIt = cell.nets.find(netId);
+                    if (netIt == cell.nets.end())
+                        return;
+                    const auto x = static_cast<ice::Coordinate>(position.x());
+                    const auto y = static_cast<ice::Coordinate>(-position.y());
+                    if (netIt->second.x == x && netIt->second.y == y)
+                        return;
+                    netIt->second.x = x;
+                    netIt->second.y = y;
+                    changed = true;
+                });
+                if (changed)
+                    refreshProject();
+                else
+                    refreshSchematic();
+            });
             schematicCanvas_->setFlipCallback([this](ice::ObjectId id) {
                 if (!project_)
                     return;
