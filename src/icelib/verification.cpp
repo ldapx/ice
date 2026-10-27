@@ -72,7 +72,8 @@ std::string serializeVerificationReport(const VerificationReport &report) {
                                  {"x", item.location.x},
                                  {"y", item.location.y},
                                  {"width", item.location.width},
-                                 {"height", item.location.height}});
+                                 {"height", item.location.height},
+                                 {"cell", item.cell}});
     for (const auto &item : report.lvs)
         output["lvs"].push_back({{"schema_version", item.schemaVersion},
                                  {"category", item.category},

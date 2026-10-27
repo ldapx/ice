@@ -113,23 +113,13 @@ ice::Orientation composeOrientation(ice::Orientation current, ice::Orientation s
 }
 
 ice::PinDirection rotateDirection(ice::PinDirection direction, ice::Orientation orientation) {
-    const QPointF vector = [&] {
-        switch (direction) {
-        case ice::PinDirection::left:
-            return QPointF(-1, 0);
-        case ice::PinDirection::right:
-            return QPointF(1, 0);
-        case ice::PinDirection::up:
-            return QPointF(0, 1);
-        case ice::PinDirection::down:
-            return QPointF(0, -1);
-        }
-        return QPointF(1, 0);
-    }();
-    const auto rotated = rotatePoint(vector, orientation);
+    // Pin positions are projected into Qt scene coordinates (positive Y down)
+    // before the symbol transform is applied. Direction vectors must follow
+    // the same path or rotated symbols report the opposite vertical side.
+    const auto rotated = rotatePoint(directionVector(direction), orientation);
     if (std::abs(rotated.x()) > std::abs(rotated.y()))
         return rotated.x() < 0 ? ice::PinDirection::left : ice::PinDirection::right;
-    return rotated.y() < 0 ? ice::PinDirection::down : ice::PinDirection::up;
+    return rotated.y() < 0 ? ice::PinDirection::up : ice::PinDirection::down;
 }
 
 QPointF directionVector(ice::PinDirection direction) {

@@ -151,7 +151,13 @@ The layout editor should initially provide:
 - undo/redo.
 
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
-column contains **Properties** and **Layers**. The bundled IHP SG13G2 device
+column contains **Properties** and **Layers**. Layout entries use a notebook-pen
+icon and placed devices use a puzzle icon. Every layout has a **Root Layer**
+child with a network icon that contains its devices by default. Right-click a
+layout entry and toggle **Flatten Layout** to promote its descendants directly
+under the layout; toggling it again restores the Root Layer grouping. When the
+active layout is flattened, **Run DRC** exports the flattened instance geometry
+instead of only the layout cell's own shapes. The bundled IHP SG13G2 device
 library appears in **Devices**, with search, category filtering, and a geometry
 preview in **Properties**. The device list starts with no selection; selecting a
 device switches to **Place Device** and shows a cursor-following preview, while
@@ -172,6 +178,23 @@ including KLayout's `pya` module. ICE looks for the checkout next to the ICE
 repository or through `ICE_IHP_ROOT`, and uses `python3` unless `ICE_PYTHON`
 points to another interpreter. If the checkout or Python module is unavailable,
 ICE reports the error and leaves the existing geometry unchanged.
+
+The layout toolbar also provides a **Draw Path** tool for routing. Click to set
+the path start and click again to commit each segment; right-click or
+double-click finishes the current path and Escape leaves the tool. Holding Shift
+constrains the active segment to horizontal or vertical so all turns are right
+angles. While the Path tool is active, **Properties** shows the current path
+layer and an editable `width (nm)` value (200 nm by default). Hold the left
+mouse button while scrolling the wheel to move the next segment up or down one
+metal layer; ICE inserts the corresponding via at the connection point
+automatically. For the IHP stack, for example, scrolling from Metal2 down to
+Metal1 adds a Via1 at the junction. Path segments are polygon shapes on the
+selected metal layer, and vias are square shapes on the matching via layer.
+
+**Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
+runs `gdscheck` with the process deck derived from the cell's PDK, and parses
+the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
+the activity dock with severity, rule, message, cell, and location columns.
 
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database

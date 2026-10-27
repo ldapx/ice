@@ -1,5 +1,7 @@
 #include "app_widgets.hpp"
 
+#include "icelib/verification.hpp"
+
 #include "icons.hpp"
 #include "package_ui.hpp"
 #include "ui_colors.hpp"
@@ -16,6 +18,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -28,6 +31,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -113,11 +117,28 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent) {
     jobsLayout->addStretch();
     tabs->addTab(jobs, QStringLiteral("Jobs"));
 
-    auto *drcReport = new QPlainTextEdit;
-    drcReport->setReadOnly(true);
-    drcReport->setAccessibleName(QStringLiteral("DRC report"));
-    drcReport->setPlaceholderText(QStringLiteral("DRC report will appear here after a design-rule check."));
-    tabs->addTab(drcReport, QStringLiteral("DRC Report"));
+    auto *drcPage = new QWidget;
+    auto *drcLayout = new QVBoxLayout(drcPage);
+    drcSummary_ = new QLabel(QStringLiteral("No DRC report yet. Use Tools > Run DRC to run gdscheck."));
+    drcSummary_->setWordWrap(true);
+    drcSummary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    drcLayout->addWidget(drcSummary_);
+    drcTable_ = new QTableWidget(0, 5);
+    drcTable_->setAccessibleName(QStringLiteral("DRC report"));
+    drcTable_->setHorizontalHeaderLabels({QStringLiteral("Severity"), QStringLiteral("Rule"), QStringLiteral("Message"),
+                                          QStringLiteral("Cell"), QStringLiteral("Location")});
+    drcTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    drcTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    drcTable_->setAlternatingRowColors(true);
+    drcTable_->setSortingEnabled(true);
+    drcTable_->verticalHeader()->setVisible(false);
+    drcTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    drcTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    drcTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    drcTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    drcTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    drcLayout->addWidget(drcTable_, 1);
+    drcTabIndex_ = tabs->addTab(drcPage, QStringLiteral("DRC Report"));
 
     auto *lvsReport = new QPlainTextEdit;
     lvsReport->setReadOnly(true);
@@ -126,6 +147,100 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent) {
     tabs->addTab(lvsReport, QStringLiteral("LVS Report"));
 
     layout->addWidget(tabs);
+    tabs_ = tabs;
+}
+
+namespace {
+QString drcSeverityLabel(ice::VerificationSeverity severity) {
+    switch (severity) {
+    case ice::VerificationSeverity::error:
+        return QStringLiteral("Error");
+    case ice::VerificationSeverity::warning:
+        return QStringLiteral("Warning");
+    case ice::VerificationSeverity::info:
+        return QStringLiteral("Info");
+    }
+    return QStringLiteral("Unknown");
+}
+
+QString drcLocationLabel(const ice::Rect &rect) {
+    if (rect.width == 0 && rect.height == 0)
+        return {};
+    const auto format = [](ice::Coordinate value) { return QString::number(value / 1000.0, 'f', 3); };
+    return QStringLiteral("%1, %2 (%3 x %4) um")
+        .arg(format(rect.x), format(rect.y), format(rect.width), format(rect.height));
+}
+} // namespace
+
+void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QString &reportPath) {
+    if (!drcTable_ || !drcSummary_)
+        return;
+    drcTable_->setSortingEnabled(false);
+    drcTable_->setRowCount(0);
+    int errors = 0;
+    int warnings = 0;
+    int infos = 0;
+    for (const auto &violation : report.drc) {
+        switch (violation.severity) {
+        case ice::VerificationSeverity::error:
+            ++errors;
+            break;
+        case ice::VerificationSeverity::warning:
+            ++warnings;
+            break;
+        case ice::VerificationSeverity::info:
+            ++infos;
+            break;
+        }
+        const int row = drcTable_->rowCount();
+        drcTable_->insertRow(row);
+        auto *severity = new QTableWidgetItem(drcSeverityLabel(violation.severity));
+        auto *rule = new QTableWidgetItem(QString::fromStdString(violation.rule));
+        auto *message = new QTableWidgetItem(QString::fromStdString(violation.message));
+        auto *cell = new QTableWidgetItem(QString::fromStdString(violation.cell));
+        auto *location = new QTableWidgetItem(drcLocationLabel(violation.location));
+        severity->setData(Qt::UserRole, static_cast<int>(violation.severity));
+        drcTable_->setItem(row, 0, severity);
+        drcTable_->setItem(row, 1, rule);
+        drcTable_->setItem(row, 2, message);
+        drcTable_->setItem(row, 3, cell);
+        drcTable_->setItem(row, 4, location);
+    }
+    drcTable_->setSortingEnabled(true);
+    QString summary;
+    if (report.drc.empty()) {
+        summary = QStringLiteral("DRC completed: no violations found.");
+    } else {
+        summary = QStringLiteral("DRC completed: %1 error(s), %2 warning(s), %3 info item(s).")
+                      .arg(errors)
+                      .arg(warnings)
+                      .arg(infos);
+    }
+    if (!reportPath.isEmpty())
+        summary += QStringLiteral(" Report: %1").arg(reportPath);
+    drcSummary_->setText(summary);
+    showDrcTab();
+}
+
+void ActivityPanel::setDrcRunning(const QString &message) {
+    if (!drcSummary_ || !drcTable_)
+        return;
+    drcTable_->setRowCount(0);
+    drcSummary_->setText(message.isEmpty() ? QStringLiteral("Running gdscheck...") : message);
+    showDrcTab();
+}
+
+void ActivityPanel::setDrcError(const QString &message) {
+    if (!drcSummary_ || !drcTable_)
+        return;
+    drcTable_->setRowCount(0);
+    drcSummary_->setText(message);
+    showDrcTab();
+}
+
+void ActivityPanel::showDrcTab() {
+    if (tabs_ && drcTabIndex_ >= 0)
+        tabs_->setCurrentIndex(drcTabIndex_);
 }
 
 CommandPalette::CommandPalette(const QList<QAction *> &actions, QWidget *parent) : QDialog(parent) {

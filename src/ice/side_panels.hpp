@@ -6,6 +6,9 @@
 #include <QWidget>
 
 #include <functional>
+#include <memory>
+#include <optional>
+#include <set>
 #include <vector>
 
 class QComboBox;
@@ -22,14 +25,21 @@ class ProjectPanel : public QWidget {
                           bool showActions = false, QWidget *parent = nullptr);
     void setOnAddClicked(std::function<void()> callback);
     void setOnRemoveClicked(std::function<void(ice::ObjectId)> callback);
+    void setOnFlattenChanged(std::function<void()> callback);
+    void setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state);
     void setProject(const ice::Project &project);
 
   private:
     ice::ObjectId selectedCellId() const;
     void updateRemoveButton();
+    void rebuildTree();
+    void showContextMenu(const QPoint &pos);
     static bool filterTreeItem(QTreeWidgetItem *item, const QString &needle);
     void applyFilter(const QString &text);
 
+    std::optional<ice::Project> project_;
+    std::shared_ptr<std::set<ice::ObjectId>> flattenedLayouts_;
+    std::function<void()> onFlattenChanged_;
     QTreeWidget *tree_ = nullptr;
     QListWidget *packageList_ = nullptr;
     QListWidget *layerList_ = nullptr;
@@ -74,9 +84,16 @@ class LayersPanel : public QWidget {
   public:
     explicit LayersPanel(QWidget *parent = nullptr);
     void setProject(const ice::Project &project);
+    void setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback);
+    void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
 
   private:
+    void applyFilter(const QString &text);
+
     QTreeWidget *tree_ = nullptr;
+    QLineEdit *search_ = nullptr;
+    std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
+    std::function<void(bool)> onAllLayersVisibilityChanged_;
 };
 
 class SymbolsPanel : public QWidget {

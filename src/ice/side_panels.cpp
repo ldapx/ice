@@ -1,5 +1,6 @@
 #include "side_panels.hpp"
 
+#include "icons.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
@@ -28,9 +29,18 @@
 #include <map>
 #include <utility>
 
+namespace {
+constexpr int kItemKindRole = Qt::UserRole + 1;
+
+enum class HierarchyItemKind : int { layout = 1, device = 2, rootLayer = 3 };
+
+QIcon hierarchyIcon(const char *name) { return ice::lucideIcon(QString::fromLatin1(name), 16); }
+} // namespace
+
 ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutHierarchy, bool showActions,
                            QWidget *parent)
-    : QWidget(parent), showLayoutHierarchy_(showLayoutHierarchy) {
+    : QWidget(parent), flattenedLayouts_(std::make_shared<std::set<ice::ObjectId>>()),
+      showLayoutHierarchy_(showLayoutHierarchy) {
     auto *layout = new QVBoxLayout(this);
     if (showActions) {
         auto *searchRow = new QHBoxLayout;
@@ -67,6 +77,12 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
     tree_->setHeaderLabel(showLayoutHierarchy_ ? QStringLiteral("Layouts") : QStringLiteral("Schematics"));
     tree_->setAccessibleName(showLayoutHierarchy_ ? QStringLiteral("Layout hierarchy")
                                                   : QStringLiteral("Schematic hierarchy"));
+    tree_->setIconSize(QSize(16, 16));
+    if (showLayoutHierarchy_) {
+        tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(tree_, &QTreeWidget::customContextMenuRequested, this,
+                [this](const QPoint &pos) { showContextMenu(pos); });
+    }
     layout->addWidget(tree_, 1);
 
     packageList_ = new QListWidget;
@@ -105,10 +121,26 @@ void ProjectPanel::setOnAddClicked(std::function<void()> callback) { onAdd_ = st
 
 void ProjectPanel::setOnRemoveClicked(std::function<void(ice::ObjectId)> callback) { onRemove_ = std::move(callback); }
 
+void ProjectPanel::setOnFlattenChanged(std::function<void()> callback) { onFlattenChanged_ = std::move(callback); }
+
+void ProjectPanel::setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state) {
+    if (state)
+        flattenedLayouts_ = std::move(state);
+}
+
 void ProjectPanel::setProject(const ice::Project &project) {
+    project_ = project;
+    std::erase_if(*flattenedLayouts_, [&](ice::ObjectId id) { return !project.layoutCells.contains(id); });
+    rebuildTree();
+}
+
+void ProjectPanel::rebuildTree() {
     tree_->clear();
     layerList_->clear();
     packageList_->clear();
+    if (!project_)
+        return;
+    const auto &project = *project_;
     if (project.packageDependencies.empty()) {
         auto *item = new QListWidgetItem(QStringLiteral("No package dependencies"), packageList_);
         item->setFlags(Qt::NoItemFlags);
@@ -146,6 +178,8 @@ void ProjectPanel::setProject(const ice::Project &project) {
                     continue;
                 auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(cellIt->second.name)});
                 childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
+                childItem->setIcon(0, hierarchyIcon("puzzle"));
+                childItem->setToolTip(0, QStringLiteral("Cell: %1").arg(QString::fromStdString(cellIt->second.name)));
                 if (std::find(ancestors.begin(), ancestors.end(), childId) != ancestors.end())
                     continue;
                 ancestors.push_back(childId);
@@ -156,6 +190,8 @@ void ProjectPanel::setProject(const ice::Project &project) {
         for (const auto &[id, cell] : project.schematicCells) {
             auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            cellItem->setIcon(0, hierarchyIcon("microchip"));
+            cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
             std::vector<ice::ObjectId> ancestors{id};
             addChildren(cellItem, id, ancestors);
         }
@@ -190,22 +226,37 @@ void ProjectPanel::setProject(const ice::Project &project) {
             return project.layoutCells.at(left.cellId).name < project.layoutCells.at(right.cellId).name;
         });
     }
-    std::function<void(QTreeWidgetItem *, ice::ObjectId, std::vector<ice::ObjectId> &)> addChildren;
-    addChildren = [&](QTreeWidgetItem *parentItem, ice::ObjectId parentId, std::vector<ice::ObjectId> &ancestors) {
-        const auto childIt = children.find(parentId);
+    std::function<void(QTreeWidgetItem *, ice::ObjectId, std::vector<ice::ObjectId> &, bool)> addContents;
+    addContents = [&](QTreeWidgetItem *layoutItem, ice::ObjectId layoutId, std::vector<ice::ObjectId> &ancestors,
+                      bool withRootLayer) {
+        QTreeWidgetItem *parentItem = layoutItem;
+        const auto layoutIt = project.layoutCells.find(layoutId);
+        if (withRootLayer && layoutIt != project.layoutCells.end() && !flattenedLayouts_->contains(layoutId)) {
+            auto *rootItem = new QTreeWidgetItem(layoutItem, {QStringLiteral("Root Layer")});
+            rootItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::rootLayer));
+            rootItem->setIcon(0, hierarchyIcon("network"));
+            rootItem->setToolTip(0,
+                                 QStringLiteral("Root layer of %1").arg(QString::fromStdString(layoutIt->second.name)));
+            parentItem = rootItem;
+        }
+        const auto childIt = children.find(layoutId);
         if (childIt == children.end())
             return;
         for (const auto &child : childIt->second) {
             const auto cellIt = project.layoutCells.find(child.cellId);
             if (cellIt == project.layoutCells.end())
                 continue;
+            const bool device = cellIt->second.library || !cellIt->second.device.empty();
             auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(child.instanceName)});
             childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(child.cellId));
+            childItem->setData(0, kItemKindRole,
+                               static_cast<int>(device ? HierarchyItemKind::device : HierarchyItemKind::layout));
+            childItem->setIcon(0, hierarchyIcon(device ? "puzzle" : "notebook-pen"));
             childItem->setToolTip(0, QString::fromStdString("Cell: " + cellIt->second.name));
             if (std::find(ancestors.begin(), ancestors.end(), child.cellId) != ancestors.end())
                 continue;
             ancestors.push_back(child.cellId);
-            addChildren(childItem, child.cellId, ancestors);
+            addContents(childItem, child.cellId, ancestors, !device);
             ancestors.pop_back();
         }
     };
@@ -214,13 +265,38 @@ void ProjectPanel::setProject(const ice::Project &project) {
             continue;
         auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
         cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+        cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
+        cellItem->setIcon(0, hierarchyIcon("notebook-pen"));
+        cellItem->setToolTip(0, QStringLiteral("Layout: %1").arg(QString::fromStdString(cell.name)));
         std::vector<ice::ObjectId> ancestors{id};
-        addChildren(cellItem, id, ancestors);
+        addContents(cellItem, id, ancestors, true);
     }
     tree_->expandAll();
     if (search_)
         applyFilter(search_->text());
     updateRemoveButton();
+}
+
+void ProjectPanel::showContextMenu(const QPoint &pos) {
+    if (!showLayoutHierarchy_ || !project_)
+        return;
+    auto *item = tree_->itemAt(pos);
+    if (!item || item->data(0, kItemKindRole).toInt() != static_cast<int>(HierarchyItemKind::layout))
+        return;
+    const auto cellId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+    if (cellId == 0 || !project_->layoutCells.contains(cellId))
+        return;
+    QMenu menu(this);
+    auto *flattenAction = menu.addAction(QStringLiteral("Flatten Layout"));
+    flattenAction->setCheckable(true);
+    flattenAction->setChecked(flattenedLayouts_->contains(cellId));
+    if (menu.exec(tree_->viewport()->mapToGlobal(pos)) != flattenAction)
+        return;
+    if (flattenedLayouts_->contains(cellId))
+        flattenedLayouts_->erase(cellId);
+    else
+        flattenedLayouts_->insert(cellId);
+    rebuildTree();
 }
 
 ice::ObjectId ProjectPanel::selectedCellId() const {
@@ -281,6 +357,7 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     tree_ = new QTreeWidget;
     tree_->setHeaderLabel(QStringLiteral("Hierarchy"));
     tree_->setAccessibleName(QStringLiteral("Simulation hierarchy"));
+    tree_->setIconSize(QSize(16, 16));
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(tree_, 1);
 
@@ -316,13 +393,16 @@ void SimulationPanel::setProject(const ice::Project &project) {
         for (const auto &[id, sim] : project.simulations) {
             auto *item = new QTreeWidgetItem(tree_, {QString::fromStdString(sim.name)});
             item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setIcon(0, hierarchyIcon("microscope"));
             auto *graphsItem = new QTreeWidgetItem(item, {QStringLiteral("Graphs (%1)").arg(sim.graphs.size())});
             graphsItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             graphsItem->setFlags(Qt::ItemIsEnabled);
+            graphsItem->setIcon(0, hierarchyIcon("chart-spline"));
             for (const auto &graph : sim.graphs) {
                 auto *graphItem = new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
                 graphItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                 graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
+                graphItem->setIcon(0, hierarchyIcon("chart-spline"));
                 const auto xAxis = graph.xAxis.empty() ? QStringLiteral("time") : QString::fromStdString(graph.xAxis);
                 QStringList ySignals;
                 for (const auto &signal : graph.ySignals)
@@ -446,6 +526,27 @@ void SimulationPanel::showContextMenu(const QPoint &pos) {
 
 LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
+    auto *controls = new QHBoxLayout;
+    controls->setContentsMargins(0, 0, 0, 0);
+    search_ = new QLineEdit;
+    search_->setPlaceholderText(QStringLiteral("Search layers…"));
+    search_->setClearButtonEnabled(true);
+    search_->setAccessibleName(QStringLiteral("Search layers"));
+    controls->addWidget(search_, 1);
+    auto *showAllButton = new QPushButton;
+    showAllButton->setFixedWidth(28);
+    showAllButton->setToolTip(QStringLiteral("Show all layers"));
+    showAllButton->setAccessibleName(QStringLiteral("Show all layers"));
+    setLucideIcon(showAllButton, QStringLiteral("eye"), 16);
+    auto *hideAllButton = new QPushButton;
+    hideAllButton->setFixedWidth(28);
+    hideAllButton->setToolTip(QStringLiteral("Hide all layers"));
+    hideAllButton->setAccessibleName(QStringLiteral("Hide all layers"));
+    setLucideIcon(hideAllButton, QStringLiteral("eye-off"), 16);
+    controls->addWidget(showAllButton);
+    controls->addWidget(hideAllButton);
+    layout->addLayout(controls);
+
     tree_ = new QTreeWidget;
     tree_->setHeaderLabel(QStringLiteral("Layers"));
     tree_->setAccessibleName(QStringLiteral("Layer visibility"));
@@ -456,9 +557,43 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(tree_, 1);
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
+        if (!item || column != 0 || !onLayerVisibilityChanged_)
+            return;
+        const auto layerId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        if (layerId != 0)
+            onLayerVisibilityChanged_(layerId, item->checkState(0) == Qt::Checked);
+    });
+    connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
+    connect(showAllButton, &QPushButton::clicked, this, [this] {
+        if (onAllLayersVisibilityChanged_)
+            onAllLayersVisibilityChanged_(true);
+    });
+    connect(hideAllButton, &QPushButton::clicked, this, [this] {
+        if (onAllLayersVisibilityChanged_)
+            onAllLayersVisibilityChanged_(false);
+    });
+}
+
+void LayersPanel::setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback) {
+    onLayerVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> callback) {
+    onAllLayersVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::applyFilter(const QString &text) {
+    QSignalBlocker blocker(tree_);
+    const auto needle = text.trimmed();
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+        auto *item = tree_->topLevelItem(index);
+        item->setHidden(!needle.isEmpty() && !item->text(0).contains(needle, Qt::CaseInsensitive));
+    }
 }
 
 void LayersPanel::setProject(const ice::Project &project) {
+    QSignalBlocker blocker(tree_);
     tree_->clear();
     const auto styles = layerStylesFor(project);
     for (const auto &[id, layer] : project.layers) {
@@ -471,6 +606,8 @@ void LayersPanel::setProject(const ice::Project &project) {
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
     }
+    if (search_)
+        applyFilter(search_->text());
 }
 
 SymbolsPanel::SymbolsPanel(QWidget *parent) : QWidget(parent) {
