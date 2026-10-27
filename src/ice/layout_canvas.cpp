@@ -6,7 +6,9 @@
 #include <QApplication>
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
-#include <QInputDialog>
+#include <QLineEdit>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -252,6 +254,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton && isScaleIndicatorPosition(event->pos())) {
+            beginScaleEdit();
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::MiddleButton) {
             panning_ = true;
             panStartPosition_ = event->pos();
@@ -401,19 +408,6 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::LeftButton && event->pos().y() >= viewport()->height() - 44 &&
-            event->pos().x() < 180) {
-            bool accepted = false;
-            const auto value = QInputDialog::getDouble(this, QStringLiteral("Scale Indicator"),
-                                                       QStringLiteral("Scale length (nm):"), scaleIndicatorLength(),
-                                                       0.0001, 1.0e12, 4, &accepted);
-            if (accepted && value > 0.0) {
-                zoom_ = std::clamp<qreal>(100.0 / value, qreal(1.0e-6), qreal(1.0e6));
-                applyNavigationTransform();
-            }
-            event->accept();
-            return;
-        }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
             if (auto *instance = layoutInstanceOwner(itemAt(event->pos()))) {
                 draggingInstance_ = nullptr;
@@ -459,6 +453,55 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
   private:
+    bool isScaleIndicatorPosition(const QPoint &position) const {
+        return position.x() < 180 && position.y() >= viewport()->height() - 44;
+    }
+
+    void beginScaleEdit() {
+        if (scaleEditor_)
+            return;
+        scaleEditor_ = new QLineEdit(viewport());
+        scaleEditor_->setText(formatScaleLength(scaleIndicatorLength()));
+        scaleEditor_->setAlignment(Qt::AlignCenter);
+        scaleEditor_->setMaximumWidth(120);
+        scaleEditor_->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^\\s*[0-9]{1,9}(?:\\s*(?:mm|um|nm|pm))?\\s*$"),
+                               QRegularExpression::CaseInsensitiveOption),
+            scaleEditor_));
+        scaleEditor_->setGeometry(4, viewport()->height() - 42, 120, 24);
+        scaleEditor_->show();
+        scaleEditor_->selectAll();
+        scaleEditor_->setFocus();
+        connect(scaleEditor_, &QLineEdit::returnPressed, this, [this] { commitScaleEdit(); });
+        connect(scaleEditor_, &QLineEdit::editingFinished, this, [this] { commitScaleEdit(); });
+    }
+
+    void commitScaleEdit() {
+        if (!scaleEditor_)
+            return;
+        const auto text = scaleEditor_->text().trimmed();
+        const auto match = QRegularExpression(QStringLiteral("^([0-9]+)\\s*(mm|um|nm|pm)$"),
+                                              QRegularExpression::CaseInsensitiveOption)
+                               .match(text);
+        if (match.hasMatch()) {
+            const auto number = match.captured(1).toLongLong();
+            const auto unit = match.captured(2).toLower();
+            qreal lengthNm = static_cast<qreal>(number);
+            if (unit == QStringLiteral("mm"))
+                lengthNm *= 1.0e6;
+            else if (unit == QStringLiteral("um"))
+                lengthNm *= 1.0e3;
+            else if (unit == QStringLiteral("pm"))
+                lengthNm *= 1.0e-3;
+            if (lengthNm > 0.0) {
+                zoom_ = std::clamp<qreal>(100.0 / lengthNm, qreal(1.0e-6), qreal(1.0e6));
+                applyNavigationTransform();
+            }
+        }
+        scaleEditor_->deleteLater();
+        scaleEditor_ = nullptr;
+    }
+
     QPointF snapPosition(const QPointF &position) const {
         if (!snapToGrid_ || gridSpacing_ <= 0.0)
             return position;
@@ -550,6 +593,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     ice::ObjectId notifiedLayoutInstance_ = 0;
     const ice::LayoutDeviceCell *devicePreview_ = nullptr;
     QPointF cursorScenePosition_;
+    QLineEdit *scaleEditor_ = nullptr;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;
     bool gridVisible_ = true;
     bool snapToGrid_ = true;

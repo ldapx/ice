@@ -13,6 +13,7 @@
 
 class QPainter;
 class QRectF;
+class QLineEdit;
 
 class LayoutCanvas : public QGraphicsView {
   public:
