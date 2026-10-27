@@ -96,6 +96,10 @@ ObjectId Project::nextId() {
             update(portId);
         for (const auto &[instanceId, instance] : cell.instances)
             update(instanceId);
+        for (const auto &[deviceId, device] : cell.plannedDevices)
+            update(deviceId);
+        for (const auto &[connectionId, connection] : cell.plannedConnections)
+            update(connectionId);
     }
     for (const auto &[id, sim] : simulations) {
         update(id);
@@ -192,6 +196,19 @@ std::vector<Diagnostic> Project::validate() const {
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.port.grid", "Port geometry is off-grid", portId});
         }
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (device.width <= 0 || device.height <= 0)
+                result.push_back({Diagnostic::Severity::error, "layout.planned_device.geometry",
+                                  "Planned device must have positive dimensions", deviceId});
+        }
+        for (const auto &[connectionId, connection] : cell.plannedConnections) {
+            if (!cell.plannedDevices.contains(connection.from) || !cell.plannedDevices.contains(connection.to))
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.device",
+                                  "Planned connection references a missing planned device", connectionId});
+            if (connection.from == connection.to)
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.self",
+                                  "Planned connection must join two different devices", connectionId});
+        }
         (void)cellId;
     }
     return result;
@@ -271,7 +288,9 @@ std::string Project::serialize() const {
                   {"pdk", cell.pdk},
                   {"shapes", json::array()},
                   {"ports", json::array()},
-                  {"instances", json::array()}};
+                  {"instances", json::array()},
+                  {"planned_devices", json::array()},
+                  {"planned_connections", json::array()}};
         if (cell.library)
             c["library"] = true;
         if (!cell.device.empty())
@@ -308,6 +327,16 @@ std::string Project::serialize() const {
                                       {"x", instance.x},
                                       {"y", instance.y},
                                       {"orientation", orientationName(instance.orientation)}});
+        for (const auto &[did, device] : cell.plannedDevices) {
+            json d = {{"id", did},     {"name", device.name},   {"x", device.x},
+                      {"y", device.y}, {"width", device.width}, {"height", device.height}};
+            if (device.schematicInstance != 0)
+                d["schematic_instance"] = device.schematicInstance;
+            c["planned_devices"].push_back(std::move(d));
+        }
+        for (const auto &[cid, connection] : cell.plannedConnections)
+            c["planned_connections"].push_back(
+                {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"name", connection.name}});
         j["layout_cells"].push_back(c);
     }
     j["simulations"] = json::array();
@@ -465,6 +494,31 @@ Project Project::deserialize(const std::string &text) {
             for (const auto &i : c.at("instances"))
                 cell.instances.emplace(i.at("id"), LayoutInstance{i.at("id"), i.at("cell"), i.at("name"), i.at("x"),
                                                                   i.at("y"), parseOrientation(i.at("orientation"))});
+            if (c.contains("planned_devices")) {
+                for (const auto &d : c.at("planned_devices")) {
+                    PlannedDevice device;
+                    device.id = d.at("id");
+                    device.name = d.value("name", std::string{});
+                    device.schematicInstance = d.value("schematic_instance", ObjectId{0});
+                    device.x = d.value("x", Coordinate{0});
+                    device.y = d.value("y", Coordinate{0});
+                    device.width = d.value("width", Coordinate{0});
+                    device.height = d.value("height", Coordinate{0});
+                    const auto deviceId = device.id;
+                    cell.plannedDevices.emplace(deviceId, std::move(device));
+                }
+            }
+            if (c.contains("planned_connections")) {
+                for (const auto &connection : c.at("planned_connections")) {
+                    PlannedConnection planned;
+                    planned.id = connection.at("id");
+                    planned.from = connection.value("from", ObjectId{0});
+                    planned.to = connection.value("to", ObjectId{0});
+                    planned.name = connection.value("name", std::string{});
+                    const auto connectionId = planned.id;
+                    cell.plannedConnections.emplace(connectionId, std::move(planned));
+                }
+            }
             p.layoutCells.emplace(cell.id, std::move(cell));
         }
         if (j.contains("simulations")) {

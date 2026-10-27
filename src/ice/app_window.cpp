@@ -43,6 +43,7 @@
 #include <QGraphicsColorizeEffect>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsItemGroup>
+#include <QGraphicsLineItem>
 #include <QGraphicsPathItem>
 #include <QGraphicsPolygonItem>
 #include <QGraphicsRectItem>
@@ -651,6 +652,34 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    void makeLayoutFromSchematic(ice::ObjectId schematicId) {
+        if (!project_)
+            return;
+        const auto schematicIt = project_->project().schematicCells.find(schematicId);
+        if (schematicIt == project_->project().schematicCells.end())
+            return;
+        const auto schematicName = QString::fromStdString(schematicIt->second.name);
+        try {
+            project_->execute("make layout from schematic", [&](ice::Project &project) {
+                activeLayoutId_ = ice::createLayoutFromSchematic(project, schematicId);
+                ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Make Layout from Schematic"),
+                                  QString::fromStdString(error.what()));
+            return;
+        }
+        layoutViewInitialized_ = false;
+        if (documents_ && layoutPage_)
+            documents_->setCurrentWidget(layoutPage_);
+        if (layoutSelectTool_)
+            layoutSelectTool_->setChecked(true);
+        if (layoutCanvas_)
+            layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Layout created from schematic '%1'").arg(schematicName));
+    }
+
     ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
                                                  const ice::LayoutDeviceLibrary &library) const {
         const auto cellId = ice::createLayoutCell(project, uniqueDeviceCellName(project, device.name), library.pdk);
@@ -1199,6 +1228,46 @@ class DocumentWindow : public QMainWindow {
                 highlight->setAcceptedMouseButtons(Qt::NoButton);
                 highlight->setVisible(false);
             }
+        }
+
+        const auto plannedRect = [](const ice::PlannedDevice &device) {
+            return QRectF(static_cast<qreal>(device.x),
+                          -static_cast<qreal>(device.y) - static_cast<qreal>(device.height),
+                          static_cast<qreal>(device.width), static_cast<qreal>(device.height));
+        };
+        // Stop a connection at the box edge instead of drawing through the box.
+        const auto plannedEdge = [](const QRectF &rect, const QPointF &toward) {
+            const auto center = rect.center();
+            const auto delta = toward - center;
+            if (delta.isNull())
+                return center;
+            const auto scaleX =
+                delta.x() != 0.0 ? rect.width() * 0.5 / std::abs(delta.x()) : std::numeric_limits<qreal>::max();
+            const auto scaleY =
+                delta.y() != 0.0 ? rect.height() * 0.5 / std::abs(delta.y()) : std::numeric_limits<qreal>::max();
+            return center + delta * std::min(scaleX, scaleY);
+        };
+        QPen connectionPen(ice::uiColor(ice::UiColor::Accent4));
+        connectionPen.setCosmetic(true);
+        connectionPen.setWidthF(1.5);
+        for (const auto &[connectionId, connection] : cellIt->second.plannedConnections) {
+            const auto from = cellIt->second.plannedDevices.find(connection.from);
+            const auto to = cellIt->second.plannedDevices.find(connection.to);
+            if (from == cellIt->second.plannedDevices.end() || to == cellIt->second.plannedDevices.end())
+                continue;
+            const auto fromRect = plannedRect(from->second);
+            const auto toRect = plannedRect(to->second);
+            auto *line = layoutCanvas_->scene()->addLine(
+                QLineF(plannedEdge(fromRect, toRect.center()), plannedEdge(toRect, fromRect.center())), connectionPen);
+            line->setZValue(-5.0);
+            line->setData(0, QVariant::fromValue<qulonglong>(connectionId));
+            line->setAcceptedMouseButtons(Qt::NoButton);
+            if (!connection.name.empty())
+                line->setToolTip(QString::fromStdString(connection.name));
+        }
+        for (const auto &[deviceId, device] : cellIt->second.plannedDevices) {
+            layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
+                                                                          plannedRect(device), readOnly));
         }
         layoutCanvas_->restoreLayoutInstanceSelection();
         if (!layoutViewInitialized_) {
@@ -3543,6 +3612,7 @@ class DocumentWindow : public QMainWindow {
         schematicHierarchy_ = new ProjectPanel(false, false, false, true);
         schematicHierarchy_->setOnAddClicked([this] { createSchematic(); });
         schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
+        schematicHierarchy_->setOnMakeLayoutFromSchematic([this](ice::ObjectId id) { makeLayoutFromSchematic(id); });
         schematicSymbolsPanel_ = new SymbolsPanel;
         schematicSymbolsPanel_->setOnSelectionChanged([this] {
             if (!schematicCanvas_)
@@ -4312,6 +4382,12 @@ class DocumentWindow : public QMainWindow {
                                                static_cast<ice::Coordinate>(-delta.y()));
                             return;
                         }
+                        if (auto planned = cellIt->second.plannedDevices.find(objectId);
+                            planned != cellIt->second.plannedDevices.end()) {
+                            planned->second.x += static_cast<ice::Coordinate>(delta.x());
+                            planned->second.y -= static_cast<ice::Coordinate>(delta.y());
+                            return;
+                        }
                         if (auto instance = cellIt->second.instances.find(objectId);
                             instance != cellIt->second.instances.end()) {
                             instance->second.x += static_cast<ice::Coordinate>(delta.x());
@@ -4328,6 +4404,12 @@ class DocumentWindow : public QMainWindow {
                         if (cellIt == project.layoutCells.end() || cellIt->second.library)
                             return;
                         for (const auto id : ids) {
+                            if (cellIt->second.plannedDevices.erase(id) != 0) {
+                                std::erase_if(cellIt->second.plannedConnections, [&](const auto &entry) {
+                                    return entry.second.from == id || entry.second.to == id;
+                                });
+                                continue;
+                            }
                             if (cellIt->second.shapes.erase(id) == 0)
                                 cellIt->second.instances.erase(id);
                         }

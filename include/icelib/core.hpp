@@ -150,6 +150,30 @@ struct LayoutInstance {
     Orientation orientation = Orientation::r0;
 };
 
+// A movable placeholder for a device that has not been implemented as real
+// layout geometry yet. Planned devices are projected from a schematic and live
+// directly under the layout's root layer. x/y is the lower-left corner in
+// database units; the canvas draws the box upward from that point.
+struct PlannedDevice {
+    ObjectId id = 0;
+    std::string name;
+    // Schematic instance this placeholder was derived from, when known.
+    ObjectId schematicInstance = 0;
+    Coordinate x = 0;
+    Coordinate y = 0;
+    Coordinate width = 0;
+    Coordinate height = 0;
+};
+
+// A straight logical connection between two planned devices. The name carries
+// the source schematic net name for display and diagnostics.
+struct PlannedConnection {
+    ObjectId id = 0;
+    ObjectId from = 0;
+    ObjectId to = 0;
+    std::string name;
+};
+
 struct LayoutCell {
     ObjectId id = 0;
     std::string name;
@@ -165,6 +189,8 @@ struct LayoutCell {
     std::map<ObjectId, Shape> shapes;
     std::map<ObjectId, Port> ports;
     std::map<ObjectId, LayoutInstance> instances;
+    std::map<ObjectId, PlannedDevice> plannedDevices;
+    std::map<ObjectId, PlannedConnection> plannedConnections;
 };
 
 struct SimulationGraph {

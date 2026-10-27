@@ -8,6 +8,7 @@ CLI invokes the same operations through `ProjectSession`.
 | --- | --- | --- | --- | --- |
 | Create/open/validate project | Yes | Startup shell | Yes | `icepy.create_project`, `icepy.load_project` |
 | Create schematic cell | Yes | View surface | Yes | Core-backed binding surface |
+| Create layout from schematic | Yes | Schematic hierarchy context menu | Core API | Core-backed binding surface |
 | Add layout rectangle | Yes | Layout surface | Yes | Core-backed binding surface |
 | Undo/redo transaction | Yes | Core-backed | Session-backed | Core-backed |
 | Polygon Boolean/offset | Yes | Geometry kernel | Core API | Core API |
