@@ -26,6 +26,8 @@ class ProjectPanel : public QWidget {
     void setOnAddClicked(std::function<void()> callback);
     void setOnRemoveClicked(std::function<void(ice::ObjectId)> callback);
     void setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback);
+    void setOnActivateLayout(std::function<void(ice::ObjectId)> callback);
+    void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
     void setOnFlattenChanged(std::function<void()> callback);
     void setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state);
     void setProject(const ice::Project &project);
@@ -50,6 +52,8 @@ class ProjectPanel : public QWidget {
     std::function<void()> onAdd_;
     std::function<void(ice::ObjectId)> onRemove_;
     std::function<void(ice::ObjectId)> onMakeLayoutFromSchematic_;
+    std::function<void(ice::ObjectId)> onActivateLayout_;
+    std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
     bool showLayoutHierarchy_ = true;
 };
 

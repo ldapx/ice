@@ -14,6 +14,8 @@ growing in one file.
   and signal-pick mode.
 - `layout_devices.*` — bundled layout-device library, device browser, device
   preview, layout/PyCell helpers, and geometry generation.
+- `procedural_layout.*` — Python script editor, runner, and generated-layout
+  refresh for procedural layouts.
 - `properties_panel.*` — the shared schematic/layout properties panel.
 - `side_panels.*` — project/layout hierarchy, layers, simulations, symbols, and
   schematic netlist panels.

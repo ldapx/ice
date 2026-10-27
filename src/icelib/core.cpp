@@ -101,6 +101,8 @@ ObjectId Project::nextId() {
         for (const auto &[connectionId, connection] : cell.plannedConnections)
             update(connectionId);
     }
+    for (const auto &[id, _] : proceduralLayouts)
+        update(id);
     for (const auto &[id, sim] : simulations) {
         update(id);
         for (const auto &graph : sim.graphs)
@@ -211,6 +213,17 @@ std::vector<Diagnostic> Project::validate() const {
         }
         (void)cellId;
     }
+    for (const auto &[layoutId, layout] : proceduralLayouts) {
+        if (layout.name.empty())
+            result.push_back({Diagnostic::Severity::error, "layout.procedural.name",
+                              "Procedural layout name is required", layoutId});
+        if (layout.pdk.empty() || layout.pdk.find_first_of("/\\") != std::string::npos)
+            result.push_back(
+                {Diagnostic::Severity::error, "layout.procedural.pdk", "Procedural layout PDK is invalid", layoutId});
+        if (!layoutCells.contains(layout.generatedCell))
+            result.push_back({Diagnostic::Severity::error, "layout.procedural.generated",
+                              "Procedural layout references a missing generated layout cell", layoutId});
+    }
     return result;
 }
 
@@ -295,6 +308,8 @@ std::string Project::serialize() const {
             c["library"] = true;
         if (!cell.device.empty())
             c["device"] = cell.device;
+        if (cell.generatedBy != 0)
+            c["generated_by"] = cell.generatedBy;
         if (!cell.parameters.empty()) {
             c["parameters"] = json::array();
             for (const auto &parameter : cell.parameters) {
@@ -338,6 +353,14 @@ std::string Project::serialize() const {
             c["planned_connections"].push_back(
                 {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"name", connection.name}});
         j["layout_cells"].push_back(c);
+    }
+    j["procedural_layouts"] = json::array();
+    for (const auto &[id, layout] : proceduralLayouts) {
+        j["procedural_layouts"].push_back({{"id", id},
+                                           {"name", layout.name},
+                                           {"pdk", layout.pdk},
+                                           {"script", layout.script},
+                                           {"generated_cell", layout.generatedCell}});
     }
     j["simulations"] = json::array();
     for (const auto &[id, sim] : simulations) {
@@ -470,6 +493,7 @@ Project Project::deserialize(const std::string &text) {
                 cell.pdk = genericPdkId;
             cell.library = c.value("library", false);
             cell.device = c.value("device", std::string{});
+            cell.generatedBy = c.value("generated_by", ObjectId{0});
             if (c.contains("parameters")) {
                 for (const auto &parameter : c.at("parameters"))
                     cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
@@ -520,6 +544,20 @@ Project Project::deserialize(const std::string &text) {
                 }
             }
             p.layoutCells.emplace(cell.id, std::move(cell));
+        }
+        if (j.contains("procedural_layouts")) {
+            for (const auto &layout : j.at("procedural_layouts")) {
+                ProceduralLayout entry;
+                entry.id = layout.at("id");
+                entry.name = layout.at("name");
+                entry.pdk = layout.value("pdk", std::string{genericPdkId});
+                if (entry.pdk.empty())
+                    entry.pdk = genericPdkId;
+                entry.script = layout.value("script", std::string{});
+                entry.generatedCell = layout.value("generated_cell", ObjectId{0});
+                const auto layoutId = entry.id;
+                p.proceduralLayouts.emplace(layoutId, std::move(entry));
+            }
         }
         if (j.contains("simulations")) {
             for (const auto &s : j.at("simulations")) {

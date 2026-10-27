@@ -191,6 +191,21 @@ struct LayoutCell {
     std::map<ObjectId, LayoutInstance> instances;
     std::map<ObjectId, PlannedDevice> plannedDevices;
     std::map<ObjectId, PlannedConnection> plannedConnections;
+    // Non-zero when this cell is the static output of a procedural layout.
+    // Generated cells stay ordinary layout cells so they can be inspected,
+    // exported, and used as instances by other cells.
+    ObjectId generatedBy = 0;
+};
+
+// A layout whose geometry is produced by a Python script. The generated
+// static layout lives in generatedCell; regenerating the script replaces that
+// cell's contents while keeping the procedural layout as the source of truth.
+struct ProceduralLayout {
+    ObjectId id = 0;
+    std::string name;
+    std::string pdk = genericPdkId;
+    std::string script;
+    ObjectId generatedCell = 0;
 };
 
 struct SimulationGraph {
@@ -238,6 +253,7 @@ class Project {
     std::map<ObjectId, SchematicCell> schematicCells;
     std::map<ObjectId, Layer> layers;
     std::map<ObjectId, LayoutCell> layoutCells;
+    std::map<ObjectId, ProceduralLayout> proceduralLayouts;
     std::map<ObjectId, SimulationItem> simulations;
 
     ObjectId nextId();

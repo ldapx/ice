@@ -162,11 +162,21 @@ Schematic **Hierarchy** tab offers **Make Layout from Schematic**. This creates
 a layout with the schematic's technology and projects every schematic instance
 into a movable **Planned Device** box under the new layout's Root Layer. Nets
 are drawn as straight connections between the boxes; planned devices use a box
-icon in the hierarchy and can be selected and moved directly on the canvas. The
-bundled IHP SG13G2 device library appears in **Devices**, with search, category
-filtering, and a geometry preview in **Properties**. The device list starts with
-no selection; selecting a device switches to **Place Device** and shows a
-cursor-following preview, while activating **Select** clears the list selection.
+icon in the hierarchy and can be selected and moved directly on the canvas.
+The **+** button in the Layout **Hierarchy** offers **Static Layout** and
+**Procedural Layout**. Procedural layouts use a notebook-text icon, open a
+Python script editor in the middle view, and contain a generated static layout
+as their child. The script runs with a `layout` builder that exposes
+`layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
+procedural layout and choose **Regenerate layout** (or use the editor's
+**Regenerate layout** button) to replace the generated child's geometry from
+the current script. Scripts run with `python3`, or the interpreter selected by
+`ICE_PYTHON`. A failed run reports the Python error and leaves the previous
+generated geometry unchanged. The bundled IHP SG13G2 device library appears in
+**Devices**, with search, category filtering, and a geometry preview in
+**Properties**. The device list starts with no selection; selecting a device
+switches to **Place Device** and shows a cursor-following preview, while
+activating **Select** clears the list selection.
 Clicking in the canvas imports the device geometry into the project and creates
 a layout instance. Every placed device gets its own read-only library cell, so
 repeated placements do not share parameters or geometry. Each instance appears

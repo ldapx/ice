@@ -18,6 +18,7 @@
 #include "appearance.hpp"
 #include "icons.hpp"
 #include "package_ui.hpp"
+#include "procedural_layout.hpp"
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
 #include "ui_colors.hpp"
@@ -31,6 +32,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -208,6 +210,9 @@ class DocumentWindow : public QMainWindow {
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         resetSectionHistories();
         layoutViewInitialized_ = false;
+        activeProceduralLayoutId_ = 0;
+        if (layoutViewStack_ && layoutCanvasPage_)
+            layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
         openLibraryLayoutCellTabs_.clear();
         clearLayoutDeviceSelection();
         if (layoutSelectTool_)
@@ -583,6 +588,48 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    bool resolveLayoutPdk(const std::string &pdk, QString *pdkLabel, std::optional<ice::PackagePdk> *selectedPdk,
+                          bool *addDependency) {
+        *pdkLabel = QStringLiteral("Generic PDK");
+        selectedPdk->reset();
+        *addDependency = false;
+        if (pdk == ice::genericPdkId)
+            return true;
+        const auto installDirectory = configuredPackageInstallDirectory();
+        const auto packages = installedPackages(installDirectory);
+        const auto package =
+            std::find_if(packages.begin(), packages.end(), [&](const auto &entry) { return entry.spec.name == pdk; });
+        if (package == packages.end()) {
+            QMessageBox::critical(
+                this, QStringLiteral("Create Layout Cell"),
+                QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
+            return false;
+        }
+        if (!packageProvidesPdk(package->spec)) {
+            QMessageBox::critical(
+                this, QStringLiteral("Create Layout Cell"),
+                QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
+            return false;
+        }
+        *pdkLabel = packagePdkDisplayName(package->spec);
+        if (package->spec.pdk)
+            *selectedPdk = *package->spec.pdk;
+        const auto &dependencies = project_->project().packageDependencies;
+        if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
+            const auto displayName = packagePdkDisplayName(package->spec);
+            const auto response =
+                QMessageBox::question(this, QStringLiteral("Add Package Dependency"),
+                                      QStringLiteral("This layout uses the %1 PDK from package %2. Add %2 to the "
+                                                     "project's package dependency list?")
+                                          .arg(displayName, QString::fromStdString(pdk)),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (response != QMessageBox::Yes)
+                return false;
+            *addDependency = true;
+        }
+        return true;
+    }
+
     void createLayoutCell() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Create Layout Cell"),
@@ -599,43 +646,11 @@ class DocumentWindow : public QMainWindow {
     void createLayoutCell(const QString &name, const std::string &pdk) {
         if (!project_ || name.trimmed().isEmpty())
             return;
-        const auto installDirectory = configuredPackageInstallDirectory();
-        auto pdkLabel = QStringLiteral("Generic PDK");
+        QString pdkLabel;
         std::optional<ice::PackagePdk> selectedPdk;
         bool addDependency = false;
-        if (pdk != ice::genericPdkId) {
-            const auto packages = installedPackages(installDirectory);
-            const auto package = std::find_if(packages.begin(), packages.end(),
-                                              [&](const auto &entry) { return entry.spec.name == pdk; });
-            if (package == packages.end()) {
-                QMessageBox::critical(
-                    this, QStringLiteral("Create Layout Cell"),
-                    QStringLiteral("The selected PDK package %1 is not installed.").arg(QString::fromStdString(pdk)));
-                return;
-            }
-            if (!packageProvidesPdk(package->spec)) {
-                QMessageBox::critical(
-                    this, QStringLiteral("Create Layout Cell"),
-                    QStringLiteral("Package %1 does not provide a PDK.").arg(QString::fromStdString(pdk)));
-                return;
-            }
-            pdkLabel = packagePdkDisplayName(package->spec);
-            if (package->spec.pdk)
-                selectedPdk = *package->spec.pdk;
-            const auto &dependencies = project_->project().packageDependencies;
-            if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
-                const auto displayName = packagePdkDisplayName(package->spec);
-                const auto response = QMessageBox::question(
-                    this, QStringLiteral("Add Package Dependency"),
-                    QStringLiteral("This layout cell uses the %1 PDK from package %2. Add %2 to the project's "
-                                   "package dependency list?")
-                        .arg(displayName, QString::fromStdString(pdk)),
-                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-                if (response != QMessageBox::Yes)
-                    return;
-                addDependency = true;
-            }
-        }
+        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+            return;
         try {
             project_->execute("create layout cell", [&](ice::Project &project) {
                 if (addDependency)
@@ -645,10 +660,182 @@ class DocumentWindow : public QMainWindow {
                 activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
+            activeProceduralLayoutId_ = 0;
             refreshProject();
             statusBar()->showMessage(QStringLiteral("Layout cell created with %1").arg(pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Layout Cell"), QString::fromStdString(error.what()));
+        }
+    }
+
+    void showAddLayoutMenu() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create Layout"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        QMenu menu(this);
+        auto *staticAction = menu.addAction(QStringLiteral("Static Layout"));
+        setLucideIcon(staticAction, QStringLiteral("notebook-pen"));
+        auto *proceduralAction = menu.addAction(QStringLiteral("Procedural Layout"));
+        setLucideIcon(proceduralAction, QStringLiteral("notebook-text"));
+        const auto *chosen = menu.exec(QCursor::pos());
+        if (chosen == staticAction)
+            createLayoutCell();
+        else if (chosen == proceduralAction)
+            createProceduralLayout();
+    }
+
+    void createProceduralLayout() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create Procedural Layout"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto installDirectory = configuredPackageInstallDirectory();
+        CreateLayoutDialog dialog(installDirectory, this);
+        dialog.setWindowTitle(QStringLiteral("Create Procedural Layout"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        createProceduralLayout(dialog.layoutName(), dialog.pdkId());
+    }
+
+    void createProceduralLayout(const QString &name, const std::string &pdk) {
+        if (!project_ || name.trimmed().isEmpty())
+            return;
+        QString pdkLabel;
+        std::optional<ice::PackagePdk> selectedPdk;
+        bool addDependency = false;
+        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+            return;
+        ice::ObjectId proceduralId = 0;
+        QString generationError;
+        bool generated = false;
+        try {
+            project_->execute("create procedural layout", [&](ice::Project &project) {
+                if (addDependency)
+                    project.packageDependencies.push_back(pdk);
+                if (selectedPdk)
+                    addPdkLayers(project, *selectedPdk);
+                proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
+                                                           ice::defaultProceduralLayoutScript());
+                generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
+            });
+            project_->setLastHistoryLabel("Created procedural layout " + name.trimmed().toStdString());
+            const auto &procedural = project_->project().proceduralLayouts.at(proceduralId);
+            activeProceduralLayoutId_ = proceduralId;
+            activeLayoutId_ = procedural.generatedCell;
+            refreshProject();
+            selectLayoutTab(proceduralId);
+            if (documents_ && layoutPage_)
+                documents_->setCurrentWidget(layoutPage_);
+            if (!generated) {
+                QMessageBox::warning(this, QStringLiteral("Create Procedural Layout"),
+                                     QStringLiteral("The procedural layout was created, but its initial generation "
+                                                    "failed:\n%1")
+                                         .arg(generationError));
+            }
+            statusBar()->showMessage(QStringLiteral("Procedural layout created with %1").arg(pdkLabel));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create Procedural Layout"),
+                                  QString::fromStdString(error.what()));
+        }
+    }
+
+    void regenerateProceduralLayout(ice::ObjectId proceduralId) {
+        if (!project_)
+            return;
+        const auto proceduralIt = project_->project().proceduralLayouts.find(proceduralId);
+        if (proceduralIt == project_->project().proceduralLayouts.end())
+            return;
+        const auto name = proceduralIt->second.name;
+        QString error;
+        try {
+            project_->execute("regenerate procedural layout", [&](ice::Project &project) {
+                if (!ice::regenerateProceduralLayout(project, proceduralId, &error))
+                    throw ice::ProjectError("layout.procedural.generate", error.toStdString());
+            });
+        } catch (const ice::ProjectError &exception) {
+            if (error.isEmpty())
+                error = QString::fromStdString(exception.what());
+            if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_)
+                proceduralEditor_->showMessage(QStringLiteral("Regeneration failed."), true);
+            QMessageBox::critical(
+                this, QStringLiteral("Regenerate Layout"),
+                QStringLiteral("Unable to regenerate '%1':\n%2").arg(QString::fromStdString(name), error));
+            return;
+        }
+        project_->setLastHistoryLabel("Regenerated layout " + name);
+        refreshProject();
+        if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_)
+            proceduralEditor_->showMessage(QStringLiteral("Layout regenerated from the current script."));
+        statusBar()->showMessage(
+            QStringLiteral("Procedural layout '%1' regenerated").arg(QString::fromStdString(name)));
+    }
+
+    void onProceduralScriptEdited(const QString &script) {
+        if (!project_ || activeProceduralLayoutId_ == 0)
+            return;
+        auto &procedural = project_->project().proceduralLayouts;
+        auto it = procedural.find(activeProceduralLayoutId_);
+        if (it == procedural.end())
+            return;
+        const auto text = script.toStdString();
+        if (it->second.script == text)
+            return;
+        it->second.script = text;
+        project_->markDirty();
+        if (proceduralEditor_)
+            proceduralEditor_->showMessage(QStringLiteral("Script changed. Regenerate layout to update the "
+                                                          "static layout child."));
+    }
+
+    void showProceduralLayoutEditor(ice::ObjectId proceduralId) {
+        if (!project_)
+            return;
+        const auto it = project_->project().proceduralLayouts.find(proceduralId);
+        if (it == project_->project().proceduralLayouts.end())
+            return;
+        activeProceduralLayoutId_ = proceduralId;
+        activeLayoutId_ = it->second.generatedCell;
+        if (layoutViewStack_ && proceduralEditorPage_)
+            layoutViewStack_->setCurrentWidget(proceduralEditorPage_);
+        if (proceduralEditor_) {
+            const auto script = QString::fromStdString(it->second.script);
+            if (proceduralEditor_->script() != script)
+                proceduralEditor_->setScript(script);
+            proceduralEditor_->showMessage(
+                QStringLiteral("Editing procedural layout '%1'.").arg(QString::fromStdString(it->second.name)));
+        }
+    }
+
+    void activateLayoutTab(int index) {
+        if (!layoutCellTabs_ || index < 0 || !project_)
+            return;
+        const auto id = static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index).toULongLong());
+        const auto &project = project_->project();
+        if (project.proceduralLayouts.contains(id)) {
+            showProceduralLayoutEditor(id);
+            return;
+        }
+        activeProceduralLayoutId_ = 0;
+        activeLayoutId_ = id;
+        if (layoutViewStack_ && layoutCanvasPage_)
+            layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
+        refreshLayout();
+    }
+
+    void selectLayoutTab(ice::ObjectId id) {
+        if (!layoutCellTabs_)
+            return;
+        for (int index = 0; index < layoutCellTabs_->count(); ++index) {
+            if (static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index).toULongLong()) != id)
+                continue;
+            if (layoutCellTabs_->currentIndex() == index)
+                activateLayoutTab(index);
+            else
+                layoutCellTabs_->setCurrentIndex(index);
+            return;
         }
     }
 
@@ -670,6 +857,9 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         layoutViewInitialized_ = false;
+        activeProceduralLayoutId_ = 0;
+        if (layoutViewStack_ && layoutCanvasPage_)
+            layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
         if (documents_ && layoutPage_)
             documents_->setCurrentWidget(layoutPage_);
         if (layoutSelectTool_)
@@ -773,6 +963,9 @@ class DocumentWindow : public QMainWindow {
             return;
         openLibraryLayoutCellTabs_.insert(cellId);
         activeLayoutId_ = cellId;
+        activeProceduralLayoutId_ = 0;
+        if (layoutViewStack_ && layoutCanvasPage_)
+            layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
         layoutViewInitialized_ = false;
         refreshEmbeddedPanels();
         refreshLayout();
@@ -790,6 +983,9 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 openLibraryLayoutCellTabs_.insert(id);
                 activeLayoutId_ = id;
+                activeProceduralLayoutId_ = 0;
+                if (layoutViewStack_ && layoutCanvasPage_)
+                    layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
                 layoutViewInitialized_ = false;
                 refreshEmbeddedPanels();
                 refreshLayout();
@@ -981,6 +1177,63 @@ class DocumentWindow : public QMainWindow {
             activeLayoutId_ = 0;
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Layout cell '%1' removed").arg(name));
+    }
+
+    void removeLayoutItem(ice::ObjectId id) {
+        if (!project_ || id == 0)
+            return;
+        if (project_->project().proceduralLayouts.contains(id))
+            removeProceduralLayout(id);
+        else
+            removeLayoutCell(id);
+    }
+
+    void removeProceduralLayout(ice::ObjectId proceduralId) {
+        if (!project_ || proceduralId == 0)
+            return;
+        const auto &project = project_->project();
+        const auto proceduralIt = project.proceduralLayouts.find(proceduralId);
+        if (proceduralIt == project.proceduralLayouts.end())
+            return;
+        const auto generatedId = proceduralIt->second.generatedCell;
+        QStringList references;
+        for (const auto &[otherId, otherCell] : project.layoutCells) {
+            if (otherId == generatedId)
+                continue;
+            for (const auto &[_, instance] : otherCell.instances)
+                if (instance.cell == generatedId)
+                    references << QStringLiteral("%1 in %2")
+                                      .arg(QString::fromStdString(instance.name),
+                                           QString::fromStdString(otherCell.name));
+        }
+        if (!references.isEmpty()) {
+            QMessageBox::information(
+                this, QStringLiteral("Remove Procedural Layout"),
+                QStringLiteral("The generated layout of '%1' is used as an instance in:\n%2\n\nRemove those "
+                               "instances first.")
+                    .arg(QString::fromStdString(proceduralIt->second.name), references.join(QStringLiteral("\n"))));
+            return;
+        }
+        const auto name = QString::fromStdString(proceduralIt->second.name);
+        if (QMessageBox::question(
+                this, QStringLiteral("Remove Procedural Layout"),
+                QStringLiteral("Remove procedural layout '%1' and its generated static layout?").arg(name),
+                QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+            return;
+        project_->execute("remove procedural layout", [&](ice::Project &project) {
+            project.proceduralLayouts.erase(proceduralId);
+            project.layoutCells.erase(generatedId);
+        });
+        if (activeProceduralLayoutId_ == proceduralId) {
+            activeProceduralLayoutId_ = 0;
+            activeLayoutId_ = 0;
+            if (layoutViewStack_ && layoutCanvasPage_)
+                layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
+        }
+        if (activeLayoutId_ == generatedId)
+            activeLayoutId_ = 0;
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Procedural layout '%1' removed").arg(name));
     }
 
     void createLayer() {
@@ -2832,13 +3085,13 @@ class DocumentWindow : public QMainWindow {
     int historyScope(const QString &label) const {
         const auto lower = label.toLower();
         const bool layout = lower.contains(QStringLiteral("layout")) || lower.contains(QStringLiteral("layer"));
-        const bool schematic = !layout && (lower.contains(QStringLiteral("schematic")) ||
-                               lower.contains(QStringLiteral("symbol")) || lower.contains(QStringLiteral("net")) ||
-                               lower.contains(QStringLiteral("pin")) || lower.contains(QStringLiteral("label")) ||
-                               lower.contains(QStringLiteral("parameter")) || lower.contains(QStringLiteral("rotat")) ||
-                               lower.contains(QStringLiteral("flip")) || lower.contains(QStringLiteral("mov")) ||
-                               lower.contains(QStringLiteral("delet")) || lower.contains(QStringLiteral("connect")) ||
-                               lower.startsWith(QStringLiteral("placed ")));
+        const bool schematic =
+            !layout && (lower.contains(QStringLiteral("schematic")) || lower.contains(QStringLiteral("symbol")) ||
+                        lower.contains(QStringLiteral("net")) || lower.contains(QStringLiteral("pin")) ||
+                        lower.contains(QStringLiteral("label")) || lower.contains(QStringLiteral("parameter")) ||
+                        lower.contains(QStringLiteral("rotat")) || lower.contains(QStringLiteral("flip")) ||
+                        lower.contains(QStringLiteral("mov")) || lower.contains(QStringLiteral("delet")) ||
+                        lower.contains(QStringLiteral("connect")) || lower.startsWith(QStringLiteral("placed ")));
         return (layout ? 2 : 0) | (schematic || lower.contains(QStringLiteral("pdk technology")) ? 1 : 0);
     }
 
@@ -2862,8 +3115,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto &history = project_->history();
-        while (syncedGlobalHistoryPosition_ < globalPosition &&
-               syncedGlobalHistoryPosition_ < history.size()) {
+        while (syncedGlobalHistoryPosition_ < globalPosition && syncedGlobalHistoryPosition_ < history.size()) {
             const auto label = QString::fromStdString(history[syncedGlobalHistoryPosition_]);
             const auto scope = historyScope(label);
             if (scope & 1) {
@@ -2892,6 +3144,7 @@ class DocumentWindow : public QMainWindow {
         else {
             restored.layers = entries[position].project.layers;
             restored.layoutCells = entries[position].project.layoutCells;
+            restored.proceduralLayouts = entries[position].project.proceduralLayouts;
         }
         project_->replaceProject(std::move(restored));
         if (schematic)
@@ -2966,14 +3219,29 @@ class DocumentWindow : public QMainWindow {
                     schematicCellTabs_->setCurrentIndex(index);
         }
         if (layoutCellTabs_) {
-            const auto selected = activeLayoutId_;
+            if (activeProceduralLayoutId_ != 0 && !project.proceduralLayouts.contains(activeProceduralLayoutId_))
+                activeProceduralLayoutId_ = 0;
+            const auto selected = activeProceduralLayoutId_ != 0 ? activeProceduralLayoutId_ : activeLayoutId_;
             layoutCellTabs_->clear();
+            for (const auto &[id, procedural] : project.proceduralLayouts) {
+                const auto index = layoutCellTabs_->count();
+                layoutCellTabs_->addTab(new QWidget, QString::fromStdString(procedural.name));
+                layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
+                layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
+            }
             for (const auto &[id, cell] : project.layoutCells) {
                 if (cell.library && !openLibraryLayoutCellTabs_.contains(id))
                     continue;
+                const auto index = layoutCellTabs_->count();
                 layoutCellTabs_->addTab(new QWidget, QString::fromStdString(cell.name));
-                layoutCellTabs_->tabBar()->setTabData(layoutCellTabs_->count() - 1,
-                                                      QVariant::fromValue<qulonglong>(id));
+                layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
+                if (cell.generatedBy != 0) {
+                    const auto procedural = project.proceduralLayouts.find(cell.generatedBy);
+                    if (procedural != project.proceduralLayouts.end())
+                        layoutCellTabs_->setTabToolTip(index,
+                                                       QStringLiteral("Generated by procedural layout '%1'")
+                                                           .arg(QString::fromStdString(procedural->second.name)));
+                }
             }
             for (int index = 0; index < layoutCellTabs_->count(); ++index)
                 if (layoutCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
@@ -3668,9 +3936,8 @@ class DocumentWindow : public QMainWindow {
         schematicNetlistPanel_ = new SchematicNetlistPanel;
         schematicProperties->addTab(schematicNetlistPanel_, QStringLiteral("Netlist"));
         schematicHistoryPanel_ = new HistoryPanel;
-        schematicHistoryPanel_->setOnHistorySelected([this](std::size_t position) {
-            jumpToSchematicHistory(position);
-        });
+        schematicHistoryPanel_->setOnHistorySelected(
+            [this](std::size_t position) { jumpToSchematicHistory(position); });
         schematicProperties->addTab(schematicHistoryPanel_, QStringLiteral("History"));
         schematicContentLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
@@ -3688,8 +3955,10 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_ = new ProjectPanel(false, false, true, true);
         layoutHierarchy_->setLayoutFlattenState(flattenedLayouts_);
         layoutHierarchy_->setOnFlattenChanged([this] { refreshEmbeddedPanels(); });
-        layoutHierarchy_->setOnAddClicked([this] { createLayoutCell(); });
-        layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutCell(id); });
+        layoutHierarchy_->setOnAddClicked([this] { showAddLayoutMenu(); });
+        layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutItem(id); });
+        layoutHierarchy_->setOnActivateLayout([this](ice::ObjectId id) { selectLayoutTab(id); });
+        layoutHierarchy_->setOnRegenerateProceduralLayout([this](ice::ObjectId id) { regenerateProceduralLayout(id); });
         layoutLeftTabs_ = new QTabWidget;
         layoutLeftTabs_->addTab(layoutHierarchy_, QStringLiteral("Hierarchy"));
         layoutDevicesPanel_ = new LayoutDevicesPanel;
@@ -3709,7 +3978,18 @@ class DocumentWindow : public QMainWindow {
         layoutEditorLayout->setContentsMargins(0, 0, 0, 0);
         layoutEditorLayout->setSpacing(0);
         layoutEditorLayout->addWidget(layoutCellTabs_);
-        layoutEditorLayout->addWidget(makeEditor(QStringLiteral("Layout editor"), true), 1);
+        layoutCanvasPage_ = makeEditor(QStringLiteral("Layout editor"), true);
+        proceduralEditor_ = new ProceduralLayoutEditor;
+        proceduralEditor_->setOnScriptEdited([this](const QString &script) { onProceduralScriptEdited(script); });
+        proceduralEditor_->setOnRegenerate([this] {
+            if (activeProceduralLayoutId_ != 0)
+                regenerateProceduralLayout(activeProceduralLayoutId_);
+        });
+        proceduralEditorPage_ = proceduralEditor_;
+        layoutViewStack_ = new QStackedWidget;
+        layoutViewStack_->addWidget(layoutCanvasPage_);
+        layoutViewStack_->addWidget(proceduralEditorPage_);
+        layoutEditorLayout->addWidget(layoutViewStack_, 1);
         layoutEmptyPanel_ = new EmptyLayoutPanel;
         layoutEmptyPanel_->setOnCreate(
             [this](const QString &name, const std::string &pdk) { createLayoutCell(name, pdk); });
@@ -4062,8 +4342,7 @@ class DocumentWindow : public QMainWindow {
         connect(layoutCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (index < 0)
                 return;
-            activeLayoutId_ = layoutCellTabs_->tabBar()->tabData(index).toULongLong();
-            refreshLayout();
+            activateLayoutTab(index);
         });
         connect(documents_, &QTabWidget::currentChanged, this, [this](int) {
             if (schematicCanvas_ && schematicCanvas_->isSignalPickMode() &&
@@ -4101,9 +4380,10 @@ class DocumentWindow : public QMainWindow {
                     for (const auto &[_, cell] : project_->project().schematicCells) {
                         if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
                             const auto symbol = cell.symbols.find(instance->second.symbol);
-                            historyLabel = "Moved " +
-                                           (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) +
-                                           " " + instance->second.name;
+                            historyLabel =
+                                "Moved " +
+                                (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) + " " +
+                                instance->second.name;
                             break;
                         }
                     }
@@ -4128,9 +4408,10 @@ class DocumentWindow : public QMainWindow {
                     for (const auto &[_, cell] : project_->project().schematicCells) {
                         if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
                             const auto symbol = cell.symbols.find(instance->second.symbol);
-                            historyLabel = "Rotated " +
-                                           (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) +
-                                           " " + instance->second.name + " - 90°";
+                            historyLabel =
+                                "Rotated " +
+                                (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) + " " +
+                                instance->second.name + " - 90°";
                             break;
                         }
                     }
@@ -4285,9 +4566,9 @@ class DocumentWindow : public QMainWindow {
                     for (const auto id : ids) {
                         if (const auto instance = cell.instances.find(id); instance != cell.instances.end()) {
                             const auto symbol = cell.symbols.find(instance->second.symbol);
-                            deletedNames.push_back((symbol == cell.symbols.end() ? std::string("device")
-                                                                                  : symbol->second.name) +
-                                                    " " + instance->second.name);
+                            deletedNames.push_back(
+                                (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) + " " +
+                                instance->second.name);
                         }
                     }
                 }
@@ -4735,11 +5016,16 @@ class DocumentWindow : public QMainWindow {
     QWidget *schematicToolbarColumn_ = nullptr;
     QStackedWidget *layoutEditorStack_ = nullptr;
     QWidget *layoutEditorPage_ = nullptr;
+    QStackedWidget *layoutViewStack_ = nullptr;
+    QWidget *layoutCanvasPage_ = nullptr;
+    QWidget *proceduralEditorPage_ = nullptr;
+    ProceduralLayoutEditor *proceduralEditor_ = nullptr;
     EmptyLayoutPanel *layoutEmptyPanel_ = nullptr;
     QWidget *layoutToolbarColumn_ = nullptr;
     QWidget *layoutOptionsColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
+    ice::ObjectId activeProceduralLayoutId_ = 0;
     std::set<ice::ObjectId> openLibraryLayoutCellTabs_;
     std::unique_ptr<ice::ProjectSession> project_;
     std::shared_ptr<std::set<ice::ObjectId>> flattenedLayouts_ = std::make_shared<std::set<ice::ObjectId>>();

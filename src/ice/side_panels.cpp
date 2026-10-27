@@ -32,7 +32,7 @@
 namespace {
 constexpr int kItemKindRole = Qt::UserRole + 1;
 
-enum class HierarchyItemKind : int { layout = 1, device = 2, rootLayer = 3, plannedDevice = 4 };
+enum class HierarchyItemKind : int { layout = 1, device = 2, rootLayer = 3, plannedDevice = 4, proceduralLayout = 5 };
 
 QIcon hierarchyIcon(const char *name) { return ice::lucideIcon(QString::fromLatin1(name), 16); }
 } // namespace
@@ -58,10 +58,10 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
         setLucideIcon(removeButton_, QStringLiteral("trash"), 16);
         removeButton_->setEnabled(false);
         if (showLayoutHierarchy_) {
-            addButton_->setToolTip(QStringLiteral("Add layout cell"));
-            addButton_->setAccessibleName(QStringLiteral("Add layout cell"));
-            removeButton_->setToolTip(QStringLiteral("Remove selected layout cell"));
-            removeButton_->setAccessibleName(QStringLiteral("Remove selected layout cell"));
+            addButton_->setToolTip(QStringLiteral("Add layout"));
+            addButton_->setAccessibleName(QStringLiteral("Add layout"));
+            removeButton_->setToolTip(QStringLiteral("Remove selected layout"));
+            removeButton_->setAccessibleName(QStringLiteral("Remove selected layout"));
         } else {
             addButton_->setToolTip(QStringLiteral("Add schematic"));
             addButton_->setAccessibleName(QStringLiteral("Add schematic"));
@@ -112,6 +112,16 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
         });
     connect(tree_, &QTreeWidget::currentItemChanged, this,
             [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateRemoveButton(); });
+    connect(tree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item, int) {
+        if (!showLayoutHierarchy_ || !item || !item->data(0, Qt::UserRole).isValid())
+            return;
+        const auto kind = item->data(0, kItemKindRole).toInt();
+        if (kind != static_cast<int>(HierarchyItemKind::layout) &&
+            kind != static_cast<int>(HierarchyItemKind::proceduralLayout))
+            return;
+        if (onActivateLayout_)
+            onActivateLayout_(static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong()));
+    });
 }
 
 void ProjectPanel::setOnAddClicked(std::function<void()> callback) { onAdd_ = std::move(callback); }
@@ -120,6 +130,14 @@ void ProjectPanel::setOnRemoveClicked(std::function<void(ice::ObjectId)> callbac
 
 void ProjectPanel::setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback) {
     onMakeLayoutFromSchematic_ = std::move(callback);
+}
+
+void ProjectPanel::setOnActivateLayout(std::function<void(ice::ObjectId)> callback) {
+    onActivateLayout_ = std::move(callback);
+}
+
+void ProjectPanel::setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback) {
+    onRegenerateProceduralLayout_ = std::move(callback);
 }
 
 void ProjectPanel::setOnFlattenChanged(std::function<void()> callback) { onFlattenChanged_ = std::move(callback); }
@@ -270,8 +288,30 @@ void ProjectPanel::rebuildTree() {
             deviceItem->setToolTip(0, QStringLiteral("Planned device: %1").arg(QString::fromStdString(device.name)));
         }
     };
+    std::set<ice::ObjectId> generatedCells;
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.generatedCell != 0)
+            generatedCells.insert(procedural.generatedCell);
+        auto *proceduralItem = new QTreeWidgetItem(tree_, {QString::fromStdString(procedural.name)});
+        proceduralItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+        proceduralItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::proceduralLayout));
+        proceduralItem->setIcon(0, hierarchyIcon("notebook-text"));
+        proceduralItem->setToolTip(
+            0, QStringLiteral("Procedural layout (Python script): %1").arg(QString::fromStdString(procedural.name)));
+        const auto generatedIt = project.layoutCells.find(procedural.generatedCell);
+        if (generatedIt == project.layoutCells.end())
+            continue;
+        auto *generatedItem = new QTreeWidgetItem(proceduralItem, {QString::fromStdString(generatedIt->second.name)});
+        generatedItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(generatedIt->first));
+        generatedItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
+        generatedItem->setIcon(0, hierarchyIcon("notebook-pen"));
+        generatedItem->setToolTip(
+            0, QStringLiteral("Generated static layout: %1").arg(QString::fromStdString(generatedIt->second.name)));
+        std::vector<ice::ObjectId> ancestors{generatedIt->first};
+        addContents(generatedItem, generatedIt->first, ancestors, true);
+    }
     for (const auto &[id, cell] : project.layoutCells) {
-        if (cell.library)
+        if (cell.library || generatedCells.contains(id))
             continue;
         auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
         cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
@@ -306,7 +346,24 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             onMakeLayoutFromSchematic_(cellId);
         return;
     }
-    if (item->data(0, kItemKindRole).toInt() != static_cast<int>(HierarchyItemKind::layout))
+    const auto kind = item->data(0, kItemKindRole).toInt();
+    if (kind == static_cast<int>(HierarchyItemKind::proceduralLayout)) {
+        const auto proceduralId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        if (proceduralId == 0 || !project_->proceduralLayouts.contains(proceduralId))
+            return;
+        QMenu menu(this);
+        auto *regenerateAction = menu.addAction(QStringLiteral("Regenerate layout"));
+        setLucideIcon(regenerateAction, QStringLiteral("refresh-cw"));
+        auto *openAction = menu.addAction(QStringLiteral("Open script"));
+        setLucideIcon(openAction, QStringLiteral("notebook-text"));
+        const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+        if (chosen == regenerateAction && onRegenerateProceduralLayout_)
+            onRegenerateProceduralLayout_(proceduralId);
+        else if (chosen == openAction && onActivateLayout_)
+            onActivateLayout_(proceduralId);
+        return;
+    }
+    if (kind != static_cast<int>(HierarchyItemKind::layout))
         return;
     const auto cellId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
     if (cellId == 0 || !project_->layoutCells.contains(cellId))

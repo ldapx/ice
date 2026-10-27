@@ -194,6 +194,46 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
     return id;
 }
 
+ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script) {
+    if (name.empty())
+        throw ProjectError("layout.procedural.name", "Procedural layout name must not be empty");
+    if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
+
+    const auto staticNameTaken = [&](const std::string &candidate) {
+        return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                           [&](const auto &entry) { return entry.second.name == candidate; });
+    };
+    const auto proceduralNameTaken = [&](const std::string &candidate) {
+        return std::any_of(project.proceduralLayouts.begin(), project.proceduralLayouts.end(),
+                           [&](const auto &entry) { return entry.second.name == candidate; });
+    };
+    const auto nameTaken = [&](const std::string &candidate) {
+        return staticNameTaken(candidate) || proceduralNameTaken(candidate);
+    };
+    if (nameTaken(name)) {
+        const auto stem = name + " Procedural";
+        name = stem;
+        for (int index = 2; nameTaken(name); ++index)
+            name = stem + " " + std::to_string(index);
+    }
+
+    auto generatedName = name + " (generated)";
+    if (nameTaken(generatedName)) {
+        const auto stem = generatedName;
+        generatedName = stem + " 2";
+        for (int index = 3; nameTaken(generatedName); ++index)
+            generatedName = stem + " " + std::to_string(index);
+    }
+
+    const auto generatedCell = createLayoutCell(project, generatedName, pdk);
+    const auto id = project.nextId();
+    project.layoutCells.at(generatedCell).generatedBy = id;
+    project.proceduralLayouts.emplace(
+        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(script), generatedCell});
+    return id;
+}
+
 ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name) {
     const auto &schematic =
         require(project.schematicCells, schematicId, "schematic.cell", "Schematic cell does not exist");

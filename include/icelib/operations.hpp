@@ -23,6 +23,12 @@ char spiceElementForSymbol(const std::string &symbolName);
 std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
                                   const std::vector<Parameter> &defaults);
 ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = genericPdkId);
+// Creates a procedural layout and its generated static layout cell. The
+// generated cell is an ordinary layout cell marked with generatedBy. Names are
+// made unique across static and procedural layouts. Returns the procedural
+// layout id, not the generated cell id.
+ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk = genericPdkId,
+                                std::string script = {});
 // Creates a layout cell using the schematic's technology and projects every
 // schematic instance into a movable planned-device box. Nets are projected as
 // straight connections between those boxes. The layout name defaults to the

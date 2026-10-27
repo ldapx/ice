@@ -815,6 +815,34 @@ TEST_CASE("layout instances survive serialization") {
     CHECK(instance.y == -80);
 }
 
+TEST_CASE("procedural layouts own a generated static layout") {
+    ice::Project project;
+    project.identity = "procedural";
+    project.name = "procedural";
+    const auto proceduralId = ice::createProceduralLayout(project, "generated_top", ice::genericPdkId,
+                                                          "layout.layer(\"Metal1\").rectangle(0, 0, 100, 100)\n");
+    const auto &procedural = project.proceduralLayouts.at(proceduralId);
+    CHECK(procedural.name == "generated_top");
+    CHECK(procedural.script.find("Metal1") != std::string::npos);
+    CHECK(procedural.generatedCell != 0);
+    const auto &generated = project.layoutCells.at(procedural.generatedCell);
+    CHECK(generated.name == "generated_top (generated)");
+    CHECK(generated.generatedBy == proceduralId);
+    CHECK(project.validate().empty());
+
+    const auto serialized = project.serialize();
+    auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.serialize() == serialized);
+    CHECK(roundTrip.proceduralLayouts.at(proceduralId).generatedCell == procedural.generatedCell);
+    CHECK(roundTrip.layoutCells.at(procedural.generatedCell).generatedBy == proceduralId);
+    CHECK(roundTrip.nextId() > proceduralId);
+
+    const auto secondId = ice::createProceduralLayout(project, "generated_top");
+    CHECK(project.proceduralLayouts.at(secondId).name != procedural.name);
+    CHECK(project.proceduralLayouts.at(secondId).generatedCell != procedural.generatedCell);
+    CHECK(project.validate().empty());
+}
+
 TEST_CASE("planned devices are projected from a schematic") {
     ice::Project project;
     project.identity = "planned";
