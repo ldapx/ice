@@ -41,6 +41,7 @@ class LayoutDevicesPanel : public QWidget {
     void setOnDeviceActivated(std::function<void()> callback);
     void focusDeviceList();
     void clearDeviceSelection();
+    void setPdk(const std::string &pdk);
 
     const ice::LayoutDeviceLibrary &library() const;
     const ice::LayoutDeviceCell *selectedDevice() const;
@@ -56,6 +57,7 @@ class LayoutDevicesPanel : public QWidget {
     ice::LayoutDeviceLibrary library_;
     std::map<std::string, std::vector<ice::LayoutDeviceParameter>> defaultParameters_;
     std::map<std::string, ice::LayoutDeviceGeometry> defaultGeometry_;
+    std::optional<std::string> activePdk_;
     QString loadError_;
     QLineEdit *search_ = nullptr;
     QComboBox *category_ = nullptr;

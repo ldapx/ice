@@ -552,6 +552,15 @@ void LayoutDevicesPanel::clearDeviceSelection() {
     notifySelection();
 }
 
+void LayoutDevicesPanel::setPdk(const std::string &pdk) {
+    if (activePdk_ && *activePdk_ == pdk)
+        return;
+    activePdk_ = pdk;
+    clearDeviceSelection();
+    rebuildCategories();
+    rebuildList();
+}
+
 const ice::LayoutDeviceLibrary &LayoutDevicesPanel::library() const { return library_; }
 
 const ice::LayoutDeviceCell *LayoutDevicesPanel::selectedDevice() const {
@@ -613,10 +622,12 @@ void LayoutDevicesPanel::rebuildCategories() {
     category_->clear();
     category_->addItem(QStringLiteral("All categories"), QString());
     QStringList categories;
-    for (const auto &cell : library_.cells) {
-        const auto category = QString::fromStdString(cell.category);
-        if (!category.isEmpty() && !categories.contains(category))
-            categories << category;
+    if (activePdk_ && *activePdk_ == library_.pdk) {
+        for (const auto &cell : library_.cells) {
+            const auto category = QString::fromStdString(cell.category);
+            if (!category.isEmpty() && !categories.contains(category))
+                categories << category;
+        }
     }
     for (const auto &category : categories)
         category_->addItem(category, category);
@@ -639,6 +650,10 @@ void LayoutDevicesPanel::rebuildList(const QString &keepSelected) {
     list_->clear();
     int selectedRow = -1;
     int row = 0;
+    if (!activePdk_ || *activePdk_ != library_.pdk) {
+        notifySelection();
+        return;
+    }
     for (std::size_t index = 0; index < library_.cells.size(); ++index) {
         const auto &cell = library_.cells[index];
         const auto cellCategory = QString::fromStdString(cell.category);

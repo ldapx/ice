@@ -1031,12 +1031,16 @@ class DocumentWindow : public QMainWindow {
         auto cellIt = project.layoutCells.find(activeLayoutId_);
         if (cellIt == project.layoutCells.end()) {
             if (project.layoutCells.empty()) {
+                if (layoutDevicesPanel_)
+                    layoutDevicesPanel_->setPdk({});
                 refreshLayoutProperties();
                 return;
             }
             cellIt = project.layoutCells.begin();
             activeLayoutId_ = cellIt->first;
         }
+        if (layoutDevicesPanel_)
+            layoutDevicesPanel_->setPdk(cellIt->second.pdk);
         const bool readOnly = cellIt->second.library;
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
