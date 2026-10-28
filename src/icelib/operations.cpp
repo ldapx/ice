@@ -193,6 +193,25 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
     cell.instances.emplace(id, SchematicInstance{id, symbolId, std::move(name), x, y});
     return id;
 }
+ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x,
+                Coordinate y) {
+    if (pins.size() < 2)
+        throw ProjectError("schematic.net", "A net must connect at least two pins");
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    for (const auto pinId : pins) {
+        const bool found = std::any_of(cell.symbols.begin(), cell.symbols.end(), [&](const auto &symbol) {
+            return std::any_of(symbol.second.pins.begin(), symbol.second.pins.end(),
+                               [&](const auto &pin) { return pin.id == pinId; });
+        });
+        if (!found)
+            throw ProjectError("schematic.net.pin", "Net references a missing pin");
+    }
+    ObjectId id = project.nextId();
+    if (name.empty())
+        name = "N" + std::to_string(id);
+    cell.nets.emplace(id, Net{id, std::move(name), std::move(pins), x, y});
+    return id;
+}
 std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
                                   const std::vector<Parameter> &defaults) {
     std::size_t added = 0;

@@ -1,144 +1,838 @@
 #include "icelib/core.hpp"
+#include "icelib/interchange.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/simulation.hpp"
+
+#include <nlohmann/json.hpp>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+using json = nlohmann::json;
+
+[[noreturn]] void argumentError(const std::string &message) { throw ice::ProjectError("cli.arguments", message); }
+
+void expectArguments(const std::vector<std::string> &args, std::size_t minimum, std::size_t maximum,
+                     const std::string &usage) {
+    if (args.size() < minimum || args.size() > maximum)
+        argumentError("Usage: ice-cli " + usage);
+}
+
+[[noreturn]] void unknownCommand(const std::string &command) {
+    throw ice::ProjectError("cli.command", "Unknown command: " + command + ". Run 'ice-cli --help'.");
+}
+
+ice::Coordinate parseInteger(const std::string &text, const char *what) {
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoll(text, &used);
+        if (used != text.size())
+            throw std::invalid_argument("trailing characters");
+        return static_cast<ice::Coordinate>(value);
+    } catch (const std::exception &) {
+        argumentError(std::string("Invalid integer for ") + what + ": " + text);
+    }
+}
+
+double parseDouble(const std::string &text, const char *what) {
+    try {
+        std::size_t used = 0;
+        const auto value = std::stod(text, &used);
+        auto suffix = text.substr(used);
+        std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        double multiplier = 1.0;
+        if (suffix.empty() || suffix == "s")
+            multiplier = 1.0;
+        else if (suffix == "t")
+            multiplier = 1e12;
+        else if (suffix == "g")
+            multiplier = 1e9;
+        else if (suffix == "meg")
+            multiplier = 1e6;
+        else if (suffix == "k")
+            multiplier = 1e3;
+        else if (suffix == "m")
+            multiplier = 1e-3;
+        else if (suffix == "u")
+            multiplier = 1e-6;
+        else if (suffix == "n")
+            multiplier = 1e-9;
+        else if (suffix == "p")
+            multiplier = 1e-12;
+        else if (suffix == "f")
+            multiplier = 1e-15;
+        else
+            throw std::invalid_argument("unknown suffix");
+        return value * multiplier;
+    } catch (const std::exception &) {
+        argumentError(std::string("Invalid number for ") + what + ": " + text);
+    }
+}
+
+std::optional<ice::ObjectId> parseUnsigned(const std::string &text) {
+    if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoull(text, &used);
+        if (used == text.size())
+            return static_cast<ice::ObjectId>(value);
+    } catch (const std::exception &) {
+    }
+    return std::nullopt;
+}
+
+template <typename Map> ice::ObjectId resolveByIdOrName(const Map &map, const std::string &text, const char *kind) {
+    if (const auto id = parseUnsigned(text); id && map.contains(*id))
+        return *id;
+    for (const auto &[id, entry] : map) {
+        if (entry.name == text)
+            return id;
+    }
+    argumentError(std::string("Unknown ") + kind + ": " + text);
+}
+
+ice::ObjectId resolveSchematic(const ice::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.schematicCells, text, "schematic");
+}
+
+ice::ObjectId resolveLayout(const ice::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.layoutCells, text, "layout cell");
+}
+
+ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.layers, text, "layer");
+}
+
+ice::ObjectId resolveSymbol(const ice::SchematicCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && cell.symbols.contains(*id))
+        return *id;
+    for (const auto &[id, symbol] : cell.symbols) {
+        if (symbol.name == text)
+            return id;
+    }
+    argumentError("Unknown symbol: " + text);
+}
+
+ice::ObjectId resolvePin(const ice::SchematicCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id) {
+        for (const auto &[_, symbol] : cell.symbols) {
+            if (std::any_of(symbol.pins.begin(), symbol.pins.end(), [&](const auto &pin) { return pin.id == *id; }))
+                return *id;
+        }
+    }
+    const auto dot = text.find('.');
+    if (dot != std::string::npos) {
+        const auto symbolName = text.substr(0, dot);
+        const auto pinName = text.substr(dot + 1);
+        for (const auto &[_, symbol] : cell.symbols) {
+            if (symbol.name != symbolName)
+                continue;
+            for (const auto &pin : symbol.pins)
+                if (pin.name == pinName)
+                    return pin.id;
+        }
+    }
+    std::optional<ice::ObjectId> found;
+    for (const auto &[_, symbol] : cell.symbols) {
+        for (const auto &pin : symbol.pins) {
+            if (pin.name != text)
+                continue;
+            if (found)
+                argumentError("Pin name is ambiguous; use <symbol>.<pin>: " + text);
+            found = pin.id;
+        }
+    }
+    if (!found)
+        argumentError("Unknown pin: " + text);
+    return *found;
+}
+
+ice::Orientation parseOrientation(const std::string &text) {
+    static const std::map<std::string, ice::Orientation> values = {
+        {"r0", ice::Orientation::r0},     {"r90", ice::Orientation::r90},  {"r180", ice::Orientation::r180},
+        {"r270", ice::Orientation::r270}, {"mx", ice::Orientation::mx},    {"my", ice::Orientation::my},
+        {"m45", ice::Orientation::m45},   {"m135", ice::Orientation::m135}};
+    const auto it = values.find(text);
+    if (it == values.end())
+        argumentError("Unsupported orientation: " + text);
+    return it->second;
+}
+
+std::vector<ice::LayoutPoint> parsePoints(const std::vector<std::string> &args, std::size_t begin) {
+    std::vector<ice::LayoutPoint> points;
+    for (std::size_t index = begin; index < args.size(); ++index) {
+        const auto comma = args[index].find(',');
+        if (comma == std::string::npos)
+            argumentError("Points must be written as x,y");
+        points.push_back({parseInteger(args[index].substr(0, comma), "point x"),
+                          parseInteger(args[index].substr(comma + 1), "point y")});
+    }
+    if (points.size() < 3)
+        argumentError("A polygon requires at least three x,y points");
+    return points;
+}
+
+std::vector<std::string> splitSignals(const std::string &text) {
+    std::vector<std::string> signals;
+    std::string current;
+    for (const char character : text) {
+        if (character != ',') {
+            current.push_back(character);
+            continue;
+        }
+        const auto first = current.find_first_not_of(" \t");
+        const auto last = current.find_last_not_of(" \t");
+        if (first != std::string::npos)
+            signals.push_back(current.substr(first, last - first + 1));
+        current.clear();
+    }
+    const auto first = current.find_first_not_of(" \t");
+    const auto last = current.find_last_not_of(" \t");
+    if (first != std::string::npos)
+        signals.push_back(current.substr(first, last - first + 1));
+    return signals;
+}
+
+std::string readTextFile(const std::filesystem::path &path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+        throw ice::ProjectError("cli.file", "Unable to read file: " + path.string());
+    return {std::istreambuf_iterator<char>(stream), {}};
+}
+
+std::filesystem::path projectRootForCli(const std::filesystem::path &path) {
+    std::error_code status;
+    if (std::filesystem::is_directory(path, status) && !status)
+        return path;
+    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
+        return path.parent_path();
+    return path;
+}
+
+std::string projectNameForPath(const std::filesystem::path &path) {
+    const auto root = projectRootForCli(path);
+    auto name = root.filename().string();
+    if (name.empty())
+        name = "project";
+    return name;
+}
+
+json diagnosticsJson(const ice::Project &project) {
+    json result = json::array();
+    for (const auto &diagnostic : project.validate()) {
+        json item = {{"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                     {"code", diagnostic.code},
+                     {"message", diagnostic.message}};
+        if (diagnostic.object)
+            item["object"] = *diagnostic.object;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
+json projectSummary(const ice::Project &project, const std::string &path) {
+    json result = {
+        {"name", project.name},
+        {"identity", project.identity},
+        {"path", path},
+        {"grid", project.grid},
+        {"units",
+         {{"nanometers_per_unit", project.units.nanometers_per_unit}, {"denominator", project.units.denominator}}},
+        {"package_dependencies", project.packageDependencies},
+        {"schematics", json::array()},
+        {"layers", json::array()},
+        {"layouts", json::array()},
+        {"procedural_layouts", json::array()},
+        {"simulations", json::array()},
+    };
+    for (const auto &[id, cell] : project.schematicCells) {
+        result["schematics"].push_back({{"id", id},
+                                        {"name", cell.name},
+                                        {"pdk", cell.pdk},
+                                        {"text", cell.textSchematic},
+                                        {"symbols", cell.symbols.size()},
+                                        {"instances", cell.instances.size()},
+                                        {"nets", cell.nets.size()}});
+    }
+    for (const auto &[id, layer] : project.layers) {
+        result["layers"].push_back(
+            {{"id", id}, {"name", layer.name}, {"number", layer.number}, {"visible", layer.visible}});
+    }
+    for (const auto &[id, cell] : project.layoutCells) {
+        result["layouts"].push_back({{"id", id},
+                                     {"name", cell.name},
+                                     {"pdk", cell.pdk},
+                                     {"library", cell.library},
+                                     {"device", cell.device},
+                                     {"generated_by", cell.generatedBy},
+                                     {"shapes", cell.shapes.size()},
+                                     {"ports", cell.ports.size()},
+                                     {"instances", cell.instances.size()},
+                                     {"planned_devices", cell.plannedDevices.size()}});
+    }
+    for (const auto &[id, cell] : project.proceduralLayouts) {
+        result["procedural_layouts"].push_back({{"id", id},
+                                                {"name", cell.name},
+                                                {"pdk", cell.pdk},
+                                                {"generated_cell", cell.generatedCell},
+                                                {"script_length", cell.script.size()}});
+    }
+    for (const auto &[id, simulation] : project.simulations) {
+        result["simulations"].push_back({{"id", id},
+                                         {"name", simulation.name},
+                                         {"schematic", simulation.schematic},
+                                         {"simulator", simulation.simulator},
+                                         {"analysis", simulation.analysis},
+                                         {"stop", simulation.stop},
+                                         {"step", simulation.step}});
+    }
+    return result;
+}
+
+json schematicInfo(const ice::SchematicCell &cell) {
+    json result = {{"id", cell.id},
+                   {"name", cell.name},
+                   {"pdk", cell.pdk},
+                   {"text", cell.textSchematic},
+                   {"source", cell.spiceText},
+                   {"symbols", json::array()},
+                   {"instances", json::array()},
+                   {"nets", json::array()}};
+    for (const auto &[id, symbol] : cell.symbols) {
+        json pins = json::array();
+        for (const auto &pin : symbol.pins)
+            pins.push_back({{"id", pin.id}, {"name", pin.name}, {"x", pin.x}, {"y", pin.y}});
+        result["symbols"].push_back(
+            {{"id", id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}});
+    }
+    for (const auto &[id, instance] : cell.instances) {
+        result["instances"].push_back({{"id", id},
+                                       {"name", instance.name},
+                                       {"symbol", instance.symbol},
+                                       {"x", instance.x},
+                                       {"y", instance.y},
+                                       {"orientation", ice::orientationName(instance.orientation)}});
+    }
+    for (const auto &[id, net] : cell.nets) {
+        result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+    }
+    return result;
+}
+
+json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
+    json result = {{"id", cell.id},
+                   {"name", cell.name},
+                   {"pdk", cell.pdk},
+                   {"library", cell.library},
+                   {"device", cell.device},
+                   {"generated_by", cell.generatedBy},
+                   {"shapes", json::array()},
+                   {"ports", json::array()},
+                   {"instances", json::array()},
+                   {"planned_devices", json::array()}};
+    for (const auto &[id, shape] : cell.shapes) {
+        const auto layer = project.layers.find(shape.layer);
+        json polygon = json::array();
+        for (const auto &point : shape.polygon)
+            polygon.push_back({point.x, point.y});
+        result["shapes"].push_back({{"id", id},
+                                    {"layer", shape.layer},
+                                    {"layer_name", layer == project.layers.end() ? "" : layer->second.name},
+                                    {"rectangle",
+                                     {{"x", shape.rectangle.x},
+                                      {"y", shape.rectangle.y},
+                                      {"width", shape.rectangle.width},
+                                      {"height", shape.rectangle.height}}},
+                                    {"polygon", std::move(polygon)}});
+    }
+    for (const auto &[id, port] : cell.ports) {
+        result["ports"].push_back({{"id", id},
+                                   {"name", port.name},
+                                   {"layer", port.layer},
+                                   {"x", port.rectangle.x},
+                                   {"y", port.rectangle.y},
+                                   {"width", port.rectangle.width},
+                                   {"height", port.rectangle.height}});
+    }
+    for (const auto &[id, instance] : cell.instances) {
+        result["instances"].push_back({{"id", id},
+                                       {"name", instance.name},
+                                       {"cell", instance.cell},
+                                       {"x", instance.x},
+                                       {"y", instance.y},
+                                       {"orientation", ice::orientationName(instance.orientation)}});
+    }
+    for (const auto &[id, device] : cell.plannedDevices) {
+        result["planned_devices"].push_back({{"id", id},
+                                             {"name", device.name},
+                                             {"x", device.x},
+                                             {"y", device.y},
+                                             {"width", device.width},
+                                             {"height", device.height}});
+    }
+    return result;
+}
+
+void printJson(const json &value) { std::cout << value.dump(2) << "\n"; }
+
+void printHelp() {
+    std::cout << "ice-cli " << ice::version() << "\n\n"
+              << "Usage: ice-cli <command> [arguments]\n\n"
+              << "Project:\n"
+              << "  project-create <folder|project.icepro> [name]\n"
+              << "  project-info <folder|project.icepro>\n"
+              << "  project-validate <folder|project.icepro>\n\n"
+              << "Schematic:\n"
+              << "  schematic-add-cell <project> <name> [pdk]\n"
+              << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
+              << "  schematic-list <project>\n"
+              << "  schematic-info <project> <cell>\n"
+              << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
+              << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
+              << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
+              << "  schematic-netlist <project> <cell>\n\n"
+              << "Layout:\n"
+              << "  layout-add-cell <project> <name> [pdk]\n"
+              << "  layout-add-procedural <project> <name> [pdk] [script-file]\n"
+              << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
+              << "  layout-list <project>\n"
+              << "  layout-info <project> <cell>\n"
+              << "  layout-add-layer <project> <name> <number>\n"
+              << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
+              << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
+              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>\n"
+              << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
+              << "  layout-export-gds <project> <cell> <output.gds>\n\n"
+              << "Simulation:\n"
+              << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
+              << "  simulation-list <project>\n"
+              << "  simulate <project> <schematic> <output.json> [stop] [step] [timeout-ms] [signals]\n"
+              << "  simulate-netlist <netlist-file> <output.json> [stop] [step] [timeout-ms] [signals]\n\n"
+              << "Cells, layers, symbols, and pins may be referenced by name or id.\n";
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
-    if (argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
-        std::cout << "ice-cli " << ice::version()
-                  << "\nUsage: ice-cli "
-                     "<version|project-create|project-validate|schematic-add-cell|layout-add-cell|layout-add-layer|"
-                     "layout-add-rectangle|simulate> ...\n";
+    auto logger = spdlog::stderr_color_mt("ice-cli");
+    spdlog::set_default_logger(std::move(logger));
+
+    if (argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h" ||
+        std::string(argv[1]) == "help") {
+        printHelp();
         return 0;
     }
-    std::string command = argv[1];
+
+    std::vector<std::string> args;
+    args.reserve(static_cast<std::size_t>(argc - 1));
+    for (int index = 1; index < argc; ++index)
+        args.emplace_back(argv[index]);
+    const auto command = args.front();
+
     if (command == "--version" || command == "version") {
         std::cout << ice::version() << "\n";
         return 0;
     }
-    const auto parseInteger = [](const char *text, const char *what) {
-        try {
-            std::size_t used = 0;
-            long long value = std::stoll(text, &used);
-            if (text[used] != '\0')
-                throw ice::ProjectError("cli.arguments", std::string("Invalid integer for ") + what);
-            return static_cast<ice::Coordinate>(value);
-        } catch (const ice::ProjectError &) {
-            throw;
-        } catch (const std::exception &) {
-            throw ice::ProjectError("cli.arguments", std::string("Invalid integer for ") + what);
-        }
-    };
-    const auto parseUnsigned = [](const char *text, const char *what) {
-        try {
-            std::size_t used = 0;
-            unsigned long long value = std::stoull(text, &used);
-            if (text[used] != '\0')
-                throw ice::ProjectError("cli.arguments", std::string("Invalid id for ") + what);
-            return static_cast<ice::ObjectId>(value);
-        } catch (const ice::ProjectError &) {
-            throw;
-        } catch (const std::exception &) {
-            throw ice::ProjectError("cli.arguments", std::string("Invalid id for ") + what);
-        }
-    };
-    const auto parseDouble = [](const char *text, const char *what) {
-        try {
-            std::size_t used = 0;
-            double value = std::stod(text, &used);
-            if (text[used] != '\0')
-                throw ice::ProjectError("cli.arguments", std::string("Invalid number for ") + what);
-            return value;
-        } catch (const ice::ProjectError &) {
-            throw;
-        } catch (const std::exception &) {
-            throw ice::ProjectError("cli.arguments", std::string("Invalid number for ") + what);
-        }
-    };
+
     try {
         if (command == "project-create") {
-            if (argc != 3)
-                throw ice::ProjectError("cli.arguments", "project-create requires a path");
+            expectArguments(args, 2, 3, "project-create <folder|project.icepro> [name]");
+            const std::filesystem::path path = args[1];
+            const auto name = args.size() == 3 ? args[2] : projectNameForPath(path);
+            const auto projectFile = projectRootForCli(path) / "project.icepro";
+            std::error_code status;
+            if (std::filesystem::exists(projectFile, status) && !status)
+                throw ice::ProjectError("project.exists", "A project already exists at " + projectFile.string());
             ice::Project project;
-            project.identity = "project-" + std::filesystem::path(argv[2]).stem().string();
-            project.name = std::filesystem::path(argv[2]).stem().string();
-            project.save(argv[2]);
+            project.identity = "project-" + name;
+            project.name = name;
+            project.save(path);
+            printJson({{"path", projectFile.string()}, {"name", name}});
             return 0;
         }
+
+        if (command == "project-info") {
+            expectArguments(args, 2, 2, "project-info <folder|project.icepro>");
+            const auto project = ice::Project::load(args[1]);
+            printJson(projectSummary(project, args[1]));
+            return 0;
+        }
+
         if (command == "project-validate") {
-            if (argc != 3)
-                throw ice::ProjectError("cli.arguments", "project-validate requires a path");
-            auto project = ice::Project::load(argv[2]);
-            std::cout << "valid: " << project.name << "\n";
+            expectArguments(args, 2, 2, "project-validate <folder|project.icepro>");
+            const auto project = ice::Project::load(args[1]);
+            const auto diagnostics = diagnosticsJson(project);
+            printJson({{"valid", diagnostics.empty()}, {"diagnostics", diagnostics}});
             return 0;
         }
+
         if (command == "schematic-add-cell") {
-            if (argc != 4)
-                throw ice::ProjectError("cli.arguments", "schematic-add-cell requires a project and cell name");
-            ice::ProjectSession session(ice::Project::load(argv[2]));
+            expectArguments(args, 3, 4, "schematic-add-cell <project> <name> [pdk]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            ice::ObjectId id = 0;
+            const auto pdk = args.size() == 4 ? args[3] : std::string(ice::genericPdkId);
             session.execute("schematic-add-cell",
-                            [&](ice::Project &project) { ice::createSchematicCell(project, argv[3]); });
-            session.save(argv[2]);
+                            [&](ice::Project &project) { id = ice::createSchematicCell(project, args[2], pdk); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
             return 0;
         }
+
+        if (command == "schematic-add-text") {
+            expectArguments(args, 3, 5, "schematic-add-text <project> <name> [pdk] [spice-file]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
+            auto text = args.size() == 5 ? readTextFile(args[4])
+                                         : "* SPICE schematic: " + args[2] + "\n.title " + args[2] + "\n.end\n";
+            ice::ObjectId id = 0;
+            session.execute("schematic-add-text", [&](ice::Project &project) {
+                id = ice::createTextSchematicCell(project, args[2], pdk, text);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"text", text}});
+            return 0;
+        }
+
+        if (command == "schematic-list") {
+            expectArguments(args, 2, 2, "schematic-list <project>");
+            const auto project = ice::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[id, cell] : project.schematicCells) {
+                result.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"text", cell.textSchematic},
+                                  {"symbols", cell.symbols.size()},
+                                  {"instances", cell.instances.size()},
+                                  {"nets", cell.nets.size()}});
+            }
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-info") {
+            expectArguments(args, 3, 3, "schematic-info <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            printJson(schematicInfo(project.schematicCells.at(id)));
+            return 0;
+        }
+
+        if (command == "schematic-add-symbol") {
+            expectArguments(args, 4, 5, "schematic-add-symbol <project> <cell> <name> [source-cell]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto source = args.size() == 5 ? resolveSchematic(project, args[4]) : ice::ObjectId{0};
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("schematic-add-symbol",
+                            [&](ice::Project &p) { id = ice::addSymbol(p, cell, args[3], {}, source); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}});
+            return 0;
+        }
+
+        if (command == "schematic-add-instance") {
+            expectArguments(args, 7, 7, "schematic-add-instance <project> <cell> <symbol> <name> <x> <y>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto symbol = resolveSymbol(project.schematicCells.at(cell), args[3]);
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("schematic-add-instance",
+                            [&](ice::Project &p) { id = ice::addSchematicInstance(p, cell, symbol, args[4], x, y); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"symbol", symbol}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "schematic-add-net") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "schematic-add-net <project> <cell> <name> <pin> <pin> ...");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<ice::ObjectId> pins;
+            for (std::size_t index = 4; index < args.size(); ++index)
+                pins.push_back(resolvePin(project.schematicCells.at(cell), args[index]));
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("schematic-add-net", [&](ice::Project &p) { id = ice::addNet(p, cell, args[3], pins); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"pins", pins}});
+            return 0;
+        }
+
+        if (command == "schematic-netlist") {
+            expectArguments(args, 3, 3, "schematic-netlist <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<std::string> notes;
+            const auto lines = ice::buildSchematicNetlist(project, cell, &notes);
+            printJson({{"cell", cell}, {"netlist", lines}, {"notes", notes}});
+            return 0;
+        }
+
         if (command == "layout-add-cell") {
-            if (argc != 4)
-                throw ice::ProjectError("cli.arguments", "layout-add-cell requires a project and cell name");
-            ice::ProjectSession session(ice::Project::load(argv[2]));
-            session.execute("layout-add-cell", [&](ice::Project &project) { ice::createLayoutCell(project, argv[3]); });
-            session.save(argv[2]);
+            expectArguments(args, 3, 4, "layout-add-cell <project> <name> [pdk]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            ice::ObjectId id = 0;
+            const auto pdk = args.size() == 4 ? args[3] : std::string(ice::genericPdkId);
+            session.execute("layout-add-cell",
+                            [&](ice::Project &project) { id = ice::createLayoutCell(project, args[2], pdk); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
             return 0;
         }
+
+        if (command == "layout-add-procedural") {
+            expectArguments(args, 3, 5, "layout-add-procedural <project> <name> [pdk] [script-file]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
+            const auto script = args.size() == 5 ? readTextFile(args[4]) : std::string{};
+            ice::ObjectId id = 0;
+            ice::ObjectId generated = 0;
+            session.execute("layout-add-procedural", [&](ice::Project &project) {
+                id = ice::createProceduralLayout(project, args[2], pdk, script);
+                generated = project.proceduralLayouts.at(id).generatedCell;
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"generated_cell", generated}});
+            return 0;
+        }
+
+        if (command == "layout-create-from-schematic") {
+            expectArguments(args, 3, 4, "layout-create-from-schematic <project> <schematic> [layout-name]");
+            const auto project = ice::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[2]);
+            const auto name = args.size() == 4 ? args[3] : std::string{};
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-create-from-schematic",
+                            [&](ice::Project &p) { id = ice::createLayoutFromSchematic(p, schematic, name); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"schematic", schematic}});
+            return 0;
+        }
+
+        if (command == "layout-list") {
+            expectArguments(args, 2, 2, "layout-list <project>");
+            const auto project = ice::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[id, cell] : project.layoutCells) {
+                result.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"library", cell.library},
+                                  {"device", cell.device},
+                                  {"generated_by", cell.generatedBy},
+                                  {"shapes", cell.shapes.size()},
+                                  {"ports", cell.ports.size()},
+                                  {"instances", cell.instances.size()}});
+            }
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "layout-info") {
+            expectArguments(args, 3, 3, "layout-info <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveLayout(project, args[2]);
+            printJson(layoutInfo(project, project.layoutCells.at(id)));
+            return 0;
+        }
+
         if (command == "layout-add-layer") {
-            if (argc != 5)
-                throw ice::ProjectError("cli.arguments", "layout-add-layer requires a project, name, and number");
-            ice::ProjectSession session(ice::Project::load(argv[2]));
-            const int number = static_cast<int>(parseInteger(argv[4], "layer number"));
+            expectArguments(args, 4, 4, "layout-add-layer <project> <name> <number>");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto number = static_cast<int>(parseInteger(args[3], "layer number"));
+            ice::ObjectId id = 0;
             session.execute("layout-add-layer",
-                            [&](ice::Project &project) { ice::addLayer(project, argv[3], number); });
-            session.save(argv[2]);
+                            [&](ice::Project &project) { id = ice::addLayer(project, args[2], number); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"number", number}});
             return 0;
         }
+
         if (command == "layout-add-rectangle") {
-            if (argc != 9)
-                throw ice::ProjectError("cli.arguments",
-                                        "layout-add-rectangle requires project, cell, layer, x, y, width, height");
-            ice::ProjectSession session(ice::Project::load(argv[2]));
-            const auto cell = parseUnsigned(argv[3], "cell");
-            const auto layer = parseUnsigned(argv[4], "layer");
-            const ice::Rect rect{parseInteger(argv[5], "x"), parseInteger(argv[6], "y"), parseInteger(argv[7], "width"),
-                                 parseInteger(argv[8], "height")};
+            expectArguments(args, 8, 8, "layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const ice::Rect rect{parseInteger(args[4], "x"), parseInteger(args[5], "y"), parseInteger(args[6], "width"),
+                                 parseInteger(args[7], "height")};
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
             session.execute("layout-add-rectangle",
-                            [&](ice::Project &project) { ice::addRectangle(project, cell, layer, rect); });
-            session.save(argv[2]);
+                            [&](ice::Project &p) { id = ice::addRectangle(p, cell, layer, rect); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}});
             return 0;
         }
-        if (command == "simulate") {
-            if (argc < 3 || argc > 6)
-                throw ice::ProjectError("cli.arguments",
-                                        "simulate requires an output path and optional stop, step, and timeout");
+
+        if (command == "layout-add-polygon") {
+            expectArguments(args, 6, static_cast<std::size_t>(-1),
+                            "layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const auto points = parsePoints(args, 4);
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-add-polygon",
+                            [&](ice::Project &p) { id = ice::addPolygon(p, cell, layer, points); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}, {"points", points.size()}});
+            return 0;
+        }
+
+        if (command == "layout-add-port") {
+            expectArguments(args, 9, 9, "layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[4]);
+            const ice::Rect rect{parseInteger(args[5], "x"), parseInteger(args[6], "y"), parseInteger(args[7], "width"),
+                                 parseInteger(args[8], "height")};
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-add-port",
+                            [&](ice::Project &p) { id = ice::addPort(p, cell, args[3], layer, rect); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"layer", layer}});
+            return 0;
+        }
+
+        if (command == "layout-add-instance") {
+            expectArguments(args, 8, 9, "layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]");
+            const auto project = ice::Project::load(args[1]);
+            const auto parent = resolveLayout(project, args[2]);
+            const auto child = resolveLayout(project, args[3]);
+            const auto orientation = args.size() == 9 ? parseOrientation(args[8]) : ice::Orientation::r0;
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-add-instance", [&](ice::Project &p) {
+                id = ice::addLayoutInstance(p, parent, child, args[4], x, y, orientation);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"parent", parent}, {"child", child}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "layout-export-gds") {
+            expectArguments(args, 4, 4, "layout-export-gds <project> <cell> <output.gds>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::LayoutInterchange::exportGds(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "simulation-add") {
+            expectArguments(args, 4, 8,
+                            "simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]");
+            const auto project = ice::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[3]);
+            ice::SimulationItem simulation;
+            simulation.name = args[2];
+            simulation.schematic = schematic;
+            if (args.size() >= 5)
+                simulation.analysis = args[4];
+            if (args.size() >= 6)
+                simulation.stop = parseDouble(args[5], "stop time");
+            if (args.size() >= 7)
+                simulation.step = parseDouble(args[6], "step time");
+            if (args.size() >= 8)
+                simulation.captureSignals = args[7];
+            ice::ProjectSession session(project);
+            session.execute("simulation-add", [&](ice::Project &p) {
+                simulation.id = p.nextId();
+                p.simulations.emplace(simulation.id, simulation);
+            });
+            session.save(args[1]);
+            printJson({{"id", simulation.id},
+                       {"name", simulation.name},
+                       {"schematic", schematic},
+                       {"signals", simulation.captureSignals}});
+            return 0;
+        }
+
+        if (command == "simulation-list") {
+            expectArguments(args, 2, 2, "simulation-list <project>");
+            const auto project = ice::Project::load(args[1]);
+            printJson(projectSummary(project, args[1])["simulations"]);
+            return 0;
+        }
+
+        if (command == "simulate" || command == "simulate-netlist") {
+            const bool fromSchematic = command == "simulate";
+            expectArguments(args, fromSchematic ? 4 : 3, fromSchematic ? 8 : 7,
+                            fromSchematic
+                                ? "simulate <project> <schematic> <output.json> [stop] [step] [timeout-ms] [signals]"
+                                : "simulate-netlist <netlist-file> <output.json> [stop] [step] [timeout-ms] [signals]");
             ice::SimulationRequest request;
-            if (argc >= 4)
-                request.stop = parseDouble(argv[3], "stop time");
-            if (argc >= 5)
-                request.step = parseDouble(argv[4], "step time");
-            const auto timeout = argc == 6 ? std::chrono::milliseconds(parseInteger(argv[5], "timeout"))
-                                           : std::chrono::milliseconds(5000);
+            std::size_t outputIndex = 0;
+            if (fromSchematic) {
+                const auto project = ice::Project::load(args[1]);
+                const auto schematic = resolveSchematic(project, args[2]);
+                request.netlist = ice::buildSchematicNetlist(project, schematic);
+                outputIndex = 3;
+            } else {
+                std::ifstream netlist(args[1]);
+                if (!netlist)
+                    throw ice::ProjectError("cli.file", "Unable to read netlist: " + args[1]);
+                std::string line;
+                while (std::getline(netlist, line))
+                    request.netlist.push_back(line);
+                outputIndex = 2;
+            }
+            if (args.size() > outputIndex + 1)
+                request.stop = parseDouble(args[outputIndex + 1], "stop time");
+            if (args.size() > outputIndex + 2)
+                request.step = parseDouble(args[outputIndex + 2], "step time");
+            const auto timeout = args.size() > outputIndex + 3
+                                     ? std::chrono::milliseconds(parseInteger(args[outputIndex + 3], "timeout"))
+                                     : std::chrono::milliseconds(10000);
+            if (args.size() > outputIndex + 4)
+                request.probeSignals = splitSignals(args[outputIndex + 4]);
             ice::SimulationRunner runner;
-            auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
+            const auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
                 std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
             });
-            std::ofstream output(argv[2]);
+            std::ofstream output(args[outputIndex]);
             if (!output)
                 throw ice::ProjectError("simulation.save", "Unable to open simulation result path");
             output << ice::serializeSimulationResult(result);
+            printJson({{"state", ice::jobStateName(result.state)},
+                       {"analysis", result.analysis},
+                       {"time_points", result.time.size()},
+                       {"traces", result.traces.size()},
+                       {"error", result.error}});
             if (result.state != ice::JobState::succeeded)
                 throw ice::ProjectError("simulation." + ice::jobStateName(result.state), result.error);
             return 0;
         }
-        throw ice::ProjectError("cli.command", "Unknown command: " + command);
+
+        unknownCommand(command);
     } catch (const ice::ProjectError &error) {
         std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";
         return 2;

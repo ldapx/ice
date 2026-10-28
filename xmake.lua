@@ -69,6 +69,7 @@ target("ice-cli")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    add_packages("spdlog", "nlohmann_json")
 
 target("ice-pkg")
     set_kind("binary")

@@ -17,6 +17,8 @@ ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::str
                    ObjectId sourceCell = 0);
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y);
+ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x = 0,
+                Coordinate y = 0);
 // The SPICE element letter a schematic symbol maps to, or 0 when unsupported.
 // Voltage and current sources both return their source letter so callers can
 // derive reference designators consistently with netlist generation.

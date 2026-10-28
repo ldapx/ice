@@ -15,6 +15,7 @@ root.
 - {doc}`roadmap` — capabilities, dependencies, and acceptance criteria.
 - {doc}`capabilities` — GUI / CLI / Python capability parity matrix.
 - {doc}`packages` — packages, PDK installation, and GDSII/OASIS interchange.
+- {doc}`cli` — headless project, schematic, layout, and simulation commands.
 - {doc}`icepy` — Python bindings, layout builder, and package PCell runtime.
 - {doc}`ice-mcp` — MCP server tools and project resources.
 - {doc}`plugins` — experimental plugin lifecycle and permission contract.
