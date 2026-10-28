@@ -191,8 +191,8 @@ class IceMcpServer {
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
         server.set_instructions(
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
-            "project, schematic, and layout tools. Mutations are transactional in memory; call project_save to "
-            "write them to disk.");
+            "project, schematic, and layout tools. Mutations are transactional in memory; the MCP "
+            "server does not write them to disk. Use ice-cli for persisted project changes.");
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
             return agentsdk::mcp::tools_list_result{listTools(), std::nullopt};
         });
@@ -322,14 +322,6 @@ class IceMcpServer {
 
         auto &session = requireSession();
 
-        if (name == "project_save") {
-            auto path = std::filesystem::path(optionalString(arguments, "path", projectPath_.string()));
-            if (path.empty())
-                throw ToolError("No project path is set. Pass 'path' to project_save.");
-            session.save(path);
-            projectPath_ = path;
-            return {{"path", projectPath_.string()}, {"dirty", false}};
-        }
         if (name == "project_validate")
             return {{"valid", session.project().validate().empty()}, {"diagnostics", diagnostics()}};
         if (name == "project_undo") {
@@ -472,10 +464,6 @@ class IceMcpServer {
         tools.push_back(tool_builder("project_open")
                             .with_description("Open an existing ICE project.")
                             .with_string_param("path", "Project folder or project.icepro path")
-                            .build());
-        tools.push_back(tool_builder("project_save")
-                            .with_description("Save the open project.")
-                            .with_string_param("path", "Optional project folder or project.icepro path", false)
                             .build());
         tools.push_back(
             tool_builder("project_summary").with_description("Summarize the open project and its cells.").build());

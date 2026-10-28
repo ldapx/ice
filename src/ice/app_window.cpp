@@ -41,6 +41,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsColorizeEffect>
@@ -78,6 +79,7 @@
 #include <QSvgRenderer>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -111,6 +113,7 @@ class DocumentWindow : public QMainWindow {
         createActivityDock();
         createDocuments();
         createStatusBar();
+        createProjectWatcher();
         toolEscapeShortcut_ = new QShortcut(QKeySequence(Qt::Key_Escape), this);
         toolEscapeShortcut_->setContext(Qt::WindowShortcut);
         toolEscapeShortcut_->setEnabled(false);
@@ -152,6 +155,9 @@ class DocumentWindow : public QMainWindow {
     bool setProject(ice::Project project) {
         if (!ensureProjectPackages(project))
             return false;
+        suppressProjectWatcher_ = false;
+        projectDiskChangePending_ = false;
+        clearProjectWatcher();
         flattenedLayouts_->clear();
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         for (auto &[_, cell] : project.layoutCells) {
@@ -240,6 +246,19 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Project loaded"));
         showWorkspace();
         return true;
+    }
+
+    void setProjectPath(const QString &path) {
+        if (path.isEmpty()) {
+            projectPath_.clear();
+            clearProjectWatcher();
+            return;
+        }
+        const QFileInfo info(path);
+        projectPath_ = info.isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
+        if (activityPanel_)
+            activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        configureProjectWatcher();
     }
 
   private:
@@ -356,6 +375,7 @@ class DocumentWindow : public QMainWindow {
         projectPath_ = QString::fromStdString(projectFile.string());
         if (activityPanel_)
             activityPanel_->setProjectPath(QString::fromStdString(root.string()));
+        configureProjectWatcher();
         addRecentProject(projectPath_);
         if (startupView_)
             startupView_->clearCreateForm();
@@ -380,6 +400,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_ = projectPath;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
+            configureProjectWatcher();
             addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project opened"));
         } catch (const ice::ProjectError &error) {
@@ -407,6 +428,19 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
+        if (projectDiskChangePending_) {
+            const auto response =
+                QMessageBox::warning(this, QStringLiteral("Save Project"),
+                                     QStringLiteral("Project files changed on disk since the GUI loaded them.\n\n"
+                                                    "Saving now will overwrite those external changes. Continue?"),
+                                     QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (response != QMessageBox::Yes) {
+                statusBar()->showMessage(
+                    QStringLiteral("Save cancelled. Use File > Reload Project from Disk to load external changes."),
+                    10000);
+                return;
+            }
+        }
 
         auto path = projectPath_;
         if (path.isEmpty())
@@ -415,15 +449,140 @@ class DocumentWindow : public QMainWindow {
                                              QStringLiteral("ICE projects (*.icepro);;All files (*)"));
         if (path.isEmpty())
             return;
+        suppressProjectWatcher_ = true;
+        if (projectWatcherResumeTimer_)
+            projectWatcherResumeTimer_->stop();
+        clearProjectWatcher();
         try {
             project_->save(path.toStdString());
             projectPath_ = QFileInfo(path).isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            projectDiskChangePending_ = false;
+            configureProjectWatcher();
+            if (projectWatcherResumeTimer_)
+                projectWatcherResumeTimer_->start();
             addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project saved"));
         } catch (const ice::ProjectError &error) {
+            suppressProjectWatcher_ = false;
+            configureProjectWatcher();
             QMessageBox::critical(this, QStringLiteral("Save Project"), QString::fromStdString(error.what()));
+        }
+    }
+
+    void createProjectWatcher() {
+        projectWatcher_ = new QFileSystemWatcher(this);
+        projectWatchDebounceTimer_ = new QTimer(this);
+        projectWatchDebounceTimer_->setSingleShot(true);
+        projectWatchDebounceTimer_->setInterval(300);
+        connect(projectWatchDebounceTimer_, &QTimer::timeout, this, [this] { reloadProjectFromDisk(false); });
+
+        projectWatcherResumeTimer_ = new QTimer(this);
+        projectWatcherResumeTimer_->setSingleShot(true);
+        projectWatcherResumeTimer_->setInterval(300);
+        connect(projectWatcherResumeTimer_, &QTimer::timeout, this, [this] {
+            suppressProjectWatcher_ = false;
+            configureProjectWatcher();
+        });
+
+        const auto changed = [this](const QString &) { scheduleProjectReloadFromDisk(); };
+        connect(projectWatcher_, &QFileSystemWatcher::directoryChanged, this, changed);
+        connect(projectWatcher_, &QFileSystemWatcher::fileChanged, this, changed);
+    }
+
+    void clearProjectWatcher() {
+        if (projectWatchDebounceTimer_)
+            projectWatchDebounceTimer_->stop();
+        if (projectWatcherResumeTimer_)
+            projectWatcherResumeTimer_->stop();
+        if (!projectWatcher_)
+            return;
+        const auto directories = projectWatcher_->directories();
+        if (!directories.isEmpty())
+            projectWatcher_->removePaths(directories);
+        const auto files = projectWatcher_->files();
+        if (!files.isEmpty())
+            projectWatcher_->removePaths(files);
+    }
+
+    void configureProjectWatcher() {
+        if (!projectWatcher_)
+            return;
+        clearProjectWatcher();
+        if (!project_ || projectPath_.isEmpty())
+            return;
+
+        const QFileInfo projectInfo(projectPath_);
+        const auto root = projectInfo.isDir() ? projectInfo.absoluteFilePath() : projectInfo.absolutePath();
+        QStringList watched;
+        const auto addDirectory = [&](const QString &name, const QStringList &patterns) {
+            const QDir directory(QDir(root).filePath(name));
+            if (!directory.exists())
+                return;
+            watched << directory.absolutePath();
+            for (const auto &entry : directory.entryInfoList(patterns, QDir::Files))
+                watched << entry.absoluteFilePath();
+        };
+        addDirectory(QStringLiteral("sch"), {QStringLiteral("*.icesch")});
+        addDirectory(QStringLiteral("lay"), {QStringLiteral("*.icelay")});
+        addDirectory(QStringLiteral("sim"), {QStringLiteral("*.icesim")});
+        if (QFileInfo::exists(projectPath_))
+            watched << projectPath_;
+        if (!watched.isEmpty())
+            projectWatcher_->addPaths(watched);
+    }
+
+    void scheduleProjectReloadFromDisk() {
+        if (suppressProjectWatcher_ || !project_ || projectPath_.isEmpty())
+            return;
+        projectDiskChangePending_ = true;
+        if (projectWatchDebounceTimer_)
+            projectWatchDebounceTimer_->start();
+    }
+
+    void reloadProjectFromDisk(bool confirmDiscard) {
+        if (!project_ || projectPath_.isEmpty() || suppressProjectWatcher_)
+            return;
+        if (!confirmDiscard &&
+            (QApplication::activeModalWidget() || (drcProcess_ && drcProcess_->state() != QProcess::NotRunning))) {
+            if (projectWatchDebounceTimer_)
+                projectWatchDebounceTimer_->start();
+            return;
+        }
+        if (projectWatchDebounceTimer_)
+            projectWatchDebounceTimer_->stop();
+
+        if (project_->dirty()) {
+            const auto message =
+                QStringLiteral("Project files changed on disk. Reloading would discard unsaved GUI changes.");
+            if (!confirmDiscard) {
+                statusBar()->showMessage(message + QStringLiteral(" Use File > Reload Project from Disk after saving."),
+                                         10000);
+                return;
+            }
+            if (QMessageBox::question(this, QStringLiteral("Reload Project"),
+                                      message + QStringLiteral("\n\nDiscard the unsaved changes and reload?"),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+                return;
+        }
+
+        const auto path = projectPath_;
+        try {
+            auto loaded = ice::Project::load(path.toStdString());
+            if (!setProject(std::move(loaded))) {
+                statusBar()->showMessage(QStringLiteral("Project reload failed."), 10000);
+                return;
+            }
+            projectPath_ = path;
+            if (activityPanel_)
+                activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            projectDiskChangePending_ = false;
+            configureProjectWatcher();
+            statusBar()->showMessage(QStringLiteral("Project refreshed from disk"));
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Project reload failed: %1").arg(QString::fromStdString(error.what())), 10000);
         }
     }
 
@@ -481,6 +640,9 @@ class DocumentWindow : public QMainWindow {
     }
 
     void closeProject() {
+        suppressProjectWatcher_ = false;
+        projectDiskChangePending_ = false;
+        clearProjectWatcher();
         project_.reset();
         resetSectionHistories();
         updateHistoryPanels();
@@ -3779,9 +3941,11 @@ class DocumentWindow : public QMainWindow {
         auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
         auto *newAction = addCommand(QStringLiteral("New Project"), QKeySequence::New);
         auto *openAction = addCommand(QStringLiteral("Open Project"), QKeySequence::Open);
+        auto *reloadProjectAction = addCommand(QStringLiteral("Reload Project from Disk"));
         auto *saveAction = addCommand(QStringLiteral("Save Project"), QKeySequence::Save);
         fileMenu->addAction(newAction);
         fileMenu->addAction(openAction);
+        fileMenu->addAction(reloadProjectAction);
         fileMenu->addAction(saveAction);
         fileMenu->addSeparator();
         auto *openLayoutAction = addCommand(QStringLiteral("Open GDS/OASIS Layout"));
@@ -3886,6 +4050,7 @@ class DocumentWindow : public QMainWindow {
 
         connect(newAction, &QAction::triggered, this, &DocumentWindow::newProject);
         connect(openAction, &QAction::triggered, this, &DocumentWindow::openProject);
+        connect(reloadProjectAction, &QAction::triggered, this, [this] { reloadProjectFromDisk(true); });
         connect(saveAction, &QAction::triggered, this, &DocumentWindow::saveProject);
         connect(openLayoutAction, &QAction::triggered, this, &DocumentWindow::openLayoutInterchange);
         connect(saveLayoutAction, &QAction::triggered, this, &DocumentWindow::saveLayoutInterchange);
@@ -5214,6 +5379,11 @@ class DocumentWindow : public QMainWindow {
     std::unique_ptr<ice::ProjectSession> project_;
     std::shared_ptr<std::set<ice::ObjectId>> flattenedLayouts_ = std::make_shared<std::set<ice::ObjectId>>();
     QString projectPath_;
+    QFileSystemWatcher *projectWatcher_ = nullptr;
+    QTimer *projectWatchDebounceTimer_ = nullptr;
+    QTimer *projectWatcherResumeTimer_ = nullptr;
+    bool suppressProjectWatcher_ = false;
+    bool projectDiskChangePending_ = false;
     QStackedWidget *workspaceStack_ = nullptr;
     StartupView *startupView_ = nullptr;
     QDockWidget *activityDock_ = nullptr;
@@ -5299,6 +5469,7 @@ class AppWindowAdapter final : public AppWindow {
     explicit AppWindowAdapter(std::unique_ptr<DocumentWindow> window) : window_(std::move(window)) {}
 
     bool setProject(ice::Project project) override { return window_->setProject(std::move(project)); }
+    void setProjectPath(const QString &path) override { window_->setProjectPath(path); }
     void show() override { window_->show(); }
     void resize(int width, int height) override { window_->resize(width, height); }
     void showMessage(const QString &message) override { window_->statusBar()->showMessage(message); }

@@ -11,6 +11,7 @@ class AppWindow {
   public:
     virtual ~AppWindow() = default;
     virtual bool setProject(ice::Project project) = 0;
+    virtual void setProjectPath(const QString &path) = 0;
     virtual void show() = 0;
     virtual void resize(int width, int height) = 0;
     virtual void showMessage(const QString &message) = 0;

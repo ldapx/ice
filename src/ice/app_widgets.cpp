@@ -74,7 +74,7 @@ DiagnosticsPanel::DiagnosticsPanel(QWidget *parent) : QWidget(parent) {
 }
 
 struct ActivityPanel::AgentBackend {
-    AgentBackend() { pool.setMaxThreadCount(1); }
+    AgentBackend() { pool.setMaxThreadCount(4); }
 
     QThreadPool pool;
     std::atomic<bool> alive{true};
@@ -82,7 +82,9 @@ struct ActivityPanel::AgentBackend {
 #ifdef ICE_HAVE_AGENTSDK
     std::vector<agentsdk::acp::agent_entry> agents;
     std::unique_ptr<agentsdk::acp::acp_client> client;
-    std::unique_ptr<agentsdk::acp::acp_session> session;
+    // Owns initialize and routes notifications/permissions for every session
+    // created through the shared client.
+    std::unique_ptr<agentsdk::acp::acp_session> protocolSession;
 #endif
 };
 
@@ -94,6 +96,48 @@ QString jsonString(const nlohmann::json &object, const char *key, const QString 
         return fallback;
     return QString::fromStdString(it->get<std::string>());
 }
+
+QString configOptionsFromResponse(const std::string &response) {
+    try {
+        const auto doc = nlohmann::json::parse(response);
+        const auto it = doc.find("configOptions");
+        if (it != doc.end() && it->is_array())
+            return QString::fromStdString(it->dump());
+    } catch (const std::exception &) {
+    }
+    return QStringLiteral("[]");
+}
+
+#ifdef ICE_HAVE_AGENTSDK
+// ACP allows multiple session IDs over one initialized connection.  The
+// acp_session wrapper only tracks one ID, so session operations use the shared
+// client directly while acp_session remains the protocol/notification hub.
+bool createAcpSession(agentsdk::acp::acp_client &client, const QString &cwd, std::string &sessionId,
+                      QString &configOptionsJson, QString &error) {
+    nlohmann::json params;
+    params["cwd"] = cwd.toStdString();
+    params["mcpServers"] = nlohmann::json::array();
+    const auto result = client.send_request("session/new", params.dump());
+    if (result.empty()) {
+        error = QStringLiteral("The agent did not create an ACP session.");
+        return false;
+    }
+    try {
+        const auto doc = nlohmann::json::parse(result);
+        const auto sessionIt = doc.find("sessionId");
+        if (sessionIt == doc.end() || !sessionIt->is_string() || sessionIt->get<std::string>().empty()) {
+            error = QStringLiteral("The agent returned an invalid ACP session.");
+            return false;
+        }
+        sessionId = sessionIt->get<std::string>();
+        configOptionsJson = configOptionsFromResponse(result);
+        return true;
+    } catch (const std::exception &) {
+        error = QStringLiteral("The agent returned an invalid ACP session response.");
+        return false;
+    }
+}
+#endif
 
 } // namespace
 
@@ -109,62 +153,128 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
 
     auto *sessionPanel = new QFrame;
     sessionPanel->setFrameShape(QFrame::StyledPanel);
-    sessionPanel->setFixedWidth(260);
-    auto *sessionLayout = new QVBoxLayout(sessionPanel);
-    sessionLayout->setContentsMargins(10, 8, 10, 8);
-    sessionLayout->setSpacing(6);
-    sessionLayout->addWidget(new QLabel(QStringLiteral("Agent")));
+    sessionPanel->setFixedWidth(240);
+    auto *panelLayout = new QVBoxLayout(sessionPanel);
+    panelLayout->setContentsMargins(0, 0, 0, 8);
+    panelLayout->setSpacing(4);
+
+    agentStack_ = new QStackedWidget;
+
+    auto *setupPage = new QWidget;
+    auto *setupLayout = new QVBoxLayout(setupPage);
+    setupLayout->setContentsMargins(8, 8, 8, 0);
+    setupLayout->setSpacing(6);
+    auto *agentRow = new QHBoxLayout;
+    agentRow->setSpacing(6);
+    auto *agentLabel = new QLabel(QStringLiteral("Agent"));
+    agentLabel->setFixedWidth(40);
+    agentRow->addWidget(agentLabel);
     agentSelector_ = new QComboBox;
     agentSelector_->setAccessibleName(QStringLiteral("ACP agent"));
-    sessionLayout->addWidget(agentSelector_);
+    agentRow->addWidget(agentSelector_, 1);
+    setupLayout->addLayout(agentRow);
+    auto *setupButtons = new QHBoxLayout;
+    setupButtons->setSpacing(6);
     agentConnectButton_ = new QPushButton(QStringLiteral("Connect"));
-    sessionLayout->addWidget(agentConnectButton_);
-    agentStatus_ = new QLabel(QStringLiteral("Not connected"));
-    agentStatus_->setWordWrap(true);
-    agentStatus_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    sessionLayout->addWidget(agentStatus_);
-    sessionLayout->addSpacing(6);
-    sessionTitle_ = new QLabel(QStringLiteral("No active session"));
-    sessionTitle_->setWordWrap(true);
-    sessionTitle_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    sessionLayout->addWidget(sessionTitle_);
-    sessionLayout->addSpacing(6);
+    agentSessionButton_ = new QPushButton(QStringLiteral("Session"));
+    agentSessionButton_->setToolTip(QStringLiteral("Sessions, model, token usage, and MCP servers"));
+    agentSessionButton_->setEnabled(false);
+    setupButtons->addWidget(agentConnectButton_, 1);
+    setupButtons->addWidget(agentSessionButton_, 1);
+    setupLayout->addLayout(setupButtons);
+    setupLayout->addStretch();
+    agentStack_->addWidget(setupPage);
+
+    auto *sessionPage = new QWidget;
+    auto *sessionLayout = new QVBoxLayout(sessionPage);
+    sessionLayout->setContentsMargins(8, 8, 8, 0);
+    sessionLayout->setSpacing(6);
+    auto *sessionRow = new QHBoxLayout;
+    sessionRow->setSpacing(4);
+    auto *sessionLabel = new QLabel(QStringLiteral("Session"));
+    sessionLabel->setFixedWidth(40);
+    sessionRow->addWidget(sessionLabel);
+    sessionSelector_ = new QComboBox;
+    sessionSelector_->setAccessibleName(QStringLiteral("ACP session"));
+    sessionSelector_->view()->setMinimumWidth(320);
+    sessionRow->addWidget(sessionSelector_, 1);
+    newSessionButton_ = new QPushButton(QStringLiteral("+"));
+    newSessionButton_->setAccessibleName(QStringLiteral("New session"));
+    newSessionButton_->setToolTip(QStringLiteral("New session"));
+    newSessionButton_->setFixedWidth(24);
+    sessionRow->addWidget(newSessionButton_);
+    closeSessionButton_ = new QPushButton(QStringLiteral("x"));
+    closeSessionButton_->setAccessibleName(QStringLiteral("Close session"));
+    closeSessionButton_->setToolTip(QStringLiteral("Close current session"));
+    closeSessionButton_->setFixedWidth(24);
+    sessionRow->addWidget(closeSessionButton_);
+    sessionLayout->addLayout(sessionRow);
+    auto *modelRow = new QHBoxLayout;
+    modelRow->setSpacing(6);
+    auto *modelLabel = new QLabel(QStringLiteral("Model"));
+    modelLabel->setFixedWidth(40);
+    modelRow->addWidget(modelLabel);
+    modelSelector_ = new QComboBox;
+    modelSelector_->setAccessibleName(QStringLiteral("Agent model"));
+    modelSelector_->setEnabled(false);
+    modelRow->addWidget(modelSelector_, 1);
+    sessionLayout->addLayout(modelRow);
     tokens_ = new QLabel(QStringLiteral("0 / 0 tokens"));
-    sessionLayout->addWidget(tokens_);
+    tokens_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     contextUsage_ = new QProgressBar;
     contextUsage_->setRange(0, 100);
     contextUsage_->setValue(0);
-    contextUsage_->setFormat(QStringLiteral("%p% used"));
-    contextUsage_->setMaximumHeight(18);
-    sessionLayout->addWidget(contextUsage_);
-    sessionLayout->addSpacing(6);
+    contextUsage_->setFormat(QStringLiteral("%p%"));
+    contextUsage_->setMaximumHeight(16);
+    auto *usageRow = new QHBoxLayout;
+    usageRow->setSpacing(6);
+    usageRow->addWidget(tokens_);
+    usageRow->addWidget(contextUsage_, 1);
+    sessionLayout->addLayout(usageRow);
+    auto *mcpLabel = new QLabel(QStringLiteral("MCP servers"));
+    mcpLabel->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    sessionLayout->addWidget(mcpLabel);
     mcpServers_ = new QListWidget;
     mcpServers_->setAccessibleName(QStringLiteral("MCP servers"));
     mcpServers_->setAlternatingRowColors(true);
-    auto *noServers = new QListWidgetItem(QStringLiteral("No MCP servers connected"), mcpServers_);
+    auto *noServers = new QListWidgetItem(QStringLiteral("None"), mcpServers_);
     noServers->setFlags(Qt::NoItemFlags);
     sessionLayout->addWidget(mcpServers_, 1);
+    auto *sessionButtons = new QHBoxLayout;
+    sessionButtons->setSpacing(6);
+    agentBackButton_ = new QPushButton(QStringLiteral("Agent"));
+    agentBackButton_->setToolTip(QStringLiteral("Change the connected agent"));
+    agentDisconnectButton_ = new QPushButton(QStringLiteral("Disconnect"));
+    sessionButtons->addWidget(agentBackButton_, 1);
+    sessionButtons->addWidget(agentDisconnectButton_, 1);
+    sessionLayout->addLayout(sessionButtons);
+    agentStack_->addWidget(sessionPage);
+
+    agentStatus_ = new QLabel;
+    agentStatus_->setWordWrap(true);
+    agentStatus_->setContentsMargins(8, 6, 8, 0);
+    agentStatus_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    agentStatus_->hide();
+    panelLayout->addWidget(agentStatus_);
+    panelLayout->addWidget(agentStack_, 1);
 
     auto *conversationColumn = new QVBoxLayout;
     conversationColumn->addWidget(transcript_, 1);
+    auto *promptRow = new QHBoxLayout;
+    promptRow->setSpacing(6);
     prompt_ = new QLineEdit;
     prompt_->setPlaceholderText(QStringLiteral("Ask the agent about the current project..."));
     prompt_->setEnabled(false);
-    conversationColumn->addWidget(prompt_);
-    agentLayout->addLayout(conversationColumn, 1);
-
-    auto *sessionColumn = new QVBoxLayout;
-    sessionColumn->setSpacing(8);
-    sessionColumn->addWidget(sessionPanel, 1);
+    promptRow->addWidget(prompt_, 1);
     sendButton_ = new QPushButton(QStringLiteral("Send"));
-    sendButton_->setFixedWidth(260);
     sendButton_->setEnabled(false);
-    sessionColumn->addWidget(sendButton_);
-    cancelButton_ = new QPushButton(QStringLiteral("Cancel turn"));
-    cancelButton_->setFixedWidth(260);
+    promptRow->addWidget(sendButton_);
+    cancelButton_ = new QPushButton(QStringLiteral("Cancel"));
     cancelButton_->setEnabled(false);
-    sessionColumn->addWidget(cancelButton_);
-    agentLayout->addLayout(sessionColumn, 0);
+    promptRow->addWidget(cancelButton_);
+    conversationColumn->addLayout(promptRow);
+    agentLayout->addLayout(conversationColumn, 1);
+    agentLayout->addWidget(sessionPanel, 0);
     agentTabIndex_ = tabs->addTab(agent, QStringLiteral("Agent"));
 
 #ifdef ICE_HAVE_AGENTSDK
@@ -181,13 +291,13 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
         agentSelector_->addItem(QStringLiteral("No ACP agents found"));
         agentSelector_->setEnabled(false);
         agentConnectButton_->setEnabled(false);
-        agentStatus_->setText(QStringLiteral("Install an ACP-capable agent on PATH (for example opencode)."));
+        setAgentStatus(QStringLiteral("Install an ACP-capable agent on PATH (for example opencode)."));
     }
 #else
     agentSelector_->addItem(QStringLiteral("agentsdk-cpp not built"));
     agentSelector_->setEnabled(false);
     agentConnectButton_->setEnabled(false);
-    agentStatus_->setText(QStringLiteral("Build with agentsdk-cpp available or set AGENTSDK_CPP_DIR."));
+    setAgentStatus(QStringLiteral("Build with agentsdk-cpp available or set AGENTSDK_CPP_DIR."));
 #endif
 
     connect(agentConnectButton_, &QPushButton::clicked, this, [this] {
@@ -196,9 +306,18 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
         else
             connectAgent();
     });
+    connect(agentSessionButton_, &QPushButton::clicked, this, &ActivityPanel::showAgentSessionPage);
+    connect(agentBackButton_, &QPushButton::clicked, this, &ActivityPanel::showAgentSetupPage);
+    connect(agentDisconnectButton_, &QPushButton::clicked, this, &ActivityPanel::disconnectAgent);
     connect(sendButton_, &QPushButton::clicked, this, &ActivityPanel::sendPrompt);
     connect(cancelButton_, &QPushButton::clicked, this, &ActivityPanel::cancelPrompt);
     connect(prompt_, &QLineEdit::returnPressed, this, &ActivityPanel::sendPrompt);
+    connect(sessionSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) { switchAgentSession(index); });
+    connect(newSessionButton_, &QPushButton::clicked, this, &ActivityPanel::newAgentSession);
+    connect(closeSessionButton_, &QPushButton::clicked, this, &ActivityPanel::closeActiveAgentSession);
+    connect(modelSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { applyModelSelection(); });
     updateAgentControls();
 
     auto *messages = new QPlainTextEdit;
@@ -265,7 +384,45 @@ ActivityPanel::~ActivityPanel() {
 
 void ActivityPanel::setProjectPath(const QString &path) { projectPath_ = path; }
 
+ActivityPanel::AgentSession *ActivityPanel::activeAgentSession() {
+    if (activeAgentSession_ < 0 || activeAgentSession_ >= static_cast<int>(agentSessions_.size()))
+        return nullptr;
+    return &agentSessions_[static_cast<std::size_t>(activeAgentSession_)];
+}
+
+ActivityPanel::AgentSession *ActivityPanel::findAgentSession(const std::string &acpSessionId) {
+    const auto index = findAgentSessionIndex(acpSessionId);
+    return index < 0 ? nullptr : &agentSessions_[static_cast<std::size_t>(index)];
+}
+
+int ActivityPanel::findAgentSessionIndex(const std::string &acpSessionId) const {
+    for (std::size_t index = 0; index < agentSessions_.size(); ++index) {
+        if (agentSessions_[index].acpSessionId == acpSessionId)
+            return static_cast<int>(index);
+    }
+    return -1;
+}
+
+void ActivityPanel::appendSessionTranscript(const std::string &acpSessionId, const QString &text) {
+    const auto index = findAgentSessionIndex(acpSessionId);
+    if (index < 0 || text.isEmpty())
+        return;
+    auto &session = agentSessions_[static_cast<std::size_t>(index)];
+    session.transcript += text;
+    if (index != activeAgentSession_ || !transcript_ || session.loading)
+        return;
+    auto cursor = transcript_->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(text);
+    transcript_->setTextCursor(cursor);
+    transcript_->ensureCursorVisible();
+}
+
 void ActivityPanel::appendTranscript(const QString &text) {
+    if (auto *session = activeAgentSession()) {
+        appendSessionTranscript(session->acpSessionId, text);
+        return;
+    }
     if (!transcript_ || text.isEmpty())
         return;
     auto cursor = transcript_->textCursor();
@@ -273,6 +430,132 @@ void ActivityPanel::appendTranscript(const QString &text) {
     cursor.insertText(text);
     transcript_->setTextCursor(cursor);
     transcript_->ensureCursorVisible();
+}
+
+void ActivityPanel::showSessionTranscript() {
+    if (!transcript_)
+        return;
+    const auto *session = activeAgentSession();
+    transcript_->setPlainText(session ? session->transcript : QString{});
+    auto cursor = transcript_->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    transcript_->setTextCursor(cursor);
+    transcript_->ensureCursorVisible();
+}
+
+void ActivityPanel::refreshSessionSelector() {
+    if (!sessionSelector_)
+        return;
+    const QSignalBlocker blocker(sessionSelector_);
+    refreshingSessionSelector_ = true;
+    sessionSelector_->clear();
+    for (const auto &session : agentSessions_) {
+        sessionSelector_->addItem(session.label, QString::fromStdString(session.acpSessionId));
+        sessionSelector_->setItemData(sessionSelector_->count() - 1, QString::fromStdString(session.acpSessionId),
+                                      Qt::ToolTipRole);
+    }
+    bool hasPast = false;
+    for (const auto &summary : pastAgentSessions_) {
+        if (findAgentSessionIndex(summary.acpSessionId) < 0) {
+            hasPast = true;
+            break;
+        }
+    }
+    if (hasPast && !agentSessions_.empty())
+        sessionSelector_->insertSeparator(sessionSelector_->count());
+    for (const auto &summary : pastAgentSessions_) {
+        if (findAgentSessionIndex(summary.acpSessionId) >= 0)
+            continue;
+        const auto title = summary.title.isEmpty() ? QStringLiteral("Past session") : summary.title;
+        sessionSelector_->addItem(QStringLiteral("↺ %1").arg(title), QString::fromStdString(summary.acpSessionId));
+        QString tooltip = title;
+        if (!summary.updatedAt.isEmpty())
+            tooltip += QStringLiteral("\nUpdated: %1").arg(summary.updatedAt);
+        tooltip += QStringLiteral("\n%1").arg(QString::fromStdString(summary.acpSessionId));
+        sessionSelector_->setItemData(sessionSelector_->count() - 1, tooltip, Qt::ToolTipRole);
+    }
+    if (activeAgentSession_ >= 0 && activeAgentSession_ < sessionSelector_->count())
+        sessionSelector_->setCurrentIndex(activeAgentSession_);
+    refreshingSessionSelector_ = false;
+}
+
+void ActivityPanel::switchAgentSession(int index) {
+    if (refreshingSessionSelector_ || modelChanging_ || sessionLoading_ || index < 0 ||
+        index >= sessionSelector_->count())
+        return;
+    const auto acpSessionId = sessionSelector_->itemData(index).toString().toStdString();
+    if (acpSessionId.empty())
+        return;
+    const auto sessionIndex = findAgentSessionIndex(acpSessionId);
+    if (sessionIndex < 0) {
+        const auto previousActive = activeAgentSession_;
+        loadAgentSession(acpSessionId);
+        if (activeAgentSession_ == previousActive) {
+            const QSignalBlocker blocker(sessionSelector_);
+            sessionSelector_->setCurrentIndex(previousActive);
+        }
+        return;
+    }
+    activeAgentSession_ = sessionIndex;
+    if (prompt_)
+        prompt_->clear();
+    showSessionTranscript();
+    populateModelSelector();
+    if (const auto *session = activeAgentSession())
+        updateAgentUsage(session->used, session->size);
+    updateAgentControls();
+}
+
+void ActivityPanel::addAgentSession(const std::string &acpSessionId, const QString &configOptionsJson,
+                                    const QString &initialTranscript) {
+    AgentSession session;
+    session.acpSessionId = acpSessionId;
+    session.label = QStringLiteral("Session %1").arg(nextAgentSessionNumber_++);
+    session.transcript = initialTranscript;
+    session.configOptionsJson = configOptionsJson.isEmpty() ? QStringLiteral("[]") : configOptionsJson;
+    agentSessions_.push_back(std::move(session));
+    activeAgentSession_ = static_cast<int>(agentSessions_.size()) - 1;
+    if (prompt_)
+        prompt_->clear();
+    refreshSessionSelector();
+    showSessionTranscript();
+    populateModelSelector();
+    updateAgentUsage(0, 0);
+    updateAgentControls();
+}
+
+void ActivityPanel::removeAgentSession(const std::string &acpSessionId) {
+    const auto index = findAgentSessionIndex(acpSessionId);
+    if (index < 0)
+        return;
+    const bool wasActive = index == activeAgentSession_;
+    agentSessions_.erase(agentSessions_.begin() + index);
+    if (agentSessions_.empty()) {
+        activeAgentSession_ = -1;
+    } else if (wasActive) {
+        activeAgentSession_ = std::min(index, static_cast<int>(agentSessions_.size()) - 1);
+    } else if (index < activeAgentSession_) {
+        --activeAgentSession_;
+    }
+    if (prompt_)
+        prompt_->clear();
+    refreshSessionSelector();
+    showSessionTranscript();
+    populateModelSelector();
+    if (const auto *session = activeAgentSession())
+        updateAgentUsage(session->used, session->size);
+    else
+        updateAgentUsage(0, 0);
+    updateAgentControls();
+}
+
+void ActivityPanel::setSessionPromptRunning(const std::string &acpSessionId, bool running) {
+    auto *session = findAgentSession(acpSessionId);
+    if (!session)
+        return;
+    session->promptRunning = running;
+    if (session == activeAgentSession())
+        updateAgentControls();
 }
 
 void ActivityPanel::updateAgentUsage(qint64 used, qint64 size) {
@@ -283,22 +566,429 @@ void ActivityPanel::updateAgentUsage(qint64 used, qint64 size) {
     contextUsage_->setValue(std::clamp(percentage, 0, 100));
 }
 
+void ActivityPanel::setAgentStatus(const QString &text) {
+    if (!agentStatus_)
+        return;
+    agentStatus_->setText(text);
+    agentStatus_->setVisible(!text.isEmpty());
+}
+
+void ActivityPanel::populateModelSelector() {
+    if (!modelSelector_)
+        return;
+    auto *session = activeAgentSession();
+    if (session) {
+        session->modelAvailable = false;
+        session->modelConfigId.clear();
+    }
+    const QSignalBlocker blocker(modelSelector_);
+    updatingModelSelector_ = true;
+    modelSelector_->clear();
+    if (!session) {
+        modelSelector_->addItem(QStringLiteral("Agent default"));
+        updatingModelSelector_ = false;
+        updateAgentControls();
+        return;
+    }
+
+    const nlohmann::json *model = nullptr;
+    nlohmann::json configs;
+    try {
+        configs = nlohmann::json::parse(session->configOptionsJson.toStdString());
+        if (configs.is_array()) {
+            for (const auto &option : configs) {
+                if (!option.is_object())
+                    continue;
+                const auto id = option.value("id", std::string{});
+                const auto category = option.value("category", std::string{});
+                if (id == "model" || category == "model") {
+                    model = &option;
+                    break;
+                }
+            }
+        }
+    } catch (const std::exception &) {
+        configs = nlohmann::json::array();
+    }
+
+    if (!model) {
+        modelSelector_->addItem(QStringLiteral("Agent default"));
+        updatingModelSelector_ = false;
+        updateAgentControls();
+        return;
+    }
+
+    session->modelConfigId = QString::fromStdString(model->value("id", std::string{}));
+    const auto optionsIt = model->find("options");
+    if (optionsIt != model->end() && optionsIt->is_array() && !optionsIt->empty()) {
+        for (const auto &value : *optionsIt) {
+            if (!value.is_object())
+                continue;
+            const auto id = value.value("value", std::string{});
+            const auto name = value.value("name", std::string{});
+            const auto label = name.empty() ? QString::fromStdString(id) : QString::fromStdString(name);
+            modelSelector_->addItem(label, QString::fromStdString(id));
+            modelSelector_->setItemData(modelSelector_->count() - 1,
+                                        QString::fromStdString(value.value("description", std::string{})),
+                                        Qt::ToolTipRole);
+        }
+        const auto current =
+            modelSelector_->findData(QString::fromStdString(model->value("currentValue", std::string{})));
+        if (current >= 0)
+            modelSelector_->setCurrentIndex(current);
+        session->modelAvailable = true;
+    } else {
+        modelSelector_->addItem(QStringLiteral("Agent default"));
+    }
+    updatingModelSelector_ = false;
+    updateAgentControls();
+}
+
+void ActivityPanel::applyModelSelection() {
+    if (updatingModelSelector_ || !agentConnected_ || modelChanging_ || !modelSelector_)
+        return;
+    auto *session = activeAgentSession();
+    if (!session || session->promptRunning || session->modelConfigId.isEmpty())
+        return;
+#ifdef ICE_HAVE_AGENTSDK
+    if (!agentBackend_ || !agentBackend_->client)
+        return;
+    const auto value = modelSelector_->currentData().toString();
+    if (value.isEmpty())
+        return;
+    const auto label = modelSelector_->currentText();
+    const auto configId = session->modelConfigId;
+    const auto acpSessionId = session->acpSessionId;
+    const auto generation = agentBackend_->generation.load();
+    auto *client = agentBackend_->client.get();
+    modelChanging_ = true;
+    updateAgentControls();
+    agentBackend_->pool.start(QRunnable::create([this, client, acpSessionId, configId, value, label, generation] {
+        nlohmann::json params;
+        params["sessionId"] = acpSessionId;
+        params["configId"] = configId.toStdString();
+        params["value"] = value.toStdString();
+        const auto result = client->send_request("session/set_config_option", params.dump());
+        const bool ok = !result.empty();
+        const auto optionsJson = ok ? configOptionsFromResponse(result) : QString{};
+        if (!agentBackend_ || !agentBackend_->alive.load())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, ok, optionsJson, acpSessionId, label, generation] {
+                if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
+                    return;
+                modelChanging_ = false;
+                auto *changedSession = findAgentSession(acpSessionId);
+                if (ok && changedSession)
+                    changedSession->configOptionsJson = optionsJson;
+                if (changedSession == activeAgentSession())
+                    populateModelSelector();
+                if (ok) {
+                    setAgentStatus(QStringLiteral("Connected to %1").arg(agentSelector_->currentText()));
+                    appendSessionTranscript(acpSessionId, QStringLiteral("\n[model] %1\n").arg(label));
+                } else {
+                    setAgentStatus(QStringLiteral("Unable to change the model."));
+                }
+                updateAgentControls();
+            },
+            Qt::QueuedConnection);
+    }));
+#endif
+}
+
+void ActivityPanel::newAgentSession() {
+    if (!agentConnected_ || sessionCreating_ || sessionClosing_ || !agentBackend_)
+        return;
+#ifdef ICE_HAVE_AGENTSDK
+    if (!agentBackend_->client)
+        return;
+    auto *client = agentBackend_->client.get();
+    const auto cwd = projectPath_.isEmpty() ? QDir::currentPath() : projectPath_;
+    const auto generation = agentBackend_->generation.load();
+    sessionCreating_ = true;
+    setAgentStatus(QStringLiteral("Creating session..."));
+    updateAgentControls();
+    agentBackend_->pool.start(QRunnable::create([this, client, cwd, generation] {
+        std::string acpSessionId;
+        QString configOptionsJson;
+        QString error;
+        const bool ok = createAcpSession(*client, cwd, acpSessionId, configOptionsJson, error);
+        if (!agentBackend_ || !agentBackend_->alive.load())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, ok, error, acpSessionId, configOptionsJson, generation] {
+                if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
+                    return;
+                sessionCreating_ = false;
+                if (ok) {
+                    setAgentStatus(QStringLiteral("Connected to %1").arg(agentSelector_->currentText()));
+                    addAgentSession(acpSessionId, configOptionsJson,
+                                    QStringLiteral("New ACP session %1.\n").arg(QString::fromStdString(acpSessionId)));
+                    showAgentSessionPage();
+                } else {
+                    setAgentStatus(error);
+                }
+                updateAgentControls();
+            },
+            Qt::QueuedConnection);
+    }));
+#endif
+}
+
+void ActivityPanel::closeActiveAgentSession() {
+    auto *session = activeAgentSession();
+    if (!session || agentSessions_.size() <= 1 || sessionClosing_ || session->promptRunning)
+        return;
+#ifdef ICE_HAVE_AGENTSDK
+    if (!agentBackend_ || !agentBackend_->client)
+        return;
+    const auto acpSessionId = session->acpSessionId;
+    const auto generation = agentBackend_->generation.load();
+    auto *client = agentBackend_->client.get();
+    sessionClosing_ = true;
+    updateAgentControls();
+    agentBackend_->pool.start(QRunnable::create([this, client, acpSessionId, generation] {
+        nlohmann::json params;
+        params["sessionId"] = acpSessionId;
+        client->send_request("session/close", params.dump(), std::chrono::milliseconds{5000});
+        if (!agentBackend_ || !agentBackend_->alive.load())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, acpSessionId, generation] {
+                if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
+                    return;
+                sessionClosing_ = false;
+                removeAgentSession(acpSessionId);
+                refreshPastAgentSessions();
+                updateAgentControls();
+            },
+            Qt::QueuedConnection);
+    }));
+#endif
+}
+
+void ActivityPanel::refreshPastAgentSessions() {
+    if (!agentConnected_ || !loadSupported_ || sessionListLoading_ || !agentBackend_)
+        return;
+#ifdef ICE_HAVE_AGENTSDK
+    if (!agentBackend_->client)
+        return;
+    auto *client = agentBackend_->client.get();
+    const auto cwd = projectPath_.isEmpty() ? QDir::currentPath() : projectPath_;
+    const auto generation = agentBackend_->generation.load();
+    sessionListLoading_ = true;
+    agentBackend_->pool.start(QRunnable::create([this, client, cwd, generation] {
+        std::vector<AgentSessionSummary> summaries;
+        bool ok = false;
+        const auto normalizePath = [](const QString &path) {
+            return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+        };
+        const auto normalizedCwd = normalizePath(cwd);
+        std::string cursor;
+        for (int page = 0; page < 8; ++page) {
+            nlohmann::json params;
+            params["cwd"] = cwd.toStdString();
+            if (!cursor.empty())
+                params["cursor"] = cursor;
+            const auto result = client->send_request("session/list", params.dump(), std::chrono::milliseconds{5000});
+            if (result.empty()) {
+                if (page == 0)
+                    ok = false;
+                break;
+            }
+            std::string nextCursor;
+            try {
+                const auto doc = nlohmann::json::parse(result);
+                const auto sessionsIt = doc.find("sessions");
+                if (sessionsIt == doc.end() || !sessionsIt->is_array())
+                    break;
+                ok = true;
+                for (const auto &entry : *sessionsIt) {
+                    if (!entry.is_object())
+                        continue;
+                    const auto idIt = entry.find("sessionId");
+                    if (idIt == entry.end() || !idIt->is_string())
+                        continue;
+                    const auto sessionId = idIt->get<std::string>();
+                    if (sessionId.empty())
+                        continue;
+                    QString entryCwd;
+                    const auto cwdIt = entry.find("cwd");
+                    if (cwdIt != entry.end() && cwdIt->is_string())
+                        entryCwd = QString::fromStdString(cwdIt->get<std::string>());
+                    if (!entryCwd.isEmpty() && normalizePath(entryCwd) != normalizedCwd)
+                        continue;
+                    bool duplicate = false;
+                    for (const auto &summary : summaries) {
+                        if (summary.acpSessionId == sessionId) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate)
+                        continue;
+                    AgentSessionSummary summary;
+                    summary.acpSessionId = sessionId;
+                    const auto titleIt = entry.find("title");
+                    if (titleIt != entry.end() && titleIt->is_string())
+                        summary.title = QString::fromStdString(titleIt->get<std::string>());
+                    const auto updatedIt = entry.find("updatedAt");
+                    if (updatedIt != entry.end() && updatedIt->is_string())
+                        summary.updatedAt = QString::fromStdString(updatedIt->get<std::string>());
+                    summaries.push_back(std::move(summary));
+                }
+                const auto cursorIt = doc.find("nextCursor");
+                if (cursorIt != doc.end() && cursorIt->is_string())
+                    nextCursor = cursorIt->get<std::string>();
+            } catch (const std::exception &) {
+                break;
+            }
+            if (nextCursor.empty() || nextCursor == cursor)
+                break;
+            cursor = std::move(nextCursor);
+        }
+        if (!agentBackend_ || !agentBackend_->alive.load())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, ok, summaries = std::move(summaries), generation] {
+                if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
+                    return;
+                sessionListLoading_ = false;
+                if (ok) {
+                    pastAgentSessions_ = summaries;
+                    refreshSessionSelector();
+                }
+                updateAgentControls();
+            },
+            Qt::QueuedConnection);
+    }));
+#else
+    sessionListLoading_ = false;
+#endif
+}
+
+void ActivityPanel::loadAgentSession(const std::string &acpSessionId) {
+    if (!agentConnected_ || !loadSupported_ || sessionLoading_ || sessionCreating_ || sessionClosing_ ||
+        acpSessionId.empty())
+        return;
+    if (findAgentSessionIndex(acpSessionId) >= 0)
+        return;
+#ifdef ICE_HAVE_AGENTSDK
+    if (!agentBackend_ || !agentBackend_->client)
+        return;
+    QString title;
+    for (const auto &summary : pastAgentSessions_) {
+        if (summary.acpSessionId == acpSessionId) {
+            title = summary.title;
+            break;
+        }
+    }
+    AgentSession session;
+    session.acpSessionId = acpSessionId;
+    session.label = title.isEmpty() ? QStringLiteral("Past session") : title;
+    session.configOptionsJson = QStringLiteral("[]");
+    session.loading = true;
+    agentSessions_.push_back(std::move(session));
+    activeAgentSession_ = static_cast<int>(agentSessions_.size()) - 1;
+    sessionLoading_ = true;
+    if (prompt_)
+        prompt_->clear();
+    refreshSessionSelector();
+    showSessionTranscript();
+    populateModelSelector();
+    updateAgentUsage(0, 0);
+    setAgentStatus(QStringLiteral("Loading session..."));
+    updateAgentControls();
+
+    auto *client = agentBackend_->client.get();
+    const auto cwd = projectPath_.isEmpty() ? QDir::currentPath() : projectPath_;
+    const auto generation = agentBackend_->generation.load();
+    agentBackend_->pool.start(QRunnable::create([this, client, acpSessionId, cwd, generation] {
+        nlohmann::json params;
+        params["sessionId"] = acpSessionId;
+        params["cwd"] = cwd.toStdString();
+        params["mcpServers"] = nlohmann::json::array();
+        const auto result = client->send_request("session/load", params.dump(), std::chrono::milliseconds{30000});
+        const bool ok = !result.empty();
+        const auto configOptionsJson = ok ? configOptionsFromResponse(result) : QString{};
+        if (!agentBackend_ || !agentBackend_->alive.load())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, ok, configOptionsJson, acpSessionId, generation] {
+                if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
+                    return;
+                sessionLoading_ = false;
+                auto *session = findAgentSession(acpSessionId);
+                if (!session) {
+                    updateAgentControls();
+                    return;
+                }
+                session->loading = false;
+                if (ok) {
+                    session->configOptionsJson = configOptionsJson;
+                    if (session == activeAgentSession()) {
+                        populateModelSelector();
+                        if (session->transcript.isEmpty())
+                            appendSessionTranscript(acpSessionId, QStringLiteral("[Session loaded]\n"));
+                        showSessionTranscript();
+                    }
+                    setAgentStatus(QStringLiteral("Connected to %1").arg(agentSelector_->currentText()));
+                } else {
+                    setAgentStatus(QStringLiteral("Unable to load the past session."));
+                    removeAgentSession(acpSessionId);
+                }
+                updateAgentControls();
+            },
+            Qt::QueuedConnection);
+    }));
+#endif
+}
+
 void ActivityPanel::updateAgentControls() {
-    if (!agentConnectButton_ || !agentSelector_ || !prompt_ || !sendButton_ || !cancelButton_)
+    if (!agentConnectButton_ || !agentSelector_ || !prompt_ || !sendButton_ || !cancelButton_ || !sessionSelector_ ||
+        !newSessionButton_ || !closeSessionButton_)
         return;
     const bool hasAgent =
         agentSelector_->currentData().isValid() && !agentSelector_->currentData().toString().isEmpty();
+    const auto *session = activeAgentSession();
+    const bool hasSession = agentConnected_ && session;
     agentConnectButton_->setText(agentConnected_ ? QStringLiteral("Disconnect") : QStringLiteral("Connect"));
     agentConnectButton_->setEnabled(!agentConnecting_ && (agentConnected_ || hasAgent));
-    agentSelector_->setEnabled(!agentConnecting_ && !agentConnected_ && !promptRunning_);
-    prompt_->setEnabled(agentConnected_ && !promptRunning_);
-    sendButton_->setEnabled(agentConnected_ && !promptRunning_);
-    cancelButton_->setEnabled(agentConnected_ && promptRunning_);
+    agentSessionButton_->setEnabled(agentConnected_ && !agentSessions_.empty() && !sessionCreating_);
+    agentDisconnectButton_->setEnabled(agentConnected_ && !agentConnecting_);
+    newSessionButton_->setEnabled(agentConnected_ && !sessionCreating_ && !sessionClosing_ && !sessionLoading_ &&
+                                  !modelChanging_);
+    closeSessionButton_->setEnabled(hasSession && agentSessions_.size() > 1 && !session->promptRunning &&
+                                    !session->loading && !sessionCreating_ && !sessionClosing_ && !sessionLoading_ &&
+                                    !modelChanging_);
+    sessionSelector_->setEnabled(agentConnected_ && !agentSessions_.empty() && !sessionCreating_ && !sessionClosing_ &&
+                                 !sessionLoading_ && !modelChanging_);
+    agentSelector_->setEnabled(!agentConnecting_ && !agentConnected_ && hasAgent);
+    prompt_->setEnabled(hasSession && !session->promptRunning && !session->loading && !sessionLoading_ &&
+                        !modelChanging_);
+    sendButton_->setEnabled(hasSession && !session->promptRunning && !session->loading && !sessionLoading_ &&
+                            !modelChanging_);
+    cancelButton_->setEnabled(hasSession && session->promptRunning && !session->loading && !sessionLoading_);
+    if (modelSelector_)
+        modelSelector_->setEnabled(hasSession && session->modelAvailable && !session->promptRunning &&
+                                   !session->loading && !sessionLoading_ && !modelChanging_);
 }
 
-void ActivityPanel::setPromptRunning(bool running) {
-    promptRunning_ = running;
-    updateAgentControls();
+void ActivityPanel::showAgentSetupPage() {
+    if (agentStack_)
+        agentStack_->setCurrentIndex(0);
+}
+
+void ActivityPanel::showAgentSessionPage() {
+    if (agentStack_ && agentConnected_ && activeAgentSession()) {
+        agentStack_->setCurrentIndex(1);
+        refreshPastAgentSessions();
+    }
 }
 
 void ActivityPanel::connectAgent() {
@@ -314,12 +1004,22 @@ void ActivityPanel::connectAgent() {
         agentBackend_->client->terminate();
     agentBackend_->pool.waitForDone();
     agentBackend_->client = std::make_unique<agentsdk::acp::acp_client>();
-    agentBackend_->session = std::make_unique<agentsdk::acp::acp_session>(*agentBackend_->client);
+    agentBackend_->protocolSession = std::make_unique<agentsdk::acp::acp_session>(*agentBackend_->client);
 
     auto *client = agentBackend_->client.get();
-    auto *session = agentBackend_->session.get();
-    session->set_update_handler([this](const std::string &, const std::string &params) { handleAgentUpdate(params); });
-    session->set_agent_request_handler(
+    auto *protocolSession = agentBackend_->protocolSession.get();
+    protocolSession->set_update_handler([this](const std::string &method, const std::string &params) {
+        if (method != "session/update")
+            return;
+        try {
+            const auto root = nlohmann::json::parse(params);
+            const auto id = root.find("sessionId");
+            if (id != root.end() && id->is_string())
+                handleAgentUpdate(id->get<std::string>(), params);
+        } catch (const std::exception &) {
+        }
+    });
+    protocolSession->set_agent_request_handler(
         [this](const std::string &method, const std::string &params) -> agentsdk::acp::agent_response {
             agentsdk::acp::agent_response response;
             if (method != "session/request_permission")
@@ -332,13 +1032,23 @@ void ActivityPanel::connectAgent() {
     const auto cwd = projectPath_.isEmpty() ? QDir::currentPath() : projectPath_;
     const auto generation = agentBackend_->generation.fetch_add(1) + 1;
     agentConnecting_ = true;
-    agentStatus_->setText(QStringLiteral("Launching %1...").arg(QString::fromStdString(entry.display_name)));
+    agentSessions_.clear();
+    pastAgentSessions_.clear();
+    activeAgentSession_ = -1;
+    nextAgentSessionNumber_ = 1;
+    loadSupported_ = false;
+    sessionLoading_ = false;
+    sessionListLoading_ = false;
+    refreshSessionSelector();
+    showSessionTranscript();
+    setAgentStatus(QStringLiteral("Launching %1...").arg(QString::fromStdString(entry.display_name)));
     appendTranscript(QStringLiteral("\nConnecting to %1...\n").arg(QString::fromStdString(entry.display_name)));
     updateAgentControls();
 
-    agentBackend_->pool.start(QRunnable::create([this, client, session, entry, cwd, generation] {
+    agentBackend_->pool.start(QRunnable::create([this, client, protocolSession, entry, cwd, generation] {
         QString error;
         bool ok = client->launch_agent(entry.command, entry.args);
+        bool canLoadSessions = false;
         if (!ok)
             error = QStringLiteral("Unable to launch %1.").arg(QString::fromStdString(entry.display_name));
         if (ok) {
@@ -350,40 +1060,38 @@ void ActivityPanel::connectAgent() {
             info.name = "ice";
             info.title = "ICE";
             info.version = ice::version();
-            ok = session->initialize(capabilities, info);
+            ok = protocolSession->initialize(capabilities, info);
             if (!ok)
                 error = QStringLiteral("ACP initialize failed.");
+            else
+                canLoadSessions = protocolSession->agent_caps().load_session;
         }
         std::string sessionId;
-        if (ok) {
-            sessionId = session->new_session(cwd.toStdString());
-            if (sessionId.empty()) {
-                ok = false;
-                error = QStringLiteral("The agent did not create an ACP session.");
-            }
-        }
+        QString configOptionsJson;
+        if (ok)
+            ok = createAcpSession(*client, cwd, sessionId, configOptionsJson, error);
         if (!ok)
             client->terminate();
         if (!agentBackend_ || !agentBackend_->alive.load())
             return;
         QMetaObject::invokeMethod(
             this,
-            [this, ok, error, entry, sessionId, generation] {
+            [this, ok, error, entry, sessionId, configOptionsJson, canLoadSessions, generation] {
                 if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
                     return;
                 agentConnecting_ = false;
                 agentConnected_ = ok;
+                loadSupported_ = canLoadSessions;
                 if (ok) {
-                    agentStatus_->setText(
-                        QStringLiteral("Connected to %1").arg(QString::fromStdString(entry.display_name)));
-                    sessionTitle_->setText(
-                        QStringLiteral("Agent: %1\nSession: %2")
-                            .arg(QString::fromStdString(entry.display_name), QString::fromStdString(sessionId)));
-                    appendTranscript(
+                    setAgentStatus(QStringLiteral("Connected to %1").arg(QString::fromStdString(entry.display_name)));
+                    agentStatus_->setToolTip({});
+                    addAgentSession(
+                        sessionId, configOptionsJson,
                         QStringLiteral("Connected. ACP session %1.\n").arg(QString::fromStdString(sessionId)));
+                    refreshPastAgentSessions();
                 } else {
-                    agentStatus_->setText(error);
-                    sessionTitle_->setText(QStringLiteral("No active session"));
+                    setAgentStatus(error);
+                    agentStatus_->setToolTip({});
                     appendTranscript(error + QStringLiteral("\n"));
                 }
                 updateAgentControls();
@@ -391,7 +1099,7 @@ void ActivityPanel::connectAgent() {
             Qt::QueuedConnection);
     }));
 #else
-    agentStatus_->setText(QStringLiteral("agentsdk-cpp is not available in this build."));
+    setAgentStatus(QStringLiteral("agentsdk-cpp is not available in this build."));
 #endif
 }
 
@@ -401,47 +1109,71 @@ void ActivityPanel::disconnectAgent() {
     agentBackend_->generation.fetch_add(1);
     agentConnected_ = false;
     agentConnecting_ = false;
-    promptRunning_ = false;
+    sessionCreating_ = false;
+    sessionClosing_ = false;
+    sessionLoading_ = false;
+    sessionListLoading_ = false;
+    loadSupported_ = false;
+    modelChanging_ = false;
 #ifdef ICE_HAVE_AGENTSDK
     if (agentBackend_->client)
         agentBackend_->client->terminate();
     agentBackend_->pool.waitForDone();
     agentBackend_->client.reset();
-    agentBackend_->session.reset();
+    agentBackend_->protocolSession.reset();
 #endif
-    if (sessionTitle_)
-        sessionTitle_->setText(QStringLiteral("No active session"));
-    if (agentStatus_)
-        agentStatus_->setText(QStringLiteral("Disconnected"));
+    if (agentStatus_) {
+        setAgentStatus({});
+        agentStatus_->setToolTip({});
+    }
+    agentSessions_.clear();
+    pastAgentSessions_.clear();
+    activeAgentSession_ = -1;
+    nextAgentSessionNumber_ = 1;
+    refreshSessionSelector();
+    showSessionTranscript();
+    populateModelSelector();
     updateAgentUsage(0, 0);
-    appendTranscript(QStringLiteral("\nDisconnected.\n"));
+    showAgentSetupPage();
     updateAgentControls();
 }
 
 void ActivityPanel::sendPrompt() {
-    if (!agentBackend_ || !agentConnected_ || promptRunning_ || !prompt_ || prompt_->text().trimmed().isEmpty())
+    if (!agentBackend_ || !agentConnected_ || !prompt_ || prompt_->text().trimmed().isEmpty())
+        return;
+    auto *session = activeAgentSession();
+    if (!session || session->promptRunning)
         return;
 #ifdef ICE_HAVE_AGENTSDK
-    if (!agentBackend_->session)
+    if (!agentBackend_->client)
         return;
     const auto text = prompt_->text().trimmed();
+    const auto acpSessionId = session->acpSessionId;
     prompt_->clear();
-    appendTranscript(QStringLiteral("\nYou: %1\n").arg(text));
-    setPromptRunning(true);
+    appendSessionTranscript(acpSessionId, QStringLiteral("\nYou: %1\n").arg(text));
+    setSessionPromptRunning(acpSessionId, true);
     const auto generation = agentBackend_->generation.load();
-    auto *session = agentBackend_->session.get();
-    agentBackend_->pool.start(QRunnable::create([this, session, text, generation] {
-        const bool ok = session->prompt(text.toStdString());
+    auto *client = agentBackend_->client.get();
+    agentBackend_->pool.start(QRunnable::create([this, client, acpSessionId, text, generation] {
+        nlohmann::json params;
+        params["sessionId"] = acpSessionId;
+        params["prompt"] = nlohmann::json::array({nlohmann::json{{"type", "text"}, {"text", text.toStdString()}}});
+        const bool ok = !client->send_request("session/prompt", params.dump(), std::chrono::milliseconds{0}).empty();
         if (!agentBackend_ || !agentBackend_->alive.load())
             return;
         QMetaObject::invokeMethod(
             this,
-            [this, ok, generation] {
+            [this, ok, acpSessionId, generation] {
                 if (!agentBackend_ || !agentBackend_->alive.load() || agentBackend_->generation.load() != generation)
                     return;
-                setPromptRunning(false);
-                appendTranscript(ok ? QStringLiteral("\n[Turn complete]\n")
-                                    : QStringLiteral("\n[Prompt failed or cancelled]\n"));
+                auto *session = findAgentSession(acpSessionId);
+                if (!session)
+                    return;
+                session->promptRunning = false;
+                appendSessionTranscript(acpSessionId, ok ? QStringLiteral("\n[Turn complete]\n")
+                                                         : QStringLiteral("\n[Prompt failed or cancelled]\n"));
+                if (session == activeAgentSession())
+                    updateAgentControls();
             },
             Qt::QueuedConnection);
     }));
@@ -450,15 +1182,20 @@ void ActivityPanel::sendPrompt() {
 
 void ActivityPanel::cancelPrompt() {
 #ifdef ICE_HAVE_AGENTSDK
-    if (agentBackend_ && agentBackend_->session) {
-        appendTranscript(QStringLiteral("\nCancelling current turn...\n"));
-        agentBackend_->session->cancel();
+    auto *session = activeAgentSession();
+    if (agentBackend_ && agentBackend_->client && session) {
+        appendSessionTranscript(session->acpSessionId, QStringLiteral("\nCancelling current turn...\n"));
+        nlohmann::json params;
+        params["sessionId"] = session->acpSessionId;
+        agentBackend_->client->send_notification("session/cancel", params.dump());
     }
 #endif
 }
 
-void ActivityPanel::handleAgentUpdate(const std::string &params) {
+void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std::string &params) {
     QString text;
+    QString messageId;
+    bool userMessage = false;
     std::optional<qint64> used;
     std::optional<qint64> size;
     try {
@@ -468,11 +1205,23 @@ void ActivityPanel::handleAgentUpdate(const std::string &params) {
             return;
         const auto &update = *updateIt;
         const auto kind = jsonString(update, "sessionUpdate");
-        if (kind == QStringLiteral("agent_message_chunk") || kind == QStringLiteral("agent_thought_chunk")) {
+        if (kind == QStringLiteral("user_message_chunk")) {
+            const auto contentIt = update.find("content");
+            if (contentIt != update.end() && contentIt->is_object() &&
+                jsonString(*contentIt, "type") == QStringLiteral("text")) {
+                text = jsonString(*contentIt, "text");
+                messageId = jsonString(update, "messageId");
+                userMessage = true;
+            }
+        } else if (kind == QStringLiteral("agent_message_chunk") || kind == QStringLiteral("agent_thought_chunk")) {
             const auto contentIt = update.find("content");
             if (contentIt != update.end() && contentIt->is_object() &&
                 jsonString(*contentIt, "type") == QStringLiteral("text"))
                 text = jsonString(*contentIt, "text");
+        } else if (kind == QStringLiteral("session_info_update") ||
+                   kind == QStringLiteral("available_commands_update") ||
+                   kind == QStringLiteral("current_mode_update") || kind == QStringLiteral("config_option_update")) {
+            return;
         } else if (kind == QStringLiteral("tool_call") || kind == QStringLiteral("tool_call_update")) {
             const auto title = jsonString(update, "title", QStringLiteral("Tool call"));
             const auto status = jsonString(update, "status");
@@ -510,12 +1259,26 @@ void ActivityPanel::handleAgentUpdate(const std::string &params) {
         return;
     QMetaObject::invokeMethod(
         this,
-        [this, text, used, size] {
+        [this, acpSessionId, text, messageId, userMessage, used, size] {
             if (!agentBackend_ || !agentBackend_->alive.load())
                 return;
-            appendTranscript(text);
-            if (used && size)
-                updateAgentUsage(*used, *size);
+            auto *session = findAgentSession(acpSessionId);
+            if (!session)
+                return;
+            if (!text.isEmpty()) {
+                auto formatted = text;
+                if (userMessage && (messageId.isEmpty() || session->lastUserMessageId != messageId)) {
+                    formatted = QStringLiteral("\nYou: %1\n").arg(text);
+                    session->lastUserMessageId = messageId;
+                }
+                appendSessionTranscript(acpSessionId, formatted);
+            }
+            if (used && size) {
+                session->used = *used;
+                session->size = *size;
+                if (session == activeAgentSession())
+                    updateAgentUsage(*used, *size);
+            }
         },
         Qt::QueuedConnection);
 }

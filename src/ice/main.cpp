@@ -22,6 +22,7 @@ int main(int argc, char **argv) {
         try {
             if (!window->setProject(ice::Project::load(argv[2])))
                 return 0;
+            window->setProjectPath(QString::fromStdString(argv[2]));
         } catch (const ice::ProjectError &) {
             window->showMessage(QStringLiteral("Unable to load project"));
         }

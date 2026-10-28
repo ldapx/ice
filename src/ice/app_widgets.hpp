@@ -50,17 +50,54 @@ class ActivityPanel : public QWidget {
 
   private:
     struct AgentBackend;
+    struct AgentSession {
+        std::string acpSessionId;
+        QString label;
+        QString transcript;
+        QString configOptionsJson;
+        QString modelConfigId;
+        QString lastUserMessageId;
+        qint64 used = 0;
+        qint64 size = 0;
+        bool modelAvailable = false;
+        bool promptRunning = false;
+        bool loading = false;
+    };
+    struct AgentSessionSummary {
+        std::string acpSessionId;
+        QString title;
+        QString updatedAt;
+    };
 
     void connectAgent();
     void disconnectAgent();
     void sendPrompt();
     void cancelPrompt();
-    void setPromptRunning(bool running);
     void updateAgentControls();
     void appendTranscript(const QString &text);
-    void handleAgentUpdate(const std::string &params);
+    void handleAgentUpdate(const std::string &acpSessionId, const std::string &params);
     std::string handleAgentPermission(const std::string &params);
     void updateAgentUsage(qint64 used, qint64 size);
+    void setAgentStatus(const QString &text);
+    void populateModelSelector();
+    void applyModelSelection();
+    void showAgentSetupPage();
+    void showAgentSessionPage();
+    AgentSession *activeAgentSession();
+    AgentSession *findAgentSession(const std::string &acpSessionId);
+    int findAgentSessionIndex(const std::string &acpSessionId) const;
+    void addAgentSession(const std::string &acpSessionId, const QString &configOptionsJson,
+                         const QString &initialTranscript = {});
+    void removeAgentSession(const std::string &acpSessionId);
+    void refreshSessionSelector();
+    void switchAgentSession(int index);
+    void showSessionTranscript();
+    void appendSessionTranscript(const std::string &acpSessionId, const QString &text);
+    void setSessionPromptRunning(const std::string &acpSessionId, bool running);
+    void newAgentSession();
+    void closeActiveAgentSession();
+    void refreshPastAgentSessions();
+    void loadAgentSession(const std::string &acpSessionId);
 
     QLabel *drcSummary_ = nullptr;
     QTableWidget *drcTable_ = nullptr;
@@ -69,21 +106,39 @@ class ActivityPanel : public QWidget {
     int agentTabIndex_ = -1;
 
     QComboBox *agentSelector_ = nullptr;
+    QComboBox *sessionSelector_ = nullptr;
+    QComboBox *modelSelector_ = nullptr;
     QLabel *agentStatus_ = nullptr;
-    QLabel *sessionTitle_ = nullptr;
     QLabel *tokens_ = nullptr;
     QProgressBar *contextUsage_ = nullptr;
     QPlainTextEdit *transcript_ = nullptr;
     QLineEdit *prompt_ = nullptr;
+    QStackedWidget *agentStack_ = nullptr;
     QPushButton *agentConnectButton_ = nullptr;
+    QPushButton *agentSessionButton_ = nullptr;
+    QPushButton *agentBackButton_ = nullptr;
+    QPushButton *agentDisconnectButton_ = nullptr;
+    QPushButton *newSessionButton_ = nullptr;
+    QPushButton *closeSessionButton_ = nullptr;
     QPushButton *sendButton_ = nullptr;
     QPushButton *cancelButton_ = nullptr;
     QListWidget *mcpServers_ = nullptr;
     std::unique_ptr<AgentBackend> agentBackend_;
+    std::vector<AgentSession> agentSessions_;
+    std::vector<AgentSessionSummary> pastAgentSessions_;
     QString projectPath_;
+    int activeAgentSession_ = -1;
+    int nextAgentSessionNumber_ = 1;
     bool agentConnected_ = false;
     bool agentConnecting_ = false;
-    bool promptRunning_ = false;
+    bool sessionCreating_ = false;
+    bool sessionClosing_ = false;
+    bool sessionLoading_ = false;
+    bool sessionListLoading_ = false;
+    bool loadSupported_ = false;
+    bool refreshingSessionSelector_ = false;
+    bool modelChanging_ = false;
+    bool updatingModelSelector_ = false;
 };
 
 class CommandPalette : public QDialog {

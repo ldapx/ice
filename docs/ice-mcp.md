@@ -32,7 +32,6 @@ go to stderr.
 | `ice_version` | Return the ICE version. |
 | `project_create` | Create and open a project file. |
 | `project_open` | Open an existing project. |
-| `project_save` | Save the open project. |
 | `project_summary` | List schematics, layouts, layers, and simulations. |
 | `project_validate` | Return validation diagnostics. |
 | `project_undo` / `project_redo` | Move through project history. |
@@ -51,8 +50,8 @@ go to stderr.
 Cells and layers may be referenced by name or numeric id. Coordinates are
 integer database units.
 
-Mutations are transactional in memory and recorded in project history. Call
-`project_save` to persist them.
+Mutations are transactional in memory and recorded in project history. The MCP
+server does not write them to disk. Use `ice-cli` for persisted project changes.
 
 ## Resources
 

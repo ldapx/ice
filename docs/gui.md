@@ -79,6 +79,13 @@ Project state, view state, and transient job state should be separate:
 | View state | zoom, panes, selections, visibility | optional UI settings |
 | Job state | running simulation, progress, cancellation | runtime and result records |
 
+The GUI watches `project.icepro` and the `sch/`, `lay/`, and `sim/` directories.
+When files change externally and the project has no unsaved GUI edits, the
+project reloads automatically. If there are unsaved edits, the GUI reports that
+external changes are pending instead of discarding them. **File → Reload Project
+from Disk** reloads explicitly after confirmation, and saving warns before it
+would overwrite external changes.
+
 ## Command and transaction model
 
 User actions should be expressed as core commands or application services.
@@ -246,16 +253,27 @@ The **Agent** tab is the Agent Client Protocol (ACP) chat interface. It uses
 local ACP-capable agent as a subprocess over newline-delimited JSON-RPC on
 stdio.
 
-- Agents discovered on `PATH` appear in the agent selector.
-- **Connect** launches the selected agent and creates a new ACP session in the
-  current project directory.
-- The prompt box sends a user turn; the transcript shows assistant text,
-  thoughts, plans, tool-call updates, and turn completion.
+- The compact right panel has two pages. The first selects an ACP agent and
+  connects it. **Connect** launches the agent and creates the first ACP session,
+  but stays on the connection page; **Session** opens the session page.
+- The session page has a session selector plus **+** and **x** controls to
+  create and close sessions. All sessions share one agent process and ACP
+  connection. Each session keeps its own transcript, model, and token usage,
+  and sessions can be switched while a turn is running.
+- If the agent supports ACP session history, earlier sessions for the current
+  project appear below the open sessions (marked **↺**). Selecting one loads it
+  with `session/load` and replays its conversation into the transcript.
+- The session page also shows the **Model** selector and MCP server list.
+  **Agent** returns to the connection page; **Disconnect** ends the agent and
+  all of its sessions.
+- The **Model** selector is populated from the active session's ACP config
+  options and changes that session's model through `session/set_config_option`.
+- The prompt row sends a user turn; the transcript shows assistant text,
+  thoughts, plans, tool-call updates, and turn completion. **Cancel** sends an
+  ACP cancellation for the active session's prompt.
 - Agent permission requests open a modal dialog listing the options supplied by
   the agent.
-- Token usage updates the session panel when the agent reports `usage_update`.
-- **Cancel turn** sends an ACP cancellation for the active prompt.
-- **Disconnect** terminates the agent process and clears the session.
+- Token usage updates the session page when the agent reports `usage_update`.
 
 ACP support is compiled in when an `agentsdk-cpp` checkout is available next to
 the ICE repository or through `AGENTSDK_CPP_DIR`. Without it, the Agent tab is
