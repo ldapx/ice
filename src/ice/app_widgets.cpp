@@ -36,6 +36,7 @@
 #include <QRunnable>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QStandardPaths>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTextCursor>
@@ -1529,6 +1530,11 @@ constexpr auto kManualUrl = "https://github.com/ldapx/ice/tree/main/docs";
 constexpr auto kDonationUrl = "https://github.com/sponsors/ldapx";
 constexpr auto kSourceUrl = "https://github.com/ldapx/ice";
 constexpr auto kWebsiteUrl = "https://github.com/ldapx/ice";
+
+QString defaultProjectFolder() {
+    const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    return documents.isEmpty() ? QDir::homePath() : documents;
+}
 } // namespace
 
 StartupView::StartupView(QWidget *parent) : QWidget(parent) {
@@ -1574,7 +1580,7 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     name_ = new QLineEdit;
     name_->setPlaceholderText(QStringLiteral("My design"));
     name_->setClearButtonEnabled(true);
-    location_ = new QLineEdit(QDir::homePath());
+    location_ = new QLineEdit(defaultProjectFolder());
     auto *browseButton = new QPushButton(QStringLiteral("…"));
     browseButton->setFixedWidth(32);
     browseButton->setToolTip(QStringLiteral("Choose project folder"));
@@ -1670,6 +1676,8 @@ void StartupView::setOnCreateProject(CreateProjectCallback callback) { onCreateP
 void StartupView::setOnOpenProject(OpenProjectCallback callback) { onOpenProject_ = std::move(callback); }
 void StartupView::setOnOpenRecent(OpenRecentCallback callback) { onOpenRecent_ = std::move(callback); }
 
+void StartupView::setOnRemoveRecent(RemoveRecentCallback callback) { onRemoveRecent_ = std::move(callback); }
+
 void StartupView::setRecentProjects(const QStringList &paths) {
     recent_->clear();
     if (paths.isEmpty()) {
@@ -1680,9 +1688,43 @@ void StartupView::setRecentProjects(const QStringList &paths) {
     for (const auto &path : paths) {
         const QFileInfo info(path);
         const auto label = info.fileName() == QStringLiteral("project.icepro") ? info.dir().dirName() : info.fileName();
-        auto *item = new QListWidgetItem(label, recent_);
+        auto *item = new QListWidgetItem(recent_);
         item->setData(Qt::UserRole, path);
         item->setToolTip(path);
+
+        auto *row = new QWidget;
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(4, 0, 4, 0);
+        rowLayout->setSpacing(4);
+        auto *openButton = new QPushButton(label);
+        openButton->setFlat(true);
+        openButton->setCursor(Qt::PointingHandCursor);
+        openButton->setStyleSheet(
+            QStringLiteral("QPushButton { text-align: left; border: none; background: transparent; padding: 2px 0; }"
+                           "QPushButton:hover { text-decoration: underline; }"));
+        openButton->setToolTip(path);
+        rowLayout->addWidget(openButton, 1);
+        auto *removeButton = new QPushButton;
+        removeButton->setFlat(true);
+        removeButton->setFixedWidth(24);
+        removeButton->setToolTip(QStringLiteral("Remove from recent projects"));
+        removeButton->setAccessibleName(QStringLiteral("Remove %1 from recent projects").arg(label));
+        setLucideIcon(removeButton, QStringLiteral("trash"), 14);
+        rowLayout->addWidget(removeButton);
+        item->setSizeHint(row->sizeHint());
+        recent_->setItemWidget(item, row);
+        connect(openButton, &QPushButton::clicked, this, [this, path] {
+            if (onOpenRecent_)
+                onOpenRecent_(path);
+        });
+        connect(removeButton, &QPushButton::clicked, this, [this, path] {
+            // The callback rebuilds the list, which deletes this button. Defer
+            // it until the click signal has fully returned.
+            QTimer::singleShot(0, this, [this, path] {
+                if (onRemoveRecent_)
+                    onRemoveRecent_(path);
+            });
+        });
     }
 }
 
@@ -1714,7 +1756,7 @@ CreateProjectDialog::CreateProjectDialog(QWidget *parent) : QDialog(parent) {
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("untitled"));
     name_->setClearButtonEnabled(true);
-    folder_ = new QLineEdit(QDir::homePath());
+    folder_ = new QLineEdit(defaultProjectFolder());
     auto *browse = new QPushButton(QStringLiteral("…"));
     browse->setFixedWidth(32);
     browse->setToolTip(QStringLiteral("Choose project folder"));

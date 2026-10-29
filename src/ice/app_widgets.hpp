@@ -173,11 +173,13 @@ class StartupView : public QWidget {
     using CreateProjectCallback = std::function<void(const QString &name, const QString &folder, bool createFolder)>;
     using OpenProjectCallback = std::function<void()>;
     using OpenRecentCallback = std::function<void(const QString &path)>;
+    using RemoveRecentCallback = std::function<void(const QString &path)>;
 
     explicit StartupView(QWidget *parent = nullptr);
     void setOnCreateProject(CreateProjectCallback callback);
     void setOnOpenProject(OpenProjectCallback callback);
     void setOnOpenRecent(OpenRecentCallback callback);
+    void setOnRemoveRecent(RemoveRecentCallback callback);
     void setRecentProjects(const QStringList &paths);
     void clearCreateForm();
     void refreshAppearance();
@@ -195,6 +197,7 @@ class StartupView : public QWidget {
     CreateProjectCallback onCreateProject_;
     OpenProjectCallback onOpenProject_;
     OpenRecentCallback onOpenRecent_;
+    RemoveRecentCallback onRemoveRecent_;
 };
 
 class CreateProjectDialog : public QDialog {

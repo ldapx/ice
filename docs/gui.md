@@ -49,9 +49,10 @@ Panels should be dockable and replaceable without changing the core model. The
 `ice-cli`, `ice-pkg`, or `ice-mcp`.
 
 When no project is open, the central area shows a startup view with create and
-open project actions, recent projects, community links, and news. Document tabs
-and the activity dock appear once a project is loaded, and closing the project
-returns to the startup view.
+open project actions, recent projects, community links, and news. Each recent
+project row has a button to remove it from the list. Document tabs and the
+activity dock appear once a project is loaded, and closing the project returns to
+the startup view.
 
 ## Document and project lifecycle
 

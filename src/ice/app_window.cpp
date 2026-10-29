@@ -6319,6 +6319,7 @@ class DocumentWindow : public QMainWindow {
         });
         startupView_->setOnOpenProject([this] { openProject(); });
         startupView_->setOnOpenRecent([this](const QString &path) { openProjectPath(path); });
+        startupView_->setOnRemoveRecent([this](const QString &path) { removeRecentProject(path); });
         startupView_->setRecentProjects(loadRecentProjects());
         workspaceStack_->addWidget(startupView_);
         workspaceStack_->addWidget(documents);
