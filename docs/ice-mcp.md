@@ -61,9 +61,9 @@ go to stderr.
 Cells, layers, simulations, graphs, and simulation scripts may be referenced by
 name or numeric id. Coordinates are integer database units.
 
-Project mutations are transactional in memory and recorded in project history.
-Simulation script source files are written under `scripts/`, but script metadata
-remains in memory. Use `ice-cli` for persisted project and script changes.
+Project mutations are recorded in project history and saved automatically after
+each successful tool call, so the GUI and `ice-cli` see them immediately.
+Simulation script source files are written under `scripts/`.
 
 `simulation_script_run` executes the script through the shared Python runner and
 returns `exit_code`, `timed_out`, `stdout`, `stderr`, and generated graph data,

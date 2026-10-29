@@ -790,8 +790,8 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
            << "5. Run the simulation and create/run a simulation script that compares the results "
               "with the expectations and can generate GUI graphs.\n"
            << "6. If the expectations are not met, tweak the schematic and continue the loop.\n\n"
-           << "For scripted work, use `ice-cli` for persisted project edits. "
-              "`ice-mcp` project mutations are in memory; use `ice-cli` when changes must be saved.\n"
+           << "For scripted work, use `ice-cli` or `ice-mcp`. Successful `ice-mcp` project mutations "
+              "are saved to disk automatically.\n"
            << "Run stored simulations with `ice-cli simulation-run <project> <simulation>`; "
               "its run is written under `build/` and loaded by the GUI graph tabs.\n\n"
            << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";

@@ -155,7 +155,7 @@ TEST_CASE("projects save as split directory files") {
     CHECK(agentsText.find("typical workflow") != std::string::npos);
     CHECK(agentsText.find("tweak the schematic") != std::string::npos);
     CHECK(agentsText.find("simulation-run") != std::string::npos);
-    CHECK(agentsText.find("in memory") != std::string::npos);
+    CHECK(agentsText.find("saved to disk automatically") != std::string::npos);
     CHECK(agentsText.find("scripts/*.py") != std::string::npos);
     CHECK(agentsText.find("simulation script") != std::string::npos);
 

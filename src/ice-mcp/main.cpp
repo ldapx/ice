@@ -312,9 +312,9 @@ class IceMcpServer {
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
         server.set_instructions(
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
-            "project, schematic, layout, simulation graph, and simulation script tools. Project mutations are "
-            "transactional in memory; simulation script source files are written under scripts/, but project "
-            "metadata remains in memory. Use ice-cli for persisted project changes.");
+            "project, schematic, layout, simulation graph, and simulation script tools. Successful project "
+            "mutations are saved to disk automatically so the GUI and ice-cli can see them immediately. "
+            "Simulation script source files are written under scripts/.");
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
             return agentsdk::mcp::tools_list_result{listTools(), std::nullopt};
         });
@@ -430,6 +430,19 @@ class IceMcpServer {
     }
 
     json call(const std::string &name, const json &arguments) {
+        auto result = callInternal(name, arguments);
+        if (session_ && session_->dirty() && !projectPath_.empty()) {
+            try {
+                session_->save(projectPath_);
+                result["saved"] = true;
+            } catch (const ice::ProjectError &error) {
+                throw ToolError("Mutation was applied in memory but could not be saved: " + std::string(error.what()));
+            }
+        }
+        return result;
+    }
+
+    json callInternal(const std::string &name, const json &arguments) {
         std::string toolName = name;
         json toolArguments = arguments;
         if (toolName.starts_with("simulation_script_")) {
