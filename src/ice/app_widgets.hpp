@@ -14,6 +14,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 class QComboBox;
 class QCheckBox;
@@ -212,33 +214,47 @@ class CreateProjectDialog : public QDialog {
 class EmptySchematicPanel : public QWidget {
   public:
     using CreateCallback = std::function<void(const QString &name, const std::string &pdk)>;
+    using OpenCallback = std::function<void(ice::ObjectId)>;
     explicit EmptySchematicPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
+    void setOnOpen(OpenCallback callback);
+    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
 
   private:
     void submit();
 
+    QLabel *description_ = nullptr;
+    QWidget *openSection_ = nullptr;
+    QComboBox *open_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
     CreateCallback onCreate_;
+    OpenCallback onOpen_;
 };
 
 class EmptyLayoutPanel : public QWidget {
   public:
     using CreateCallback = std::function<void(const QString &name, const std::string &pdk)>;
+    using OpenCallback = std::function<void(ice::ObjectId)>;
     explicit EmptyLayoutPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
+    void setOnOpen(OpenCallback callback);
+    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
 
   private:
     void submit();
 
+    QLabel *description_ = nullptr;
+    QWidget *openSection_ = nullptr;
+    QComboBox *open_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
     CreateCallback onCreate_;
+    OpenCallback onOpen_;
 };
 
 class CreateLayoutDialog : public QDialog {

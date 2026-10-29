@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QRectF>
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <cmath>
@@ -42,7 +43,7 @@ bool isAnalysisControlDirective(const QString &line) {
 
 QStringList parseSignalList(const QString &text) {
     QStringList signalNames;
-    for (const auto &part : text.split(',', Qt::SkipEmptyParts)) {
+    for (const auto &part : text.split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts)) {
         const auto signal = part.trimmed();
         if (signal.isEmpty() || signalNames.contains(signal, Qt::CaseInsensitive))
             continue;

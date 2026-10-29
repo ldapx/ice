@@ -245,8 +245,8 @@ struct SimulationItem {
     std::vector<SimulationGraph> graphs;
 };
 
-// A project-level Python report. Reports are stored in reports/ and can read
-// any simulation run in the project.
+// A project-level Python simulation script. Scripts are stored in scripts/ and
+// can read any simulation run in the project.
 struct ProjectReport {
     ObjectId id = 0;
     std::string name;

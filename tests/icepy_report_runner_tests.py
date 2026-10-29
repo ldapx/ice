@@ -1,4 +1,4 @@
-"""Headless smoke test for the project-level simulation report runner."""
+"""Headless smoke test for the project-level simulation script runner."""
 
 from __future__ import annotations
 
@@ -57,18 +57,23 @@ def write_run(
     (directory / f"{run_id}.json").write_text(json.dumps(document))
 
 
-def run_report(project_root: Path, report: Path) -> subprocess.CompletedProcess[str]:
+def run_report(
+    project_root: Path, report: Path, graph_output: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(REPOSITORY / "python")
+    command = [
+        sys.executable,
+        str(RUNNER),
+        "--project-root",
+        str(project_root),
+        "--report",
+        str(report),
+    ]
+    if graph_output is not None:
+        command.extend(["--graph-output", str(graph_output)])
     return subprocess.run(
-        [
-            sys.executable,
-            str(RUNNER),
-            "--project-root",
-            str(project_root),
-            "--report",
-            str(report),
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -96,34 +101,62 @@ def test_report_builder_can_compare_multiple_simulations() -> None:
             [0.0, 0.7, 1.2, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         )
         report = root / "compare.py"
+        graph_output = root / "graphs.json"
         report.write_text(
-            "def build_report(ctx):\n"
+            "def build_script(ctx):\n"
             "    print('computing comparison')\n"
             "    rows = []\n"
             "    for name, run in sorted(ctx.latest_many().items()):\n"
+            "        ctx.graph(name, run=run, signals=['v(n1)'])\n"
             "        metrics = run.trace('v(n1)').metrics()\n"
             "        rows.append(f'{name}: {run.state} {run.trace(\"v(n1)\").size} '\n"
             "                    f'{metrics.settling_time:.3f}')\n"
             "    return '\\n'.join(rows)\n"
         )
-        result = run_report(root, report)
+        result = run_report(root, report, graph_output)
         assert result.returncode == 0, result.stderr
         assert "computing comparison" in result.stderr
         assert "alpha: succeeded 11 0.560" in result.stdout
         assert "beta: succeeded 11 0.290" in result.stdout
+        payload = json.loads(graph_output.read_text())
+        assert payload["format"] == "ice-simulation-script-graphs"
+        assert [graph["name"] for graph in payload["graphs"]] == ["alpha", "beta"]
+        assert payload["graphs"][0]["series"][0]["name"] == "v(n1)"
+        assert len(payload["graphs"][0]["x"]) == 11
+
+
+def test_script_can_generate_graphs_from_explicit_arrays() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        report = root / "derived.py"
+        graph_output = root / "graphs.json"
+        report.write_text(
+            "def build_script(ctx):\n"
+            "    ctx.graph('Derived metric', x=[0, 1, 2], y={'gain': [1, 2, 4]}, x_axis='index')\n"
+            "    return '# Derived'\n"
+        )
+        result = run_report(root, report, graph_output)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(graph_output.read_text())
+        graph = payload["graphs"][0]
+        assert graph["name"] == "Derived metric"
+        assert graph["x_axis"] == "index"
+        assert graph["x"] == [0.0, 1.0, 2.0]
+        assert graph["series"] == [{"name": "gain", "values": [1.0, 2.0, 4.0]}]
 
 
 def test_module_without_builder_uses_stdout() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         report = root / "script.py"
-        report.write_text("print('# Script report')\n")
+        report.write_text("print('# Simulation script')\n")
         result = run_report(root, report)
         assert result.returncode == 0, result.stderr
-        assert "# Script report" in result.stdout
+        assert "# Simulation script" in result.stdout
 
 
 if __name__ == "__main__":
     test_report_builder_can_compare_multiple_simulations()
+    test_script_can_generate_graphs_from_explicit_arrays()
     test_module_without_builder_uses_stdout()
-    print("icepy report runner tests passed")
+    print("icepy simulation script runner tests passed")

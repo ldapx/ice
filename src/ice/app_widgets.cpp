@@ -1769,9 +1769,20 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     auto *card = new QGroupBox(QStringLiteral("Create a schematic"));
     card->setMaximumWidth(520);
     auto *cardLayout = new QVBoxLayout(card);
-    auto *description = new QLabel(QStringLiteral("This project has no schematics yet. Create one to start drawing."));
-    description->setWordWrap(true);
-    cardLayout->addWidget(description);
+    description_ = new QLabel(QStringLiteral("This project has no schematics yet. Create one to start drawing."));
+    description_->setWordWrap(true);
+    cardLayout->addWidget(description_);
+
+    openSection_ = new QWidget;
+    auto *openSectionLayout = new QHBoxLayout(openSection_);
+    openSectionLayout->setContentsMargins(0, 0, 0, 0);
+    open_ = new QComboBox;
+    open_->setAccessibleName(QStringLiteral("Open schematic"));
+    openSectionLayout->addWidget(open_, 1);
+    auto *openButton = new QPushButton(QStringLiteral("Open"));
+    openSectionLayout->addWidget(openButton);
+    cardLayout->addWidget(openSection_);
+
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("top"));
     name_->setClearButtonEnabled(true);
@@ -1790,11 +1801,33 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     layout->addStretch(1);
 
     refreshPdks(configuredPackageInstallDirectory());
+    setOpenCandidates({});
     connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
     connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
+    connect(openButton, &QPushButton::clicked, this, [this] {
+        const auto id = static_cast<ice::ObjectId>(open_->currentData().toULongLong());
+        if (id != 0 && onOpen_)
+            onOpen_(id);
+    });
 }
 
 void EmptySchematicPanel::setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
+
+void EmptySchematicPanel::setOnOpen(OpenCallback callback) { onOpen_ = std::move(callback); }
+
+void EmptySchematicPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates) {
+    const QSignalBlocker blocker(open_);
+    open_->clear();
+    for (const auto &[id, name] : candidates)
+        open_->addItem(name, QVariant::fromValue<qulonglong>(id));
+    const bool hasCandidates = !candidates.empty();
+    openSection_->setVisible(hasCandidates);
+    if (description_)
+        description_->setText(hasCandidates
+                                  ? QStringLiteral("All schematics are closed. Open an existing file or create a "
+                                                   "new schematic.")
+                                  : QStringLiteral("This project has no schematics yet. Create one to start drawing."));
+}
 
 void EmptySchematicPanel::refreshPdks(const std::filesystem::path &installDirectory) {
     const auto current = pdk_->currentData().toString();
@@ -1834,10 +1867,20 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     auto *card = new QGroupBox(QStringLiteral("Create a layout cell"));
     card->setMaximumWidth(520);
     auto *cardLayout = new QVBoxLayout(card);
-    auto *description =
-        new QLabel(QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
-    description->setWordWrap(true);
-    cardLayout->addWidget(description);
+    description_ = new QLabel(QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
+    description_->setWordWrap(true);
+    cardLayout->addWidget(description_);
+
+    openSection_ = new QWidget;
+    auto *openSectionLayout = new QHBoxLayout(openSection_);
+    openSectionLayout->setContentsMargins(0, 0, 0, 0);
+    open_ = new QComboBox;
+    open_->setAccessibleName(QStringLiteral("Open layout"));
+    openSectionLayout->addWidget(open_, 1);
+    auto *openButton = new QPushButton(QStringLiteral("Open"));
+    openSectionLayout->addWidget(openButton);
+    cardLayout->addWidget(openSection_);
+
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("top"));
     name_->setClearButtonEnabled(true);
@@ -1856,11 +1899,33 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     layout->addStretch(1);
 
     refreshPdks(configuredPackageInstallDirectory());
+    setOpenCandidates({});
     connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
     connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
+    connect(openButton, &QPushButton::clicked, this, [this] {
+        const auto id = static_cast<ice::ObjectId>(open_->currentData().toULongLong());
+        if (id != 0 && onOpen_)
+            onOpen_(id);
+    });
 }
 
 void EmptyLayoutPanel::setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
+
+void EmptyLayoutPanel::setOnOpen(OpenCallback callback) { onOpen_ = std::move(callback); }
+
+void EmptyLayoutPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates) {
+    const QSignalBlocker blocker(open_);
+    open_->clear();
+    for (const auto &[id, name] : candidates)
+        open_->addItem(name, QVariant::fromValue<qulonglong>(id));
+    const bool hasCandidates = !candidates.empty();
+    openSection_->setVisible(hasCandidates);
+    if (description_)
+        description_->setText(
+            hasCandidates ? QStringLiteral("All layout files are closed. Open an existing file or create a "
+                                           "new layout.")
+                          : QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
+}
 
 void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory) {
     const auto current = pdk_->currentData().toString();

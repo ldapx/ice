@@ -139,14 +139,14 @@ TEST_CASE("projects save as split directory files") {
     simulation.schematic = schematic;
     project.simulations.emplace(simulation.id, simulation);
     const auto report = project.nextId();
-    project.reports.emplace(report, ice::ProjectReport{report, "compare", "reports/compare.py"});
+    project.reports.emplace(report, ice::ProjectReport{report, "compare", "scripts/compare.py"});
 
     project.save(root);
     CHECK(std::filesystem::is_regular_file(root / "project.icepro"));
     CHECK(std::filesystem::is_directory(root / "sch"));
     CHECK(std::filesystem::is_directory(root / "lay"));
     CHECK(std::filesystem::is_directory(root / "sim"));
-    CHECK(std::filesystem::is_directory(root / "reports"));
+    CHECK(std::filesystem::is_directory(root / "scripts"));
     CHECK(std::filesystem::is_directory(root / "build"));
     CHECK(std::filesystem::is_regular_file(root / ".gitignore"));
     CHECK(std::filesystem::is_regular_file(root / "AGENTS.md"));
@@ -154,17 +154,21 @@ TEST_CASE("projects save as split directory files") {
     const std::string agentsText((std::istreambuf_iterator<char>(agentsStream)), {});
     CHECK(agentsText.find("typical workflow") != std::string::npos);
     CHECK(agentsText.find("tweak the schematic") != std::string::npos);
+    CHECK(agentsText.find("simulation-run") != std::string::npos);
+    CHECK(agentsText.find("in memory") != std::string::npos);
+    CHECK(agentsText.find("scripts/*.py") != std::string::npos);
+    CHECK(agentsText.find("simulation script") != std::string::npos);
 
     std::ifstream projectStream(root / "project.icepro");
     const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
     CHECK(projectJson.find("schematic_cells") == std::string::npos);
     CHECK(projectJson.find("layout_cells") == std::string::npos);
     CHECK(projectJson.find("simulations") == std::string::npos);
-    CHECK(projectJson.find("\"reports\"") != std::string::npos);
+    CHECK(projectJson.find("\"simulation_scripts\"") != std::string::npos);
     std::ifstream simulationFile(root / "sim" / "tran1.icesim");
     const std::string simulationJson((std::istreambuf_iterator<char>(simulationFile)), {});
     CHECK(simulationJson.find("reports") == std::string::npos);
-    CHECK(std::filesystem::is_directory(root / "reports"));
+    CHECK(std::filesystem::is_directory(root / "scripts"));
 
     const auto loaded = ice::Project::load(root / "project.icepro");
     CHECK(loaded.name == project.name);
@@ -178,6 +182,7 @@ TEST_CASE("projects save as split directory files") {
     std::ifstream ignoreStream(root / ".gitignore");
     const std::string ignoreText((std::istreambuf_iterator<char>(ignoreStream)), {});
     CHECK(ignoreText.find("reports/") == std::string::npos);
+    CHECK(ignoreText.find("scripts/") == std::string::npos);
     CHECK(ignoreText.find("build/") != std::string::npos);
 
     std::filesystem::remove_all(root);
@@ -1088,19 +1093,19 @@ TEST_CASE("project reports are project-level metadata") {
     project.identity = "design";
     project.name = "design";
     const auto reportId = project.nextId();
-    project.reports.emplace(reportId, ice::ProjectReport{reportId, "rlc comparison", "reports/rlc_comparison.py"});
+    project.reports.emplace(reportId, ice::ProjectReport{reportId, "rlc comparison", "scripts/rlc_comparison.py"});
     CHECK(project.validate().empty());
     CHECK(project.nextId() == reportId + 1);
     const auto roundTrip = ice::Project::deserialize(project.serialize());
     CHECK(roundTrip.reports.contains(reportId));
     CHECK(roundTrip.reports.at(reportId).name == "rlc comparison");
-    CHECK(roundTrip.reports.at(reportId).path == "reports/rlc_comparison.py");
+    CHECK(roundTrip.reports.at(reportId).path == "scripts/rlc_comparison.py");
 
     auto invalid = project;
     invalid.reports.at(reportId).path = "../outside.py";
     CHECK(!invalid.validate().empty());
     auto invalidExtension = project;
-    invalidExtension.reports.at(reportId).path = "reports/outside.txt";
+    invalidExtension.reports.at(reportId).path = "scripts/outside.txt";
     CHECK(!invalidExtension.validate().empty());
 }
 
@@ -1135,7 +1140,7 @@ TEST_CASE("simulation runs are persisted under the project build directory") {
     context.projectName = project.name;
     context.simulationId = simulationId;
     context.simulationName = simulation.name;
-    context.schematicId = 0;
+    context.schematicId = 42;
     context.schematicName = "rlc";
     context.request = request;
     context.directives = "";
@@ -1165,6 +1170,19 @@ TEST_CASE("simulation runs are persisted under the project build directory") {
     CHECK(content.find("\"state\": \"succeeded\"") != std::string::npos);
     CHECK(content.find("\"test note\"") != std::string::npos);
     CHECK(content.find("\"RLC response\"") != std::string::npos);
+
+    const auto stored = ice::readSimulationRun(artifact.path);
+    CHECK(stored.runId == artifact.runId);
+    CHECK(stored.simulationId == simulationId);
+    CHECK(stored.schematicId == 42);
+    CHECK(stored.result.time.size() == 2);
+    CHECK(stored.result.traces.size() == 2);
+    const auto latest = ice::latestSimulationRun(context.projectRoot, simulationId);
+    CHECK(latest.has_value());
+    CHECK(latest->path == artifact.path);
+    const auto latestBySchematic = ice::latestSimulationRun(context.projectRoot, std::nullopt, 42);
+    CHECK(latestBySchematic.has_value());
+    CHECK(latestBySchematic->runId == artifact.runId);
 
     auto failed = result;
     failed.state = ice::JobState::failed;
@@ -1197,20 +1215,57 @@ TEST_CASE("project reports can be created and edited through core helpers") {
     CHECK(project.reports.contains(reportId));
     const auto &report = project.reports.at(reportId);
     CHECK(report.name == "Comparison Report");
-    CHECK(report.path == "reports/comparison-report.py");
+    CHECK(report.path == "scripts/comparison-report.py");
     CHECK(std::filesystem::is_regular_file(root / report.path));
     CHECK(ice::readProjectReportSource(root, report).find("# custom report") != std::string::npos);
 
     ice::writeProjectReportSource(root, report, "# updated\n");
     CHECK(ice::readProjectReportSource(root, report) == "# updated\n");
     CHECK(project.validate().empty());
+    const auto graphPath = ice::projectSimulationScriptGraphPath(root, report);
+    CHECK(graphPath.filename() == "graphs.json");
+    CHECK(graphPath.string().find("build/simulation-scripts") != std::string::npos);
     CHECK(ice::sanitizedReportSlug("../../Comp/are") == "comp-are");
     CHECK_THROWS_AS(ice::createProjectReport(project, root, "Comparison Report", "# duplicate\n"), ice::ProjectError);
 
     const auto templateReportId = ice::createProjectReport(project, root, "Template Report");
-    CHECK(ice::readProjectReportSource(root, project.reports.at(templateReportId)).find("# ICE simulation report") !=
+    CHECK(ice::readProjectReportSource(root, project.reports.at(templateReportId)).find("# ICE simulation script") !=
           std::string::npos);
     std::filesystem::remove_all(root);
+}
+
+TEST_CASE("simulation script graph payloads are parsed for the GUI") {
+    const std::string payload = R"JSON({
+  "format": "ice-simulation-script-graphs",
+  "version": 1,
+  "graphs": [
+    {
+      "name": "RLC response",
+      "x_axis": "time",
+      "x": [0.0, 1e-9, 2e-9],
+      "series": [
+        {"name": "in", "values": [0.0, 5.0, 5.0]},
+        {"name": "n2", "values": [0.0, 0.2, 0.4]}
+      ],
+      "x_min": 0.0,
+      "x_max": 2e-9,
+      "y_min": null,
+      "y_max": 5.0
+    }
+  ]
+})JSON";
+    const auto graphs = ice::parseSimulationScriptGraphs(payload);
+    CHECK(graphs.size() == 1);
+    CHECK(graphs[0].name == "RLC response");
+    CHECK(graphs[0].x.size() == 3);
+    CHECK(graphs[0].series.size() == 2);
+    CHECK(graphs[0].series[1].name == "n2");
+    CHECK(graphs[0].xMin.has_value());
+    CHECK(!graphs[0].yMin.has_value());
+    CHECK_THROWS_AS(ice::parseSimulationScriptGraphs("{\"format\":\"ice-simulation-script-graphs\","
+                                                     "\"graphs\":[{\"name\":\"bad\",\"x\":[0,1],"
+                                                     "\"series\":[{\"name\":\"s\",\"values\":[0]}]}]}"),
+                    ice::ProjectError);
 }
 
 TEST_CASE("simulation graph metadata is editable through core helpers") {

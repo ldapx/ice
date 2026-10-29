@@ -231,16 +231,19 @@ std::vector<Diagnostic> Project::validate() const {
     std::unordered_set<std::string> reportNames;
     for (const auto &[reportId, report] : reports) {
         if (report.name.empty())
-            result.push_back({Diagnostic::Severity::error, "report.name", "Report name is required", reportId});
+            result.push_back(
+                {Diagnostic::Severity::error, "report.name", "Simulation script name is required", reportId});
         else if (!reportNames.insert(report.name).second)
             result.push_back({Diagnostic::Severity::error, "report.name.duplicate",
-                              "Report name is listed more than once: " + report.name, reportId});
+                              "Simulation script name is listed more than once: " + report.name, reportId});
         const auto normalized = std::filesystem::path(report.path).lexically_normal();
         const auto first = normalized.begin();
-        if (report.path.empty() || normalized.empty() || normalized.is_absolute() || first == normalized.end() ||
-            first->string() != "reports" || normalized.extension() != ".py")
+        const bool inScriptsDirectory =
+            first != normalized.end() && (first->string() == "scripts" || first->string() == "reports");
+        if (report.path.empty() || normalized.empty() || normalized.is_absolute() || !inScriptsDirectory ||
+            normalized.extension() != ".py")
             result.push_back({Diagnostic::Severity::error, "report.path",
-                              "Report path must be a relative Python file inside reports/", reportId});
+                              "Simulation script path must be a relative Python file inside scripts/", reportId});
     }
     return result;
 }
@@ -413,9 +416,9 @@ std::string Project::serialize() const {
         }
         j["simulations"].push_back(s);
     }
-    j["reports"] = json::array();
+    j["simulation_scripts"] = json::array();
     for (const auto &[id, report] : reports)
-        j["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+        j["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
     return j.dump(2) + "\n";
 }
 
@@ -643,8 +646,10 @@ Project Project::deserialize(const std::string &text) {
                 p.simulations.emplace(sim.id, std::move(sim));
             }
         }
-        if (j.contains("reports")) {
-            for (const auto &report : j.at("reports")) {
+        const auto *scripts = j.contains("simulation_scripts") ? &j.at("simulation_scripts")
+                                                               : (j.contains("reports") ? &j.at("reports") : nullptr);
+        if (scripts != nullptr) {
+            for (const auto &report : *scripts) {
                 ProjectReport entry;
                 entry.id = report.at("id");
                 entry.name = report.at("name");
@@ -748,10 +753,12 @@ void ensureGitignore(const std::filesystem::path &root) {
         if (text.find(line + "\n") == std::string::npos && text != line)
             text += (text.empty() || text.back() == '\n' ? "" : "\n") + line + "\n";
     };
-    // Reports are project source files, not generated output. Older projects
-    // may have been created when reports/ was ignored.
+    // Simulation scripts are project source files, not generated output. Older
+    // projects may have used reports/ before the directory was renamed.
     removeLine("reports/");
     removeLine("reports");
+    removeLine("scripts/");
+    removeLine("scripts");
     ensureLine("build/");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output)
@@ -773,16 +780,20 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
            << "- `sch/*.icesch` contains schematic cells.\n"
            << "- `lay/*.icelay` contains layout cells and procedural layouts.\n"
            << "- `sim/*.icesim` contains simulations.\n"
-           << "- `reports/*.py` contains project-level simulation reports.\n"
+           << "- `scripts/*.py` contains project-level simulation scripts.\n"
            << "- `build/` contains generated simulation results.\n\n"
            << "When the user asks you to make a schematic or circuit, use this typical workflow:\n\n"
            << "1. Clarify the expectations (waveforms, gain, bandwidth, settling, power, etc.).\n"
            << "2. Create or update the schematic.\n"
            << "3. Create the simulation and choose the signals to capture.\n"
            << "4. Create graphs that show the signals needed to check the expectations.\n"
-           << "5. Run the simulation and create/run a project report that compares the results "
-              "with the expectations.\n"
+           << "5. Run the simulation and create/run a simulation script that compares the results "
+              "with the expectations and can generate GUI graphs.\n"
            << "6. If the expectations are not met, tweak the schematic and continue the loop.\n\n"
+           << "For scripted work, use `ice-cli` for persisted project edits. "
+              "`ice-mcp` project mutations are in memory; use `ice-cli` when changes must be saved.\n"
+           << "Run stored simulations with `ice-cli simulation-run <project> <simulation>`; "
+              "its run is written under `build/` and loaded by the GUI graph tabs.\n\n"
            << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";
 }
 
@@ -825,7 +836,7 @@ void Project::save(const std::filesystem::path &path) const {
     prepareDirectory(schematicDir, ".icesch");
     prepareDirectory(layoutDir, ".icelay");
     prepareDirectory(simulationDir, ".icesim");
-    std::filesystem::create_directories(root / "reports");
+    std::filesystem::create_directories(root / "scripts");
     std::filesystem::create_directories(root / "build");
 
     writeJsonFile(root / "project.icepro", projectJson);

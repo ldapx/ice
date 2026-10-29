@@ -8,7 +8,6 @@
 #include <functional>
 #include <string>
 
-class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 
@@ -33,12 +32,10 @@ class ProceduralLayoutEditor : public QWidget {
     QString script() const;
     void setOnScriptEdited(std::function<void(const QString &)> callback);
     void setOnRegenerate(std::function<void()> callback);
-    void showMessage(const QString &message, bool error = false);
 
   private:
     QPlainTextEdit *editor_ = nullptr;
     QPushButton *regenerateButton_ = nullptr;
-    QLabel *status_ = nullptr;
     std::function<void(const QString &)> onScriptEdited_;
     std::function<void()> onRegenerate_;
 };

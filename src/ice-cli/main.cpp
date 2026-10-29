@@ -194,22 +194,61 @@ std::vector<ice::LayoutPoint> parsePoints(const std::vector<std::string> &args, 
 std::vector<std::string> splitSignals(const std::string &text) {
     std::vector<std::string> signals;
     std::string current;
-    for (const char character : text) {
-        if (character != ',') {
-            current.push_back(character);
-            continue;
-        }
-        const auto first = current.find_first_not_of(" \t");
-        const auto last = current.find_last_not_of(" \t");
+    const auto flush = [&] {
+        const auto first = current.find_first_not_of(" \t\r\n");
+        const auto last = current.find_last_not_of(" \t\r\n");
         if (first != std::string::npos)
             signals.push_back(current.substr(first, last - first + 1));
         current.clear();
+    };
+    for (const char character : text) {
+        if (character == ',' || std::isspace(static_cast<unsigned char>(character))) {
+            flush();
+            continue;
+        }
+        current.push_back(character);
     }
-    const auto first = current.find_first_not_of(" \t");
-    const auto last = current.find_last_not_of(" \t");
-    if (first != std::string::npos)
-        signals.push_back(current.substr(first, last - first + 1));
+    flush();
     return signals;
+}
+
+std::string trimText(const std::string &text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::string normalizeAnalysisName(const std::string &text) {
+    std::string normalized;
+    for (const unsigned char character : text) {
+        if (!std::isspace(character))
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+    }
+    if (normalized.empty() || normalized == "tran" || normalized == "transient")
+        return "transient";
+    if (normalized == "dc" || normalized == "dcsweep")
+        return "dc";
+    if (normalized == "ac" || normalized == "acsweep")
+        return "ac";
+    if (normalized == "op" || normalized == "operatingpoint")
+        return "op";
+    argumentError("Unsupported analysis: " + text);
+}
+
+bool isAnalysisDirective(const std::string &line) {
+    std::string normalized;
+    for (const unsigned char character : line) {
+        if (!std::isspace(character))
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+    }
+    const auto starts = [&](const char *name) {
+        const std::string prefix(name);
+        return normalized == prefix || (normalized.starts_with(prefix) && normalized.size() > prefix.size() &&
+                                        std::isspace(static_cast<unsigned char>(normalized[prefix.size()])));
+    };
+    return starts(".tran") || starts(".dc") || starts(".ac") || starts(".op") || normalized == ".end";
 }
 
 std::string readTextFile(const std::filesystem::path &path) {
@@ -269,7 +308,7 @@ json projectSummary(const ice::Project &project, const std::string &path) {
         {"layouts", json::array()},
         {"procedural_layouts", json::array()},
         {"simulations", json::array()},
-        {"reports", json::array()},
+        {"simulation_scripts", json::array()},
     };
     for (const auto &[id, cell] : project.schematicCells) {
         result["schematics"].push_back({{"id", id},
@@ -314,7 +353,7 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                          {"graphs", simulation.graphs.size()}});
     }
     for (const auto &[id, report] : project.reports)
-        result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+        result["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
     return result;
 }
 
@@ -469,6 +508,7 @@ void printHelp() {
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
               << "  simulation-list <project>\n"
+              << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
               << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
               << "  simulation-graph-list <project> <simulation>\n"
               << "  simulation-graph-info <project> <simulation> <graph>\n"
@@ -477,15 +517,16 @@ void printHelp() {
               << "  simulation-graph-delete <project> <simulation> <graph>\n"
               << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
               << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n\n"
-              << "Reports:\n"
-              << "  report-add <project> <name> [source-file]\n"
-              << "  report-list <project>\n"
-              << "  report-info <project> <report>\n"
-              << "  report-read <project> <report>\n"
-              << "  report-write <project> <report> <source-file|->\n"
-              << "  report-run <project> <report> [timeout-ms]\n"
-              << "  report-delete <project> <report>\n\n"
-              << "Reports may be referenced by name or id. Use '-' to read report source from stdin.\n";
+              << "Simulation scripts:\n"
+              << "  script-add <project> <name> [source-file]\n"
+              << "  script-list <project>\n"
+              << "  script-info <project> <script>\n"
+              << "  script-read <project> <script>\n"
+              << "  script-write <project> <script> <source-file|->\n"
+              << "  script-run <project> <script> [timeout-ms]\n"
+              << "  script-delete <project> <script>\n\n"
+              << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n"
+              << "The legacy report-* command names remain available as aliases.\n";
 }
 
 } // namespace
@@ -504,7 +545,9 @@ int main(int argc, char **argv) {
     args.reserve(static_cast<std::size_t>(argc - 1));
     for (int index = 1; index < argc; ++index)
         args.emplace_back(argv[index]);
-    const auto command = args.front();
+    auto command = args.front();
+    if (command.starts_with("script-"))
+        command = "report-" + command.substr(7);
     auto executablePath = ice::currentExecutablePath();
     if (executablePath.empty())
         executablePath = std::filesystem::absolute(argv[0]);
@@ -819,7 +862,7 @@ int main(int argc, char **argv) {
             simulation.name = args[2];
             simulation.schematic = schematic;
             if (args.size() >= 5)
-                simulation.analysis = args[4];
+                simulation.analysis = normalizeAnalysisName(args[4]);
             if (args.size() >= 6)
                 simulation.stop = parseDouble(args[5], "stop time");
             if (args.size() >= 7)
@@ -852,6 +895,88 @@ int main(int argc, char **argv) {
             expectArguments(args, 2, 2, "simulation-list <project>");
             const auto project = ice::Project::load(args[1]);
             printJson(projectSummary(project, args[1])["simulations"]);
+            return 0;
+        }
+
+        if (command == "simulation-run") {
+            expectArguments(args, 3, 5, "simulation-run <project> <simulation> [timeout-ms] [output.json]");
+            std::size_t end = args.size();
+            std::string outputPath;
+            if (end > 3 && std::filesystem::path(args.back()).extension() == ".json") {
+                outputPath = args.back();
+                --end;
+            }
+            if (end > 4)
+                argumentError("Usage: ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]");
+            const auto timeout = std::chrono::milliseconds(
+                end > 3 ? std::max<ice::Coordinate>(1, parseInteger(args[3], "timeout")) : 60000);
+
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            const auto schematic = project.schematicCells.find(simulation.schematic);
+            if (schematic == project.schematicCells.end())
+                throw ice::ProjectError("simulation.schematic", "Simulation references a missing schematic");
+
+            ice::SimulationRequest request;
+            request.analysis = normalizeAnalysisName(simulation.analysis);
+            request.simulator = simulation.simulator;
+            request.stop = simulation.stop;
+            request.step = simulation.step;
+            request.use_initial_conditions = simulation.use_initial_conditions;
+            std::vector<std::string> notes;
+            request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
+            std::istringstream directives(simulation.directives);
+            std::string directive;
+            while (std::getline(directives, directive)) {
+                const auto trimmed = trimText(directive);
+                if (!trimmed.empty() && !isAnalysisDirective(trimmed))
+                    request.netlist.push_back(trimmed);
+            }
+            request.probeSignals = splitSignals(simulation.captureSignals);
+
+            ice::SimulationRunner runner;
+            const auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
+                std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
+            });
+
+            ice::SimulationRunContext context;
+            context.projectRoot = projectRootForCli(args[1]);
+            context.projectIdentity = project.identity;
+            context.projectName = project.name;
+            context.simulationId = simulationId;
+            context.simulationName = simulation.name;
+            context.schematicId = simulation.schematic;
+            context.schematicName = schematic->second.name;
+            context.request = request;
+            context.directives = simulation.directives;
+            context.netlistNotes = std::move(notes);
+            context.graphs = simulation.graphs;
+
+            std::filesystem::path storedPath;
+            std::string runId;
+            if (outputPath.empty()) {
+                const auto artifact = ice::writeSimulationRun(context, result);
+                storedPath = artifact.path;
+                runId = artifact.runId;
+            } else {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw ice::ProjectError("simulation.save", "Unable to open simulation result path");
+                output << ice::serializeSimulationRun(context, result);
+                storedPath = outputPath;
+            }
+            json summary = {{"state", ice::jobStateName(result.state)},
+                            {"analysis", result.analysis},
+                            {"time_points", result.time.size()},
+                            {"traces", result.traces.size()},
+                            {"stored", storedPath.string()},
+                            {"error", result.error}};
+            if (!runId.empty())
+                summary["run_id"] = runId;
+            printJson(summary);
+            if (result.state != ice::JobState::succeeded)
+                throw ice::ProjectError("simulation." + ice::jobStateName(result.state), result.error);
             return 0;
         }
 
@@ -988,7 +1113,7 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-add") {
-            expectArguments(args, 3, 4, "report-add <project> <name> [source-file]");
+            expectArguments(args, 3, 4, "script-add <project> <name> [source-file]");
             auto project = ice::Project::load(args[1]);
             std::string source;
             if (args.size() > 3)
@@ -1001,14 +1126,14 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-list") {
-            expectArguments(args, 2, 2, "report-list <project>");
+            expectArguments(args, 2, 2, "script-list <project>");
             const auto project = ice::Project::load(args[1]);
-            printJson(projectSummary(project, args[1])["reports"]);
+            printJson(projectSummary(project, args[1])["simulation_scripts"]);
             return 0;
         }
 
         if (command == "report-info") {
-            expectArguments(args, 3, 3, "report-info <project> <report>");
+            expectArguments(args, 3, 3, "script-info <project> <script>");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto &report = project.reports.at(id);
@@ -1017,7 +1142,7 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-read") {
-            expectArguments(args, 3, 3, "report-read <project> <report>");
+            expectArguments(args, 3, 3, "script-read <project> <script>");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto &report = project.reports.at(id);
@@ -1029,7 +1154,7 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-write") {
-            expectArguments(args, 4, 4, "report-write <project> <report> <source-file|->");
+            expectArguments(args, 4, 4, "script-write <project> <script> <source-file|->");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto &report = project.reports.at(id);
@@ -1040,7 +1165,7 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-run") {
-            expectArguments(args, 3, 4, "report-run <project> <report> [timeout-ms]");
+            expectArguments(args, 3, 4, "script-run <project> <script> [timeout-ms]");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto &report = project.reports.at(id);
@@ -1049,6 +1174,12 @@ int main(int argc, char **argv) {
             const auto timeout = std::chrono::milliseconds(std::max<ice::Coordinate>(1, timeoutMs));
             const auto result = ice::runProjectReport(projectRootForCli(args[1]), report, executablePath, timeout);
             const bool ok = !result.timedOut && result.exitCode == 0;
+            json graphs = json::array();
+            if (!result.graphsText.empty()) {
+                const auto document = json::parse(result.graphsText, nullptr, false);
+                if (!document.is_discarded() && document.contains("graphs"))
+                    graphs = document.at("graphs");
+            }
             printJson({{"id", id},
                        {"name", report.name},
                        {"path", report.path},
@@ -1056,16 +1187,18 @@ int main(int argc, char **argv) {
                        {"timed_out", result.timedOut},
                        {"exit_code", result.exitCode},
                        {"stdout", result.stdoutText},
-                       {"stderr", result.stderrText}});
+                       {"stderr", result.stderrText},
+                       {"graphs", std::move(graphs)}});
             if (result.timedOut)
-                throw ice::ProjectError("report.timeout", "Report timed out");
+                throw ice::ProjectError("report.timeout", "Simulation script timed out");
             if (result.exitCode != 0)
-                throw ice::ProjectError("report.failed", "Report exited with code " + std::to_string(result.exitCode));
+                throw ice::ProjectError("report.failed",
+                                        "Simulation script exited with code " + std::to_string(result.exitCode));
             return 0;
         }
 
         if (command == "report-delete") {
-            expectArguments(args, 3, 3, "report-delete <project> <report>");
+            expectArguments(args, 3, 3, "script-delete <project> <script>");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto report = project.reports.at(id);

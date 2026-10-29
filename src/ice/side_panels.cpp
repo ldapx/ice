@@ -445,17 +445,17 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     auto *toolbarRow = new QHBoxLayout;
     toolbarRow->setContentsMargins(4, 0, 4, 4);
     search_ = new QLineEdit;
-    search_->setPlaceholderText(QStringLiteral("Search simulations and reports…"));
+    search_->setPlaceholderText(QStringLiteral("Search simulations and simulation scripts…"));
     search_->setClearButtonEnabled(true);
-    search_->setAccessibleName(QStringLiteral("Search simulations and reports"));
+    search_->setAccessibleName(QStringLiteral("Search simulations and simulation scripts"));
     addButton_ = new QPushButton;
-    addButton_->setToolTip(QStringLiteral("Add simulation or report"));
-    addButton_->setAccessibleName(QStringLiteral("Add simulation or report"));
+    addButton_->setToolTip(QStringLiteral("Add simulation or simulation script"));
+    addButton_->setAccessibleName(QStringLiteral("Add simulation or simulation script"));
     addButton_->setFixedWidth(28);
     setLucideIcon(addButton_, QStringLiteral("plus"), 16);
     deleteButton_ = new QPushButton;
-    deleteButton_->setToolTip(QStringLiteral("Delete selected simulation or report"));
-    deleteButton_->setAccessibleName(QStringLiteral("Delete selected simulation or report"));
+    deleteButton_->setToolTip(QStringLiteral("Delete selected simulation or simulation script"));
+    deleteButton_->setAccessibleName(QStringLiteral("Delete selected simulation or simulation script"));
     deleteButton_->setFixedWidth(28);
     setLucideIcon(deleteButton_, QStringLiteral("trash"), 16);
     deleteButton_->setEnabled(false);
@@ -487,7 +487,7 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     connect(addButton_, &QPushButton::clicked, this, [this] {
         QMenu menu(this);
         auto *simulationAction = menu.addAction(QStringLiteral("Add Simulation…"));
-        auto *reportAction = menu.addAction(QStringLiteral("Add Report…"));
+        auto *reportAction = menu.addAction(QStringLiteral("Add Simulation Script…"));
         const auto *chosen = menu.exec(addButton_->mapToGlobal(QPoint(0, addButton_->height())));
         if (chosen == simulationAction && onAdd_) {
             onAdd_();
@@ -530,12 +530,8 @@ void SimulationPanel::setProject(const ice::Project &project) {
             auto *item = new QTreeWidgetItem(tree_, {QString::fromStdString(sim.name)});
             item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             item->setIcon(0, hierarchyIcon("microscope"));
-            auto *graphsItem = new QTreeWidgetItem(item, {QStringLiteral("Graphs (%1)").arg(sim.graphs.size())});
-            graphsItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
-            graphsItem->setFlags(Qt::ItemIsEnabled);
-            graphsItem->setIcon(0, hierarchyIcon("chart-spline"));
             for (const auto &graph : sim.graphs) {
-                auto *graphItem = new QTreeWidgetItem(graphsItem, {QString::fromStdString(graph.name)});
+                auto *graphItem = new QTreeWidgetItem(item, {QString::fromStdString(graph.name)});
                 graphItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
                 graphItem->setData(0, Qt::UserRole + 1, QVariant::fromValue<qulonglong>(graph.id));
                 graphItem->setIcon(0, hierarchyIcon("chart-spline"));
@@ -613,13 +609,10 @@ void SimulationPanel::selectSimulation(ice::ObjectId id, ice::ObjectId graphId) 
         QTreeWidgetItem *target = item;
         if (graphId != 0) {
             for (int g = 0; g < item->childCount(); ++g) {
-                auto *graphsNode = item->child(g);
-                for (int c = 0; graphsNode && c < graphsNode->childCount(); ++c) {
-                    auto *graphItem = graphsNode->child(c);
-                    if (static_cast<ice::ObjectId>(graphItem->data(0, Qt::UserRole + 1).toULongLong()) == graphId) {
-                        target = graphItem;
-                        break;
-                    }
+                auto *graphItem = item->child(g);
+                if (static_cast<ice::ObjectId>(graphItem->data(0, Qt::UserRole + 1).toULongLong()) == graphId) {
+                    target = graphItem;
+                    break;
                 }
             }
         }
@@ -651,19 +644,10 @@ void SimulationPanel::applyFilter(const QString &text) {
         const bool simMatches = needle.isEmpty() || simItem->text(0).contains(needle, Qt::CaseInsensitive);
         bool anyGraphVisible = false;
         for (int childIndex = 0; childIndex < simItem->childCount(); ++childIndex) {
-            auto *graphsItem = simItem->child(childIndex);
-            const bool graphsMatch = needle.isEmpty() || graphsItem->text(0).contains(needle, Qt::CaseInsensitive);
-            bool anyChildVisible = false;
-            for (int graphIndex = 0; graphIndex < graphsItem->childCount(); ++graphIndex) {
-                auto *graphItem = graphsItem->child(graphIndex);
-                const bool graphVisible =
-                    simMatches || graphsMatch || graphItem->text(0).contains(needle, Qt::CaseInsensitive);
-                graphItem->setHidden(!graphVisible);
-                anyChildVisible |= graphVisible;
-            }
-            const bool graphsVisible = simMatches || graphsMatch || anyChildVisible;
-            graphsItem->setHidden(!graphsVisible);
-            anyGraphVisible |= graphsVisible;
+            auto *graphItem = simItem->child(childIndex);
+            const bool graphVisible = simMatches || graphItem->text(0).contains(needle, Qt::CaseInsensitive);
+            graphItem->setHidden(!graphVisible);
+            anyGraphVisible |= graphVisible;
         }
         simItem->setHidden(!simMatches && !anyGraphVisible);
     }
@@ -679,8 +663,8 @@ void SimulationPanel::showContextMenu(const QPoint &pos) {
     if (clicked->data(0, kReportIdRole).isValid()) {
         const auto reportId = static_cast<ice::ObjectId>(clicked->data(0, kReportIdRole).toULongLong());
         QMenu menu(this);
-        auto *openAction = menu.addAction(QStringLiteral("Open report file"));
-        auto *deleteAction = menu.addAction(QStringLiteral("Delete report"));
+        auto *openAction = menu.addAction(QStringLiteral("Open simulation script"));
+        auto *deleteAction = menu.addAction(QStringLiteral("Delete simulation script"));
         const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
         if (chosen == openAction && onOpenReport_)
             onOpenReport_(reportId);

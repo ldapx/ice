@@ -61,7 +61,7 @@ project.save("demo")
 
 `Project.save()` and `Project.load()` use the split project-directory
 format. The root contains `project.icepro`, `sch/*.icesch`,
-`lay/*.icelay`, `sim/*.icesim`, `reports/`, `build/`, `.gitignore`, and
+`lay/*.icelay`, `sim/*.icesim`, `scripts/`, `build/`, `.gitignore`, and
 `AGENTS.md`.
 
 ## Simulation metrics

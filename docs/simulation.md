@@ -45,7 +45,7 @@ comment.
 ## Stored runs
 
 The GUI plots the in-memory result returned by the simulator. Separately, every
-run is persisted so reports, notebooks, and external tools can analyze it
+run is persisted so simulation scripts, notebooks, and external tools can analyze it
 later. By default, stored runs live under the project build directory:
 
 ```text
@@ -57,7 +57,7 @@ the request/netlist, time samples, traces, and graph metadata. Runs are written
 atomically and include failed, cancelled, and timed-out terminal states.
 
 The stored format is intentionally new-only; legacy bare result JSON is not
-read by the report tooling.
+read by the simulation script tooling.
 
 ## Python metrics API
 
@@ -88,44 +88,59 @@ interpolated, and damping uses a log-decrement estimate from successive peaks.
 `MetricOptions` changes these thresholds and `Trace.crossing_time(level)` exposes
 raw threshold crossings.
 
-## Reports
+## Simulation scripts
 
-Project reports are Python files under `reports/` and are stored as
-`ProjectReport` metadata in `project.icepro`. A report can query every
-simulation and run in the project.
+Simulation scripts are Python files under `scripts/` and are stored as
+project-level metadata in `project.icepro`. A script can query every simulation
+and run in the project, return Markdown, and add graphs that the GUI renders.
 
 ```python
-def build_report(ctx):
-    runs = ctx.latest_many()
-    return "# Report\n\n..."  # Markdown
+def build_script(ctx):
+    run = ctx.latest("RLC")
+    if run is not None:
+        ctx.graph("RLC response", run=run, signals=["in", "n2"])
+    return "# Simulation script\n\n..."  # Markdown
 ```
 
-The report runner supplies `ctx.project_root`, `ctx.simulations()`,
-`ctx.runs()`, `ctx.latest()`, `ctx.latest_many()`, and `ctx.load()`. Reports are
-executed by `assets/simulation/report_runner.py`. The project-level report view
-inside the Simulation workspace edits the Python source; runner messages,
-errors, and output are appended to the **Messages** tab.
+The runner supplies `ctx.project_root`, `ctx.simulations()`, `ctx.runs()`,
+`ctx.latest()`, `ctx.latest_many()`, and `ctx.load()`. `ctx.graph(...)` accepts
+a stored run plus signal names, or explicit `x` and `y` arrays for values
+computed by the script. Multiple graphs can be added. Scripts are executed by
+the shared Python runner. The project-level script view inside the Simulation
+workspace edits the Python source; generated graphs appear in tabs below the
+editor, while runner messages, errors, and Markdown output are appended to the
+**Messages** tab. Generated graphs are cached under
+`build/simulation-scripts/` and reload when the script is selected. The legacy
+`build_report` function name is still accepted.
 
 ## CLI
 
 ```text
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
+ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
 ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
 ice-cli simulation-graph-delete <project> <simulation> <graph>
-ice-cli report-add <project> <name> [source-file]
-ice-cli report-read <project> <report>
-ice-cli report-write <project> <report> <source-file|->
-ice-cli report-run <project> <report> [timeout-ms]
+ice-cli script-add <project> <name> [source-file]
+ice-cli script-read <project> <script>
+ice-cli script-write <project> <script> <source-file|->
+ice-cli script-run <project> <script> [timeout-ms]
 ```
 
 When no output path is supplied, the run is stored under the project build
 directory. The optional arguments are stop time, step size, timeout in
-milliseconds, and captured signals. `simulation-add` creates a default graph
-from the captured signals; the `simulation-graph-*` commands let agents configure
-graph metadata (X/Y signals and optional limits), and the `report-*` commands let
-agents create, inspect, edit, and run reports against stored runs without
-launching the GUI.
+milliseconds, and captured signals. Signals may be comma- or whitespace-
+separated. `simulation-add` creates a default graph from the captured signals;
+the `simulation-graph-*` commands let agents configure graph metadata (X/Y signals
+and optional limits), and the `script-*` commands let agents create, inspect,
+edit, and run simulation scripts against stored runs without launching the GUI.
+`script-run` also returns the graph data produced by `ctx.graph(...)`.
+
+`simulation-run` runs a saved simulation definition and stores the run under
+that simulation's build directory. When a simulation is selected, the GUI loads
+its newest stored run into the graph tabs; if no simulation-specific run exists,
+it falls back to the newest run for the simulation's schematic. The GUI also
+watches `build/simulations` and refreshes the active plots when new runs appear.

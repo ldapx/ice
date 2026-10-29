@@ -4,7 +4,6 @@
 #include "icons.hpp"
 #include "layout_devices.hpp"
 #include "package_ui.hpp"
-#include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
 #include <QCoreApplication>
@@ -16,7 +15,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
-#include <QLabel>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
@@ -546,24 +544,16 @@ bool regenerateProceduralLayout(Project &project, ObjectId proceduralLayoutId, Q
 
 ProceduralLayoutEditor::ProceduralLayoutEditor(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
-    auto *titleRow = new QHBoxLayout;
-    titleRow->addWidget(heading(QStringLiteral("Python script")), 1);
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->setContentsMargins(6, 6, 6, 6);
+    buttonRow->addStretch(1);
     regenerateButton_ = new QPushButton(QStringLiteral("Regenerate layout"));
     setLucideIcon(regenerateButton_, QStringLiteral("refresh-cw"), 16);
-    titleRow->addWidget(regenerateButton_);
-    layout->addLayout(titleRow);
-
-    auto *hint = new QLabel(
-        QStringLiteral("This procedural layout is generated from the Python script below. Right-click the "
-                       "procedural layout in Hierarchy and choose Regenerate layout (or use the button above) "
-                       "to rebuild its static layout child. PDK packages can also add process-specific geometry; "
-                       "for example, layout.add_dummy_fill(...) invokes the active PDK package's dummy fill "
-                       "implementation."));
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    layout->addWidget(hint);
+    buttonRow->addWidget(regenerateButton_);
+    layout->addLayout(buttonRow);
 
     editor_ = new QPlainTextEdit;
     editor_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -574,10 +564,6 @@ ProceduralLayoutEditor::ProceduralLayoutEditor(QWidget *parent) : QWidget(parent
     editor_->setAccessibleName(QStringLiteral("Procedural layout Python script"));
     editor_->setPlaceholderText(QStringLiteral("Write Python that builds the layout through the `layout` object."));
     layout->addWidget(editor_, 1);
-
-    status_ = new QLabel;
-    status_->setWordWrap(true);
-    layout->addWidget(status_);
 
     connect(editor_, &QPlainTextEdit::textChanged, this, [this] {
         if (onScriptEdited_)
@@ -601,9 +587,3 @@ void ProceduralLayoutEditor::setOnScriptEdited(std::function<void(const QString 
 }
 
 void ProceduralLayoutEditor::setOnRegenerate(std::function<void()> callback) { onRegenerate_ = std::move(callback); }
-
-void ProceduralLayoutEditor::showMessage(const QString &message, bool error) {
-    status_->setText(message);
-    status_->setStyleSheet(error ? QStringLiteral("color: #d9534f; font-weight: bold;")
-                                 : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-}

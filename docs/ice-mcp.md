@@ -32,7 +32,7 @@ go to stderr.
 | `ice_version` | Return the ICE version. |
 | `project_create` | Create and open a project file. |
 | `project_open` | Open an existing project. |
-| `project_summary` | List schematics, layouts, layers, simulations, and reports. |
+| `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
 | `project_validate` | Return validation diagnostics. |
 | `project_undo` / `project_redo` | Move through project history. |
 | `schematic_create` | Create a drawn schematic cell. |
@@ -51,30 +51,31 @@ go to stderr.
 | `simulation_graph_info` | Read one graph definition. |
 | `simulation_graph_update` | Update axes, signals, or limits. |
 | `simulation_graph_delete` | Delete a graph while keeping the last one. |
-| `report_create` | Create a report file from a template or supplied source. |
-| `report_list` | List project-level reports. |
-| `report_read` | Read report metadata and Python source. |
-| `report_write` | Replace report source. |
-| `report_run` | Run a report and return stdout, stderr, and exit status. |
-| `report_delete` | Delete report metadata; the file remains. |
+| `simulation_script_create` | Create a simulation script from a template or supplied source. |
+| `simulation_script_list` | List project-level simulation scripts. |
+| `simulation_script_read` | Read simulation script metadata and Python source. |
+| `simulation_script_write` | Replace simulation script source. |
+| `simulation_script_run` | Run a script and return output plus generated graphs. |
+| `simulation_script_delete` | Delete script metadata; the file remains. |
 
-Cells, layers, simulations, graphs, and reports may be referenced by name or
-numeric id. Coordinates are integer database units.
+Cells, layers, simulations, graphs, and simulation scripts may be referenced by
+name or numeric id. Coordinates are integer database units.
 
 Project mutations are transactional in memory and recorded in project history.
-Report source files are written under `reports/`, but report metadata remains in
-memory. Use `ice-cli` for persisted project and report changes.
+Simulation script source files are written under `scripts/`, but script metadata
+remains in memory. Use `ice-cli` for persisted project and script changes.
 
-`report_run` executes the report through the shared Python runner and returns
-`exit_code`, `timed_out`, `stdout`, and `stderr`, so agents can inspect analysis
-results and adjust the schematic in the same session.
+`simulation_script_run` executes the script through the shared Python runner and
+returns `exit_code`, `timed_out`, `stdout`, `stderr`, and generated graph data,
+so agents can inspect analysis results and adjust the schematic in the same
+session. The legacy `report_*` tool names remain accepted as aliases.
 
 ## Resources
 
 | URI | Contents |
 | --- | --- |
 | `ice://project/summary` | JSON summary of the open project. |
-| `ice://project/reports` | Report metadata and Python sources. |
+| `ice://project/simulation-scripts` | Simulation script metadata and Python sources. |
 | `ice://project/json` | Canonical serialized project JSON. |
 | `ice://project/validation` | Validation diagnostics. |
 

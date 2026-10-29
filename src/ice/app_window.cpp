@@ -162,8 +162,8 @@ class DocumentWindow : public QMainWindow {
 
     bool setProject(ice::Project project) {
         if (reportDirty_ && !saveReportSource()) {
-            QMessageBox::warning(this, QStringLiteral("Report"),
-                                 QStringLiteral("Unable to save the current report changes."));
+            QMessageBox::warning(this, QStringLiteral("Simulation Script"),
+                                 QStringLiteral("Unable to save the current simulation script changes."));
             return false;
         }
         if (!ensureProjectPackages(project))
@@ -228,16 +228,43 @@ class DocumentWindow : public QMainWindow {
             }
         }
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
+        project_->subscribe([this] { updateFileTabDirtyIndicators(); });
+        captureSavedFileBaselines();
+        conflictedSchematicFiles_.clear();
+        conflictedLayoutFiles_.clear();
+        conflictedProceduralFiles_.clear();
+        externalSchematicFiles_.clear();
+        externalLayoutFiles_.clear();
+        externalProceduralFiles_.clear();
         resetSectionHistories();
         layoutViewInitialized_ = false;
+        activeSchematicId_ = 0;
+        activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
+        activeSimulationId_ = 0;
         activeReportId_ = 0;
         selectingReport_ = false;
+        loadedCachedRunPath_.clear();
         if (schematicViewStack_ && schematicCanvasPage_)
             schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         if (layoutViewStack_ && layoutCanvasPage_)
             layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
-        openLibraryLayoutCellTabs_.clear();
+        openSchematicTabs_.clear();
+        openLayoutTabs_.clear();
+        knownSchematicCells_.clear();
+        knownLayoutCells_.clear();
+        knownProceduralLayouts_.clear();
+        // A freshly opened project starts with no document tabs. Seed the
+        // known sets so the first refresh does not treat every existing file
+        // as newly-created and open it automatically.
+        if (project_) {
+            for (const auto &[id, _] : project_->project().schematicCells)
+                knownSchematicCells_.insert(id);
+            for (const auto &[id, _] : project_->project().layoutCells)
+                knownLayoutCells_.insert(id);
+            for (const auto &[id, _] : project_->project().proceduralLayouts)
+                knownProceduralLayouts_.insert(id);
+        }
         clearLayoutDeviceSelection();
         if (layoutSelectTool_)
             layoutSelectTool_->setChecked(true);
@@ -437,11 +464,133 @@ class DocumentWindow : public QMainWindow {
             openProjectPath(path);
     }
 
+    bool resolveExternalFileConflicts() {
+        if (!project_)
+            return true;
+        const auto ask = [&](const QString &label, bool externalDeleted) -> std::optional<bool> {
+            QMessageBox box(this);
+            box.setIcon(QMessageBox::Warning);
+            box.setWindowTitle(QStringLiteral("External Changes Detected"));
+            box.setText(
+                QStringLiteral("The file \"%1\" was changed externally and also has unsaved GUI edits.%2\n\n"
+                               "Which version should be preserved when saving?")
+                    .arg(label, externalDeleted ? QStringLiteral("\n\nThe external version was deleted.") : QString()));
+            box.addButton(QStringLiteral("Keep My Version"), QMessageBox::AcceptRole);
+            auto *external = box.addButton(QStringLiteral("Use External Version"), QMessageBox::DestructiveRole);
+            auto *cancel = box.addButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == cancel || box.clickedButton() == nullptr)
+                return std::optional<bool>{};
+            return std::optional<bool>(box.clickedButton() == external);
+        };
+
+        std::map<ice::ObjectId, bool> schematicChoices;
+        std::map<ice::ObjectId, bool> layoutChoices;
+        std::map<ice::ObjectId, bool> proceduralChoices;
+        for (const auto id : conflictedSchematicFiles_) {
+            const auto current = project_->project().schematicCells.find(id);
+            const auto external = externalSchematicFiles_.find(id);
+            QString name = QString::number(id);
+            if (current != project_->project().schematicCells.end())
+                name = QString::fromStdString(current->second.name);
+            else if (external != externalSchematicFiles_.end())
+                name = QString::fromStdString(external->second.name);
+            const auto choice = ask(name + QStringLiteral(".icesch"), external == externalSchematicFiles_.end());
+            if (!choice)
+                return false;
+            schematicChoices[id] = *choice;
+        }
+        for (const auto id : conflictedLayoutFiles_) {
+            const auto current = project_->project().layoutCells.find(id);
+            const auto external = externalLayoutFiles_.find(id);
+            QString name = QString::number(id);
+            if (current != project_->project().layoutCells.end())
+                name = QString::fromStdString(current->second.name);
+            else if (external != externalLayoutFiles_.end())
+                name = QString::fromStdString(external->second.name);
+            const auto choice = ask(name + QStringLiteral(".icelay"), external == externalLayoutFiles_.end());
+            if (!choice)
+                return false;
+            layoutChoices[id] = *choice;
+        }
+        for (const auto id : conflictedProceduralFiles_) {
+            const auto current = project_->project().proceduralLayouts.find(id);
+            const auto external = externalProceduralFiles_.find(id);
+            QString name = QString::number(id);
+            if (current != project_->project().proceduralLayouts.end())
+                name = QString::fromStdString(current->second.name);
+            else if (external != externalProceduralFiles_.end())
+                name = QString::fromStdString(external->second.name);
+            const auto choice = ask(name + QStringLiteral(".icelay"), external == externalProceduralFiles_.end());
+            if (!choice)
+                return false;
+            proceduralChoices[id] = *choice;
+        }
+
+        for (const auto &[id, useExternal] : schematicChoices) {
+            if (!useExternal)
+                continue;
+            const auto external = externalSchematicFiles_.find(id);
+            if (external != externalSchematicFiles_.end()) {
+                project_->project().schematicCells[id] = external->second;
+                savedSchematicSignatures_[id] = schematicFileSignature(external->second);
+            } else {
+                project_->project().schematicCells.erase(id);
+                savedSchematicSignatures_.erase(id);
+            }
+        }
+        for (const auto &[id, useExternal] : layoutChoices) {
+            if (!useExternal)
+                continue;
+            const auto external = externalLayoutFiles_.find(id);
+            if (external != externalLayoutFiles_.end()) {
+                project_->project().layoutCells[id] = external->second;
+                savedLayoutSignatures_[id] = layoutFileSignature(external->second);
+            } else {
+                project_->project().layoutCells.erase(id);
+                savedLayoutSignatures_.erase(id);
+            }
+        }
+        for (const auto &[id, useExternal] : proceduralChoices) {
+            if (!useExternal)
+                continue;
+            const auto external = externalProceduralFiles_.find(id);
+            if (external != externalProceduralFiles_.end()) {
+                project_->project().proceduralLayouts[id] = external->second;
+                savedProceduralSignatures_[id] = proceduralFileSignature(external->second);
+            } else {
+                project_->project().proceduralLayouts.erase(id);
+                savedProceduralSignatures_.erase(id);
+            }
+        }
+
+        conflictedSchematicFiles_.clear();
+        conflictedLayoutFiles_.clear();
+        conflictedProceduralFiles_.clear();
+        externalSchematicFiles_.clear();
+        externalLayoutFiles_.clear();
+        externalProceduralFiles_.clear();
+        projectDiskChangePending_ = false;
+        refreshProject();
+        return true;
+    }
+
     void saveProject() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Save Project"),
                                      QStringLiteral("Create or open a project first."));
             return;
+        }
+        const bool hadExternalConflicts = !conflictedSchematicFiles_.empty() || !conflictedLayoutFiles_.empty() ||
+                                          !conflictedProceduralFiles_.empty();
+        if (projectDiskChangePending_ && !hadExternalConflicts)
+            reloadProjectFromDisk(false);
+        const bool hadExternalConflictsAfterReload = !conflictedSchematicFiles_.empty() ||
+                                                     !conflictedLayoutFiles_.empty() ||
+                                                     !conflictedProceduralFiles_.empty();
+        if (hadExternalConflictsAfterReload) {
+            if (!resolveExternalFileConflicts())
+                return;
         }
         if (projectDiskChangePending_) {
             const auto response =
@@ -470,6 +619,14 @@ class DocumentWindow : public QMainWindow {
         clearProjectWatcher();
         try {
             project_->save(path.toStdString());
+            captureSavedFileBaselines();
+            conflictedSchematicFiles_.clear();
+            conflictedLayoutFiles_.clear();
+            conflictedProceduralFiles_.clear();
+            externalSchematicFiles_.clear();
+            externalLayoutFiles_.clear();
+            externalProceduralFiles_.clear();
+            updateFileTabDirtyIndicators();
             projectPath_ = QFileInfo(path).isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
@@ -488,6 +645,21 @@ class DocumentWindow : public QMainWindow {
 
     void createProjectWatcher() {
         projectWatcher_ = new QFileSystemWatcher(this);
+        simulationRunWatcher_ = new QFileSystemWatcher(this);
+        simulationRunWatcherTimer_ = new QTimer(this);
+        simulationRunWatcherTimer_->setSingleShot(true);
+        simulationRunWatcherTimer_->setInterval(150);
+        connect(simulationRunWatcherTimer_, &QTimer::timeout, this, [this] {
+            loadCachedSimulationRun();
+            loadCachedScriptGraphs();
+            configureSimulationRunWatcher();
+        });
+        const auto runChanged = [this](const QString &) {
+            if (simulationRunWatcherTimer_)
+                simulationRunWatcherTimer_->start();
+        };
+        connect(simulationRunWatcher_, &QFileSystemWatcher::directoryChanged, this, runChanged);
+        connect(simulationRunWatcher_, &QFileSystemWatcher::fileChanged, this, runChanged);
         projectWatchDebounceTimer_ = new QTimer(this);
         projectWatchDebounceTimer_->setSingleShot(true);
         projectWatchDebounceTimer_->setInterval(300);
@@ -511,6 +683,16 @@ class DocumentWindow : public QMainWindow {
             projectWatchDebounceTimer_->stop();
         if (projectWatcherResumeTimer_)
             projectWatcherResumeTimer_->stop();
+        if (simulationRunWatcherTimer_)
+            simulationRunWatcherTimer_->stop();
+        if (simulationRunWatcher_) {
+            const auto paths = simulationRunWatcher_->directories();
+            if (!paths.isEmpty())
+                simulationRunWatcher_->removePaths(paths);
+            const auto files = simulationRunWatcher_->files();
+            if (!files.isEmpty())
+                simulationRunWatcher_->removePaths(files);
+        }
         if (!projectWatcher_)
             return;
         const auto directories = projectWatcher_->directories();
@@ -546,6 +728,47 @@ class DocumentWindow : public QMainWindow {
             watched << projectPath_;
         if (!watched.isEmpty())
             projectWatcher_->addPaths(watched);
+        configureSimulationRunWatcher();
+    }
+
+    void configureSimulationRunWatcher() {
+        if (!simulationRunWatcher_)
+            return;
+        const auto paths = simulationRunWatcher_->directories();
+        if (!paths.isEmpty())
+            simulationRunWatcher_->removePaths(paths);
+        const auto files = simulationRunWatcher_->files();
+        if (!files.isEmpty())
+            simulationRunWatcher_->removePaths(files);
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const QFileInfo projectInfo(projectPath_);
+        const auto root = projectInfo.isDir() ? projectInfo.absoluteFilePath() : projectInfo.absolutePath();
+        QStringList watched{root};
+        const QDir buildDir(QDir(root).filePath(QStringLiteral("build")));
+        if (buildDir.exists())
+            watched << buildDir.absolutePath();
+        const QDir base(QDir(root).filePath(QStringLiteral("build/simulations")));
+        if (!base.exists()) {
+            if (!watched.isEmpty())
+                simulationRunWatcher_->addPaths(watched);
+            return;
+        }
+        watched << base.absolutePath();
+        for (const auto &entry : base.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            watched << entry.absoluteFilePath();
+            const QDir runsDir(QDir(entry.absoluteFilePath()).filePath(QStringLiteral("runs")));
+            if (runsDir.exists())
+                watched << runsDir.absolutePath();
+        }
+        const QDir scriptsBase(QDir(root).filePath(QStringLiteral("build/simulation-scripts")));
+        if (scriptsBase.exists()) {
+            watched << scriptsBase.absolutePath();
+            for (const auto &entry : scriptsBase.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+                watched << entry.absoluteFilePath();
+        }
+        if (!watched.isEmpty())
+            simulationRunWatcher_->addPaths(watched);
     }
 
     void scheduleProjectReloadFromDisk() {
@@ -554,6 +777,285 @@ class DocumentWindow : public QMainWindow {
         projectDiskChangePending_ = true;
         if (projectWatchDebounceTimer_)
             projectWatchDebounceTimer_->start();
+    }
+
+    bool mergeExternalProject(const ice::Project &disk) {
+        if (!project_)
+            return false;
+        auto merged = project_->project();
+        auto savedSchematic = savedSchematicSignatures_;
+        auto savedLayout = savedLayoutSignatures_;
+        auto savedProcedural = savedProceduralSignatures_;
+        auto externalSchematic = std::map<ice::ObjectId, ice::SchematicCell>{};
+        auto externalLayout = std::map<ice::ObjectId, ice::LayoutCell>{};
+        auto externalProcedural = std::map<ice::ObjectId, ice::ProceduralLayout>{};
+        auto conflictedSchematic = std::set<ice::ObjectId>{};
+        auto conflictedLayout = std::set<ice::ObjectId>{};
+        auto conflictedProcedural = std::set<ice::ObjectId>{};
+        bool adopted = false;
+
+        auto mergeSchematic = [&](const ice::SchematicCell &diskCell) {
+            const auto id = diskCell.id;
+            const auto diskSignature = schematicFileSignature(diskCell);
+            auto current = merged.schematicCells.find(id);
+            const auto saved = savedSchematic.find(id);
+            if (current == merged.schematicCells.end()) {
+                if (saved == savedSchematic.end()) {
+                    merged.schematicCells.emplace(id, diskCell);
+                    savedSchematic[id] = diskSignature;
+                    adopted = true;
+                } else if (diskSignature != saved->second) {
+                    externalSchematic[id] = diskCell;
+                    conflictedSchematic.insert(id);
+                }
+                return;
+            }
+            const auto currentSignature = schematicFileSignature(current->second);
+            if (currentSignature == diskSignature) {
+                savedSchematic[id] = diskSignature;
+                return;
+            }
+            if (saved == savedSchematic.end()) {
+                externalSchematic[id] = diskCell;
+                conflictedSchematic.insert(id);
+                return;
+            }
+            const bool localDirty = currentSignature != saved->second;
+            const bool diskChanged = diskSignature != saved->second;
+            if (!diskChanged)
+                return;
+            if (!localDirty) {
+                current->second = diskCell;
+                savedSchematic[id] = diskSignature;
+                adopted = true;
+            } else {
+                externalSchematic[id] = diskCell;
+                conflictedSchematic.insert(id);
+            }
+        };
+
+        auto mergeLayout = [&](const ice::LayoutCell &diskCell) {
+            const auto id = diskCell.id;
+            const auto diskSignature = layoutFileSignature(diskCell);
+            auto current = merged.layoutCells.find(id);
+            const auto saved = savedLayout.find(id);
+            if (current == merged.layoutCells.end()) {
+                if (saved == savedLayout.end()) {
+                    merged.layoutCells.emplace(id, diskCell);
+                    savedLayout[id] = diskSignature;
+                    adopted = true;
+                } else if (diskSignature != saved->second) {
+                    externalLayout[id] = diskCell;
+                    conflictedLayout.insert(id);
+                }
+                return;
+            }
+            const auto currentSignature = layoutFileSignature(current->second);
+            if (currentSignature == diskSignature) {
+                savedLayout[id] = diskSignature;
+                return;
+            }
+            if (saved == savedLayout.end()) {
+                externalLayout[id] = diskCell;
+                conflictedLayout.insert(id);
+                return;
+            }
+            const bool localDirty = currentSignature != saved->second;
+            const bool diskChanged = diskSignature != saved->second;
+            if (!diskChanged)
+                return;
+            if (!localDirty) {
+                current->second = diskCell;
+                savedLayout[id] = diskSignature;
+                adopted = true;
+            } else {
+                externalLayout[id] = diskCell;
+                conflictedLayout.insert(id);
+            }
+        };
+
+        auto mergeProcedural = [&](const ice::ProceduralLayout &diskLayout) {
+            const auto id = diskLayout.id;
+            const auto diskSignature = proceduralFileSignature(diskLayout);
+            auto current = merged.proceduralLayouts.find(id);
+            const auto saved = savedProcedural.find(id);
+            if (current == merged.proceduralLayouts.end()) {
+                if (saved == savedProcedural.end()) {
+                    merged.proceduralLayouts.emplace(id, diskLayout);
+                    savedProcedural[id] = diskSignature;
+                    adopted = true;
+                } else if (diskSignature != saved->second) {
+                    externalProcedural[id] = diskLayout;
+                    conflictedProcedural.insert(id);
+                }
+                return;
+            }
+            const auto currentSignature = proceduralFileSignature(current->second);
+            if (currentSignature == diskSignature) {
+                savedProcedural[id] = diskSignature;
+                return;
+            }
+            if (saved == savedProcedural.end()) {
+                externalProcedural[id] = diskLayout;
+                conflictedProcedural.insert(id);
+                return;
+            }
+            const bool localDirty = currentSignature != saved->second;
+            const bool diskChanged = diskSignature != saved->second;
+            if (!diskChanged)
+                return;
+            if (!localDirty) {
+                current->second = diskLayout;
+                savedProcedural[id] = diskSignature;
+                adopted = true;
+            } else {
+                externalProcedural[id] = diskLayout;
+                conflictedProcedural.insert(id);
+            }
+        };
+
+        std::set<ice::ObjectId> diskSchematicIds;
+        for (const auto &[id, cell] : disk.schematicCells) {
+            diskSchematicIds.insert(id);
+            mergeSchematic(cell);
+        }
+        for (auto it = merged.schematicCells.begin(); it != merged.schematicCells.end();) {
+            const auto id = it->first;
+            if (diskSchematicIds.contains(id)) {
+                ++it;
+                continue;
+            }
+            const auto saved = savedSchematic.find(id);
+            if (saved == savedSchematic.end()) {
+                ++it;
+                continue;
+            }
+            if (schematicFileSignature(it->second) != saved->second) {
+                conflictedSchematic.insert(id);
+                ++it;
+            } else {
+                savedSchematic.erase(id);
+                it = merged.schematicCells.erase(it);
+                adopted = true;
+            }
+        }
+
+        std::set<ice::ObjectId> diskLayoutIds;
+        for (const auto &[id, cell] : disk.layoutCells) {
+            diskLayoutIds.insert(id);
+            mergeLayout(cell);
+        }
+        for (auto it = merged.layoutCells.begin(); it != merged.layoutCells.end();) {
+            const auto id = it->first;
+            if (diskLayoutIds.contains(id)) {
+                ++it;
+                continue;
+            }
+            const auto saved = savedLayout.find(id);
+            if (saved == savedLayout.end()) {
+                ++it;
+                continue;
+            }
+            if (layoutFileSignature(it->second) != saved->second) {
+                conflictedLayout.insert(id);
+                ++it;
+            } else {
+                savedLayout.erase(id);
+                it = merged.layoutCells.erase(it);
+                adopted = true;
+            }
+        }
+
+        std::set<ice::ObjectId> diskProceduralIds;
+        for (const auto &[id, layout] : disk.proceduralLayouts) {
+            diskProceduralIds.insert(id);
+            mergeProcedural(layout);
+        }
+        for (auto it = merged.proceduralLayouts.begin(); it != merged.proceduralLayouts.end();) {
+            const auto id = it->first;
+            if (diskProceduralIds.contains(id)) {
+                ++it;
+                continue;
+            }
+            const auto saved = savedProcedural.find(id);
+            if (saved == savedProcedural.end()) {
+                ++it;
+                continue;
+            }
+            if (proceduralFileSignature(it->second) != saved->second) {
+                conflictedProcedural.insert(id);
+                ++it;
+            } else {
+                savedProcedural.erase(id);
+                it = merged.proceduralLayouts.erase(it);
+                adopted = true;
+            }
+        }
+
+        const auto diagnostics = merged.validate();
+        if (!diagnostics.empty()) {
+            statusBar()->showMessage(QStringLiteral("External project changes could not be merged: %1")
+                                         .arg(QString::fromStdString(diagnostics.front().message)),
+                                     10000);
+            return false;
+        }
+
+        project_->project() = std::move(merged);
+        savedSchematicSignatures_ = std::move(savedSchematic);
+        savedLayoutSignatures_ = std::move(savedLayout);
+        savedProceduralSignatures_ = std::move(savedProcedural);
+        externalSchematicFiles_ = std::move(externalSchematic);
+        externalLayoutFiles_ = std::move(externalLayout);
+        externalProceduralFiles_ = std::move(externalProcedural);
+        conflictedSchematicFiles_ = std::move(conflictedSchematic);
+        conflictedLayoutFiles_ = std::move(conflictedLayout);
+        conflictedProceduralFiles_ = std::move(conflictedProcedural);
+        projectDiskChangePending_ = !conflictedSchematicFiles_.empty() || !conflictedLayoutFiles_.empty() ||
+                                    !conflictedProceduralFiles_.empty();
+        const auto conflictCount =
+            conflictedSchematicFiles_.size() + conflictedLayoutFiles_.size() + conflictedProceduralFiles_.size();
+        refreshProject();
+        if (conflictCount > 0) {
+            statusBar()->showMessage(
+                QStringLiteral("External changes detected; %1 file(s) have conflicts. Choose on save.")
+                    .arg(conflictCount),
+                12000);
+        } else if (adopted) {
+            statusBar()->showMessage(QStringLiteral("Project files refreshed from disk"));
+        }
+        return true;
+    }
+
+    bool adoptProjectFromDisk(ice::Project loaded) {
+        const auto path = projectPath_;
+        const auto openSchematics = openSchematicTabs_;
+        const auto openLayouts = openLayoutTabs_;
+        const auto knownSchematics = knownSchematicCells_;
+        const auto knownLayouts = knownLayoutCells_;
+        const auto knownProcedural = knownProceduralLayouts_;
+        const auto activeSchematic = activeSchematicId_;
+        const auto activeLayout = activeLayoutId_;
+        const auto activeProcedural = activeProceduralLayoutId_;
+        const auto activeSimulation = activeSimulationId_;
+        if (!setProject(std::move(loaded)))
+            return false;
+        projectPath_ = path;
+        if (activityPanel_)
+            activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        openSchematicTabs_ = openSchematics;
+        openLayoutTabs_ = openLayouts;
+        knownSchematicCells_ = knownSchematics;
+        knownLayoutCells_ = knownLayouts;
+        knownProceduralLayouts_ = knownProcedural;
+        activeSchematicId_ = activeSchematic;
+        activeLayoutId_ = activeLayout;
+        activeProceduralLayoutId_ = activeProcedural;
+        activeSimulationId_ = activeSimulation;
+        refreshEmbeddedPanels();
+        refreshSchematic();
+        refreshLayout();
+        configureProjectWatcher();
+        return true;
     }
 
     void reloadProjectFromDisk(bool confirmDiscard) {
@@ -568,16 +1070,9 @@ class DocumentWindow : public QMainWindow {
         if (projectWatchDebounceTimer_)
             projectWatchDebounceTimer_->stop();
 
-        if (project_->dirty()) {
-            const auto message =
-                QStringLiteral("Project files changed on disk. Reloading would discard unsaved GUI changes.");
-            if (!confirmDiscard) {
-                statusBar()->showMessage(message + QStringLiteral(" Use File > Reload Project from Disk after saving."),
-                                         10000);
-                return;
-            }
+        if (confirmDiscard && project_->dirty()) {
             if (QMessageBox::question(this, QStringLiteral("Reload Project"),
-                                      message + QStringLiteral("\n\nDiscard the unsaved changes and reload?"),
+                                      QStringLiteral("Reloading will discard the unsaved GUI changes. Continue?"),
                                       QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
                 return;
         }
@@ -585,16 +1080,23 @@ class DocumentWindow : public QMainWindow {
         const auto path = projectPath_;
         try {
             auto loaded = ice::Project::load(path.toStdString());
-            if (!setProject(std::move(loaded))) {
-                statusBar()->showMessage(QStringLiteral("Project reload failed."), 10000);
-                return;
+            if (confirmDiscard || !project_->dirty()) {
+                if (!adoptProjectFromDisk(std::move(loaded))) {
+                    statusBar()->showMessage(QStringLiteral("Project reload failed."), 10000);
+                    return;
+                }
+                projectDiskChangePending_ = false;
+                statusBar()->showMessage(QStringLiteral("Project refreshed from disk"));
+            } else {
+                if (!mergeExternalProject(loaded)) {
+                    statusBar()->showMessage(QStringLiteral("External project changes could not be applied."), 10000);
+                    return;
+                }
             }
             projectPath_ = path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
-            projectDiskChangePending_ = false;
             configureProjectWatcher();
-            statusBar()->showMessage(QStringLiteral("Project refreshed from disk"));
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(
                 QStringLiteral("Project reload failed: %1").arg(QString::fromStdString(error.what())), 10000);
@@ -660,15 +1162,33 @@ class DocumentWindow : public QMainWindow {
         suppressProjectWatcher_ = false;
         projectDiskChangePending_ = false;
         clearProjectWatcher();
+        activeSchematicId_ = 0;
+        activeLayoutId_ = 0;
+        activeProceduralLayoutId_ = 0;
+        activeSimulationId_ = 0;
         activeReportId_ = 0;
         selectingReport_ = false;
+        loadedCachedRunPath_.clear();
         project_.reset();
+        savedSchematicSignatures_.clear();
+        savedLayoutSignatures_.clear();
+        savedProceduralSignatures_.clear();
+        conflictedSchematicFiles_.clear();
+        conflictedLayoutFiles_.clear();
+        conflictedProceduralFiles_.clear();
+        externalSchematicFiles_.clear();
+        externalLayoutFiles_.clear();
+        externalProceduralFiles_.clear();
         resetSectionHistories();
         updateHistoryPanels();
         clearLayoutDeviceSelection();
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->resetDevices();
-        openLibraryLayoutCellTabs_.clear();
+        openSchematicTabs_.clear();
+        openLayoutTabs_.clear();
+        knownSchematicCells_.clear();
+        knownLayoutCells_.clear();
+        knownProceduralLayouts_.clear();
         projectPath_.clear();
         if (activityPanel_)
             activityPanel_->setProjectPath({});
@@ -1018,8 +1538,6 @@ class DocumentWindow : public QMainWindow {
         } catch (const ice::ProjectError &exception) {
             if (error.isEmpty())
                 error = QString::fromStdString(exception.what());
-            if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_)
-                proceduralEditor_->showMessage(QStringLiteral("Regeneration failed."), true);
             QMessageBox::critical(
                 this, QStringLiteral("Regenerate Layout"),
                 QStringLiteral("Unable to regenerate '%1':\n%2").arg(QString::fromStdString(name), error));
@@ -1027,8 +1545,6 @@ class DocumentWindow : public QMainWindow {
         }
         project_->setLastHistoryLabel("Regenerated layout " + name);
         refreshProject();
-        if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_)
-            proceduralEditor_->showMessage(QStringLiteral("Layout regenerated from the current script."));
         statusBar()->showMessage(
             QStringLiteral("Procedural layout '%1' regenerated").arg(QString::fromStdString(name)));
     }
@@ -1045,9 +1561,7 @@ class DocumentWindow : public QMainWindow {
             return;
         it->second.script = text;
         project_->markDirty();
-        if (proceduralEditor_)
-            proceduralEditor_->showMessage(QStringLiteral("Script changed. Regenerate layout to update the "
-                                                          "static layout child."));
+        updateFileTabDirtyIndicators();
     }
 
     void onTextSchematicEdited(const QString &text) {
@@ -1062,8 +1576,7 @@ class DocumentWindow : public QMainWindow {
             return;
         it->second.spiceText = value;
         project_->markDirty();
-        if (textSchematicEditor_)
-            textSchematicEditor_->showMessage(QStringLiteral("Text changed. The netlist is stored with the project."));
+        updateFileTabDirtyIndicators();
     }
 
     void showTextSchematicEditor(ice::ObjectId schematicId) {
@@ -1079,8 +1592,6 @@ class DocumentWindow : public QMainWindow {
             const auto text = QString::fromStdString(it->second.spiceText);
             if (textSchematicEditor_->text() != text)
                 textSchematicEditor_->setText(text);
-            textSchematicEditor_->showMessage(
-                QStringLiteral("Editing text SPICE schematic '%1'.").arg(QString::fromStdString(it->second.name)));
         }
     }
 
@@ -1094,16 +1605,23 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = id;
         if (it->second.textSchematic) {
             showTextSchematicEditor(id);
+            updateEmptyWorkspaceState();
             return;
         }
         if (schematicViewStack_ && schematicCanvasPage_)
             schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         refreshSchematic();
+        updateEmptyWorkspaceState();
     }
 
     void selectSchematicTab(ice::ObjectId id) {
         if (!schematicCellTabs_)
             return;
+        if (project_ && project_->project().schematicCells.contains(id) && !openSchematicTabs_.contains(id)) {
+            openSchematicTabs_.insert(id);
+            knownSchematicCells_.insert(id);
+            refreshEmbeddedPanels();
+        }
         for (int index = 0; index < schematicCellTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong()) != id)
                 continue;
@@ -1131,8 +1649,6 @@ class DocumentWindow : public QMainWindow {
             const auto script = QString::fromStdString(it->second.script);
             if (proceduralEditor_->script() != script)
                 proceduralEditor_->setScript(script);
-            proceduralEditor_->showMessage(
-                QStringLiteral("Editing procedural layout '%1'.").arg(QString::fromStdString(it->second.name)));
         }
     }
 
@@ -1143,6 +1659,7 @@ class DocumentWindow : public QMainWindow {
         const auto &project = project_->project();
         if (project.proceduralLayouts.contains(id)) {
             showProceduralLayoutEditor(id);
+            updateEmptyWorkspaceState();
             return;
         }
         activeProceduralLayoutId_ = 0;
@@ -1150,11 +1667,20 @@ class DocumentWindow : public QMainWindow {
         if (layoutViewStack_ && layoutCanvasPage_)
             layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
         refreshLayout();
+        updateEmptyWorkspaceState();
     }
 
     void selectLayoutTab(ice::ObjectId id) {
         if (!layoutCellTabs_)
             return;
+        if (project_ &&
+            (project_->project().layoutCells.contains(id) || project_->project().proceduralLayouts.contains(id)) &&
+            !openLayoutTabs_.contains(id)) {
+            openLayoutTabs_.insert(id);
+            knownLayoutCells_.insert(id);
+            knownProceduralLayouts_.insert(id);
+            refreshEmbeddedPanels();
+        }
         for (int index = 0; index < layoutCellTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index).toULongLong()) != id)
                 continue;
@@ -1164,6 +1690,78 @@ class DocumentWindow : public QMainWindow {
                 layoutCellTabs_->setCurrentIndex(index);
             return;
         }
+    }
+
+    void closeSchematicTab(int index) {
+        if (!schematicCellTabs_ || !project_ || index < 0)
+            return;
+        const auto id = static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong());
+        if (id == 0)
+            return;
+        ice::ObjectId nextId = 0;
+        if (activeSchematicId_ == id) {
+            if (index + 1 < schematicCellTabs_->count())
+                nextId = static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index + 1).toULongLong());
+            else if (index > 0)
+                nextId = static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index - 1).toULongLong());
+        }
+        openSchematicTabs_.erase(id);
+        if (activeSchematicId_ == id)
+            activeSchematicId_ = nextId;
+        refreshEmbeddedPanels();
+        if (openSchematicTabs_.empty()) {
+            if (schematicCanvas_)
+                schematicCanvas_->scene()->clear();
+            if (textSchematicEditor_)
+                textSchematicEditor_->setText({});
+            if (schematicNetlistPanel_)
+                schematicNetlistPanel_->clear();
+            if (schematicPropertiesPanel_)
+                schematicPropertiesPanel_->clearSelection();
+        } else {
+            refreshSchematic();
+        }
+        statusBar()->showMessage(QStringLiteral("Schematic file closed"));
+    }
+
+    void closeLayoutTab(int index) {
+        if (!layoutCellTabs_ || !project_ || index < 0)
+            return;
+        const auto id = static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index).toULongLong());
+        if (id == 0)
+            return;
+        ice::ObjectId nextId = 0;
+        if (activeProceduralLayoutId_ == id || (activeProceduralLayoutId_ == 0 && activeLayoutId_ == id)) {
+            if (index + 1 < layoutCellTabs_->count())
+                nextId = static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index + 1).toULongLong());
+            else if (index > 0)
+                nextId = static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index - 1).toULongLong());
+        }
+        openLayoutTabs_.erase(id);
+        if (nextId != 0) {
+            const auto procedural = project_->project().proceduralLayouts.find(nextId);
+            if (procedural != project_->project().proceduralLayouts.end()) {
+                activeProceduralLayoutId_ = nextId;
+                activeLayoutId_ = procedural->second.generatedCell;
+            } else {
+                activeProceduralLayoutId_ = 0;
+                activeLayoutId_ = nextId;
+            }
+        } else if (activeProceduralLayoutId_ == id || activeLayoutId_ == id) {
+            activeProceduralLayoutId_ = 0;
+            activeLayoutId_ = 0;
+        }
+        refreshEmbeddedPanels();
+        if (openLayoutTabs_.empty()) {
+            if (layoutCanvas_)
+                layoutCanvas_->scene()->clear();
+            if (layoutPropertiesPanel_)
+                layoutPropertiesPanel_->clearSelection();
+            refreshLayoutProperties();
+        } else {
+            refreshLayout();
+        }
+        statusBar()->showMessage(QStringLiteral("Layout file closed"));
     }
 
     void makeLayoutFromSchematic(ice::ObjectId schematicId) {
@@ -1288,7 +1886,7 @@ class DocumentWindow : public QMainWindow {
         const auto childIt = project_->project().layoutCells.find(cellId);
         if (childIt == project_->project().layoutCells.end())
             return;
-        openLibraryLayoutCellTabs_.insert(cellId);
+        openLayoutTabs_.insert(cellId);
         activeLayoutId_ = cellId;
         activeProceduralLayoutId_ = 0;
         if (layoutViewStack_ && layoutCanvasPage_)
@@ -1308,7 +1906,7 @@ class DocumentWindow : public QMainWindow {
             for (const auto &[_, instance] : cell.instances) {
                 if (instance.cell != activeLayoutId_)
                     continue;
-                openLibraryLayoutCellTabs_.insert(id);
+                openLayoutTabs_.insert(id);
                 activeLayoutId_ = id;
                 activeProceduralLayoutId_ = 0;
                 if (layoutViewStack_ && layoutCanvasPage_)
@@ -1634,6 +2232,7 @@ class DocumentWindow : public QMainWindow {
     void refreshLayout() {
         if (!layoutCanvas_ || !project_)
             return;
+        updateFileTabDirtyIndicators();
         layoutCanvas_->scene()->clear();
         const auto &project = project_->project();
         layoutCanvas_->setGridSpacing(static_cast<qreal>(project.grid));
@@ -2448,6 +3047,7 @@ class DocumentWindow : public QMainWindow {
 
     // Build (or rebuild) graphTabs_ from a SimulationItem's graphs vector.
     void rebuildGraphTabs(const std::vector<ice::SimulationGraph> &graphs) {
+        loadedCachedRunPath_.clear();
         // Preserve the current tab index so we can restore it.
         const int prevIndex = graphTabs_ ? graphTabs_->currentIndex() : 0;
         if (!graphTabs_)
@@ -2487,8 +3087,19 @@ class DocumentWindow : public QMainWindow {
         }
         for (std::size_t i = 0; i < graphs.size(); ++i) {
             SimulationPlot *plot = (i == 0) ? simulationPlot_ : new SimulationPlot;
+            auto displayGraph = graphs[i];
+            std::vector<std::string> normalizedSignals;
+            for (const auto &signal : displayGraph.ySignals) {
+                for (const auto &part : parseSignalList(QString::fromStdString(signal))) {
+                    const auto value = part.toStdString();
+                    if (std::find(normalizedSignals.begin(), normalizedSignals.end(), value) == normalizedSignals.end())
+                        normalizedSignals.push_back(value);
+                }
+            }
+            if (!normalizedSignals.empty() || displayGraph.ySignals.empty())
+                displayGraph.ySignals = std::move(normalizedSignals);
             plot->clear();
-            plot->setGraph(graphs[i]);
+            plot->setGraph(displayGraph);
             plot->setGridVisible(graphGridVisible_);
             if (const auto previous = previousPlots.find(graphs[i].id); previous != previousPlots.end())
                 plot->setResult(previous->second.result);
@@ -2498,6 +3109,55 @@ class DocumentWindow : public QMainWindow {
         }
         const int restored = (prevIndex >= 0 && prevIndex < graphTabs_->count()) ? prevIndex : 0;
         graphTabs_->setCurrentIndex(restored);
+    }
+
+    void applySimulationResultToGraphTabs(const ice::SimulationResult &result) {
+        if (!graphTabs_)
+            return;
+        for (int index = 0; index < graphTabs_->count(); ++index) {
+            if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
+                plot->setResult(result);
+        }
+    }
+
+    void loadCachedSimulationRun() {
+        if (!project_ || projectPath_.isEmpty() || activeSimulationId_ == 0)
+            return;
+        const auto simulation = project_->project().simulations.find(activeSimulationId_);
+        if (simulation == project_->project().simulations.end())
+            return;
+        const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        auto stored = ice::latestSimulationRun(root, activeSimulationId_);
+        if (simulation->second.schematic != 0) {
+            auto bySchematic = ice::latestSimulationRun(root, std::nullopt, simulation->second.schematic);
+            if (bySchematic) {
+                if (!stored)
+                    stored = std::move(bySchematic);
+                else {
+                    const auto &left = stored->createdAt.empty() ? stored->path.filename().string() : stored->createdAt;
+                    const auto &right =
+                        bySchematic->createdAt.empty() ? bySchematic->path.filename().string() : bySchematic->createdAt;
+                    if (right > left)
+                        stored = std::move(bySchematic);
+                }
+            }
+        }
+        if (!stored)
+            return;
+        const auto path = QString::fromStdString(stored->path.string());
+        if (loadedCachedRunPath_ == path)
+            return;
+        loadedCachedRunPath_ = path;
+        applySimulationResultToGraphTabs(stored->result);
+        if (simulationOutput_ && stored->result.state != ice::JobState::succeeded) {
+            simulationOutput_->setPlainText(
+                QStringLiteral("Loaded last stored run %1: %2%3")
+                    .arg(QString::fromStdString(stored->runId),
+                         QString::fromStdString(ice::jobStateName(stored->result.state)),
+                         stored->result.error.empty()
+                             ? QString()
+                             : QStringLiteral("\n%1").arg(QString::fromStdString(stored->result.error))));
+        }
     }
 
     // Called when the SimulationPanel selection changes.
@@ -2549,7 +3209,19 @@ class DocumentWindow : public QMainWindow {
         if (schIdx >= 0)
             schematicSelector_->setCurrentIndex(schIdx);
         simulatorSelector_->setCurrentIndex(simulatorSelector_->findData(QString::fromStdString(sim.simulator)));
-        analysisSelector_->setCurrentIndex(analysisSelector_->findData(QString::fromStdString(sim.analysis)));
+        auto analysis = QString::fromStdString(sim.analysis).trimmed().toLower();
+        if (analysis == QStringLiteral("tran"))
+            analysis = QStringLiteral("transient");
+        else if (analysis == QStringLiteral("dc sweep"))
+            analysis = QStringLiteral("dc");
+        else if (analysis == QStringLiteral("ac sweep"))
+            analysis = QStringLiteral("ac");
+        else if (analysis == QStringLiteral("operating point"))
+            analysis = QStringLiteral("op");
+        int analysisIndex = analysisSelector_->findData(analysis);
+        if (analysisIndex < 0)
+            analysisIndex = 0;
+        analysisSelector_->setCurrentIndex(analysisIndex);
         stopTime_->setValue(sim.stop);
         stepTime_->setValue(sim.step);
         QStringList additional;
@@ -2570,6 +3242,7 @@ class DocumentWindow : public QMainWindow {
         if (graphId != 0)
             selectGraphTab(graphId);
         updateSimulationNetlistState();
+        loadCachedSimulationRun();
     }
 
     // Switch the graph tab widget to the tab holding the given graph id.
@@ -2778,8 +3451,9 @@ class DocumentWindow : public QMainWindow {
     void refreshReportPanel() {
         const auto *report = selectedReport();
         if (!report) {
+            clearScriptGraphs();
             if (reportTitleLabel_)
-                reportTitleLabel_->setText(QStringLiteral("No report selected"));
+                reportTitleLabel_->setText(QStringLiteral("No simulation script selected"));
             if (reportCodeEditor_) {
                 const QSignalBlocker blocker(reportCodeEditor_);
                 reportCodeEditor_->clear();
@@ -2832,7 +3506,7 @@ class DocumentWindow : public QMainWindow {
                 reportCodeEditor_->setReadOnly(true);
                 const auto message = QStringLiteral("Unable to open %1").arg(QString::fromStdString(report->path));
                 setReportStatus(message, true);
-                appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+                appendReportMessage(QStringLiteral("[Simulation script] %1").arg(message));
             } else {
                 reportCodeEditor_->setPlainText(QString::fromUtf8(file.readAll()));
                 setReportStatus(QStringLiteral("Saved"));
@@ -2857,14 +3531,14 @@ class DocumentWindow : public QMainWindow {
         if (!file.open(QIODevice::WriteOnly)) {
             const auto message = QStringLiteral("Unable to save %1").arg(QString::fromStdString(report->path));
             setReportStatus(message, true);
-            appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+            appendReportMessage(QStringLiteral("[Simulation script] %1").arg(message));
             return false;
         }
         const auto contents = reportCodeEditor_->toPlainText().toUtf8();
         if (file.write(contents) != contents.size() || !file.commit()) {
             const auto message = QStringLiteral("Unable to save %1").arg(QString::fromStdString(report->path));
             setReportStatus(message, true);
-            appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+            appendReportMessage(QStringLiteral("[Simulation script] %1").arg(message));
             return false;
         }
         reportDirty_ = false;
@@ -2888,6 +3562,7 @@ class DocumentWindow : public QMainWindow {
         }
         selectingReport_ = true;
         activeReportId_ = id;
+        clearScriptGraphs();
         if (simulationPanel_)
             simulationPanel_->selectReport(id);
         if (simulationRightStack_ && reportsView_)
@@ -2896,6 +3571,7 @@ class DocumentWindow : public QMainWindow {
             documents_->setCurrentWidget(simulationPage_);
         selectingReport_ = false;
         loadReportSource();
+        loadCachedScriptGraphs();
     }
 
     std::filesystem::path reportRunnerPath() const {
@@ -2917,38 +3593,116 @@ class DocumentWindow : public QMainWindow {
         return {};
     }
 
+    void clearScriptGraphs() {
+        if (!scriptGraphTabs_)
+            return;
+        while (scriptGraphTabs_->count() > 0) {
+            auto *widget = scriptGraphTabs_->widget(0);
+            scriptGraphTabs_->removeTab(0);
+            delete widget;
+        }
+        scriptGraphTabs_->hide();
+    }
+
+    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs) {
+        if (!scriptGraphTabs_)
+            return;
+        clearScriptGraphs();
+        for (const auto &graph : graphs) {
+            if (graph.x.empty() || graph.series.empty())
+                continue;
+            ice::SimulationResult result;
+            result.state = ice::JobState::succeeded;
+            result.analysis = "simulation script";
+            result.time = graph.x;
+            result.traces = graph.series;
+
+            ice::SimulationGraph definition;
+            definition.name = graph.name;
+            definition.xAxis = graph.xAxis;
+            for (const auto &series : graph.series)
+                definition.ySignals.push_back(series.name);
+            definition.xMin = graph.xMin;
+            definition.xMax = graph.xMax;
+            definition.yMin = graph.yMin;
+            definition.yMax = graph.yMax;
+
+            auto *plot = new SimulationPlot;
+            plot->setGridVisible(graphGridVisible_);
+            plot->setGraph(definition);
+            plot->setResult(result);
+            scriptGraphTabs_->addTab(plot, QString::fromStdString(graph.name));
+        }
+        if (scriptGraphTabs_->count() > 0) {
+            scriptGraphTabs_->show();
+            scriptGraphTabs_->setCurrentIndex(0);
+            if (scriptViewSplitter_)
+                scriptViewSplitter_->setSizes({600, 300});
+        }
+    }
+
+    void loadCachedScriptGraphs() {
+        const auto *report = selectedReport();
+        if (!report || projectPath_.isEmpty()) {
+            clearScriptGraphs();
+            return;
+        }
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        const auto path =
+            QString::fromStdString(ice::projectSimulationScriptGraphPath(root.toStdString(), *report).string());
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            clearScriptGraphs();
+            return;
+        }
+        try {
+            displayScriptGraphs(ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString()));
+        } catch (const ice::ProjectError &) {
+            clearScriptGraphs();
+        }
+    }
+
     void runSelectedReport() {
         const auto *report = selectedReport();
         if (!report) {
             showReportMessages();
-            appendReportMessage(QStringLiteral("[Report] No report selected."));
+            appendReportMessage(QStringLiteral("[Simulation script] No simulation script selected."));
             return;
         }
         const auto reportName = QString::fromStdString(report->name);
         showReportMessages();
+        clearScriptGraphs();
         if (reportCodeEditor_ && reportDirty_ && !saveReportSource()) {
-            appendReportMessage(QStringLiteral("[Report] %1 could not be saved, so it was not run.").arg(reportName));
+            appendReportMessage(
+                QStringLiteral("[Simulation script] %1 could not be saved, so it was not run.").arg(reportName));
             return;
         }
         if (projectPath_.isEmpty()) {
-            appendReportMessage(QStringLiteral("[Report] %1: project path is not available.").arg(reportName));
+            appendReportMessage(
+                QStringLiteral("[Simulation script] %1: project path is not available.").arg(reportName));
             return;
         }
         const auto root = QFileInfo(projectPath_).absolutePath();
         const auto reportFile = QDir(root).filePath(QString::fromStdString(report->path));
         if (!QFileInfo::exists(reportFile)) {
-            appendReportMessage(QStringLiteral("[Report] %1: report file is missing: %2")
+            appendReportMessage(QStringLiteral("[Simulation script] %1: script file is missing: %2")
                                     .arg(reportName, QString::fromStdString(report->path)));
             return;
         }
         const auto runner = reportRunnerPath();
         const auto python = pythonExecutable();
         if (runner.empty() || python.isEmpty()) {
-            appendReportMessage(QStringLiteral("[Report] %1: Python report runner is not available.").arg(reportName));
+            appendReportMessage(
+                QStringLiteral("[Simulation script] %1: Python script runner is not available.").arg(reportName));
             return;
         }
 
-        appendReportMessage(QStringLiteral("[Report] %1: running…").arg(reportName));
+        const auto graphPath =
+            QString::fromStdString(ice::projectSimulationScriptGraphPath(root.toStdString(), *report).string());
+        QDir().mkpath(QFileInfo(graphPath).absolutePath());
+        QFile::remove(graphPath);
+
+        appendReportMessage(QStringLiteral("[Simulation script] %1: running…").arg(reportName));
         QProcess process;
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.insert(QStringLiteral("PYTHONPATH"), icepyPythonPath());
@@ -2956,19 +3710,19 @@ class DocumentWindow : public QMainWindow {
         process.setWorkingDirectory(root);
         process.setProgram(python);
         process.setArguments({QString::fromStdString(runner.string()), QStringLiteral("--project-root"), root,
-                              QStringLiteral("--report"), reportFile});
+                              QStringLiteral("--report"), reportFile, QStringLiteral("--graph-output"), graphPath});
         process.start();
         if (!process.waitForStarted(5000)) {
-            appendReportMessage(
-                QStringLiteral("[Report] %1: unable to start Python: %2").arg(reportName, process.errorString()));
-            statusBar()->showMessage(QStringLiteral("Report failed"));
+            appendReportMessage(QStringLiteral("[Simulation script] %1: unable to start Python: %2")
+                                    .arg(reportName, process.errorString()));
+            statusBar()->showMessage(QStringLiteral("Simulation script failed"));
             return;
         }
         if (!process.waitForFinished(30000)) {
             process.kill();
             process.waitForFinished(2000);
-            appendReportMessage(QStringLiteral("[Report] %1: timed out after 30 seconds.").arg(reportName));
-            statusBar()->showMessage(QStringLiteral("Report timed out"));
+            appendReportMessage(QStringLiteral("[Simulation script] %1: timed out after 30 seconds.").arg(reportName));
+            statusBar()->showMessage(QStringLiteral("Simulation script timed out"));
             return;
         }
         const auto stdoutText = QString::fromUtf8(process.readAllStandardOutput());
@@ -2979,20 +3733,32 @@ class DocumentWindow : public QMainWindow {
                 detail = stdoutText.trimmed();
             if (detail.isEmpty())
                 detail = QStringLiteral("Python exited with code %1.").arg(process.exitCode());
-            appendReportMessage(QStringLiteral("[Report] %1 failed:\n%2").arg(reportName, detail));
-            statusBar()->showMessage(QStringLiteral("Report failed"));
+            appendReportMessage(QStringLiteral("[Simulation script] %1 failed:\n%2").arg(reportName, detail));
+            statusBar()->showMessage(QStringLiteral("Simulation script failed"));
             return;
         }
-        appendReportMessage(QStringLiteral("[Report] %1 finished.").arg(reportName));
+        appendReportMessage(QStringLiteral("[Simulation script] %1 finished.").arg(reportName));
+        QFile graphFile(graphPath);
+        if (graphFile.open(QIODevice::ReadOnly)) {
+            try {
+                const auto graphs =
+                    ice::parseSimulationScriptGraphs(QString::fromUtf8(graphFile.readAll()).toStdString());
+                if (!graphs.empty())
+                    displayScriptGraphs(graphs);
+            } catch (const ice::ProjectError &error) {
+                appendReportMessage(QStringLiteral("[Simulation script] %1: unable to read graphs: %2")
+                                        .arg(reportName, QString::fromStdString(error.what())));
+            }
+        }
         const auto logs = stderrText.trimmed();
         if (!logs.isEmpty())
-            appendReportMessage(QStringLiteral("[Report] %1 logs:\n%2").arg(reportName, logs));
+            appendReportMessage(QStringLiteral("[Simulation script] %1 logs:\n%2").arg(reportName, logs));
         const auto output = stdoutText.trimmed();
         if (!output.isEmpty())
-            appendReportMessage(QStringLiteral("[Report] %1 output:\n%2").arg(reportName, output));
+            appendReportMessage(QStringLiteral("[Simulation script] %1 output:\n%2").arg(reportName, output));
         else
-            appendReportMessage(QStringLiteral("[Report] %1 produced no output.").arg(reportName));
-        statusBar()->showMessage(QStringLiteral("Report finished"));
+            appendReportMessage(QStringLiteral("[Simulation script] %1 produced no output.").arg(reportName));
+        statusBar()->showMessage(QStringLiteral("Simulation script finished"));
     }
 
     void openReportFile(ice::ObjectId id) {
@@ -3004,8 +3770,8 @@ class DocumentWindow : public QMainWindow {
         const auto root = QFileInfo(projectPath_).absolutePath();
         const auto path = QDir(root).filePath(QString::fromStdString(it->second.path));
         if (!QFileInfo::exists(path)) {
-            QMessageBox::warning(this, QStringLiteral("Open Report"),
-                                 QStringLiteral("Report file is missing:\n%1").arg(path));
+            QMessageBox::warning(this, QStringLiteral("Open Simulation Script"),
+                                 QStringLiteral("Simulation script file is missing:\n%1").arg(path));
             return;
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));
@@ -3019,15 +3785,16 @@ class DocumentWindow : public QMainWindow {
 
     void addReport() {
         if (!project_ || projectPath_.isEmpty()) {
-            QMessageBox::information(this, QStringLiteral("Add Report"),
+            QMessageBox::information(this, QStringLiteral("Add Simulation Script"),
                                      QStringLiteral("Open and save a project first."));
             return;
         }
         if (reportDirty_ && !saveReportSource())
             return;
         bool ok = false;
-        auto name = QInputDialog::getText(this, QStringLiteral("Add Report"), QStringLiteral("Report name:"),
-                                          QLineEdit::Normal, QStringLiteral("Simulation Report"), &ok)
+        auto name = QInputDialog::getText(this, QStringLiteral("Add Simulation Script"),
+                                          QStringLiteral("Simulation script name:"), QLineEdit::Normal,
+                                          QStringLiteral("Simulation Script"), &ok)
                         .trimmed();
         if (!ok || name.isEmpty())
             return;
@@ -3043,23 +3810,23 @@ class DocumentWindow : public QMainWindow {
         name = uniqueName;
 
         const auto root = QFileInfo(projectPath_).absolutePath();
-        QDir reportsDir(QDir(root).filePath(QStringLiteral("reports")));
+        QDir reportsDir(QDir(root).filePath(QStringLiteral("scripts")));
         if (!reportsDir.mkpath(QStringLiteral("."))) {
-            QMessageBox::critical(this, QStringLiteral("Add Report"),
-                                  QStringLiteral("Unable to create the reports directory."));
+            QMessageBox::critical(this, QStringLiteral("Add Simulation Script"),
+                                  QStringLiteral("Unable to create the simulation scripts directory."));
             return;
         }
         const auto target = uniqueReportPath(reportsDir.absolutePath(), reportSlug(name), QStringLiteral(".py"));
         QSaveFile file(target);
         if (!file.open(QIODevice::WriteOnly)) {
-            QMessageBox::critical(this, QStringLiteral("Add Report"),
-                                  QStringLiteral("Unable to create report file:\n%1").arg(target));
+            QMessageBox::critical(this, QStringLiteral("Add Simulation Script"),
+                                  QStringLiteral("Unable to create simulation script file:\n%1").arg(target));
             return;
         }
         const auto templateText = QString::fromStdString(ice::defaultSimulationReportTemplate()).toUtf8();
         if (file.write(templateText) != templateText.size() || !file.commit()) {
-            QMessageBox::critical(this, QStringLiteral("Add Report"),
-                                  QStringLiteral("Unable to write report file:\n%1").arg(target));
+            QMessageBox::critical(this, QStringLiteral("Add Simulation Script"),
+                                  QStringLiteral("Unable to write simulation script file:\n%1").arg(target));
             return;
         }
 
@@ -3068,17 +3835,17 @@ class DocumentWindow : public QMainWindow {
         try {
             const auto reportName = name;
             const auto reportPath = relative;
-            project_->execute("add report", [&](ice::Project &project) {
+            project_->execute("add simulation script", [&](ice::Project &project) {
                 newId = project.nextId();
                 project.reports.emplace(newId,
                                         ice::ProjectReport{newId, reportName.toStdString(), reportPath.toStdString()});
             });
-            project_->setLastHistoryLabel("Added report " + name.toStdString());
+            project_->setLastHistoryLabel("Added simulation script " + name.toStdString());
             activeReportId_ = newId;
             refreshProject();
             selectReport(newId);
         } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Add Report"), QString::fromStdString(error.what()));
+            QMessageBox::critical(this, QStringLiteral("Add Simulation Script"), QString::fromStdString(error.what()));
         }
     }
 
@@ -3090,12 +3857,13 @@ class DocumentWindow : public QMainWindow {
             return;
         if (activeReportId_ == id && reportDirty_ && !saveReportSource())
             return;
-        if (QMessageBox::question(this, QStringLiteral("Delete Report"),
-                                  QStringLiteral("Delete report metadata for '%1'? The Python file will remain.")
-                                      .arg(QString::fromStdString(it->second.name)),
-                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        if (QMessageBox::question(
+                this, QStringLiteral("Delete Simulation Script"),
+                QStringLiteral("Delete simulation script metadata for '%1'? The Python file will remain.")
+                    .arg(QString::fromStdString(it->second.name)),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
             return;
-        project_->execute("delete report", [id](ice::Project &project) { project.reports.erase(id); });
+        project_->execute("delete simulation script", [id](ice::Project &project) { project.reports.erase(id); });
         const bool deletedActive = activeReportId_ == id;
         if (deletedActive)
             activeReportId_ = 0;
@@ -3106,7 +3874,7 @@ class DocumentWindow : public QMainWindow {
             if (documents_ && simulationPage_)
                 documents_->setCurrentWidget(simulationPage_);
         }
-        statusBar()->showMessage(QStringLiteral("Report deleted"));
+        statusBar()->showMessage(QStringLiteral("Simulation script deleted"));
     }
 
     // Delete the currently selected SimulationItem.
@@ -3248,12 +4016,13 @@ class DocumentWindow : public QMainWindow {
         ySignalsList->setAccessibleName(QStringLiteral("Y axis signals"));
         const auto selectedYSignal = [&](const QString &data) {
             for (const auto &signal : currentGraph.ySignals) {
-                const auto current = QString::fromStdString(signal);
-                if (current.compare(data, Qt::CaseInsensitive) == 0)
-                    return true;
-                if (data == QStringLiteral("time") &&
-                    current.compare(QStringLiteral("Time (s)"), Qt::CaseInsensitive) == 0)
-                    return true;
+                for (const auto &part : parseSignalList(QString::fromStdString(signal))) {
+                    if (part.compare(data, Qt::CaseInsensitive) == 0)
+                        return true;
+                    if (data == QStringLiteral("time") &&
+                        part.compare(QStringLiteral("Time (s)"), Qt::CaseInsensitive) == 0)
+                        return true;
+                }
             }
             return false;
         };
@@ -3399,7 +4168,6 @@ class DocumentWindow : public QMainWindow {
 
     // Refresh the active graph's plot (called when switching tabs).
     void refreshGraphPlot() {
-        // Result display is driven by runSimulation; here just ensure the plot widget is visible.
         if (graphTabs_ && graphTabs_->currentWidget())
             graphTabs_->currentWidget()->update();
     }
@@ -3953,9 +4721,210 @@ class DocumentWindow : public QMainWindow {
     void jumpToSchematicHistory(std::size_t position) { restoreSectionHistory(true, position); }
     void jumpToLayoutHistory(std::size_t position) { restoreSectionHistory(false, position); }
 
+    static std::string schematicFileSignature(const ice::SchematicCell &cell) {
+        ice::Project project;
+        project.schematicCells.emplace(cell.id, cell);
+        return project.serialize();
+    }
+
+    static std::string layoutFileSignature(const ice::LayoutCell &cell) {
+        ice::Project project;
+        project.layoutCells.emplace(cell.id, cell);
+        return project.serialize();
+    }
+
+    static std::string proceduralFileSignature(const ice::ProceduralLayout &layout) {
+        ice::Project project;
+        project.proceduralLayouts.emplace(layout.id, layout);
+        return project.serialize();
+    }
+
+    void captureSavedFileBaselines() {
+        savedSchematicSignatures_.clear();
+        savedLayoutSignatures_.clear();
+        savedProceduralSignatures_.clear();
+        if (!project_)
+            return;
+        for (const auto &[id, cell] : project_->project().schematicCells)
+            savedSchematicSignatures_[id] = schematicFileSignature(cell);
+        for (const auto &[id, cell] : project_->project().layoutCells)
+            savedLayoutSignatures_[id] = layoutFileSignature(cell);
+        for (const auto &[id, layout] : project_->project().proceduralLayouts)
+            savedProceduralSignatures_[id] = proceduralFileSignature(layout);
+    }
+
+    bool schematicFileDirty(ice::ObjectId id) const {
+        if (!project_)
+            return false;
+        const auto cell = project_->project().schematicCells.find(id);
+        if (cell == project_->project().schematicCells.end())
+            return false;
+        const auto saved = savedSchematicSignatures_.find(id);
+        return saved == savedSchematicSignatures_.end() || schematicFileSignature(cell->second) != saved->second;
+    }
+
+    bool layoutFileDirty(ice::ObjectId id) const {
+        if (!project_)
+            return false;
+        const auto procedural = project_->project().proceduralLayouts.find(id);
+        if (procedural != project_->project().proceduralLayouts.end()) {
+            const auto saved = savedProceduralSignatures_.find(id);
+            return saved == savedProceduralSignatures_.end() ||
+                   proceduralFileSignature(procedural->second) != saved->second;
+        }
+        const auto cell = project_->project().layoutCells.find(id);
+        if (cell == project_->project().layoutCells.end())
+            return false;
+        const auto saved = savedLayoutSignatures_.find(id);
+        return saved == savedLayoutSignatures_.end() || layoutFileSignature(cell->second) != saved->second;
+    }
+
+    static QString fileTabLabel(const QString &name, const QString &extension, bool dirty, bool conflict) {
+        QString label = name + QLatin1Char('.') + extension;
+        if (conflict)
+            label.prepend(QStringLiteral("⚠ "));
+        if (dirty)
+            label.prepend(QStringLiteral("● "));
+        return label;
+    }
+
+    static QString schematicFileExtension(const ice::SchematicCell &cell) {
+        return cell.textSchematic ? QStringLiteral("sp") : QStringLiteral("icesch");
+    }
+
+    void syncOpenFileTabs() {
+        if (!project_) {
+            openSchematicTabs_.clear();
+            openLayoutTabs_.clear();
+            knownSchematicCells_.clear();
+            knownLayoutCells_.clear();
+            knownProceduralLayouts_.clear();
+            return;
+        }
+        std::set<ice::ObjectId> schematicIds;
+        for (const auto &[id, _] : project_->project().schematicCells) {
+            schematicIds.insert(id);
+            if (knownSchematicCells_.insert(id).second)
+                openSchematicTabs_.insert(id);
+        }
+        for (auto it = knownSchematicCells_.begin(); it != knownSchematicCells_.end();) {
+            if (!schematicIds.contains(*it)) {
+                openSchematicTabs_.erase(*it);
+                it = knownSchematicCells_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = openSchematicTabs_.begin(); it != openSchematicTabs_.end();) {
+            if (!schematicIds.contains(*it))
+                it = openSchematicTabs_.erase(it);
+            else
+                ++it;
+        }
+
+        std::set<ice::ObjectId> layoutIds;
+        for (const auto &[id, _] : project_->project().proceduralLayouts) {
+            layoutIds.insert(id);
+            if (knownProceduralLayouts_.insert(id).second)
+                openLayoutTabs_.insert(id);
+        }
+        for (auto it = knownProceduralLayouts_.begin(); it != knownProceduralLayouts_.end();) {
+            if (!project_->project().proceduralLayouts.contains(*it))
+                it = knownProceduralLayouts_.erase(it);
+            else
+                ++it;
+        }
+        for (const auto &[id, cell] : project_->project().layoutCells) {
+            layoutIds.insert(id);
+            if (knownLayoutCells_.insert(id).second && !cell.library)
+                openLayoutTabs_.insert(id);
+        }
+        for (auto it = knownLayoutCells_.begin(); it != knownLayoutCells_.end();) {
+            if (!project_->project().layoutCells.contains(*it))
+                it = knownLayoutCells_.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = openLayoutTabs_.begin(); it != openLayoutTabs_.end();) {
+            if (!layoutIds.contains(*it))
+                it = openLayoutTabs_.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    void updateFileTabDirtyIndicators() {
+        if (!project_)
+            return;
+        if (schematicCellTabs_) {
+            for (int index = 0; index < schematicCellTabs_->count(); ++index) {
+                const auto id = static_cast<ice::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong());
+                const auto cell = project_->project().schematicCells.find(id);
+                if (cell == project_->project().schematicCells.end())
+                    continue;
+                const bool conflict = conflictedSchematicFiles_.contains(id);
+                schematicCellTabs_->setTabText(index, fileTabLabel(QString::fromStdString(cell->second.name),
+                                                                   schematicFileExtension(cell->second),
+                                                                   schematicFileDirty(id), conflict));
+            }
+        }
+        if (layoutCellTabs_) {
+            for (int index = 0; index < layoutCellTabs_->count(); ++index) {
+                const auto id = static_cast<ice::ObjectId>(layoutCellTabs_->tabBar()->tabData(index).toULongLong());
+                const auto procedural = project_->project().proceduralLayouts.find(id);
+                if (procedural != project_->project().proceduralLayouts.end()) {
+                    const bool conflict = conflictedProceduralFiles_.contains(id);
+                    layoutCellTabs_->setTabText(index,
+                                                fileTabLabel(QString::fromStdString(procedural->second.name),
+                                                             QStringLiteral("icelay"), layoutFileDirty(id), conflict));
+                    continue;
+                }
+                const auto cell = project_->project().layoutCells.find(id);
+                if (cell == project_->project().layoutCells.end())
+                    continue;
+                const bool conflict = conflictedLayoutFiles_.contains(id);
+                layoutCellTabs_->setTabText(index,
+                                            fileTabLabel(QString::fromStdString(cell->second.name),
+                                                         QStringLiteral("icelay"), layoutFileDirty(id), conflict));
+            }
+        }
+    }
+
+    void openSchematicFile(ice::ObjectId id) {
+        if (!project_ || !project_->project().schematicCells.contains(id))
+            return;
+        openSchematicTabs_.insert(id);
+        knownSchematicCells_.insert(id);
+        refreshEmbeddedPanels();
+        selectSchematicTab(id);
+        if (documents_ && schematicPage_)
+            documents_->setCurrentWidget(schematicPage_);
+    }
+
+    void openLayoutFile(ice::ObjectId id) {
+        if (!project_)
+            return;
+        if (!project_->project().layoutCells.contains(id) && !project_->project().proceduralLayouts.contains(id))
+            return;
+        openLayoutTabs_.insert(id);
+        knownLayoutCells_.insert(id);
+        knownProceduralLayouts_.insert(id);
+        refreshEmbeddedPanels();
+        selectLayoutTab(id);
+        if (documents_ && layoutPage_)
+            documents_->setCurrentWidget(layoutPage_);
+    }
+
     void refreshEmbeddedPanels() {
         const ice::Project empty;
         const auto &project = project_ ? project_->project() : empty;
+        syncOpenFileTabs();
+        if (activeSchematicId_ != 0 && !openSchematicTabs_.contains(activeSchematicId_))
+            activeSchematicId_ = 0;
+        if (activeProceduralLayoutId_ != 0 && !openLayoutTabs_.contains(activeProceduralLayoutId_))
+            activeProceduralLayoutId_ = 0;
+        if (activeLayoutId_ != 0 && !openLayoutTabs_.contains(activeLayoutId_))
+            activeLayoutId_ = 0;
         if (schematicHierarchy_)
             schematicHierarchy_->setProject(project);
         if (layoutHierarchy_)
@@ -3966,8 +4935,12 @@ class DocumentWindow : public QMainWindow {
             const auto selected = activeSchematicId_;
             schematicCellTabs_->clear();
             for (const auto &[id, cell] : project.schematicCells) {
+                if (!openSchematicTabs_.contains(id))
+                    continue;
                 const int tab = schematicCellTabs_->count();
-                schematicCellTabs_->addTab(new QWidget, QString::fromStdString(cell.name));
+                schematicCellTabs_->addTab(
+                    new QWidget, fileTabLabel(QString::fromStdString(cell.name), schematicFileExtension(cell),
+                                              schematicFileDirty(id), conflictedSchematicFiles_.contains(id)));
                 schematicCellTabs_->tabBar()->setTabData(tab, QVariant::fromValue<qulonglong>(id));
                 const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                                    : QString::fromStdString(cell.pdk);
@@ -3975,9 +4948,30 @@ class DocumentWindow : public QMainWindow {
                                                            ? QStringLiteral("Text SPICE schematic · PDK: %1").arg(pdk)
                                                            : QStringLiteral("PDK: %1").arg(pdk));
             }
-            for (int index = 0; index < schematicCellTabs_->count(); ++index)
-                if (schematicCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
+            bool selectedTab = false;
+            for (int index = 0; index < schematicCellTabs_->count(); ++index) {
+                if (schematicCellTabs_->tabBar()->tabData(index).toULongLong() != selected)
+                    continue;
+                if (schematicCellTabs_->currentIndex() == index)
+                    activateSchematicTab(index);
+                else
                     schematicCellTabs_->setCurrentIndex(index);
+                selectedTab = true;
+                break;
+            }
+            // Newly discovered external files are opened automatically. When
+            // there was no active tab, activate the tab Qt selected so text
+            // schematics switch to the source editor instead of leaving the
+            // canvas visible.
+            if (!selectedTab && selected == 0 && schematicCellTabs_->count() > 0) {
+                int fallback = schematicCellTabs_->currentIndex();
+                if (fallback < 0)
+                    fallback = 0;
+                if (schematicCellTabs_->currentIndex() == fallback)
+                    activateSchematicTab(fallback);
+                else
+                    schematicCellTabs_->setCurrentIndex(fallback);
+            }
         }
         if (layoutCellTabs_) {
             if (activeProceduralLayoutId_ != 0 && !project.proceduralLayouts.contains(activeProceduralLayoutId_))
@@ -3985,16 +4979,22 @@ class DocumentWindow : public QMainWindow {
             const auto selected = activeProceduralLayoutId_ != 0 ? activeProceduralLayoutId_ : activeLayoutId_;
             layoutCellTabs_->clear();
             for (const auto &[id, procedural] : project.proceduralLayouts) {
+                if (!openLayoutTabs_.contains(id))
+                    continue;
                 const auto index = layoutCellTabs_->count();
-                layoutCellTabs_->addTab(new QWidget, QString::fromStdString(procedural.name));
+                layoutCellTabs_->addTab(new QWidget,
+                                        fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("icelay"),
+                                                     layoutFileDirty(id), conflictedProceduralFiles_.contains(id)));
                 layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
                 layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
             }
             for (const auto &[id, cell] : project.layoutCells) {
-                if (cell.library && !openLibraryLayoutCellTabs_.contains(id))
+                if (!openLayoutTabs_.contains(id))
                     continue;
                 const auto index = layoutCellTabs_->count();
-                layoutCellTabs_->addTab(new QWidget, QString::fromStdString(cell.name));
+                layoutCellTabs_->addTab(new QWidget,
+                                        fileTabLabel(QString::fromStdString(cell.name), QStringLiteral("icelay"),
+                                                     layoutFileDirty(id), conflictedLayoutFiles_.contains(id)));
                 layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
                 if (cell.generatedBy != 0) {
                     const auto procedural = project.proceduralLayouts.find(cell.generatedBy);
@@ -4004,11 +5004,17 @@ class DocumentWindow : public QMainWindow {
                                                            .arg(QString::fromStdString(procedural->second.name)));
                 }
             }
-            for (int index = 0; index < layoutCellTabs_->count(); ++index)
-                if (layoutCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
+            for (int index = 0; index < layoutCellTabs_->count(); ++index) {
+                if (layoutCellTabs_->tabBar()->tabData(index).toULongLong() != selected)
+                    continue;
+                if (layoutCellTabs_->currentIndex() == index)
+                    activateLayoutTab(index);
+                else
                     layoutCellTabs_->setCurrentIndex(index);
+                break;
+            }
         }
-        // Refresh simulation panel and project-level reports.
+        // Refresh simulation panel and project-level simulation scripts.
         if (simulationPanel_)
             simulationPanel_->setProject(project);
         refreshReportPanel();
@@ -4071,6 +5077,7 @@ class DocumentWindow : public QMainWindow {
     void refreshSchematic() {
         if (!schematicCanvas_)
             return;
+        updateFileTabDirtyIndicators();
         auto *scene = schematicCanvas_->scene();
         scene->clear();
         if (!project_ || project_->project().schematicCells.empty()) {
@@ -4089,6 +5096,13 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto &cell = cellIt->second;
         if (cell.textSchematic) {
+            if (schematicViewStack_ && textSchematicEditorPage_)
+                schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
+            if (textSchematicEditor_) {
+                const auto text = QString::fromStdString(cell.spiceText);
+                if (textSchematicEditor_->text() != text)
+                    textSchematicEditor_->setText(text);
+            }
             if (schematicSymbolsPanel_)
                 schematicSymbolsPanel_->clear();
             if (schematicNetlistPanel_)
@@ -4097,6 +5111,8 @@ class DocumentWindow : public QMainWindow {
             schematicSymbolsPdk_.clear();
             return;
         }
+        if (schematicViewStack_ && schematicCanvasPage_)
+            schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
         if (schematicSymbolsPanel_) {
             if (!schematicSymbolsLoaded_ || schematicSymbolsPdk_ != pdk) {
@@ -4616,20 +5632,61 @@ class DocumentWindow : public QMainWindow {
     }
 
     void updateEmptyWorkspaceState() {
-        const bool hasSchematics = project_ && !project_->project().schematicCells.empty();
-        const bool hasLayouts = project_ && !project_->project().layoutCells.empty();
+        const bool hasOpenSchematics = project_ && !openSchematicTabs_.empty();
+        const bool hasOpenLayouts = project_ && !openLayoutTabs_.empty();
+        bool showingCanvasSchematic = false;
+        if (project_ && hasOpenSchematics) {
+            const auto active = project_->project().schematicCells.find(activeSchematicId_);
+            if (active != project_->project().schematicCells.end()) {
+                showingCanvasSchematic = !active->second.textSchematic;
+            } else {
+                for (const auto id : openSchematicTabs_) {
+                    const auto cell = project_->project().schematicCells.find(id);
+                    if (cell != project_->project().schematicCells.end() && !cell->second.textSchematic) {
+                        showingCanvasSchematic = true;
+                        break;
+                    }
+                }
+            }
+        }
+        bool showingCanvasLayout = false;
+        if (project_ && hasOpenLayouts) {
+            const bool proceduralActive = activeProceduralLayoutId_ != 0 &&
+                                          project_->project().proceduralLayouts.contains(activeProceduralLayoutId_);
+            if (!proceduralActive) {
+                const auto active = project_->project().layoutCells.find(activeLayoutId_);
+                if (active != project_->project().layoutCells.end()) {
+                    showingCanvasLayout = true;
+                } else {
+                    for (const auto id : openLayoutTabs_) {
+                        if (project_->project().layoutCells.contains(id)) {
+                            showingCanvasLayout = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if (schematicToolbarColumn_)
-            schematicToolbarColumn_->setVisible(hasSchematics);
+            schematicToolbarColumn_->setVisible(showingCanvasSchematic);
         if (layoutToolbarColumn_)
-            layoutToolbarColumn_->setVisible(hasLayouts);
+            layoutToolbarColumn_->setVisible(showingCanvasLayout);
         if (layoutOptionsColumn_)
-            layoutOptionsColumn_->setVisible(hasLayouts);
+            layoutOptionsColumn_->setVisible(showingCanvasLayout);
 
         if (schematicEditorStack_ && schematicEditorPage_ && schematicEmptyPanel_) {
             const bool showingEmpty = schematicEditorStack_->currentWidget() == schematicEmptyPanel_;
-            if (hasSchematics) {
+            if (hasOpenSchematics) {
                 schematicEditorStack_->setCurrentWidget(schematicEditorPage_);
             } else {
+                std::vector<std::pair<ice::ObjectId, QString>> candidates;
+                if (project_) {
+                    for (const auto &[id, cell] : project_->project().schematicCells)
+                        candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
+                                                                 schematicFileExtension(cell), schematicFileDirty(id),
+                                                                 conflictedSchematicFiles_.contains(id)));
+                }
+                schematicEmptyPanel_->setOpenCandidates(candidates);
                 schematicEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
                 schematicEditorStack_->setCurrentWidget(schematicEmptyPanel_);
                 if (!showingEmpty)
@@ -4638,8 +5695,20 @@ class DocumentWindow : public QMainWindow {
         }
         if (layoutEditorStack_ && layoutEditorPage_ && layoutEmptyPanel_) {
             const bool showingEmpty = layoutEditorStack_->currentWidget() == layoutEmptyPanel_;
-            layoutEditorStack_->setCurrentWidget(hasLayouts ? layoutEditorPage_ : layoutEmptyPanel_);
-            if (!hasLayouts) {
+            layoutEditorStack_->setCurrentWidget(hasOpenLayouts ? layoutEditorPage_ : layoutEmptyPanel_);
+            if (!hasOpenLayouts) {
+                std::vector<std::pair<ice::ObjectId, QString>> candidates;
+                if (project_) {
+                    for (const auto &[id, layout] : project_->project().proceduralLayouts)
+                        candidates.emplace_back(id, fileTabLabel(QString::fromStdString(layout.name),
+                                                                 QStringLiteral("icelay"), layoutFileDirty(id),
+                                                                 conflictedProceduralFiles_.contains(id)));
+                    for (const auto &[id, cell] : project_->project().layoutCells)
+                        candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
+                                                                 QStringLiteral("icelay"), layoutFileDirty(id),
+                                                                 conflictedLayoutFiles_.contains(id)));
+                }
+                layoutEmptyPanel_->setOpenCandidates(candidates);
                 layoutEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
                 if (!showingEmpty)
                     layoutEmptyPanel_->prepareForDisplay();
@@ -4658,6 +5727,7 @@ class DocumentWindow : public QMainWindow {
         schematicLayout->setSpacing(0);
         schematicCellTabs_ = new QTabWidget;
         schematicCellTabs_->setDocumentMode(true);
+        schematicCellTabs_->setTabsClosable(true);
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
         schematicHierarchy_ = new ProjectPanel(false, false, false, true);
@@ -4694,10 +5764,7 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
         schematicCanvasPage_ = makeEditor(QStringLiteral("Schematic editor"), false);
-        textSchematicEditor_ = new TextDocumentEditor(
-            QStringLiteral("SPICE netlist"),
-            QStringLiteral("This text SPICE schematic stores its netlist directly in the project. "
-                           "Use normal SPICE syntax; changes are saved with the project."));
+        textSchematicEditor_ = new TextDocumentEditor;
         textSchematicEditor_->setOnTextEdited([this](const QString &text) { onTextSchematicEdited(text); });
         textSchematicEditorPage_ = textSchematicEditor_;
         schematicViewStack_ = new QStackedWidget;
@@ -4707,6 +5774,7 @@ class DocumentWindow : public QMainWindow {
         schematicEmptyPanel_ = new EmptySchematicPanel;
         schematicEmptyPanel_->setOnCreate(
             [this](const QString &name, const std::string &pdk) { createSchematic(name, pdk); });
+        schematicEmptyPanel_->setOnOpen([this](ice::ObjectId id) { openSchematicFile(id); });
         schematicEditorStack_ = new QStackedWidget;
         schematicEditorStack_->addWidget(schematicEmptyPanel_);
         schematicEditorStack_->addWidget(schematicEditorPage_);
@@ -4744,6 +5812,7 @@ class DocumentWindow : public QMainWindow {
         layoutLayout->setSpacing(0);
         layoutCellTabs_ = new QTabWidget;
         layoutCellTabs_->setDocumentMode(true);
+        layoutCellTabs_->setTabsClosable(true);
         auto *layoutContent = new QWidget;
         auto *layoutContentLayout = new QHBoxLayout(layoutContent);
         layoutHierarchy_ = new ProjectPanel(false, false, true, true);
@@ -4787,6 +5856,7 @@ class DocumentWindow : public QMainWindow {
         layoutEmptyPanel_ = new EmptyLayoutPanel;
         layoutEmptyPanel_->setOnCreate(
             [this](const QString &name, const std::string &pdk) { createLayoutCell(name, pdk); });
+        layoutEmptyPanel_->setOnOpen([this](ice::ObjectId id) { openLayoutFile(id); });
         layoutEditorStack_ = new QStackedWidget;
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
         layoutEditorStack_->addWidget(layoutEditorPage_);
@@ -5139,6 +6209,10 @@ class DocumentWindow : public QMainWindow {
                     plot->setGridVisible(visible);
         });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
+        connect(simulationTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+            if (simulationTabs_ && simulationGraphsPage_ && simulationTabs_->widget(index) == simulationGraphsPage_)
+                loadCachedSimulationRun();
+        });
 
         // ── Wire schematic / layout tabs ─────────────────────────────────
         connect(schematicCellTabs_, &QTabWidget::currentChanged, this, [this](int index) {
@@ -5151,10 +6225,21 @@ class DocumentWindow : public QMainWindow {
                 return;
             activateLayoutTab(index);
         });
+        connect(schematicCellTabs_, &QTabWidget::tabCloseRequested, this,
+                [this](int index) { closeSchematicTab(index); });
+        connect(layoutCellTabs_, &QTabWidget::tabCloseRequested, this, [this](int index) { closeLayoutTab(index); });
         connect(documents_, &QTabWidget::currentChanged, this, [this](int) {
             if (schematicCanvas_ && schematicCanvas_->isSignalPickMode() &&
                 documents_->currentWidget() != schematicPage_)
                 schematicCanvas_->setSignalPickMode(false);
+            if (documents_ && documents_->currentWidget() == simulationPage_) {
+                if (activeSimulationId_ == 0 && project_ && !project_->project().simulations.empty()) {
+                    if (simulationPanel_)
+                        simulationPanel_->selectSimulation(project_->project().simulations.begin()->first);
+                } else {
+                    loadCachedSimulationRun();
+                }
+            }
         });
 
         connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
@@ -5166,20 +6251,20 @@ class DocumentWindow : public QMainWindow {
         reportsLayout->setContentsMargins(0, 0, 0, 0);
         auto *reportsToolbar = new QHBoxLayout;
         reportsToolbar->setContentsMargins(4, 4, 4, 4);
-        reportTitleLabel_ = new QLabel(QStringLiteral("No report selected"));
+        reportTitleLabel_ = new QLabel(QStringLiteral("No simulation script selected"));
         reportTitleLabel_->setStyleSheet(QStringLiteral("font-weight: 600;"));
         reportsToolbar->addWidget(reportTitleLabel_, 1);
         reportStatusLabel_ = new QLabel;
         reportsToolbar->addWidget(reportStatusLabel_);
         reportSaveButton_ = new QPushButton(QStringLiteral("Save"));
-        reportSaveButton_->setToolTip(QStringLiteral("Save the report source"));
+        reportSaveButton_->setToolTip(QStringLiteral("Save the simulation script source"));
         reportsToolbar->addWidget(reportSaveButton_);
         reportRunButton_ = new QPushButton(QStringLiteral("Run"));
-        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected report"));
+        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected simulation script"));
         setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
         reportsToolbar->addWidget(reportRunButton_);
         reportOpenButton_ = new QPushButton(QStringLiteral("Open File"));
-        reportOpenButton_->setToolTip(QStringLiteral("Open the report source in an external editor"));
+        reportOpenButton_->setToolTip(QStringLiteral("Open the simulation script source in an external editor"));
         setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
         reportsToolbar->addWidget(reportOpenButton_);
         reportsLayout->addLayout(reportsToolbar);
@@ -5191,9 +6276,17 @@ class DocumentWindow : public QMainWindow {
         reportFont.setPointSizeF(std::max(reportFont.pointSizeF(), 10.0));
         reportCodeEditor_->setFont(reportFont);
         reportCodeEditor_->setTabStopDistance(reportCodeEditor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
-        reportCodeEditor_->setPlaceholderText(QStringLiteral("Select a report to edit its Python source."));
+        reportCodeEditor_->setPlaceholderText(QStringLiteral("Select a simulation script to edit its Python source."));
         reportHighlighter_ = new PythonSyntaxHighlighter(reportCodeEditor_->document());
-        reportsLayout->addWidget(reportCodeEditor_, 1);
+        scriptViewSplitter_ = new QSplitter(Qt::Vertical);
+        scriptViewSplitter_->addWidget(reportCodeEditor_);
+        scriptGraphTabs_ = new QTabWidget;
+        scriptGraphTabs_->setDocumentMode(true);
+        scriptGraphTabs_->hide();
+        scriptViewSplitter_->addWidget(scriptGraphTabs_);
+        scriptViewSplitter_->setStretchFactor(0, 3);
+        scriptViewSplitter_->setStretchFactor(1, 2);
+        reportsLayout->addWidget(scriptViewSplitter_, 1);
         simulationRightStack_->addWidget(reportsView_);
 
         reportSaveTimer_ = new QTimer(this);
@@ -5898,11 +6991,26 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
-    std::set<ice::ObjectId> openLibraryLayoutCellTabs_;
+    std::set<ice::ObjectId> openSchematicTabs_;
+    std::set<ice::ObjectId> openLayoutTabs_;
+    std::set<ice::ObjectId> knownSchematicCells_;
+    std::set<ice::ObjectId> knownLayoutCells_;
+    std::set<ice::ObjectId> knownProceduralLayouts_;
+    std::map<ice::ObjectId, std::string> savedSchematicSignatures_;
+    std::map<ice::ObjectId, std::string> savedLayoutSignatures_;
+    std::map<ice::ObjectId, std::string> savedProceduralSignatures_;
+    std::set<ice::ObjectId> conflictedSchematicFiles_;
+    std::set<ice::ObjectId> conflictedLayoutFiles_;
+    std::set<ice::ObjectId> conflictedProceduralFiles_;
+    std::map<ice::ObjectId, ice::SchematicCell> externalSchematicFiles_;
+    std::map<ice::ObjectId, ice::LayoutCell> externalLayoutFiles_;
+    std::map<ice::ObjectId, ice::ProceduralLayout> externalProceduralFiles_;
     std::unique_ptr<ice::ProjectSession> project_;
     std::shared_ptr<std::set<ice::ObjectId>> flattenedLayouts_ = std::make_shared<std::set<ice::ObjectId>>();
     QString projectPath_;
     QFileSystemWatcher *projectWatcher_ = nullptr;
+    QFileSystemWatcher *simulationRunWatcher_ = nullptr;
+    QTimer *simulationRunWatcherTimer_ = nullptr;
     QTimer *projectWatchDebounceTimer_ = nullptr;
     QTimer *projectWatcherResumeTimer_ = nullptr;
     bool suppressProjectWatcher_ = false;
@@ -5929,6 +7037,8 @@ class DocumentWindow : public QMainWindow {
     QWidget *simulationGraphsPage_ = nullptr;
     QStackedWidget *simulationRightStack_ = nullptr;
     QWidget *reportsView_ = nullptr;
+    QSplitter *scriptViewSplitter_ = nullptr;
+    QTabWidget *scriptGraphTabs_ = nullptr;
     QLabel *reportTitleLabel_ = nullptr;
     QPlainTextEdit *reportCodeEditor_ = nullptr;
     PythonSyntaxHighlighter *reportHighlighter_ = nullptr;
@@ -5937,6 +7047,7 @@ class DocumentWindow : public QMainWindow {
     QPushButton *reportRunButton_ = nullptr;
     QPushButton *reportOpenButton_ = nullptr;
     QTimer *reportSaveTimer_ = nullptr;
+    QString loadedCachedRunPath_;
     ice::ObjectId activeReportId_ = 0;
     bool selectingReport_ = false;
     bool loadingReport_ = false;

@@ -4,6 +4,7 @@
 #include "icelib/simulation.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,27 @@ struct SimulationRunArtifact {
     std::filesystem::path path;
     std::string runId;
 };
+
+struct StoredSimulationRun {
+    std::filesystem::path path;
+    std::string runId;
+    std::string createdAt;
+    ObjectId simulationId = 0;
+    std::string simulationName;
+    ObjectId schematicId = 0;
+    std::string schematicName;
+    SimulationResult result;
+};
+
+// Reads a stored run file. Throws ProjectError if the file is not a valid
+// stored ICE result.
+StoredSimulationRun readSimulationRun(const std::filesystem::path &path);
+
+// Finds the newest stored run. Filters are optional; when both are provided
+// both must match.
+std::optional<StoredSimulationRun> latestSimulationRun(const std::filesystem::path &projectRoot,
+                                                       std::optional<ObjectId> simulationId = std::nullopt,
+                                                       std::optional<ObjectId> schematicId = std::nullopt);
 
 // Serialize a result using the stored-run schema. The format is deliberately
 // new-only: report tooling is not expected to understand the old bare result

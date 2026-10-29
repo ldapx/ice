@@ -13,7 +13,7 @@ ice-cli project-validate <folder|project.icepro>
 ```
 
 `project-create` initializes `project.icepro`, `sch/`, `lay/`, `sim/`,
-`reports/`, `build/`, `.gitignore`, and `AGENTS.md`.
+`scripts/`, `build/`, `.gitignore`, and `AGENTS.md`.
 
 ## Schematic
 
@@ -54,6 +54,7 @@ Coordinates are integer database units.
 ```sh
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
+ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-info <project> <simulation> <graph>
@@ -65,7 +66,13 @@ ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [ou
 ```
 
 Time values accept SPICE-style engineering suffixes such as `1u`, `100n`, and
-`2m`. Signals are comma-separated names such as `1,2` or `out,v(out)`.
+`2m`. Signals may be comma- or whitespace-separated, for example `1,2`,
+`out,v(out)`, or `IN N1 N2`. Analysis aliases such as `tran` are stored as
+`transient`.
+
+`simulation-run` uses the stored simulation definition and writes its result
+under the simulation's build directory, so the GUI can load it as the latest
+run. `simulate` runs a schematic directly without a simulation definition.
 
 Without an explicit output path, the simulation writes a stored run under:
 
@@ -89,35 +96,37 @@ captured signals on Y. In `simulation-graph-update`, `-` keeps a field unchanged
 In `simulation-graph-limits`, `-` clears a limit. Deleting the last graph is
 rejected.
 
-## Reports
+## Simulation scripts
 
 ```sh
-ice-cli report-add <project> <name> [source-file]
-ice-cli report-list <project>
-ice-cli report-info <project> <report>
-ice-cli report-read <project> <report>
-ice-cli report-write <project> <report> <source-file|->
-ice-cli report-run <project> <report> [timeout-ms]
-ice-cli report-delete <project> <report>
+ice-cli script-add <project> <name> [source-file]
+ice-cli script-list <project>
+ice-cli script-info <project> <script>
+ice-cli script-read <project> <script>
+ice-cli script-write <project> <script> <source-file|->
+ice-cli script-run <project> <script> [timeout-ms]
+ice-cli script-delete <project> <script>
 ```
 
-`report-add` creates a new Python file under `reports/` from the built-in
+`script-add` creates a new Python file under `scripts/` from the built-in
 template, records it in `project.icepro`, and saves the project. An optional
 source file replaces the template. Use `-` to read the source from stdin.
 
-`report-write` replaces an existing report's source without changing project
-metadata. `report-read` returns the source, and `report-run` returns JSON with
-the process exit code, timeout state, stdout, and stderr. Report runs use the
-stored simulation runs under `build/simulations/`. `report-delete` removes only
-the project association; the Python file remains on disk.
+`script-write` replaces an existing simulation script's source without changing
+project metadata. `script-read` returns the source, and `script-run` returns JSON
+with the process exit code, timeout state, stdout, stderr, and generated graph
+data. Script runs use the stored simulation runs under `build/simulations/`.
+`script-delete` removes only the project association; the Python file remains on
+disk. The legacy `report-*` command names remain available as aliases.
 
 The typical agent feedback loop is:
 
 ```sh
 ice-cli schematic-add-cell project top
 ice-cli simulation-add project tran1 top transient 1m 1u 'v(n1)'
-ice-cli simulate project top 1m 1u 30000 'v(n1)'
-ice-cli report-add project "RLC Comparison"
-ice-cli report-write project "RLC Comparison" report.py
-ice-cli report-run project "RLC Comparison"
+ice-cli simulation-graph-add project tran1 "Response" time 'v(n1)'
+ice-cli simulation-run project tran1
+ice-cli script-add project "RLC Comparison"
+ice-cli script-write project "RLC Comparison" script.py
+ice-cli script-run project "RLC Comparison"
 ```

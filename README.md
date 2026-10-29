@@ -46,15 +46,15 @@ project/
 ├── sch/                 # *.icesch schematic cells
 ├── lay/                 # *.icelay layout cells and procedural layouts
 ├── sim/                 # *.icesim simulations
-├── reports/             # project-level Python simulation reports
+├── scripts/             # project-level Python simulation scripts
 ├── build/               # generated simulation runs and build output, ignored by Git
 ├── .gitignore
 └── AGENTS.md
 ```
 
-All project files are JSON except report scripts. `project.icepro` contains
+All project files are JSON except simulation scripts. `project.icepro` contains
 only project-level metadata, such as identity, name, units, grid, package
-dependencies, layers, and report associations. Schematics, layouts, and
+dependencies, layers, and simulation script associations. Schematics, layouts, and
 simulations are stored as individual files.
 
 ## Prerequisites

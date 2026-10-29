@@ -85,6 +85,22 @@ json jsonArrayOrEmpty(const std::vector<SimulationTrace> &traces) {
     return result;
 }
 
+JobState parseJobState(const std::string &state) {
+    if (state == "queued")
+        return JobState::queued;
+    if (state == "running")
+        return JobState::running;
+    if (state == "succeeded")
+        return JobState::succeeded;
+    if (state == "failed")
+        return JobState::failed;
+    if (state == "cancelled")
+        return JobState::cancelled;
+    if (state == "timed_out")
+        return JobState::timed_out;
+    return JobState::failed;
+}
+
 } // namespace
 
 std::filesystem::path simulationRunDirectory(const std::filesystem::path &projectRoot,
@@ -186,6 +202,97 @@ SimulationRunArtifact writeSimulationRun(const SimulationRunContext &context, co
         throw ProjectError("simulation.store.write", "Unable to finalize simulation result: " + path.string());
     }
     return {path, storedRunId};
+}
+
+StoredSimulationRun readSimulationRun(const std::filesystem::path &path) {
+    try {
+        std::ifstream input(path, std::ios::binary);
+        if (!input)
+            throw ProjectError("simulation.store.read", "Unable to read simulation result: " + path.string());
+        json document = json::parse(input);
+        if (document.value("format", std::string{}) != "ice-simulation-result")
+            throw ProjectError("simulation.store.format", "Not an ICE stored simulation result: " + path.string());
+        const auto run = document.at("run");
+        StoredSimulationRun stored;
+        stored.path = path;
+        stored.runId = run.value("id", std::string{});
+        stored.createdAt = run.value("created_at", std::string{});
+        const auto simulation = run.value("simulation", json::object());
+        stored.simulationId = simulation.value("id", ObjectId{0});
+        stored.simulationName = simulation.value("name", std::string{});
+        const auto schematic = run.value("schematic", json::object());
+        stored.schematicId = schematic.value("id", ObjectId{0});
+        stored.schematicName = schematic.value("name", std::string{});
+
+        auto &result = stored.result;
+        result.schema_version = document.value("schema_version", 1);
+        result.state = parseJobState(run.value("state", std::string{}));
+        result.analysis = document.value("analysis", run.value("analysis", std::string{}));
+        result.simulator = document.value("simulator", run.value("simulator", std::string{}));
+        result.simulator_version = document.value("simulator_version", run.value("simulator_version", std::string{}));
+        result.input_fingerprint = document.value("input_fingerprint", run.value("input_fingerprint", std::string{}));
+        result.error = document.value("error", run.value("error", std::string{}));
+        if (const auto time = document.find("time"); time != document.end() && time->is_array())
+            result.time = time->get<std::vector<double>>();
+        if (const auto traces = document.find("traces"); traces != document.end() && traces->is_array()) {
+            for (const auto &trace : *traces) {
+                SimulationTrace entry;
+                entry.name = trace.value("name", std::string{});
+                if (const auto values = trace.find("values"); values != trace.end() && values->is_array())
+                    entry.values = values->get<std::vector<double>>();
+                result.traces.push_back(std::move(entry));
+            }
+        }
+        return stored;
+    } catch (const ProjectError &) {
+        throw;
+    } catch (const std::exception &error) {
+        throw ProjectError("simulation.store.read", "Invalid simulation result " + path.string() + ": " + error.what());
+    }
+}
+
+std::optional<StoredSimulationRun> latestSimulationRun(const std::filesystem::path &projectRoot,
+                                                       std::optional<ObjectId> simulationId,
+                                                       std::optional<ObjectId> schematicId) {
+    const auto root = normalizedProjectRoot(projectRoot);
+    const auto base = root / "build" / "simulations";
+    std::error_code status;
+    if (!std::filesystem::is_directory(base, status) || status)
+        return std::nullopt;
+
+    std::vector<std::filesystem::path> files;
+    for (std::filesystem::directory_iterator simulations(base, status), end; !status && simulations != end;
+         simulations.increment(status)) {
+        if (!simulations->is_directory(status) || status)
+            continue;
+        const auto runs = simulations->path() / "runs";
+        if (!std::filesystem::is_directory(runs, status) || status)
+            continue;
+        for (std::filesystem::directory_iterator entries(runs, status), runEnd; !status && entries != runEnd;
+             entries.increment(status)) {
+            if (entries->is_regular_file(status) && !status && entries->path().extension() == ".json")
+                files.push_back(entries->path());
+        }
+    }
+    std::sort(files.begin(), files.end(), [](const std::filesystem::path &left, const std::filesystem::path &right) {
+        const auto leftName = left.filename().string();
+        const auto rightName = right.filename().string();
+        if (leftName != rightName)
+            return leftName < rightName;
+        return left < right;
+    });
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+        try {
+            auto stored = readSimulationRun(*it);
+            if (simulationId && stored.simulationId != *simulationId)
+                continue;
+            if (schematicId && stored.schematicId != *schematicId)
+                continue;
+            return stored;
+        } catch (const ProjectError &) {
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace ice

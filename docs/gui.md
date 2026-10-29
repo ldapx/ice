@@ -67,7 +67,7 @@ The GUI should support:
 
 Creating a project asks for a project name, a project folder, and whether to
 create a folder named after the project. The project root is initialized with
-`project.icepro`, `sch/`, `lay/`, `sim/`, `reports/`, `build/`, `.gitignore`,
+`project.icepro`, `sch/`, `lay/`, `sim/`, `scripts/`, `build/`, `.gitignore`,
 and `AGENTS.md`. Schematics, layouts, and simulations are stored as individual
 JSON files with `.icesch`, `.icelay`, and `.icesim` extensions.
 
@@ -79,12 +79,21 @@ Project state, view state, and transient job state should be separate:
 | View state | zoom, panes, selections, visibility | optional UI settings |
 | Job state | running simulation, progress, cancellation | runtime and result records |
 
+Schematic and layout file tabs are closable. Their labels include the file
+extension (`.sp` for text SPICE schematics, `.icesch` for drawn schematics, or
+`.icelay` for layouts) and a leading `●` while that file has unsaved edits. If
+every schematic or layout file tab is closed, the central editor area shows a
+form to open an existing file or create a new one. Opening a project starts with
+no schematic or layout file tabs open; open files from the hierarchy or the
+empty workspace form.
+
 The GUI watches `project.icepro` and the `sch/`, `lay/`, and `sim/` directories.
-When files change externally and the project has no unsaved GUI edits, the
-project reloads automatically. If there are unsaved edits, the GUI reports that
-external changes are pending instead of discarding them. **File → Reload Project
-from Disk** reloads explicitly after confirmation, and saving warns before it
-would overwrite external changes.
+External changes to an open file are reflected immediately when that file has no
+unsaved GUI edits. If the same file has unsaved edits, its tab shows a warning
+and saving asks whether to preserve the local or external version for each
+conflicting file. Clean files are merged from disk even while another file has
+local edits. **File → Reload Project from Disk** reloads explicitly after
+confirmation.
 
 ## Command and transaction model
 
@@ -144,8 +153,9 @@ The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
 The **+** button in Schematic **Hierarchy** offers **Schematic** and **Text
 SPICE Schematic**. Text SPICE schematics use a notebook-text icon, appear in the
-schematic tab bar, and open a plain-text SPICE editor in place of the canvas.
-Their source is stored directly in the project and saved with it. They are not
+schematic tab bar with a `.sp` extension, and open a plain-text SPICE editor in
+place of the canvas and canvas toolbar. Their source is stored directly in the
+project and saved with it. They are not
 projected into generated hierarchy symbols, but they can be selected as the
 source for a simulation. For a text schematic, simulation uses the stored SPICE
 source minus analysis-control directives such as `.tran`, `.dc`, `.ac`, `.op`,
@@ -189,7 +199,8 @@ icon in the hierarchy and can be selected and moved directly on the canvas.
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
 Python script editor in the middle view, and contain a generated static layout
-as their child. The script runs with a `layout` builder that exposes
+as their child. The canvas tool columns are hidden while a procedural layout
+tab is active. The script runs with a `layout` builder that exposes
 `layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
 procedural layout and choose **Regenerate layout** (or use the editor's
 **Regenerate layout** button) to replace the generated child's geometry from
@@ -250,27 +261,33 @@ layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
 
-## Simulation reports
+## Simulation scripts
 
-The Simulation panel **+** menu offers **Add Simulation…** and **Add Report…**.
-Reports are project-level Python files under `reports/`, recorded in
-`project.icepro`, and listed as top-level entries in the simulation hierarchy
-alongside simulations. Adding a report does not require an active simulation and
-always creates a new Python file from the built-in template.
+The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation
+Script…**. Simulation scripts are project-level Python files under `scripts/`,
+recorded in `project.icepro`, and listed as top-level entries in the simulation
+hierarchy alongside simulations. Adding a script does not require an active
+simulation and always creates a new Python file from the built-in template.
 
-Selecting a report shows the project-level report view in the Simulation
+Selecting a script shows the project-level script view in the Simulation
 workspace, replacing the simulation editor on the right. It is not a separate
 top-level document tab and is not stored inside any simulation. The right pane
-is an editable Python source editor with syntax highlighting. Report run
-messages, errors, and output are
-appended to the **Messages** tab, which is opened when a report runs. Reports
-have access to every stored simulation run through the `ReportContext`
-(`simulations`, `runs`, `latest`, `latest_many`, and `load`) and can compare
-multiple simulations in one report.
+is an editable Python source editor with syntax highlighting. Script run
+messages, errors, and Markdown output are appended to the **Messages** tab,
+which is opened when a script runs. Scripts have access to every stored
+simulation run through the context (`simulations`, `runs`, `latest`,
+`latest_many`, and `load`) and can compare multiple simulations in one script.
+
+Scripts can generate GUI graphs with `ctx.graph(...)`. The generated graphs are
+shown in tabs below the script editor. Graphs can reference stored runs and
+signals, or use explicit `x` and `y` arrays computed by the script. Running the
+script replaces the previously generated graph tabs. The latest graph payload is
+cached under `build/simulation-scripts/` and reloaded when the script is selected,
+including runs started from `ice-cli`.
 
 The **Save** button saves the Python source immediately; edits also autosave
-after a short pause. **Run** saves any pending edits and executes the report.
-**Open File** opens the Python source externally. Deleting a report removes only
+after a short pause. **Run** saves any pending edits and executes the script.
+**Open File** opens the Python source externally. Deleting a script removes only
 its project metadata; the file remains on disk.
 
 ## Agent tab

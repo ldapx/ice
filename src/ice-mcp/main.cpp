@@ -13,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -212,21 +213,21 @@ std::size_t resolveGraphIndex(const ice::SimulationItem &simulation, const json 
 std::vector<std::string> splitCommaList(const std::string &text) {
     std::vector<std::string> values;
     std::string current;
-    for (const char character : text) {
-        if (character != ',') {
-            current.push_back(character);
-            continue;
-        }
-        const auto first = current.find_first_not_of(" \t");
-        const auto last = current.find_last_not_of(" \t");
+    const auto flush = [&] {
+        const auto first = current.find_first_not_of(" \t\r\n");
+        const auto last = current.find_last_not_of(" \t\r\n");
         if (first != std::string::npos)
             values.push_back(current.substr(first, last - first + 1));
         current.clear();
+    };
+    for (const char character : text) {
+        if (character == ',' || std::isspace(static_cast<unsigned char>(character))) {
+            flush();
+            continue;
+        }
+        current.push_back(character);
     }
-    const auto first = current.find_first_not_of(" \t");
-    const auto last = current.find_last_not_of(" \t");
-    if (first != std::string::npos)
-        values.push_back(current.substr(first, last - first + 1));
+    flush();
     return values;
 }
 
@@ -311,10 +312,9 @@ class IceMcpServer {
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
         server.set_instructions(
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
-            "project, schematic, layout, simulation graph, and report tools. Project mutations are transactional in "
-            "memory; "
-            "report source files are written under reports/, but project metadata remains in memory. "
-            "Use ice-cli for persisted project changes.");
+            "project, schematic, layout, simulation graph, and simulation script tools. Project mutations are "
+            "transactional in memory; simulation script source files are written under scripts/, but project "
+            "metadata remains in memory. Use ice-cli for persisted project changes.");
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
             return agentsdk::mcp::tools_list_result{listTools(), std::nullopt};
         });
@@ -368,7 +368,7 @@ class IceMcpServer {
             {"layouts", json::array()},
             {"procedural_layouts", json::array()},
             {"simulations", json::array()},
-            {"reports", json::array()},
+            {"simulation_scripts", json::array()},
         };
         for (const auto &[id, cell] : project.schematicCells) {
             result["schematics"].push_back({{"id", id},
@@ -410,7 +410,7 @@ class IceMcpServer {
                                              {"graphs", simulation.graphs.size()}});
         }
         for (const auto &[id, report] : project.reports)
-            result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+            result["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
         return result;
     }
 
@@ -430,6 +430,15 @@ class IceMcpServer {
     }
 
     json call(const std::string &name, const json &arguments) {
+        std::string toolName = name;
+        json toolArguments = arguments;
+        if (toolName.starts_with("simulation_script_")) {
+            toolName = "report_" + toolName.substr(std::string("simulation_script_").size());
+            if (toolArguments.contains("script")) {
+                toolArguments["report"] = toolArguments.at("script");
+                toolArguments.erase("script");
+            }
+        }
         if (name == "ice_version")
             return {{"version", ice::version()}};
 
@@ -591,12 +600,12 @@ class IceMcpServer {
             return {{"id", graph.id}, {"name", graph.name}, {"simulation", simulationId}, {"deleted", true}};
         }
 
-        if (name == "report_create") {
-            const auto reportName = requiredString(arguments, "name");
-            const auto source = optionalString(arguments, "source");
+        if (toolName == "report_create") {
+            const auto reportName = requiredString(toolArguments, "name");
+            const auto source = optionalString(toolArguments, "source");
             const auto root = projectRootPath();
             ice::ObjectId id = 0;
-            session.execute("mcp report-create", [&](ice::Project &project) {
+            session.execute("mcp simulation-script-create", [&](ice::Project &project) {
                 id = ice::createProjectReport(project, root, reportName, source);
             });
             const auto &report = session.project().reports.at(id);
@@ -605,33 +614,42 @@ class IceMcpServer {
                     {"path", report.path},
                     {"source", ice::readProjectReportSource(root, report)}};
         }
-        if (name == "report_list") {
+        if (toolName == "report_list") {
             json reports = json::array();
             for (const auto &[id, report] : session.project().reports)
                 reports.push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
             return reports;
         }
-        if (name == "report_read") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+        if (toolName == "report_read") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
+                                             "simulation script");
             const auto &report = session.project().reports.at(id);
             return {{"id", id},
                     {"name", report.name},
                     {"path", report.path},
                     {"source", ice::readProjectReportSource(projectRootPath(), report)}};
         }
-        if (name == "report_write") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+        if (toolName == "report_write") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
+                                             "simulation script");
             const auto &report = session.project().reports.at(id);
-            const auto source = requiredStringAllowEmpty(arguments, "source");
+            const auto source = requiredStringAllowEmpty(toolArguments, "source");
             ice::writeProjectReportSource(projectRootPath(), report, source);
             return {{"id", id}, {"name", report.name}, {"path", report.path}, {"bytes", source.size()}};
         }
-        if (name == "report_run") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+        if (toolName == "report_run") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
+                                             "simulation script");
             const auto &report = session.project().reports.at(id);
-            const auto timeoutValue = optionalInteger(arguments, "timeout_ms").value_or(30000);
+            const auto timeoutValue = optionalInteger(toolArguments, "timeout_ms").value_or(30000);
             const auto timeout = std::chrono::milliseconds(std::max<std::int64_t>(1, timeoutValue));
             const auto result = ice::runProjectReport(projectRootPath(), report, executablePath_, timeout);
+            json graphs = json::array();
+            if (!result.graphsText.empty()) {
+                const auto document = json::parse(result.graphsText, nullptr, false);
+                if (!document.is_discarded() && document.contains("graphs"))
+                    graphs = document.at("graphs");
+            }
             return {{"id", id},
                     {"name", report.name},
                     {"path", report.path},
@@ -639,12 +657,14 @@ class IceMcpServer {
                     {"timed_out", result.timedOut},
                     {"exit_code", result.exitCode},
                     {"stdout", result.stdoutText},
-                    {"stderr", result.stderrText}};
+                    {"stderr", result.stderrText},
+                    {"graphs", std::move(graphs)}};
         }
-        if (name == "report_delete") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+        if (toolName == "report_delete") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
+                                             "simulation script");
             const auto report = session.project().reports.at(id);
-            session.execute("mcp report-delete", [&](ice::Project &project) { project.reports.erase(id); });
+            session.execute("mcp simulation-script-delete", [&](ice::Project &project) { project.reports.erase(id); });
             return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}};
         }
 
@@ -826,29 +846,30 @@ class IceMcpServer {
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("graph", "Graph name or id")
                             .build());
-        tools.push_back(tool_builder("report_create")
-                            .with_description("Create a project-level Python report file under reports/.")
-                            .with_string_param("name", "Report name")
+        tools.push_back(tool_builder("simulation_script_create")
+                            .with_description("Create a project-level Python simulation script under scripts/.")
+                            .with_string_param("name", "Simulation script name")
                             .with_string_param("source", "Optional initial Python source", false)
                             .build());
-        tools.push_back(tool_builder("report_list").with_description("List project-level reports.").build());
-        tools.push_back(tool_builder("report_read")
-                            .with_description("Read a report's metadata and Python source.")
-                            .with_string_param("report", "Report name or id")
+        tools.push_back(
+            tool_builder("simulation_script_list").with_description("List project-level simulation scripts.").build());
+        tools.push_back(tool_builder("simulation_script_read")
+                            .with_description("Read a simulation script's metadata and Python source.")
+                            .with_string_param("script", "Simulation script name or id")
                             .build());
-        tools.push_back(tool_builder("report_write")
-                            .with_description("Replace a report's Python source.")
-                            .with_string_param("report", "Report name or id")
+        tools.push_back(tool_builder("simulation_script_write")
+                            .with_description("Replace a simulation script's Python source.")
+                            .with_string_param("script", "Simulation script name or id")
                             .with_string_param("source", "Python source")
                             .build());
-        tools.push_back(tool_builder("report_run")
-                            .with_description("Run a report and return its exit code, stdout, and stderr.")
-                            .with_string_param("report", "Report name or id")
+        tools.push_back(tool_builder("simulation_script_run")
+                            .with_description("Run a simulation script and return its output and generated graphs.")
+                            .with_string_param("script", "Simulation script name or id")
                             .with_integer_param("timeout_ms", "Optional timeout in milliseconds", false)
                             .build());
-        tools.push_back(tool_builder("report_delete")
-                            .with_description("Delete report metadata; the Python file remains on disk.")
-                            .with_string_param("report", "Report name or id")
+        tools.push_back(tool_builder("simulation_script_delete")
+                            .with_description("Delete simulation script metadata; the Python file remains on disk.")
+                            .with_string_param("script", "Simulation script name or id")
                             .build());
         tools.push_back(tool_builder("schematic_create")
                             .with_description("Create a drawn schematic cell.")
@@ -952,9 +973,9 @@ class IceMcpServer {
         resources.push_back({"ice://project/validation", "Project validation", std::nullopt,
                              "Validation diagnostics for the open project", "application/json", std::nullopt,
                              std::nullopt});
-        resources.push_back({"ice://project/reports", "Project reports", std::nullopt,
-                             "Project-level report metadata and Python sources", "application/json", std::nullopt,
-                             std::nullopt});
+        resources.push_back({"ice://project/simulation-scripts", "Simulation scripts", std::nullopt,
+                             "Project-level simulation script metadata and Python sources", "application/json",
+                             std::nullopt, std::nullopt});
         return resources;
     }
 
@@ -970,7 +991,7 @@ class IceMcpServer {
             text = session_->project().serialize();
         else if (uri == "ice://project/validation")
             text = diagnostics().dump(2);
-        else if (uri == "ice://project/reports") {
+        else if (uri == "ice://project/simulation-scripts" || uri == "ice://project/reports") {
             json reports = json::array();
             for (const auto &[id, report] : session_->project().reports) {
                 json entry = {{"id", id}, {"name", report.name}, {"path", report.path}};

@@ -1382,7 +1382,7 @@ Agent:
 → connect nets
 → generate layout
 → place layout
-→ report changes
+→ summarize changes
 ```
 
 The chatbox should not have a separate private representation of the project.
@@ -1449,18 +1449,18 @@ project/
 │   └── <cell>.icelay    # one layout cell or procedural layout per file
 ├── sim/
 │   └── <sim>.icesim     # one simulation per file
-├── reports/
-│   └── <report>.py      # project-level simulation report
+├── scripts/
+│   └── <script>.py      # project-level simulation script
 ├── build/               # generated simulation runs, ignored by Git
 ├── .gitignore           # ignores build/
 └── AGENTS.md
 ```
 
 The `.icepro` file contains identity, name, units, grid, package
-dependencies, layer metadata, and project-level report associations. It does
-not contain schematic, layout, or simulation objects. Report scripts are
-project source files; generated run data goes under `build/` and is ignored by
-Git.
+dependencies, layer metadata, and project-level simulation script associations.
+It does not contain schematic, layout, or simulation objects. Simulation
+scripts are project source files; generated run data goes under `build/` and is
+ignored by Git.
 
 A lockfile should eventually record exact package/PDK versions used by the project.
 
