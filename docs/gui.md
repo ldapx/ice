@@ -313,11 +313,18 @@ stdio.
   all of its sessions.
 - The **Model** selector is populated from the active session's ACP config
   options and changes that session's model through `session/set_config_option`.
-- The prompt row sends a user turn; the transcript shows assistant text,
-  thoughts, plans, tool-call updates, and turn completion. **Cancel** sends an
-  ACP cancellation for the active session's prompt.
+- The prompt row sends a user turn. The transcript shows assistant text,
+  thoughts, and plans. Tool-call updates are coalesced by ACP tool-call ID:
+  completed file reads are grouped as `→Explored: N reads`, shell commands are
+  shown as `$ command` with truncated output, and pending/in-progress updates do
+  not create duplicate transcript entries. **Cancel** sends an ACP cancellation
+  for the active session's prompt.
 - Agent permission requests open a modal dialog listing the options supplied by
   the agent.
+- Agent questions use ACP form elicitation. ICE advertises form support, renders
+  the requested fields (single choice, multi-select, boolean, numeric, and text),
+  and returns the answers to the agent. Declining the dialog returns a declined
+  elicitation response.
 - Token usage updates the session page when the agent reports `usage_update`.
 
 ACP support is compiled in when an `agentsdk-cpp` checkout is available next to

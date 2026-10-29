@@ -12,6 +12,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -54,6 +55,13 @@ class ActivityPanel : public QWidget {
 
   private:
     struct AgentBackend;
+    struct AgentToolCall {
+        QString title;
+        QString kind;
+        QString command;
+        QString output;
+        QString path;
+    };
     struct AgentSession {
         std::string acpSessionId;
         QString label;
@@ -61,6 +69,8 @@ class ActivityPanel : public QWidget {
         QString configOptionsJson;
         QString modelConfigId;
         QString lastUserMessageId;
+        std::map<std::string, AgentToolCall> toolCalls;
+        int pendingReads = 0;
         qint64 used = 0;
         qint64 size = 0;
         bool modelAvailable = false;
@@ -81,6 +91,7 @@ class ActivityPanel : public QWidget {
     void appendTranscript(const QString &text);
     void handleAgentUpdate(const std::string &acpSessionId, const std::string &params);
     std::string handleAgentPermission(const std::string &params);
+    std::string handleAgentElicitation(const std::string &params);
     void updateAgentUsage(qint64 used, qint64 size);
     void setAgentStatus(const QString &text);
     void populateModelSelector();
@@ -97,6 +108,10 @@ class ActivityPanel : public QWidget {
     void switchAgentSession(int index);
     void showSessionTranscript();
     void appendSessionTranscript(const std::string &acpSessionId, const QString &text);
+    void flushPendingReads(AgentSession &session);
+    void handleToolCallUpdate(AgentSession &session, const std::string &toolCallId, const QString &title,
+                              const QString &kind, const QString &status, const QString &command, const QString &output,
+                              const QString &path);
     void setSessionPromptRunning(const std::string &acpSessionId, bool running);
     void newAgentSession();
     void closeActiveAgentSession();

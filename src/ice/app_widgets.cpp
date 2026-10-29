@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
@@ -34,8 +35,10 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRunnable>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -61,6 +64,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -96,6 +100,28 @@ QString jsonString(const nlohmann::json &object, const char *key, const QString 
     if (it == object.end() || !it->is_string())
         return fallback;
     return QString::fromStdString(it->get<std::string>());
+}
+
+struct AgentToolEvent {
+    QString id;
+    QString title;
+    QString kind;
+    QString status;
+    QString command;
+    QString output;
+    QString path;
+};
+
+QString truncatedToolOutput(const QString &text) {
+    const auto trimmed = text.trimmed();
+    if (trimmed.isEmpty())
+        return {};
+    auto lines = trimmed.split(QLatin1Char('\n'));
+    constexpr int tailLines = 12;
+    if (lines.size() <= tailLines + 1)
+        return trimmed;
+    const auto omitted = lines.size() - tailLines;
+    return QStringLiteral("(%1 earlier lines)\n%2").arg(omitted).arg(lines.mid(omitted).join(QLatin1Char('\n')));
 }
 
 QString configOptionsFromResponse(const std::string &response) {
@@ -419,6 +445,79 @@ void ActivityPanel::appendSessionTranscript(const std::string &acpSessionId, con
     transcript_->ensureCursorVisible();
 }
 
+void ActivityPanel::flushPendingReads(AgentSession &session) {
+    if (session.pendingReads <= 0)
+        return;
+    const auto count = session.pendingReads;
+    session.pendingReads = 0;
+    appendSessionTranscript(session.acpSessionId,
+                            QStringLiteral("→Explored: %1 %2\n").arg(count).arg(count == 1 ? "read" : "reads"));
+}
+
+void ActivityPanel::handleToolCallUpdate(AgentSession &session, const std::string &toolCallId, const QString &title,
+                                         const QString &kind, const QString &status, const QString &command,
+                                         const QString &output, const QString &path) {
+    if (toolCallId.empty())
+        return;
+    auto &call = session.toolCalls[toolCallId];
+    if (!title.isEmpty())
+        call.title = title;
+    if (!kind.isEmpty())
+        call.kind = kind;
+    if (!command.isEmpty())
+        call.command = command;
+    if (!output.isEmpty())
+        call.output = output;
+    if (!path.isEmpty())
+        call.path = path;
+
+    if (status.isEmpty() || status == QStringLiteral("pending") || status == QStringLiteral("in_progress")) {
+        if (call.kind != QStringLiteral("read"))
+            flushPendingReads(session);
+        return;
+    }
+
+    const bool failed = status == QStringLiteral("failed");
+    if (!failed && call.kind == QStringLiteral("read")) {
+        ++session.pendingReads;
+        session.toolCalls.erase(toolCallId);
+        return;
+    }
+
+    flushPendingReads(session);
+
+    auto label = call.title;
+    if (label.isEmpty() || label == call.kind)
+        label = call.path;
+    if (label.isEmpty())
+        label = call.kind;
+    if (failed) {
+        appendSessionTranscript(
+            session.acpSessionId,
+            QStringLiteral("✗ %1 failed\n").arg(label.isEmpty() ? QStringLiteral("Tool call") : label));
+        const auto detail = truncatedToolOutput(call.output);
+        if (!detail.isEmpty())
+            appendSessionTranscript(session.acpSessionId, detail + QLatin1Char('\n'));
+        session.toolCalls.erase(toolCallId);
+        return;
+    }
+
+    if (call.kind == QStringLiteral("execute")) {
+        const auto shellCommand = !call.command.isEmpty() ? call.command : call.title;
+        QString block = QStringLiteral("$ %1\n").arg(shellCommand.isEmpty() ? QStringLiteral("command") : shellCommand);
+        const auto detail = truncatedToolOutput(call.output);
+        if (!detail.isEmpty())
+            block += detail + QLatin1Char('\n');
+        appendSessionTranscript(session.acpSessionId, block);
+    } else if (call.title == QStringLiteral("question") && !call.output.isEmpty()) {
+        appendSessionTranscript(session.acpSessionId, QStringLiteral("→ %1\n").arg(truncatedToolOutput(call.output)));
+    } else {
+        appendSessionTranscript(session.acpSessionId,
+                                QStringLiteral("→ %1\n").arg(label.isEmpty() ? QStringLiteral("Tool call") : label));
+    }
+    session.toolCalls.erase(toolCallId);
+}
+
 void ActivityPanel::appendTranscript(const QString &text) {
     if (auto *session = activeAgentSession()) {
         appendSessionTranscript(session->acpSessionId, text);
@@ -487,6 +586,8 @@ void ActivityPanel::switchAgentSession(int index) {
     const auto acpSessionId = sessionSelector_->itemData(index).toString().toStdString();
     if (acpSessionId.empty())
         return;
+    if (auto *current = activeAgentSession())
+        flushPendingReads(*current);
     const auto sessionIndex = findAgentSessionIndex(acpSessionId);
     if (sessionIndex < 0) {
         const auto previousActive = activeAgentSession_;
@@ -529,6 +630,7 @@ void ActivityPanel::removeAgentSession(const std::string &acpSessionId) {
     const auto index = findAgentSessionIndex(acpSessionId);
     if (index < 0)
         return;
+    flushPendingReads(agentSessions_[static_cast<std::size_t>(index)]);
     const bool wasActive = index == activeAgentSession_;
     agentSessions_.erase(agentSessions_.begin() + index);
     if (agentSessions_.empty()) {
@@ -725,8 +827,7 @@ void ActivityPanel::newAgentSession() {
                 sessionCreating_ = false;
                 if (ok) {
                     setAgentStatus(QStringLiteral("Connected to %1").arg(agentSelector_->currentText()));
-                    addAgentSession(acpSessionId, configOptionsJson,
-                                    QStringLiteral("New ACP session %1.\n").arg(QString::fromStdString(acpSessionId)));
+                    addAgentSession(acpSessionId, configOptionsJson);
                     showAgentSessionPage();
                 } else {
                     setAgentStatus(error);
@@ -1023,10 +1124,16 @@ void ActivityPanel::connectAgent() {
     protocolSession->set_agent_request_handler(
         [this](const std::string &method, const std::string &params) -> agentsdk::acp::agent_response {
             agentsdk::acp::agent_response response;
-            if (method != "session/request_permission")
+            if (method == "session/request_permission") {
+                response.handled = true;
+                response.result_json = handleAgentPermission(params);
                 return response;
-            response.handled = true;
-            response.result_json = handleAgentPermission(params);
+            }
+            if (method == "elicitation/create") {
+                response.handled = true;
+                response.result_json = handleAgentElicitation(params);
+                return response;
+            }
             return response;
         });
 
@@ -1057,6 +1164,7 @@ void ActivityPanel::connectAgent() {
             capabilities.fs.read_text_file = true;
             capabilities.fs.write_text_file = true;
             capabilities.terminal = false;
+            capabilities.elicitation.form = true;
             agentsdk::acp::implementation_info info;
             info.name = "ice";
             info.title = "ICE";
@@ -1086,9 +1194,7 @@ void ActivityPanel::connectAgent() {
                 if (ok) {
                     setAgentStatus(QStringLiteral("Connected to %1").arg(QString::fromStdString(entry.display_name)));
                     agentStatus_->setToolTip({});
-                    addAgentSession(
-                        sessionId, configOptionsJson,
-                        QStringLiteral("Connected. ACP session %1.\n").arg(QString::fromStdString(sessionId)));
+                    addAgentSession(sessionId, configOptionsJson);
                     refreshPastAgentSessions();
                 } else {
                     setAgentStatus(error);
@@ -1171,8 +1277,9 @@ void ActivityPanel::sendPrompt() {
                 if (!session)
                     return;
                 session->promptRunning = false;
-                appendSessionTranscript(acpSessionId, ok ? QStringLiteral("\n[Turn complete]\n")
-                                                         : QStringLiteral("\n[Prompt failed or cancelled]\n"));
+                flushPendingReads(*session);
+                if (!ok)
+                    appendSessionTranscript(acpSessionId, QStringLiteral("\n[Turn failed or cancelled]\n"));
                 if (session == activeAgentSession())
                     updateAgentControls();
             },
@@ -1185,6 +1292,7 @@ void ActivityPanel::cancelPrompt() {
 #ifdef ICE_HAVE_AGENTSDK
     auto *session = activeAgentSession();
     if (agentBackend_ && agentBackend_->client && session) {
+        flushPendingReads(*session);
         appendSessionTranscript(session->acpSessionId, QStringLiteral("\nCancelling current turn...\n"));
         nlohmann::json params;
         params["sessionId"] = session->acpSessionId;
@@ -1197,6 +1305,7 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
     QString text;
     QString messageId;
     bool userMessage = false;
+    std::optional<AgentToolEvent> toolEvent;
     std::optional<qint64> used;
     std::optional<qint64> size;
     try {
@@ -1224,15 +1333,45 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
                    kind == QStringLiteral("current_mode_update") || kind == QStringLiteral("config_option_update")) {
             return;
         } else if (kind == QStringLiteral("tool_call") || kind == QStringLiteral("tool_call_update")) {
-            const auto title = jsonString(update, "title", QStringLiteral("Tool call"));
-            const auto status = jsonString(update, "status");
-            const auto toolKind = jsonString(update, "kind");
-            text = QStringLiteral("\n[tool] %1").arg(title);
-            if (!toolKind.isEmpty())
-                text += QStringLiteral(" · %1").arg(toolKind);
-            if (!status.isEmpty())
-                text += QStringLiteral(" · %1").arg(status);
-            text += QLatin1Char('\n');
+            AgentToolEvent event;
+            event.id = jsonString(update, "toolCallId");
+            event.title = jsonString(update, "title");
+            event.kind = jsonString(update, "kind");
+            event.status = jsonString(update, "status");
+            if (const auto inputIt = update.find("rawInput"); inputIt != update.end() && inputIt->is_object())
+                event.command = jsonString(*inputIt, "command");
+            if (const auto locationsIt = update.find("locations");
+                locationsIt != update.end() && locationsIt->is_array() && !locationsIt->empty()) {
+                const auto &location = locationsIt->front();
+                if (location.is_object())
+                    event.path = jsonString(location, "path");
+            }
+            if (const auto contentIt = update.find("content"); contentIt != update.end() && contentIt->is_array()) {
+                for (const auto &item : *contentIt) {
+                    if (!item.is_object())
+                        continue;
+                    const auto itemType = jsonString(item, "type");
+                    if (itemType == QStringLiteral("content") || itemType == QStringLiteral("text")) {
+                        const auto inner =
+                            itemType == QStringLiteral("content") ? item.find("content") : item.find("text");
+                        QString chunk;
+                        if (itemType == QStringLiteral("text") && inner != item.end() && inner->is_string())
+                            chunk = QString::fromStdString(inner->get<std::string>());
+                        else if (inner != item.end() && inner->is_object() &&
+                                 jsonString(*inner, "type") == QStringLiteral("text"))
+                            chunk = jsonString(*inner, "text");
+                        if (!chunk.isEmpty()) {
+                            if (!event.output.isEmpty())
+                                event.output += QLatin1Char('\n');
+                            event.output += chunk;
+                        }
+                    } else if (itemType == QStringLiteral("diff")) {
+                        if (event.path.isEmpty())
+                            event.path = jsonString(item, "path");
+                    }
+                }
+            }
+            toolEvent = std::move(event);
         } else if (kind == QStringLiteral("plan")) {
             text = QStringLiteral("\n[plan]\n");
             const auto entriesIt = update.find("entries");
@@ -1256,17 +1395,22 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
     } catch (const std::exception &) {
         return;
     }
-    if (text.isEmpty() && !used && !size)
+    if (text.isEmpty() && !toolEvent && !used && !size)
         return;
     QMetaObject::invokeMethod(
         this,
-        [this, acpSessionId, text, messageId, userMessage, used, size] {
+        [this, acpSessionId, text, messageId, userMessage, toolEvent, used, size] {
             if (!agentBackend_ || !agentBackend_->alive.load())
                 return;
             auto *session = findAgentSession(acpSessionId);
             if (!session)
                 return;
+            if (toolEvent) {
+                handleToolCallUpdate(*session, toolEvent->id.toStdString(), toolEvent->title, toolEvent->kind,
+                                     toolEvent->status, toolEvent->command, toolEvent->output, toolEvent->path);
+            }
             if (!text.isEmpty()) {
+                flushPendingReads(*session);
                 auto formatted = text;
                 if (userMessage && (messageId.isEmpty() || session->lastUserMessageId != messageId)) {
                     formatted = QStringLiteral("\nYou: %1\n").arg(text);
@@ -1282,6 +1426,250 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
             }
         },
         Qt::QueuedConnection);
+}
+
+std::string ActivityPanel::handleAgentElicitation(const std::string &params) {
+    auto promise = std::make_shared<std::promise<QString>>();
+    auto future = promise->get_future();
+    QPointer<ActivityPanel> self(this);
+    QMetaObject::invokeMethod(
+        this,
+        [self, promise, params] {
+            const auto decline = [&] { promise->set_value(QStringLiteral("{\"action\":\"decline\"}")); };
+            if (!self) {
+                decline();
+                return;
+            }
+            nlohmann::json root;
+            try {
+                root = nlohmann::json::parse(params);
+            } catch (const std::exception &) {
+                decline();
+                return;
+            }
+            const auto schemaIt = root.find("requestedSchema");
+            if (schemaIt == root.end() || !schemaIt->is_object()) {
+                decline();
+                return;
+            }
+            const auto propertiesIt = schemaIt->find("properties");
+            if (propertiesIt == schemaIt->end() || !propertiesIt->is_object()) {
+                decline();
+                return;
+            }
+            std::set<std::string> required;
+            if (const auto requiredIt = schemaIt->find("required");
+                requiredIt != schemaIt->end() && requiredIt->is_array()) {
+                for (const auto &entry : *requiredIt) {
+                    if (entry.is_string())
+                        required.insert(entry.get<std::string>());
+                }
+            }
+
+            struct Option {
+                nlohmann::json value;
+                QString label;
+                QString description;
+            };
+            const auto optionsFor = [](const nlohmann::json &schema) {
+                std::vector<Option> options;
+                if (const auto oneOf = schema.find("oneOf"); oneOf != schema.end() && oneOf->is_array()) {
+                    for (const auto &item : *oneOf) {
+                        if (!item.is_object())
+                            continue;
+                        Option option;
+                        option.value =
+                            item.contains("const") ? item.at("const") : item.value("title", nlohmann::json{});
+                        const auto title = item.value("title", std::string{});
+                        option.label = QString::fromStdString(
+                            title.empty() && option.value.is_string() ? option.value.get<std::string>() : title);
+                        option.description = QString::fromStdString(item.value("description", std::string{}));
+                        options.push_back(std::move(option));
+                    }
+                } else if (const auto enumIt = schema.find("enum"); enumIt != schema.end() && enumIt->is_array()) {
+                    for (const auto &item : *enumIt) {
+                        Option option;
+                        option.value = item;
+                        option.label = QString::fromStdString(item.is_string() ? item.get<std::string>() : item.dump());
+                        options.push_back(std::move(option));
+                    }
+                }
+                return options;
+            };
+
+            struct Binding {
+                std::string key;
+                bool required = false;
+                std::function<nlohmann::json()> read;
+            };
+            std::vector<Binding> bindings;
+
+            QDialog dialog(self.data());
+            dialog.setWindowTitle(QStringLiteral("Agent Question"));
+            auto *layout = new QVBoxLayout(&dialog);
+            const auto message = QString::fromStdString(root.value("message", std::string{}));
+            if (!message.isEmpty()) {
+                auto *messageLabel = new QLabel(message);
+                auto font = messageLabel->font();
+                font.setBold(true);
+                messageLabel->setFont(font);
+                messageLabel->setWordWrap(true);
+                layout->addWidget(messageLabel);
+            }
+
+            auto *scroll = new QScrollArea;
+            scroll->setWidgetResizable(true);
+            auto *formWidget = new QWidget;
+            auto *form = new QFormLayout(formWidget);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+            const auto addField = [&](const std::string &key, const nlohmann::json &property, QWidget *field,
+                                      std::function<nlohmann::json()> read) {
+                auto *box = new QWidget;
+                auto *boxLayout = new QVBoxLayout(box);
+                boxLayout->setContentsMargins(0, 0, 0, 0);
+                boxLayout->setSpacing(2);
+                auto *title = new QLabel(QString::fromStdString(property.value("title", key)));
+                auto titleFont = title->font();
+                titleFont.setBold(true);
+                title->setFont(titleFont);
+                title->setWordWrap(true);
+                boxLayout->addWidget(title);
+                const auto description = QString::fromStdString(property.value("description", std::string{}));
+                if (!description.isEmpty()) {
+                    auto *hint = new QLabel(description);
+                    hint->setWordWrap(true);
+                    hint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+                    boxLayout->addWidget(hint);
+                }
+                boxLayout->addWidget(field);
+                form->addRow(box);
+                bindings.push_back({key, required.contains(key), std::move(read)});
+            };
+
+            for (auto it = propertiesIt->begin(); it != propertiesIt->end(); ++it) {
+                if (!it->is_object())
+                    continue;
+                const auto &key = it.key();
+                const auto &property = *it;
+                const auto type = property.value("type", std::string{"string"});
+                const auto options = optionsFor(property);
+                if (type == "array") {
+                    auto *list = new QListWidget;
+                    list->setSelectionMode(QAbstractItemView::NoSelection);
+                    list->setMinimumHeight(110);
+                    const auto itemSchema = property.contains("items") && property.at("items").is_object()
+                                                ? property.at("items")
+                                                : nlohmann::json::object();
+                    for (const auto &option : optionsFor(itemSchema)) {
+                        auto *item = new QListWidgetItem(option.label, list);
+                        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+                        item->setCheckState(Qt::Unchecked);
+                        item->setData(Qt::UserRole, QString::fromStdString(option.value.dump()));
+                        if (!option.description.isEmpty())
+                            item->setToolTip(option.description);
+                    }
+                    addField(key, property, list, [list] {
+                        nlohmann::json values = nlohmann::json::array();
+                        for (int index = 0; index < list->count(); ++index) {
+                            const auto *item = list->item(index);
+                            if (item->checkState() != Qt::Checked)
+                                continue;
+                            try {
+                                values.push_back(
+                                    nlohmann::json::parse(item->data(Qt::UserRole).toString().toStdString()));
+                            } catch (const std::exception &) {
+                            }
+                        }
+                        return values.empty() ? nlohmann::json{} : values;
+                    });
+                    continue;
+                }
+                if (type == "boolean") {
+                    auto *check = new QCheckBox;
+                    addField(key, property, check, [check] { return nlohmann::json(check->isChecked()); });
+                    continue;
+                }
+                if (type == "integer") {
+                    auto *spin = new QSpinBox;
+                    spin->setRange(property.value("minimum", -1000000000), property.value("maximum", 1000000000));
+                    addField(key, property, spin, [spin] { return nlohmann::json(spin->value()); });
+                    continue;
+                }
+                if (type == "number") {
+                    auto *spin = new QDoubleSpinBox;
+                    spin->setDecimals(6);
+                    spin->setRange(property.value("minimum", -1.0e12), property.value("maximum", 1.0e12));
+                    addField(key, property, spin, [spin] { return nlohmann::json(spin->value()); });
+                    continue;
+                }
+                if (!options.empty()) {
+                    auto *combo = new QComboBox;
+                    combo->addItem(QStringLiteral("Select…"), QString{});
+                    for (const auto &option : options) {
+                        combo->addItem(option.label, QString::fromStdString(option.value.dump()));
+                        if (!option.description.isEmpty())
+                            combo->setItemData(combo->count() - 1, option.description, Qt::ToolTipRole);
+                    }
+                    addField(key, property, combo, [combo] {
+                        const auto data = combo->currentData().toString();
+                        if (data.isEmpty())
+                            return nlohmann::json{};
+                        try {
+                            return nlohmann::json::parse(data.toStdString());
+                        } catch (const std::exception &) {
+                            return nlohmann::json{};
+                        }
+                    });
+                    continue;
+                }
+                auto *edit = new QLineEdit;
+                addField(key, property, edit, [edit] {
+                    const auto text = edit->text().trimmed();
+                    return text.isEmpty() ? nlohmann::json{} : nlohmann::json(text.toStdString());
+                });
+            }
+
+            scroll->setWidget(formWidget);
+            layout->addWidget(scroll, 1);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Answer"));
+            buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Decline"));
+            layout->addWidget(buttons);
+            bool accepted = false;
+            QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+                for (const auto &binding : bindings) {
+                    if (binding.required && binding.read().is_null()) {
+                        QMessageBox::warning(&dialog, QStringLiteral("Agent Question"),
+                                             QStringLiteral("Please answer all required questions."));
+                        return;
+                    }
+                }
+                accepted = true;
+                dialog.accept();
+            });
+            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            dialog.resize(620, 460);
+            if (dialog.exec() != QDialog::Accepted || !accepted) {
+                decline();
+                return;
+            }
+            nlohmann::json content = nlohmann::json::object();
+            for (const auto &binding : bindings) {
+                auto value = binding.read();
+                if (!value.is_null())
+                    content[binding.key] = std::move(value);
+            }
+            promise->set_value(
+                QString::fromStdString(nlohmann::json{{"action", "accept"}, {"content", std::move(content)}}.dump()));
+        },
+        Qt::QueuedConnection);
+
+    while (agentBackend_ && agentBackend_->alive.load()) {
+        if (future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready)
+            return future.get().toStdString();
+    }
+    return R"({"action":"cancel"})";
 }
 
 std::string ActivityPanel::handleAgentPermission(const std::string &params) {
