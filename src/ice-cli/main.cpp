@@ -2,6 +2,8 @@
 #include "icelib/interchange.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/simulation.hpp"
+#include "icelib/simulation_report.hpp"
+#include "icelib/simulation_store.hpp"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -217,6 +219,12 @@ std::string readTextFile(const std::filesystem::path &path) {
     return {std::istreambuf_iterator<char>(stream), {}};
 }
 
+std::string readStdin() {
+    std::ostringstream stream;
+    stream << std::cin.rdbuf();
+    return stream.str();
+}
+
 std::filesystem::path projectRootForCli(const std::filesystem::path &path) {
     std::error_code status;
     if (std::filesystem::is_directory(path, status) && !status)
@@ -261,6 +269,7 @@ json projectSummary(const ice::Project &project, const std::string &path) {
         {"layouts", json::array()},
         {"procedural_layouts", json::array()},
         {"simulations", json::array()},
+        {"reports", json::array()},
     };
     for (const auto &[id, cell] : project.schematicCells) {
         result["schematics"].push_back({{"id", id},
@@ -303,7 +312,13 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                          {"stop", simulation.stop},
                                          {"step", simulation.step}});
     }
+    for (const auto &[id, report] : project.reports)
+        result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
     return result;
+}
+
+ice::ObjectId resolveReport(const ice::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.reports, text, "report");
 }
 
 json schematicInfo(const ice::SchematicCell &cell) {
@@ -423,9 +438,17 @@ void printHelp() {
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
               << "  simulation-list <project>\n"
-              << "  simulate <project> <schematic> <output.json> [stop] [step] [timeout-ms] [signals]\n"
-              << "  simulate-netlist <netlist-file> <output.json> [stop] [step] [timeout-ms] [signals]\n\n"
-              << "Cells, layers, symbols, and pins may be referenced by name or id.\n";
+              << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
+              << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n\n"
+              << "Reports:\n"
+              << "  report-add <project> <name> [source-file]\n"
+              << "  report-list <project>\n"
+              << "  report-info <project> <report>\n"
+              << "  report-read <project> <report>\n"
+              << "  report-write <project> <report> <source-file|->\n"
+              << "  report-run <project> <report> [timeout-ms]\n"
+              << "  report-delete <project> <report>\n\n"
+              << "Reports may be referenced by name or id. Use '-' to read report source from stdin.\n";
 }
 
 } // namespace
@@ -445,6 +468,9 @@ int main(int argc, char **argv) {
     for (int index = 1; index < argc; ++index)
         args.emplace_back(argv[index]);
     const auto command = args.front();
+    auto executablePath = ice::currentExecutablePath();
+    if (executablePath.empty())
+        executablePath = std::filesystem::absolute(argv[0]);
 
     if (command == "--version" || command == "version") {
         std::cout << ice::version() << "\n";
@@ -783,19 +809,123 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "report-add") {
+            expectArguments(args, 3, 4, "report-add <project> <name> [source-file]");
+            auto project = ice::Project::load(args[1]);
+            std::string source;
+            if (args.size() > 3)
+                source = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            const auto id = ice::createProjectReport(project, projectRootForCli(args[1]), args[2], source);
+            project.save(args[1]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}});
+            return 0;
+        }
+
+        if (command == "report-list") {
+            expectArguments(args, 2, 2, "report-list <project>");
+            const auto project = ice::Project::load(args[1]);
+            printJson(projectSummary(project, args[1])["reports"]);
+            return 0;
+        }
+
+        if (command == "report-info") {
+            expectArguments(args, 3, 3, "report-info <project> <report>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}});
+            return 0;
+        }
+
+        if (command == "report-read") {
+            expectArguments(args, 3, 3, "report-read <project> <report>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id},
+                       {"name", report.name},
+                       {"path", report.path},
+                       {"source", ice::readProjectReportSource(projectRootForCli(args[1]), report)}});
+            return 0;
+        }
+
+        if (command == "report-write") {
+            expectArguments(args, 4, 4, "report-write <project> <report> <source-file|->");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            const auto source = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            ice::writeProjectReportSource(projectRootForCli(args[1]), report, source);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"bytes", source.size()}});
+            return 0;
+        }
+
+        if (command == "report-run") {
+            expectArguments(args, 3, 4, "report-run <project> <report> [timeout-ms]");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            const auto timeoutMs =
+                args.size() > 3 ? parseInteger(args[3], "timeout") : static_cast<ice::Coordinate>(30000);
+            const auto timeout = std::chrono::milliseconds(std::max<ice::Coordinate>(1, timeoutMs));
+            const auto result = ice::runProjectReport(projectRootForCli(args[1]), report, executablePath, timeout);
+            const bool ok = !result.timedOut && result.exitCode == 0;
+            printJson({{"id", id},
+                       {"name", report.name},
+                       {"path", report.path},
+                       {"ok", ok},
+                       {"timed_out", result.timedOut},
+                       {"exit_code", result.exitCode},
+                       {"stdout", result.stdoutText},
+                       {"stderr", result.stderrText}});
+            if (result.timedOut)
+                throw ice::ProjectError("report.timeout", "Report timed out");
+            if (result.exitCode != 0)
+                throw ice::ProjectError("report.failed", "Report exited with code " + std::to_string(result.exitCode));
+            return 0;
+        }
+
+        if (command == "report-delete") {
+            expectArguments(args, 3, 3, "report-delete <project> <report>");
+            auto project = ice::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto report = project.reports.at(id);
+            project.reports.erase(id);
+            project.save(args[1]);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}});
+            return 0;
+        }
+
         if (command == "simulate" || command == "simulate-netlist") {
             const bool fromSchematic = command == "simulate";
-            expectArguments(args, fromSchematic ? 4 : 3, fromSchematic ? 8 : 7,
+            const std::size_t base = fromSchematic ? 3 : 2;
+            expectArguments(args, base, base + 5,
                             fromSchematic
-                                ? "simulate <project> <schematic> <output.json> [stop] [step] [timeout-ms] [signals]"
-                                : "simulate-netlist <netlist-file> <output.json> [stop] [step] [timeout-ms] [signals]");
+                                ? "simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]"
+                                : "simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]");
+
+            std::size_t end = args.size();
+            std::string outputPath;
+            if (end > base && std::filesystem::path(args.back()).extension() == ".json") {
+                outputPath = args.back();
+                --end;
+            }
+
             ice::SimulationRequest request;
-            std::size_t outputIndex = 0;
+            ice::SimulationRunContext context;
             if (fromSchematic) {
                 const auto project = ice::Project::load(args[1]);
-                const auto schematic = resolveSchematic(project, args[2]);
-                request.netlist = ice::buildSchematicNetlist(project, schematic);
-                outputIndex = 3;
+                const auto schematicId = resolveSchematic(project, args[2]);
+                const auto &schematic = project.schematicCells.at(schematicId);
+                request.netlist = ice::buildSchematicNetlist(project, schematicId);
+                context.projectRoot = args[1];
+                context.projectIdentity = project.identity;
+                context.projectName = project.name;
+                context.simulationId = 0;
+                context.simulationName = "cli-" + schematic.name;
+                context.schematicId = schematicId;
+                context.schematicName = schematic.name;
             } else {
                 std::ifstream netlist(args[1]);
                 if (!netlist)
@@ -803,30 +933,56 @@ int main(int argc, char **argv) {
                 std::string line;
                 while (std::getline(netlist, line))
                     request.netlist.push_back(line);
-                outputIndex = 2;
+                context.projectRoot = std::filesystem::current_path();
+                context.projectIdentity = "netlist";
+                context.projectName = "netlist";
+                context.simulationId = 0;
+                context.simulationName = std::filesystem::path(args[1]).stem().string();
+                context.schematicId = 0;
+                context.schematicName = context.simulationName;
             }
-            if (args.size() > outputIndex + 1)
-                request.stop = parseDouble(args[outputIndex + 1], "stop time");
-            if (args.size() > outputIndex + 2)
-                request.step = parseDouble(args[outputIndex + 2], "step time");
-            const auto timeout = args.size() > outputIndex + 3
-                                     ? std::chrono::milliseconds(parseInteger(args[outputIndex + 3], "timeout"))
-                                     : std::chrono::milliseconds(10000);
-            if (args.size() > outputIndex + 4)
-                request.probeSignals = splitSignals(args[outputIndex + 4]);
+
+            std::size_t option = base;
+            if (end > option)
+                request.stop = parseDouble(args[option++], "stop time");
+            if (end > option)
+                request.step = parseDouble(args[option++], "step time");
+            const auto timeout = end > option ? std::chrono::milliseconds(parseInteger(args[option++], "timeout"))
+                                              : std::chrono::milliseconds(10000);
+            if (end > option)
+                request.probeSignals = splitSignals(args[option++]);
+            if (end > option)
+                throw ice::ProjectError("cli.arguments", "Too many simulation arguments");
+            context.request = request;
+
             ice::SimulationRunner runner;
             const auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
                 std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
             });
-            std::ofstream output(args[outputIndex]);
-            if (!output)
-                throw ice::ProjectError("simulation.save", "Unable to open simulation result path");
-            output << ice::serializeSimulationResult(result);
-            printJson({{"state", ice::jobStateName(result.state)},
-                       {"analysis", result.analysis},
-                       {"time_points", result.time.size()},
-                       {"traces", result.traces.size()},
-                       {"error", result.error}});
+
+            std::filesystem::path storedPath;
+            std::string runId;
+            if (outputPath.empty()) {
+                const auto artifact = ice::writeSimulationRun(context, result);
+                storedPath = artifact.path;
+                runId = artifact.runId;
+            } else {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw ice::ProjectError("simulation.save", "Unable to open simulation result path");
+                output << ice::serializeSimulationRun(context, result);
+                storedPath = outputPath;
+            }
+
+            json summary = {{"state", ice::jobStateName(result.state)},
+                            {"analysis", result.analysis},
+                            {"time_points", result.time.size()},
+                            {"traces", result.traces.size()},
+                            {"stored", storedPath.string()},
+                            {"error", result.error}};
+            if (!runId.empty())
+                summary["run_id"] = runId;
+            printJson(summary);
             if (result.state != ice::JobState::succeeded)
                 throw ice::ProjectError("simulation." + ice::jobStateName(result.state), result.error);
             return 0;

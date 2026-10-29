@@ -31,6 +31,7 @@
 
 namespace {
 constexpr int kItemKindRole = Qt::UserRole + 1;
+constexpr int kReportIdRole = Qt::UserRole + 2;
 
 enum class HierarchyItemKind : int {
     layout = 1,
@@ -444,17 +445,17 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     auto *toolbarRow = new QHBoxLayout;
     toolbarRow->setContentsMargins(4, 0, 4, 4);
     search_ = new QLineEdit;
-    search_->setPlaceholderText(QStringLiteral("Search simulations…"));
+    search_->setPlaceholderText(QStringLiteral("Search simulations and reports…"));
     search_->setClearButtonEnabled(true);
-    search_->setAccessibleName(QStringLiteral("Search simulations"));
+    search_->setAccessibleName(QStringLiteral("Search simulations and reports"));
     addButton_ = new QPushButton;
-    addButton_->setToolTip(QStringLiteral("Add simulation"));
-    addButton_->setAccessibleName(QStringLiteral("Add simulation"));
+    addButton_->setToolTip(QStringLiteral("Add simulation or report"));
+    addButton_->setAccessibleName(QStringLiteral("Add simulation or report"));
     addButton_->setFixedWidth(28);
     setLucideIcon(addButton_, QStringLiteral("plus"), 16);
     deleteButton_ = new QPushButton;
-    deleteButton_->setToolTip(QStringLiteral("Delete selected simulation"));
-    deleteButton_->setAccessibleName(QStringLiteral("Delete selected simulation"));
+    deleteButton_->setToolTip(QStringLiteral("Delete selected simulation or report"));
+    deleteButton_->setAccessibleName(QStringLiteral("Delete selected simulation or report"));
     deleteButton_->setFixedWidth(28);
     setLucideIcon(deleteButton_, QStringLiteral("trash"), 16);
     deleteButton_->setEnabled(false);
@@ -472,30 +473,56 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
 
     connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *, QTreeWidgetItem *) {
-        deleteButton_->setEnabled(currentSimulationId() != 0);
+        const auto reportId = currentReportId();
+        deleteButton_->setEnabled(currentSimulationId() != 0 || reportId != 0);
+        if (reportId != 0) {
+            if (onReportSelection_)
+                onReportSelection_(reportId);
+            return;
+        }
         if (onSelection_)
             onSelection_(currentSimulationId(), currentGraphId());
     });
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint &pos) { showContextMenu(pos); });
+    connect(addButton_, &QPushButton::clicked, this, [this] {
+        QMenu menu(this);
+        auto *simulationAction = menu.addAction(QStringLiteral("Add Simulation…"));
+        auto *reportAction = menu.addAction(QStringLiteral("Add Report…"));
+        const auto *chosen = menu.exec(addButton_->mapToGlobal(QPoint(0, addButton_->height())));
+        if (chosen == simulationAction && onAdd_) {
+            onAdd_();
+        } else if (chosen == reportAction && onAddReport_) {
+            onAddReport_();
+        }
+    });
+    connect(deleteButton_, &QPushButton::clicked, this, [this] {
+        const auto reportId = currentReportId();
+        if (reportId != 0 && onDeleteReport_)
+            onDeleteReport_(reportId);
+        else if (onDelete_)
+            onDelete_();
+    });
 }
 
-void SimulationPanel::setOnAddClicked(std::function<void()> cb) {
-    connect(addButton_, &QPushButton::clicked, this, [cb = std::move(cb)] { cb(); });
-}
+void SimulationPanel::setOnAddClicked(std::function<void()> cb) { onAdd_ = std::move(cb); }
 
-void SimulationPanel::setOnDeleteClicked(std::function<void()> cb) {
-    connect(deleteButton_, &QPushButton::clicked, this, [cb = std::move(cb)] { cb(); });
-}
+void SimulationPanel::setOnAddReport(std::function<void()> cb) { onAddReport_ = std::move(cb); }
+void SimulationPanel::setOnOpenReport(std::function<void(ice::ObjectId)> cb) { onOpenReport_ = std::move(cb); }
+
+void SimulationPanel::setOnDeleteClicked(std::function<void()> cb) { onDelete_ = std::move(cb); }
 
 void SimulationPanel::setOnAddGraph(std::function<void(ice::ObjectId)> cb) { onAddGraph_ = std::move(cb); }
 void SimulationPanel::setOnDeleteGraph(std::function<void(ice::ObjectId, ice::ObjectId)> cb) {
     onDeleteGraph_ = std::move(cb);
 }
+void SimulationPanel::setOnDeleteReport(std::function<void(ice::ObjectId)> cb) { onDeleteReport_ = std::move(cb); }
 void SimulationPanel::setOnSelection(SelectionCallback cb) { onSelection_ = std::move(cb); }
+void SimulationPanel::setOnReportSelection(ReportSelectionCallback cb) { onReportSelection_ = std::move(cb); }
 
 void SimulationPanel::setProject(const ice::Project &project) {
     const ice::ObjectId prevSimId = currentSimulationId();
     const ice::ObjectId prevGraphId = currentGraphId();
+    const ice::ObjectId prevReportId = currentReportId();
     {
         QSignalBlocker blocker(tree_);
         tree_->clear();
@@ -520,13 +547,24 @@ void SimulationPanel::setProject(const ice::Project &project) {
                 graphItem->setToolTip(0, QStringLiteral("X: %1  Y: %2").arg(xAxis, yAxis));
             }
         }
+        for (const auto &[id, report] : project.reports) {
+            auto *reportItem = new QTreeWidgetItem(tree_, {QString::fromStdString(report.name)});
+            reportItem->setData(0, kReportIdRole, QVariant::fromValue<qulonglong>(id));
+            reportItem->setIcon(0, hierarchyIcon("notebook-text"));
+            reportItem->setToolTip(0, QString::fromStdString(report.path));
+        }
         tree_->expandAll();
-        if (prevSimId != 0)
+        if (prevReportId != 0)
+            selectReport(prevReportId);
+        else if (prevSimId != 0)
             selectSimulation(prevSimId, prevGraphId);
         if (search_)
             applyFilter(search_->text());
     }
-    deleteButton_->setEnabled(currentSimulationId() != 0);
+    const auto reportId = currentReportId();
+    deleteButton_->setEnabled(currentSimulationId() != 0 || reportId != 0);
+    if (reportId != 0)
+        return;
     if (onSelection_)
         onSelection_(currentSimulationId(), currentGraphId());
 }
@@ -556,7 +594,18 @@ ice::ObjectId SimulationPanel::currentGraphId() const {
     return static_cast<ice::ObjectId>(item->data(0, Qt::UserRole + 1).toULongLong());
 }
 
+ice::ObjectId SimulationPanel::currentReportId() const {
+    auto *item = tree_->currentItem();
+    if (!item || !item->data(0, kReportIdRole).isValid())
+        return 0;
+    return static_cast<ice::ObjectId>(item->data(0, kReportIdRole).toULongLong());
+}
+
 void SimulationPanel::selectSimulation(ice::ObjectId id, ice::ObjectId graphId) {
+    if (id == 0) {
+        tree_->setCurrentItem(nullptr);
+        return;
+    }
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
         auto *item = tree_->topLevelItem(i);
         if (static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong()) != id)
@@ -576,6 +625,21 @@ void SimulationPanel::selectSimulation(ice::ObjectId id, ice::ObjectId graphId) 
         }
         tree_->setCurrentItem(target);
         return;
+    }
+    tree_->setCurrentItem(nullptr);
+}
+
+void SimulationPanel::selectReport(ice::ObjectId id) {
+    if (id == 0) {
+        tree_->setCurrentItem(nullptr);
+        return;
+    }
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+        auto *item = tree_->topLevelItem(i);
+        if (static_cast<ice::ObjectId>(item->data(0, kReportIdRole).toULongLong()) == id) {
+            tree_->setCurrentItem(item);
+            return;
+        }
     }
     tree_->setCurrentItem(nullptr);
 }
@@ -605,13 +669,25 @@ void SimulationPanel::applyFilter(const QString &text) {
     }
     if (!needle.isEmpty())
         tree_->expandAll();
-    deleteButton_->setEnabled(currentSimulationId() != 0);
+    deleteButton_->setEnabled(currentSimulationId() != 0 || currentReportId() != 0);
 }
 
 void SimulationPanel::showContextMenu(const QPoint &pos) {
     auto *clicked = tree_->itemAt(pos);
     if (!clicked)
         return;
+    if (clicked->data(0, kReportIdRole).isValid()) {
+        const auto reportId = static_cast<ice::ObjectId>(clicked->data(0, kReportIdRole).toULongLong());
+        QMenu menu(this);
+        auto *openAction = menu.addAction(QStringLiteral("Open report file"));
+        auto *deleteAction = menu.addAction(QStringLiteral("Delete report"));
+        const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+        if (chosen == openAction && onOpenReport_)
+            onOpenReport_(reportId);
+        else if (chosen == deleteAction && onDeleteReport_)
+            onDeleteReport_(reportId);
+        return;
+    }
     QTreeWidgetItem *simItem = clicked;
     while (simItem && !simItem->data(0, Qt::UserRole).isValid())
         simItem = simItem->parent();

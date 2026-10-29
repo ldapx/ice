@@ -245,6 +245,14 @@ struct SimulationItem {
     std::vector<SimulationGraph> graphs;
 };
 
+// A project-level Python report. Reports are stored in reports/ and can read
+// any simulation run in the project.
+struct ProjectReport {
+    ObjectId id = 0;
+    std::string name;
+    std::string path;
+};
+
 class Project {
   public:
     static constexpr int schemaVersion = 1;
@@ -259,6 +267,7 @@ class Project {
     std::map<ObjectId, LayoutCell> layoutCells;
     std::map<ObjectId, ProceduralLayout> proceduralLayouts;
     std::map<ObjectId, SimulationItem> simulations;
+    std::map<ObjectId, ProjectReport> reports;
 
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;

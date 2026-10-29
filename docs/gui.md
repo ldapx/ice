@@ -246,6 +246,29 @@ layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
 
+## Simulation reports
+
+The Simulation panel **+** menu offers **Add Simulation…** and **Add Report…**.
+Reports are project-level Python files under `reports/`, recorded in
+`project.icepro`, and listed as top-level entries in the simulation hierarchy
+alongside simulations. Adding a report does not require an active simulation and
+always creates a new Python file from the built-in template.
+
+Selecting a report shows the project-level report view in the Simulation
+workspace, replacing the simulation editor on the right. It is not a separate
+top-level document tab and is not stored inside any simulation. The right pane
+is an editable Python source editor with syntax highlighting. Report run
+messages, errors, and output are
+appended to the **Messages** tab, which is opened when a report runs. Reports
+have access to every stored simulation run through the `ReportContext`
+(`simulations`, `runs`, `latest`, `latest_many`, and `load`) and can compare
+multiple simulations in one report.
+
+The **Save** button saves the Python source immediately; edits also autosave
+after a short pause. **Run** saves any pending edits and executes the report.
+**Open File** opens the Python source externally. Deleting a report removes only
+its project metadata; the file remains on disk.
+
 ## Agent tab
 
 The **Agent** tab is the Agent Client Protocol (ACP) chat interface. It uses

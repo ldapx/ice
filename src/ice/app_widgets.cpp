@@ -320,10 +320,10 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
             [this](int) { applyModelSelection(); });
     updateAgentControls();
 
-    auto *messages = new QPlainTextEdit;
-    messages->setReadOnly(true);
-    messages->setPlaceholderText(QStringLiteral("Structured application and external-tool messages"));
-    tabs->addTab(messages, QStringLiteral("Messages"));
+    messages_ = new QPlainTextEdit;
+    messages_->setReadOnly(true);
+    messages_->setPlaceholderText(QStringLiteral("Structured application and external-tool messages"));
+    messagesTabIndex_ = tabs->addTab(messages_, QStringLiteral("Messages"));
 
     auto *jobs = new QWidget;
     auto *jobsLayout = new QVBoxLayout(jobs);
@@ -1448,6 +1448,18 @@ void ActivityPanel::showDrcTab() {
 void ActivityPanel::showAgentTab() {
     if (tabs_ && agentTabIndex_ >= 0)
         tabs_->setCurrentIndex(agentTabIndex_);
+}
+
+void ActivityPanel::appendMessage(const QString &message) {
+    if (!messages_)
+        return;
+    messages_->appendPlainText(message);
+    messages_->moveCursor(QTextCursor::End);
+}
+
+void ActivityPanel::showMessagesTab() {
+    if (tabs_ && messagesTabIndex_ >= 0)
+        tabs_->setCurrentIndex(messagesTabIndex_);
 }
 
 CommandPalette::CommandPalette(const QList<QAction *> &actions, QWidget *parent) : QDialog(parent) {

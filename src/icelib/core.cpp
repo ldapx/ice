@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <spdlog/spdlog.h>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -109,6 +110,8 @@ ObjectId Project::nextId() {
         for (const auto &graph : sim.graphs)
             update(graph.id);
     }
+    for (const auto &[id, _] : reports)
+        update(id);
     return highest + 1;
 }
 
@@ -224,6 +227,20 @@ std::vector<Diagnostic> Project::validate() const {
         if (!layoutCells.contains(layout.generatedCell))
             result.push_back({Diagnostic::Severity::error, "layout.procedural.generated",
                               "Procedural layout references a missing generated layout cell", layoutId});
+    }
+    std::unordered_set<std::string> reportNames;
+    for (const auto &[reportId, report] : reports) {
+        if (report.name.empty())
+            result.push_back({Diagnostic::Severity::error, "report.name", "Report name is required", reportId});
+        else if (!reportNames.insert(report.name).second)
+            result.push_back({Diagnostic::Severity::error, "report.name.duplicate",
+                              "Report name is listed more than once: " + report.name, reportId});
+        const auto normalized = std::filesystem::path(report.path).lexically_normal();
+        const auto first = normalized.begin();
+        if (report.path.empty() || normalized.empty() || normalized.is_absolute() || first == normalized.end() ||
+            first->string() != "reports" || normalized.extension() != ".py")
+            result.push_back({Diagnostic::Severity::error, "report.path",
+                              "Report path must be a relative Python file inside reports/", reportId});
     }
     return result;
 }
@@ -396,6 +413,9 @@ std::string Project::serialize() const {
         }
         j["simulations"].push_back(s);
     }
+    j["reports"] = json::array();
+    for (const auto &[id, report] : reports)
+        j["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
     return j.dump(2) + "\n";
 }
 
@@ -623,6 +643,15 @@ Project Project::deserialize(const std::string &text) {
                 p.simulations.emplace(sim.id, std::move(sim));
             }
         }
+        if (j.contains("reports")) {
+            for (const auto &report : j.at("reports")) {
+                ProjectReport entry;
+                entry.id = report.at("id");
+                entry.name = report.at("name");
+                entry.path = report.at("path");
+                p.reports.emplace(entry.id, std::move(entry));
+            }
+        }
         auto diagnostics = p.validate();
         if (!diagnostics.empty())
             throw ProjectError(diagnostics.front().code, diagnostics.front().message);
@@ -704,11 +733,25 @@ void ensureGitignore(const std::filesystem::path &root) {
         if (input)
             text.assign(std::istreambuf_iterator<char>(input), {});
     }
+    const auto removeLine = [&](const std::string &line) {
+        std::istringstream input(text);
+        std::string current;
+        std::string updated;
+        while (std::getline(input, current)) {
+            if (current == line)
+                continue;
+            updated += current + "\n";
+        }
+        text = std::move(updated);
+    };
     const auto ensureLine = [&](const std::string &line) {
         if (text.find(line + "\n") == std::string::npos && text != line)
             text += (text.empty() || text.back() == '\n' ? "" : "\n") + line + "\n";
     };
-    ensureLine("reports/");
+    // Reports are project source files, not generated output. Older projects
+    // may have been created when reports/ was ignored.
+    removeLine("reports/");
+    removeLine("reports");
     ensureLine("build/");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output)
@@ -730,7 +773,8 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
            << "- `sch/*.icesch` contains schematic cells.\n"
            << "- `lay/*.icelay` contains layout cells and procedural layouts.\n"
            << "- `sim/*.icesim` contains simulations.\n"
-           << "- `reports/` and `build/` are generated output directories.\n\n"
+           << "- `reports/*.py` contains project-level simulation reports.\n"
+           << "- `build/` contains generated simulation results.\n\n"
            << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";
 }
 

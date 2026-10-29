@@ -70,6 +70,13 @@ std::filesystem::path pdkPackageRoot(const std::string &pdk) {
     return {};
 }
 
+bool regularFile(const std::filesystem::path &path) {
+    std::error_code status;
+    return std::filesystem::is_regular_file(path, status) && !status;
+}
+
+} // namespace
+
 QString icepyPythonPath() {
     QStringList paths;
     const auto appDir = QCoreApplication::applicationDirPath();
@@ -83,13 +90,6 @@ QString icepyPythonPath() {
         paths << inherited;
     return paths.join(QDir::listSeparator());
 }
-
-bool regularFile(const std::filesystem::path &path) {
-    std::error_code status;
-    return std::filesystem::is_regular_file(path, status) && !status;
-}
-
-} // namespace
 
 std::filesystem::path layoutDeviceLibraryPath() {
     const auto appDir = QCoreApplication::applicationDirPath().toStdString();

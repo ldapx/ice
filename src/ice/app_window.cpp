@@ -8,9 +8,12 @@
 #include "icelib/packages.hpp"
 #include "icelib/routing.hpp"
 #include "icelib/simulation.hpp"
+#include "icelib/simulation_report.hpp"
+#include "icelib/simulation_store.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
 #include "properties_panel.hpp"
+#include "python_highlighter.hpp"
 #include "schematic_canvas.hpp"
 #include "schematic_utils.hpp"
 #include "side_panels.hpp"
@@ -34,6 +37,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QCursor>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -42,6 +46,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
+#include <QFontDatabase>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsColorizeEffect>
@@ -69,7 +74,9 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
@@ -81,6 +88,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtSvgWidgets/QGraphicsSvgItem>
@@ -153,6 +161,11 @@ class DocumentWindow : public QMainWindow {
     }
 
     bool setProject(ice::Project project) {
+        if (reportDirty_ && !saveReportSource()) {
+            QMessageBox::warning(this, QStringLiteral("Report"),
+                                 QStringLiteral("Unable to save the current report changes."));
+            return false;
+        }
         if (!ensureProjectPackages(project))
             return false;
         suppressProjectWatcher_ = false;
@@ -218,6 +231,8 @@ class DocumentWindow : public QMainWindow {
         resetSectionHistories();
         layoutViewInitialized_ = false;
         activeProceduralLayoutId_ = 0;
+        activeReportId_ = 0;
+        selectingReport_ = false;
         if (schematicViewStack_ && schematicCanvasPage_)
             schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         if (layoutViewStack_ && layoutCanvasPage_)
@@ -640,9 +655,13 @@ class DocumentWindow : public QMainWindow {
     }
 
     void closeProject() {
+        if (reportDirty_)
+            saveReportSource();
         suppressProjectWatcher_ = false;
         projectDiskChangePending_ = false;
         clearProjectWatcher();
+        activeReportId_ = 0;
+        selectingReport_ = false;
         project_.reset();
         resetSectionHistories();
         updateHistoryPanels();
@@ -2712,6 +2731,384 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Simulation added"));
     }
 
+    QString reportSlug(const QString &name) const {
+        return QString::fromStdString(ice::sanitizedReportSlug(name.toStdString()));
+    }
+
+    QString uniqueReportPath(const QString &directory, const QString &base, const QString &extension) {
+        QDir dir(directory);
+        QString candidate = base + extension;
+        if (!QFileInfo::exists(dir.filePath(candidate)))
+            return dir.filePath(candidate);
+        for (int index = 2;; ++index) {
+            candidate = QStringLiteral("%1-%2%3").arg(base).arg(index).arg(extension);
+            if (!QFileInfo::exists(dir.filePath(candidate)))
+                return dir.filePath(candidate);
+        }
+    }
+
+    const ice::ProjectReport *selectedReport() const {
+        if (!project_ || activeReportId_ == 0)
+            return nullptr;
+        const auto it = project_->project().reports.find(activeReportId_);
+        return it == project_->project().reports.end() ? nullptr : &it->second;
+    }
+
+    void setReportStatus(const QString &text, bool error = false) {
+        if (!reportStatusLabel_)
+            return;
+        reportStatusLabel_->setText(text);
+        reportStatusLabel_->setStyleSheet(
+            error ? QStringLiteral("color: #d9534f; font-weight: bold;")
+                  : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    }
+
+    void appendReportMessage(const QString &message) {
+        if (activityPanel_)
+            activityPanel_->appendMessage(message);
+    }
+
+    void showReportMessages() {
+        if (activityDock_)
+            activityDock_->show();
+        if (activityPanel_)
+            activityPanel_->showMessagesTab();
+    }
+
+    void refreshReportPanel() {
+        const auto *report = selectedReport();
+        if (!report) {
+            if (reportTitleLabel_)
+                reportTitleLabel_->setText(QStringLiteral("No report selected"));
+            if (reportCodeEditor_) {
+                const QSignalBlocker blocker(reportCodeEditor_);
+                reportCodeEditor_->clear();
+                reportCodeEditor_->setReadOnly(true);
+            }
+            setReportStatus(QString());
+            reportDirty_ = false;
+            if (reportSaveTimer_)
+                reportSaveTimer_->stop();
+            if (reportSaveButton_)
+                reportSaveButton_->setEnabled(false);
+            if (reportRunButton_)
+                reportRunButton_->setEnabled(false);
+            if (reportOpenButton_)
+                reportOpenButton_->setEnabled(false);
+            if (simulationRightStack_ && simulationEditorPage_ &&
+                simulationRightStack_->currentWidget() == reportsView_)
+                simulationRightStack_->setCurrentWidget(simulationEditorPage_);
+            return;
+        }
+        if (reportTitleLabel_)
+            reportTitleLabel_->setText(QString::fromStdString(report->name));
+        if (reportCodeEditor_)
+            reportCodeEditor_->setReadOnly(false);
+        if (reportSaveButton_)
+            reportSaveButton_->setEnabled(true);
+        if (reportRunButton_)
+            reportRunButton_->setEnabled(true);
+        if (reportOpenButton_)
+            reportOpenButton_->setEnabled(true);
+    }
+
+    void loadReportSource() {
+        if (!reportCodeEditor_)
+            return;
+        const auto *report = selectedReport();
+        if (!report || projectPath_.isEmpty()) {
+            refreshReportPanel();
+            return;
+        }
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        const auto path = QDir(root).filePath(QString::fromStdString(report->path));
+        QFile file(path);
+        loadingReport_ = true;
+        {
+            const QSignalBlocker blocker(reportCodeEditor_);
+            reportCodeEditor_->setReadOnly(false);
+            if (!file.open(QIODevice::ReadOnly)) {
+                reportCodeEditor_->clear();
+                reportCodeEditor_->setReadOnly(true);
+                const auto message = QStringLiteral("Unable to open %1").arg(QString::fromStdString(report->path));
+                setReportStatus(message, true);
+                appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+            } else {
+                reportCodeEditor_->setPlainText(QString::fromUtf8(file.readAll()));
+                setReportStatus(QStringLiteral("Saved"));
+            }
+        }
+        loadingReport_ = false;
+        reportDirty_ = false;
+        if (reportSaveTimer_)
+            reportSaveTimer_->stop();
+        refreshReportPanel();
+    }
+
+    bool saveReportSource() {
+        const auto *report = selectedReport();
+        if (!report || !reportCodeEditor_ || projectPath_.isEmpty())
+            return false;
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        const auto path = QDir(root).filePath(QString::fromStdString(report->path));
+        const auto directory = QFileInfo(path).absolutePath();
+        QDir().mkpath(directory);
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            const auto message = QStringLiteral("Unable to save %1").arg(QString::fromStdString(report->path));
+            setReportStatus(message, true);
+            appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+            return false;
+        }
+        const auto contents = reportCodeEditor_->toPlainText().toUtf8();
+        if (file.write(contents) != contents.size() || !file.commit()) {
+            const auto message = QStringLiteral("Unable to save %1").arg(QString::fromStdString(report->path));
+            setReportStatus(message, true);
+            appendReportMessage(QStringLiteral("[Report] %1").arg(message));
+            return false;
+        }
+        reportDirty_ = false;
+        if (reportSaveTimer_)
+            reportSaveTimer_->stop();
+        setReportStatus(QStringLiteral("Saved"));
+        return true;
+    }
+
+    void selectReport(ice::ObjectId id) {
+        if (selectingReport_)
+            return;
+        if (activeReportId_ != 0 && reportDirty_ && !saveReportSource()) {
+            if (activeReportId_ != id) {
+                selectingReport_ = true;
+                if (simulationPanel_)
+                    simulationPanel_->selectReport(activeReportId_);
+                selectingReport_ = false;
+            }
+            return;
+        }
+        selectingReport_ = true;
+        activeReportId_ = id;
+        if (simulationPanel_)
+            simulationPanel_->selectReport(id);
+        if (simulationRightStack_ && reportsView_)
+            simulationRightStack_->setCurrentWidget(reportsView_);
+        if (documents_ && simulationPage_)
+            documents_->setCurrentWidget(simulationPage_);
+        selectingReport_ = false;
+        loadReportSource();
+    }
+
+    std::filesystem::path reportRunnerPath() const {
+        const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+        const std::vector<std::filesystem::path> candidates = {
+            std::filesystem::path(appDir) / "assets" / "simulation" / "report_runner.py",
+            std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "simulation" / "report_runner.py",
+#ifdef ICE_SOURCE_DIR
+            std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "simulation" / "report_runner.py",
+#endif
+            std::filesystem::path("assets") / "simulation" / "report_runner.py",
+            std::filesystem::path("/usr/share/ice/assets/simulation/report_runner.py"),
+        };
+        for (const auto &candidate : candidates) {
+            std::error_code status;
+            if (std::filesystem::is_regular_file(candidate, status) && !status)
+                return candidate;
+        }
+        return {};
+    }
+
+    void runSelectedReport() {
+        const auto *report = selectedReport();
+        if (!report) {
+            showReportMessages();
+            appendReportMessage(QStringLiteral("[Report] No report selected."));
+            return;
+        }
+        const auto reportName = QString::fromStdString(report->name);
+        showReportMessages();
+        if (reportCodeEditor_ && reportDirty_ && !saveReportSource()) {
+            appendReportMessage(QStringLiteral("[Report] %1 could not be saved, so it was not run.").arg(reportName));
+            return;
+        }
+        if (projectPath_.isEmpty()) {
+            appendReportMessage(QStringLiteral("[Report] %1: project path is not available.").arg(reportName));
+            return;
+        }
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        const auto reportFile = QDir(root).filePath(QString::fromStdString(report->path));
+        if (!QFileInfo::exists(reportFile)) {
+            appendReportMessage(QStringLiteral("[Report] %1: report file is missing: %2")
+                                    .arg(reportName, QString::fromStdString(report->path)));
+            return;
+        }
+        const auto runner = reportRunnerPath();
+        const auto python = pythonExecutable();
+        if (runner.empty() || python.isEmpty()) {
+            appendReportMessage(QStringLiteral("[Report] %1: Python report runner is not available.").arg(reportName));
+            return;
+        }
+
+        appendReportMessage(QStringLiteral("[Report] %1: running…").arg(reportName));
+        QProcess process;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("PYTHONPATH"), icepyPythonPath());
+        process.setProcessEnvironment(environment);
+        process.setWorkingDirectory(root);
+        process.setProgram(python);
+        process.setArguments({QString::fromStdString(runner.string()), QStringLiteral("--project-root"), root,
+                              QStringLiteral("--report"), reportFile});
+        process.start();
+        if (!process.waitForStarted(5000)) {
+            appendReportMessage(
+                QStringLiteral("[Report] %1: unable to start Python: %2").arg(reportName, process.errorString()));
+            statusBar()->showMessage(QStringLiteral("Report failed"));
+            return;
+        }
+        if (!process.waitForFinished(30000)) {
+            process.kill();
+            process.waitForFinished(2000);
+            appendReportMessage(QStringLiteral("[Report] %1: timed out after 30 seconds.").arg(reportName));
+            statusBar()->showMessage(QStringLiteral("Report timed out"));
+            return;
+        }
+        const auto stdoutText = QString::fromUtf8(process.readAllStandardOutput());
+        const auto stderrText = QString::fromUtf8(process.readAllStandardError());
+        if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+            QString detail = stderrText.trimmed();
+            if (detail.isEmpty())
+                detail = stdoutText.trimmed();
+            if (detail.isEmpty())
+                detail = QStringLiteral("Python exited with code %1.").arg(process.exitCode());
+            appendReportMessage(QStringLiteral("[Report] %1 failed:\n%2").arg(reportName, detail));
+            statusBar()->showMessage(QStringLiteral("Report failed"));
+            return;
+        }
+        appendReportMessage(QStringLiteral("[Report] %1 finished.").arg(reportName));
+        const auto logs = stderrText.trimmed();
+        if (!logs.isEmpty())
+            appendReportMessage(QStringLiteral("[Report] %1 logs:\n%2").arg(reportName, logs));
+        const auto output = stdoutText.trimmed();
+        if (!output.isEmpty())
+            appendReportMessage(QStringLiteral("[Report] %1 output:\n%2").arg(reportName, output));
+        else
+            appendReportMessage(QStringLiteral("[Report] %1 produced no output.").arg(reportName));
+        statusBar()->showMessage(QStringLiteral("Report finished"));
+    }
+
+    void openReportFile(ice::ObjectId id) {
+        if (!project_ || projectPath_.isEmpty() || id == 0)
+            return;
+        const auto it = project_->project().reports.find(id);
+        if (it == project_->project().reports.end())
+            return;
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        const auto path = QDir(root).filePath(QString::fromStdString(it->second.path));
+        if (!QFileInfo::exists(path)) {
+            QMessageBox::warning(this, QStringLiteral("Open Report"),
+                                 QStringLiteral("Report file is missing:\n%1").arg(path));
+            return;
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    }
+
+    void openSelectedReportFile() {
+        if (reportDirty_ && !saveReportSource())
+            return;
+        openReportFile(activeReportId_);
+    }
+
+    void addReport() {
+        if (!project_ || projectPath_.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("Add Report"),
+                                     QStringLiteral("Open and save a project first."));
+            return;
+        }
+        if (reportDirty_ && !saveReportSource())
+            return;
+        bool ok = false;
+        auto name = QInputDialog::getText(this, QStringLiteral("Add Report"), QStringLiteral("Report name:"),
+                                          QLineEdit::Normal, QStringLiteral("Simulation Report"), &ok)
+                        .trimmed();
+        if (!ok || name.isEmpty())
+            return;
+        QString uniqueName = name;
+        for (int suffix = 2;; ++suffix) {
+            const bool used =
+                std::any_of(project_->project().reports.begin(), project_->project().reports.end(),
+                            [&](const auto &entry) { return entry.second.name == uniqueName.toStdString(); });
+            if (!used)
+                break;
+            uniqueName = QStringLiteral("%1 %2").arg(name).arg(suffix);
+        }
+        name = uniqueName;
+
+        const auto root = QFileInfo(projectPath_).absolutePath();
+        QDir reportsDir(QDir(root).filePath(QStringLiteral("reports")));
+        if (!reportsDir.mkpath(QStringLiteral("."))) {
+            QMessageBox::critical(this, QStringLiteral("Add Report"),
+                                  QStringLiteral("Unable to create the reports directory."));
+            return;
+        }
+        const auto target = uniqueReportPath(reportsDir.absolutePath(), reportSlug(name), QStringLiteral(".py"));
+        QSaveFile file(target);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::critical(this, QStringLiteral("Add Report"),
+                                  QStringLiteral("Unable to create report file:\n%1").arg(target));
+            return;
+        }
+        const auto templateText = QString::fromStdString(ice::defaultSimulationReportTemplate()).toUtf8();
+        if (file.write(templateText) != templateText.size() || !file.commit()) {
+            QMessageBox::critical(this, QStringLiteral("Add Report"),
+                                  QStringLiteral("Unable to write report file:\n%1").arg(target));
+            return;
+        }
+
+        const auto relative = QDir(root).relativeFilePath(target);
+        ice::ObjectId newId = 0;
+        try {
+            const auto reportName = name;
+            const auto reportPath = relative;
+            project_->execute("add report", [&](ice::Project &project) {
+                newId = project.nextId();
+                project.reports.emplace(newId,
+                                        ice::ProjectReport{newId, reportName.toStdString(), reportPath.toStdString()});
+            });
+            project_->setLastHistoryLabel("Added report " + name.toStdString());
+            activeReportId_ = newId;
+            refreshProject();
+            selectReport(newId);
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Add Report"), QString::fromStdString(error.what()));
+        }
+    }
+
+    void deleteReport(ice::ObjectId id) {
+        if (!project_)
+            return;
+        const auto it = project_->project().reports.find(id);
+        if (it == project_->project().reports.end())
+            return;
+        if (activeReportId_ == id && reportDirty_ && !saveReportSource())
+            return;
+        if (QMessageBox::question(this, QStringLiteral("Delete Report"),
+                                  QStringLiteral("Delete report metadata for '%1'? The Python file will remain.")
+                                      .arg(QString::fromStdString(it->second.name)),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        project_->execute("delete report", [id](ice::Project &project) { project.reports.erase(id); });
+        const bool deletedActive = activeReportId_ == id;
+        if (deletedActive)
+            activeReportId_ = 0;
+        refreshProject();
+        if (deletedActive) {
+            if (simulationRightStack_ && simulationEditorPage_)
+                simulationRightStack_->setCurrentWidget(simulationEditorPage_);
+            if (documents_ && simulationPage_)
+                documents_->setCurrentWidget(simulationPage_);
+        }
+        statusBar()->showMessage(QStringLiteral("Report deleted"));
+    }
+
     // Delete the currently selected SimulationItem.
     void deleteSimulation() {
         if (!project_ || activeSimulationId_ == 0)
@@ -2761,7 +3158,7 @@ class DocumentWindow : public QMainWindow {
         // Refresh the panel tree, select the simulation and the new graph tab.
         simulationPanel_->setProject(project_->project());
         activeSimulationId_ = 0; // force rebuild on next load
-        loadSimulationById(simId, newGraphId);
+        simulationPanel_->selectSimulation(simId, newGraphId);
         statusBar()->showMessage(QStringLiteral("Graph added"));
     }
 
@@ -3223,7 +3620,40 @@ class DocumentWindow : public QMainWindow {
         const auto request = buildSimulationRequest(sim, netlistNotes);
         const auto result =
             ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
-        simulationOutput_->setPlainText(formatSimulationReport(request, result, netlistNotes));
+        auto report = formatSimulationReport(request, result, netlistNotes);
+        QString storedPath;
+
+        const auto projectRoot = projectPath_.isEmpty()
+                                     ? std::filesystem::path{}
+                                     : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        if (!projectRoot.empty()) {
+            ice::SimulationRunContext context;
+            context.projectRoot = projectRoot;
+            context.projectIdentity = project_->project().identity;
+            context.projectName = project_->project().name;
+            context.simulationId = sim.id;
+            context.simulationName = sim.name;
+            context.schematicId = sim.schematic;
+            if (const auto schematic = project_->project().schematicCells.find(sim.schematic);
+                schematic != project_->project().schematicCells.end())
+                context.schematicName = schematic->second.name;
+            context.request = request;
+            context.directives = sim.directives;
+            context.netlistNotes.reserve(static_cast<std::size_t>(netlistNotes.size()));
+            for (const auto &note : netlistNotes)
+                context.netlistNotes.push_back(note.toStdString());
+            context.graphs = sim.graphs;
+            try {
+                const auto artifact = ice::writeSimulationRun(context, result);
+                storedPath = QString::fromStdString(artifact.path.string());
+                report += QStringLiteral("\nStored result: %1\n").arg(storedPath);
+            } catch (const ice::ProjectError &error) {
+                report += QStringLiteral("\nUnable to store result: %1\n").arg(QString::fromStdString(error.what()));
+            }
+        } else {
+            report += QStringLiteral("\nResult not stored: save the project first.\n");
+        }
+        simulationOutput_->setPlainText(report);
 
         // Show result in the currently active graph tab.
         if (graphTabs_) {
@@ -3231,7 +3661,8 @@ class DocumentWindow : public QMainWindow {
             if (plot)
                 plot->setResult(result);
         }
-        statusBar()->showMessage(QStringLiteral("Simulation finished"));
+        statusBar()->showMessage(storedPath.isEmpty() ? QStringLiteral("Simulation finished")
+                                                      : QStringLiteral("Simulation stored: %1").arg(storedPath));
     }
 
     void ensureDrcProcess() {
@@ -3559,9 +3990,10 @@ class DocumentWindow : public QMainWindow {
                 if (layoutCellTabs_->tabBar()->tabData(index).toULongLong() == selected)
                     layoutCellTabs_->setCurrentIndex(index);
         }
-        // Refresh simulation panel.
+        // Refresh simulation panel and project-level reports.
         if (simulationPanel_)
             simulationPanel_->setProject(project);
+        refreshReportPanel();
         updateEmptyWorkspaceState();
     }
 
@@ -3919,6 +4351,8 @@ class DocumentWindow : public QMainWindow {
             schematicPropertiesPanel_->refreshAppearance();
         if (startupView_)
             startupView_->refreshAppearance();
+        if (reportHighlighter_)
+            reportHighlighter_->refreshColors();
         if (graphTabs_) {
             for (int index = 0; index < graphTabs_->count(); ++index)
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
@@ -4614,14 +5048,28 @@ class DocumentWindow : public QMainWindow {
 
         simEditorLayout->addWidget(simulationTabs_, 1);
 
-        simulationSplit->addWidget(simEditor);
+        simulationEditorPage_ = simEditor;
+        simulationRightStack_ = new QStackedWidget;
+        simulationRightStack_->addWidget(simEditor);
+        simulationSplit->addWidget(simulationRightStack_);
         simulationLayout->addWidget(simulationSplit, 1);
 
         // ── Wire SimulationPanel ─────────────────────────────────────────
         simulationPanel_->setOnAddClicked([this] { addSimulation(); });
+        simulationPanel_->setOnAddReport([this] { addReport(); });
+        simulationPanel_->setOnOpenReport([this](ice::ObjectId reportId) { openReportFile(reportId); });
         simulationPanel_->setOnDeleteClicked([this] { deleteSimulation(); });
-        simulationPanel_->setOnSelection(
-            [this](ice::ObjectId simId, ice::ObjectId graphId) { loadSimulationById(simId, graphId); });
+        simulationPanel_->setOnDeleteReport([this](ice::ObjectId reportId) { deleteReport(reportId); });
+        simulationPanel_->setOnSelection([this](ice::ObjectId simId, ice::ObjectId graphId) {
+            if (simId != 0 && reportDirty_)
+                saveReportSource();
+            loadSimulationById(simId, graphId);
+            if (simId != 0 && simulationRightStack_ && simulationEditorPage_)
+                simulationRightStack_->setCurrentWidget(simulationEditorPage_);
+            if (simId != 0 && documents_ && simulationPage_)
+                documents_->setCurrentWidget(simulationPage_);
+        });
+        simulationPanel_->setOnReportSelection([this](ice::ObjectId reportId) { selectReport(reportId); });
         simulationPanel_->setOnAddGraph([this](ice::ObjectId simId) { addGraph(simId); });
         simulationPanel_->setOnDeleteGraph(
             [this](ice::ObjectId simId, ice::ObjectId graphId) { deleteGraph(simId, graphId); });
@@ -4696,6 +5144,66 @@ class DocumentWindow : public QMainWindow {
 
         connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
         documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+
+        auto *reportsView = new QWidget;
+        reportsView_ = reportsView;
+        auto *reportsLayout = new QVBoxLayout(reportsView_);
+        reportsLayout->setContentsMargins(0, 0, 0, 0);
+        auto *reportsToolbar = new QHBoxLayout;
+        reportsToolbar->setContentsMargins(4, 4, 4, 4);
+        reportTitleLabel_ = new QLabel(QStringLiteral("No report selected"));
+        reportTitleLabel_->setStyleSheet(QStringLiteral("font-weight: 600;"));
+        reportsToolbar->addWidget(reportTitleLabel_, 1);
+        reportStatusLabel_ = new QLabel;
+        reportsToolbar->addWidget(reportStatusLabel_);
+        reportSaveButton_ = new QPushButton(QStringLiteral("Save"));
+        reportSaveButton_->setToolTip(QStringLiteral("Save the report source"));
+        reportsToolbar->addWidget(reportSaveButton_);
+        reportRunButton_ = new QPushButton(QStringLiteral("Run"));
+        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected report"));
+        setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
+        reportsToolbar->addWidget(reportRunButton_);
+        reportOpenButton_ = new QPushButton(QStringLiteral("Open File"));
+        reportOpenButton_->setToolTip(QStringLiteral("Open the report source in an external editor"));
+        setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
+        reportsToolbar->addWidget(reportOpenButton_);
+        reportsLayout->addLayout(reportsToolbar);
+
+        reportCodeEditor_ = new QPlainTextEdit;
+        reportCodeEditor_->setReadOnly(true);
+        reportCodeEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto reportFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        reportFont.setPointSizeF(std::max(reportFont.pointSizeF(), 10.0));
+        reportCodeEditor_->setFont(reportFont);
+        reportCodeEditor_->setTabStopDistance(reportCodeEditor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
+        reportCodeEditor_->setPlaceholderText(QStringLiteral("Select a report to edit its Python source."));
+        reportHighlighter_ = new PythonSyntaxHighlighter(reportCodeEditor_->document());
+        reportsLayout->addWidget(reportCodeEditor_, 1);
+        simulationRightStack_->addWidget(reportsView_);
+
+        reportSaveTimer_ = new QTimer(this);
+        reportSaveTimer_->setSingleShot(true);
+        reportSaveTimer_->setInterval(600);
+        connect(reportSaveTimer_, &QTimer::timeout, this, [this] { saveReportSource(); });
+        connect(reportCodeEditor_, &QPlainTextEdit::textChanged, this, [this] {
+            if (loadingReport_)
+                return;
+            reportDirty_ = true;
+            setReportStatus(QStringLiteral("Unsaved changes"));
+            if (reportSaveTimer_)
+                reportSaveTimer_->start();
+        });
+        connect(reportSaveButton_, &QPushButton::clicked, this, [this] { saveReportSource(); });
+        connect(reportRunButton_, &QPushButton::clicked, this, [this] { runSelectedReport(); });
+        connect(reportOpenButton_, &QPushButton::clicked, this, [this] { openSelectedReportFile(); });
+        connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
+            if (reportDirty_)
+                saveReportSource();
+        });
+        reportSaveButton_->setEnabled(false);
+        reportRunButton_->setEnabled(false);
+        reportOpenButton_->setEnabled(false);
+
         workspaceStack_ = new WorkspaceStack;
         startupView_ = new StartupView;
         startupView_->setOnCreateProject([this](const QString &name, const QString &location, bool createFolder) {
@@ -5402,7 +5910,22 @@ class DocumentWindow : public QMainWindow {
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationPage_ = nullptr;
+    QWidget *simulationEditorPage_ = nullptr;
     QWidget *simulationGraphsPage_ = nullptr;
+    QStackedWidget *simulationRightStack_ = nullptr;
+    QWidget *reportsView_ = nullptr;
+    QLabel *reportTitleLabel_ = nullptr;
+    QPlainTextEdit *reportCodeEditor_ = nullptr;
+    PythonSyntaxHighlighter *reportHighlighter_ = nullptr;
+    QLabel *reportStatusLabel_ = nullptr;
+    QPushButton *reportSaveButton_ = nullptr;
+    QPushButton *reportRunButton_ = nullptr;
+    QPushButton *reportOpenButton_ = nullptr;
+    QTimer *reportSaveTimer_ = nullptr;
+    ice::ObjectId activeReportId_ = 0;
+    bool selectingReport_ = false;
+    bool loadingReport_ = false;
+    bool reportDirty_ = false;
     QComboBox *schematicSelector_ = nullptr;
     QComboBox *simulatorSelector_ = nullptr;
     QComboBox *analysisSelector_ = nullptr;

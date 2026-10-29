@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/simulation_report.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -63,6 +64,13 @@ std::string optionalString(const json &arguments, const char *name, const std::s
     return it->get<std::string>();
 }
 
+std::string requiredStringAllowEmpty(const json &arguments, const char *name) {
+    const auto &value = requiredValue(arguments, name);
+    if (!value.is_string())
+        throw ToolError(std::string("Argument must be a string: ") + name);
+    return value.get<std::string>();
+}
+
 ice::Coordinate coordinateValue(const json &value, const char *name) {
     if (value.is_number_integer())
         return value.get<ice::Coordinate>();
@@ -75,6 +83,13 @@ ice::Coordinate coordinateValue(const json &value, const char *name) {
 
 ice::Coordinate requiredInteger(const json &arguments, const char *name) {
     return coordinateValue(requiredValue(arguments, name), name);
+}
+
+std::optional<std::int64_t> optionalInteger(const json &arguments, const char *name) {
+    const auto it = arguments.find(name);
+    if (it == arguments.end() || it->is_null())
+        return std::nullopt;
+    return static_cast<std::int64_t>(coordinateValue(*it, name));
 }
 
 std::vector<ice::LayoutPoint> parsePoints(const json &arguments) {
@@ -165,7 +180,8 @@ agentsdk::mcp::tool_result jsonResult(const json &value, bool isError = false) {
 
 class IceMcpServer {
   public:
-    explicit IceMcpServer(std::optional<std::filesystem::path> projectPath) {
+    IceMcpServer(std::optional<std::filesystem::path> projectPath, std::filesystem::path executablePath)
+        : executablePath_(std::move(executablePath)) {
         if (projectPath) {
             auto project = ice::Project::load(*projectPath);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
@@ -191,8 +207,9 @@ class IceMcpServer {
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
         server.set_instructions(
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
-            "project, schematic, and layout tools. Mutations are transactional in memory; the MCP "
-            "server does not write them to disk. Use ice-cli for persisted project changes.");
+            "project, schematic, layout, and report tools. Project mutations are transactional in memory; "
+            "report source files are written under reports/, but project metadata remains in memory. "
+            "Use ice-cli for persisted project changes.");
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
             return agentsdk::mcp::tools_list_result{listTools(), std::nullopt};
         });
@@ -218,6 +235,17 @@ class IceMcpServer {
         return *session_;
     }
 
+    std::filesystem::path projectRootPath() const {
+        if (projectPath_.empty())
+            throw ToolError("Project path is not available.");
+        std::error_code status;
+        if (std::filesystem::is_directory(projectPath_, status) && !status)
+            return projectPath_;
+        if (projectPath_.extension() == ".icepro" || projectPath_.filename() == "project.icepro")
+            return projectPath_.parent_path();
+        return projectPath_;
+    }
+
     json summary() const {
         if (!session_)
             return json{{"open", false}};
@@ -235,6 +263,7 @@ class IceMcpServer {
             {"layouts", json::array()},
             {"procedural_layouts", json::array()},
             {"simulations", json::array()},
+            {"reports", json::array()},
         };
         for (const auto &[id, cell] : project.schematicCells) {
             result["schematics"].push_back({{"id", id},
@@ -274,6 +303,8 @@ class IceMcpServer {
                                              {"analysis", simulation.analysis},
                                              {"simulator", simulation.simulator}});
         }
+        for (const auto &[id, report] : project.reports)
+            result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
         return result;
     }
 
@@ -332,6 +363,63 @@ class IceMcpServer {
             const bool changed = session.redo();
             return {{"changed", changed}};
         }
+        if (name == "report_create") {
+            const auto reportName = requiredString(arguments, "name");
+            const auto source = optionalString(arguments, "source");
+            const auto root = projectRootPath();
+            ice::ObjectId id = 0;
+            session.execute("mcp report-create", [&](ice::Project &project) {
+                id = ice::createProjectReport(project, root, reportName, source);
+            });
+            const auto &report = session.project().reports.at(id);
+            return {{"id", id},
+                    {"name", report.name},
+                    {"path", report.path},
+                    {"source", ice::readProjectReportSource(root, report)}};
+        }
+        if (name == "report_list") {
+            json reports = json::array();
+            for (const auto &[id, report] : session.project().reports)
+                reports.push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+            return reports;
+        }
+        if (name == "report_read") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+            const auto &report = session.project().reports.at(id);
+            return {{"id", id},
+                    {"name", report.name},
+                    {"path", report.path},
+                    {"source", ice::readProjectReportSource(projectRootPath(), report)}};
+        }
+        if (name == "report_write") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+            const auto &report = session.project().reports.at(id);
+            const auto source = requiredStringAllowEmpty(arguments, "source");
+            ice::writeProjectReportSource(projectRootPath(), report, source);
+            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"bytes", source.size()}};
+        }
+        if (name == "report_run") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+            const auto &report = session.project().reports.at(id);
+            const auto timeoutValue = optionalInteger(arguments, "timeout_ms").value_or(30000);
+            const auto timeout = std::chrono::milliseconds(std::max<std::int64_t>(1, timeoutValue));
+            const auto result = ice::runProjectReport(projectRootPath(), report, executablePath_, timeout);
+            return {{"id", id},
+                    {"name", report.name},
+                    {"path", report.path},
+                    {"ok", !result.timedOut && result.exitCode == 0},
+                    {"timed_out", result.timedOut},
+                    {"exit_code", result.exitCode},
+                    {"stdout", result.stdoutText},
+                    {"stderr", result.stderrText}};
+        }
+        if (name == "report_delete") {
+            const auto id = lookupByIdOrName(session.project().reports, requiredValue(arguments, "report"), "report");
+            const auto report = session.project().reports.at(id);
+            session.execute("mcp report-delete", [&](ice::Project &project) { project.reports.erase(id); });
+            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}};
+        }
+
         if (name == "schematic_create") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
@@ -472,6 +560,30 @@ class IceMcpServer {
                             .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
+        tools.push_back(tool_builder("report_create")
+                            .with_description("Create a project-level Python report file under reports/.")
+                            .with_string_param("name", "Report name")
+                            .with_string_param("source", "Optional initial Python source", false)
+                            .build());
+        tools.push_back(tool_builder("report_list").with_description("List project-level reports.").build());
+        tools.push_back(tool_builder("report_read")
+                            .with_description("Read a report's metadata and Python source.")
+                            .with_string_param("report", "Report name or id")
+                            .build());
+        tools.push_back(tool_builder("report_write")
+                            .with_description("Replace a report's Python source.")
+                            .with_string_param("report", "Report name or id")
+                            .with_string_param("source", "Python source")
+                            .build());
+        tools.push_back(tool_builder("report_run")
+                            .with_description("Run a report and return its exit code, stdout, and stderr.")
+                            .with_string_param("report", "Report name or id")
+                            .with_integer_param("timeout_ms", "Optional timeout in milliseconds", false)
+                            .build());
+        tools.push_back(tool_builder("report_delete")
+                            .with_description("Delete report metadata; the Python file remains on disk.")
+                            .with_string_param("report", "Report name or id")
+                            .build());
         tools.push_back(tool_builder("schematic_create")
                             .with_description("Create a drawn schematic cell.")
                             .with_string_param("name", "Schematic name")
@@ -574,6 +686,9 @@ class IceMcpServer {
         resources.push_back({"ice://project/validation", "Project validation", std::nullopt,
                              "Validation diagnostics for the open project", "application/json", std::nullopt,
                              std::nullopt});
+        resources.push_back({"ice://project/reports", "Project reports", std::nullopt,
+                             "Project-level report metadata and Python sources", "application/json", std::nullopt,
+                             std::nullopt});
         return resources;
     }
 
@@ -589,7 +704,19 @@ class IceMcpServer {
             text = session_->project().serialize();
         else if (uri == "ice://project/validation")
             text = diagnostics().dump(2);
-        else
+        else if (uri == "ice://project/reports") {
+            json reports = json::array();
+            for (const auto &[id, report] : session_->project().reports) {
+                json entry = {{"id", id}, {"name", report.name}, {"path", report.path}};
+                try {
+                    entry["source"] = ice::readProjectReportSource(projectRootPath(), report);
+                } catch (const ice::ProjectError &error) {
+                    entry["source_error"] = error.what();
+                }
+                reports.push_back(std::move(entry));
+            }
+            text = reports.dump(2);
+        } else
             return mcp_error{RESOURCE_NOT_FOUND, "Resource not found: " + uri, std::nullopt};
         resource_read_result result;
         resource_contents contents;
@@ -603,6 +730,7 @@ class IceMcpServer {
 
     std::unique_ptr<ice::ProjectSession> session_;
     std::filesystem::path projectPath_;
+    std::filesystem::path executablePath_;
 };
 
 } // namespace
@@ -632,7 +760,10 @@ int main(int argc, char **argv) {
 
 #ifdef ICE_HAVE_AGENTSDK
     try {
-        IceMcpServer server(std::move(projectPath));
+        auto executablePath = ice::currentExecutablePath();
+        if (executablePath.empty())
+            executablePath = std::filesystem::absolute(argv[0]);
+        IceMcpServer server(std::move(projectPath), std::move(executablePath));
         return server.run();
     } catch (const ice::ProjectError &error) {
         std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";

@@ -69,6 +69,7 @@ class LayoutDevicesPanel : public QWidget {
 std::filesystem::path layoutDeviceLibraryPath();
 std::filesystem::path ihpSourceRoot();
 QString pythonExecutable();
+QString icepyPythonPath();
 
 std::map<std::string, std::string> parameterValues(const std::vector<ice::LayoutDeviceParameter> &parameters);
 

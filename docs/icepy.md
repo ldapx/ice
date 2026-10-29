@@ -64,6 +64,35 @@ format. The root contains `project.icepro`, `sch/*.icesch`,
 `lay/*.icelay`, `sim/*.icesim`, `reports/`, `build/`, `.gitignore`, and
 `AGENTS.md`.
 
+## Simulation metrics
+
+Simulation result loading and metrics live in the pure-Python `icepy_sim`
+module, also exposed as `icepy.sim` when the extension is built:
+
+```python
+from icepy import sim
+
+run = sim.load_latest("/path/to/project", simulation="rlc_sim")
+if run is not None:
+    metrics = run.trace("v(n1)").metrics(settling_tolerance=0.02)
+    print(metrics.overshoot_percent)
+    print(metrics.settling_time)
+    print(metrics.ringing_frequency)
+```
+
+Compare multiple simulations:
+
+```python
+runs = sim.load_latest_many(
+    "/path/to/project",
+    simulations=["rlc_damped", "rlc_tuned"],
+)
+for name, run in runs.items():
+    print(name, run.trace("v(n1)").metrics().settling_time)
+```
+
+The API is new-format-only and reads runs from `build/simulations`.
+
 ## PCell runtime
 
 The upstream IHP PyCell implementations stay in the IHP checkout. `icepy`

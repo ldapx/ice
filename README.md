@@ -46,15 +46,16 @@ project/
 ├── sch/                 # *.icesch schematic cells
 ├── lay/                 # *.icelay layout cells and procedural layouts
 ├── sim/                 # *.icesim simulations
-├── reports/             # generated reports, ignored by Git
-├── build/               # generated build output, ignored by Git
+├── reports/             # project-level Python simulation reports
+├── build/               # generated simulation runs and build output, ignored by Git
 ├── .gitignore
 └── AGENTS.md
 ```
 
-All project files are JSON. `project.icepro` contains only project-level
-metadata, such as identity, name, units, grid, package dependencies, and
-layers. Schematics, layouts, and simulations are stored as individual files.
+All project files are JSON except report scripts. `project.icepro` contains
+only project-level metadata, such as identity, name, units, grid, package
+dependencies, layers, and report associations. Schematics, layouts, and
+simulations are stored as individual files.
 
 ## Prerequisites
 
@@ -90,6 +91,13 @@ or:
 
 ```sh
 xmake test
+```
+
+Run the pure-Python simulation metrics tests:
+
+```sh
+PYTHONPATH=python python3 tests/icepy_sim_tests.py
+python3 tests/icepy_report_runner_tests.py
 ```
 
 Format first-party C++ sources:

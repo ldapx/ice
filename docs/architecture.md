@@ -1450,15 +1450,17 @@ project/
 ├── sim/
 │   └── <sim>.icesim     # one simulation per file
 ├── reports/
-├── build/
-├── .gitignore           # ignores reports/ and build/
+│   └── <report>.py      # project-level simulation report
+├── build/               # generated simulation runs, ignored by Git
+├── .gitignore           # ignores build/
 └── AGENTS.md
 ```
 
 The `.icepro` file contains identity, name, units, grid, package
-dependencies, and layer metadata. It does not contain schematic, layout, or
-simulation objects. The `reports/` and `build/` directories are generated
-output locations and are ignored by Git.
+dependencies, layer metadata, and project-level report associations. It does
+not contain schematic, layout, or simulation objects. Report scripts are
+project source files; generated run data goes under `build/` and is ignored by
+Git.
 
 A lockfile should eventually record exact package/PDK versions used by the project.
 

@@ -62,18 +62,25 @@ class ProjectPanel : public QWidget {
 class SimulationPanel : public QWidget {
   public:
     using SelectionCallback = std::function<void(ice::ObjectId simulationId, ice::ObjectId graphId)>;
+    using ReportSelectionCallback = std::function<void(ice::ObjectId reportId)>;
 
     explicit SimulationPanel(QWidget *parent = nullptr);
     void setOnAddClicked(std::function<void()> cb);
+    void setOnAddReport(std::function<void()> cb);
+    void setOnOpenReport(std::function<void(ice::ObjectId)> cb);
     void setOnDeleteClicked(std::function<void()> cb);
     void setOnAddGraph(std::function<void(ice::ObjectId)> cb);
     void setOnDeleteGraph(std::function<void(ice::ObjectId, ice::ObjectId)> cb);
+    void setOnDeleteReport(std::function<void(ice::ObjectId)> cb);
     void setOnSelection(SelectionCallback cb);
+    void setOnReportSelection(ReportSelectionCallback cb);
     void setProject(const ice::Project &project);
     void clear();
     ice::ObjectId currentSimulationId() const;
     ice::ObjectId currentGraphId() const;
+    ice::ObjectId currentReportId() const;
     void selectSimulation(ice::ObjectId id, ice::ObjectId graphId = 0);
+    void selectReport(ice::ObjectId id);
 
   private:
     void applyFilter(const QString &text);
@@ -84,8 +91,14 @@ class SimulationPanel : public QWidget {
     QPushButton *addButton_ = nullptr;
     QPushButton *deleteButton_ = nullptr;
     SelectionCallback onSelection_;
+    ReportSelectionCallback onReportSelection_;
+    std::function<void()> onAdd_;
+    std::function<void()> onDelete_;
+    std::function<void()> onAddReport_;
+    std::function<void(ice::ObjectId)> onOpenReport_;
     std::function<void(ice::ObjectId)> onAddGraph_;
     std::function<void(ice::ObjectId, ice::ObjectId)> onDeleteGraph_;
+    std::function<void(ice::ObjectId)> onDeleteReport_;
 };
 
 class LayersPanel : public QWidget {

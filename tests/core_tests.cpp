@@ -6,6 +6,8 @@
 #include "icelib/packages.hpp"
 #include "icelib/plugins.hpp"
 #include "icelib/simulation.hpp"
+#include "icelib/simulation_report.hpp"
+#include "icelib/simulation_store.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -136,6 +138,8 @@ TEST_CASE("projects save as split directory files") {
     simulation.name = "tran1";
     simulation.schematic = schematic;
     project.simulations.emplace(simulation.id, simulation);
+    const auto report = project.nextId();
+    project.reports.emplace(report, ice::ProjectReport{report, "compare", "reports/compare.py"});
 
     project.save(root);
     CHECK(std::filesystem::is_regular_file(root / "project.icepro"));
@@ -152,6 +156,11 @@ TEST_CASE("projects save as split directory files") {
     CHECK(projectJson.find("schematic_cells") == std::string::npos);
     CHECK(projectJson.find("layout_cells") == std::string::npos);
     CHECK(projectJson.find("simulations") == std::string::npos);
+    CHECK(projectJson.find("\"reports\"") != std::string::npos);
+    std::ifstream simulationFile(root / "sim" / "tran1.icesim");
+    const std::string simulationJson((std::istreambuf_iterator<char>(simulationFile)), {});
+    CHECK(simulationJson.find("reports") == std::string::npos);
+    CHECK(std::filesystem::is_directory(root / "reports"));
 
     const auto loaded = ice::Project::load(root / "project.icepro");
     CHECK(loaded.name == project.name);
@@ -159,11 +168,12 @@ TEST_CASE("projects save as split directory files") {
     CHECK(loaded.schematicCells.contains(textSchematic));
     CHECK(loaded.layoutCells.contains(layout));
     CHECK(loaded.simulations.contains(simulation.id));
+    CHECK(loaded.reports.contains(report));
     CHECK(loaded.serialize() == project.serialize());
 
     std::ifstream ignoreStream(root / ".gitignore");
     const std::string ignoreText((std::istreambuf_iterator<char>(ignoreStream)), {});
-    CHECK(ignoreText.find("reports/") != std::string::npos);
+    CHECK(ignoreText.find("reports/") == std::string::npos);
     CHECK(ignoreText.find("build/") != std::string::npos);
 
     std::filesystem::remove_all(root);
@@ -1061,4 +1071,134 @@ TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {
     plugins.disable("test-plugin");
     plugins.unload("test-plugin");
     std::filesystem::remove_all(pluginRoot);
+}
+
+TEST_CASE("project reports are project-level metadata") {
+    ice::Project project;
+    project.identity = "design";
+    project.name = "design";
+    const auto reportId = project.nextId();
+    project.reports.emplace(reportId, ice::ProjectReport{reportId, "rlc comparison", "reports/rlc_comparison.py"});
+    CHECK(project.validate().empty());
+    CHECK(project.nextId() == reportId + 1);
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.reports.contains(reportId));
+    CHECK(roundTrip.reports.at(reportId).name == "rlc comparison");
+    CHECK(roundTrip.reports.at(reportId).path == "reports/rlc_comparison.py");
+
+    auto invalid = project;
+    invalid.reports.at(reportId).path = "../outside.py";
+    CHECK(!invalid.validate().empty());
+    auto invalidExtension = project;
+    invalidExtension.reports.at(reportId).path = "reports/outside.txt";
+    CHECK(!invalidExtension.validate().empty());
+}
+
+TEST_CASE("simulation runs are persisted under the project build directory") {
+    ice::Project project;
+    project.identity = "design";
+    project.name = "design";
+    const auto simulationId = project.nextId();
+    ice::SimulationItem simulation;
+    simulation.id = simulationId;
+    simulation.name = "rlc_sim";
+    project.simulations.emplace(simulationId, simulation);
+
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.stop = 0.01;
+    request.step = 1e-5;
+    request.netlist = {"V1 in 0 5", "R1 in n1 1k"};
+    request.probeSignals = {"v(in)", "v(n1)"};
+
+    ice::SimulationResult result;
+    result.state = ice::JobState::succeeded;
+    result.analysis = "transient";
+    result.simulator = "ngspice";
+    result.simulator_version = "test";
+    result.time = {0.0, 1e-6};
+    result.traces = {{"v(in)", {5.0, 5.0}}, {"v(n1)", {0.0, 1.0}}};
+
+    ice::SimulationRunContext context;
+    context.projectRoot = std::filesystem::temp_directory_path() / "ice-simulation-store";
+    context.projectIdentity = project.identity;
+    context.projectName = project.name;
+    context.simulationId = simulationId;
+    context.simulationName = simulation.name;
+    context.schematicId = 0;
+    context.schematicName = "rlc";
+    context.request = request;
+    context.directives = "";
+    context.netlistNotes = {"test note"};
+    ice::SimulationGraph graph;
+    graph.id = 1;
+    graph.name = "RLC response";
+    graph.ySignals = {"v(in)", "v(n1)"};
+    context.graphs.push_back(graph);
+
+    std::filesystem::remove_all(context.projectRoot);
+    const auto serialized = ice::serializeSimulationRun(context, result);
+    CHECK(serialized.find("\"format\": \"ice-simulation-result\"") != std::string::npos);
+    CHECK(serialized.find("\"simulationName\"") == std::string::npos);
+    CHECK(serialized.find("\"name\": \"rlc_sim\"") != std::string::npos);
+    CHECK(serialized.find("\"netlist_notes\"") != std::string::npos);
+
+    const auto artifact = ice::writeSimulationRun(context, result);
+    CHECK(std::filesystem::is_regular_file(artifact.path));
+    CHECK(!std::filesystem::exists(artifact.path.string() + ".tmp"));
+    CHECK(artifact.path.string().find("build/simulations/" + std::to_string(simulationId) + "-rlc_sim/runs/") !=
+          std::string::npos);
+    CHECK(artifact.path.stem().string() == artifact.runId);
+    std::ifstream input(artifact.path);
+    const std::string content((std::istreambuf_iterator<char>(input)), {});
+    CHECK(content.find("\"format\": \"ice-simulation-result\"") != std::string::npos);
+    CHECK(content.find("\"state\": \"succeeded\"") != std::string::npos);
+    CHECK(content.find("\"test note\"") != std::string::npos);
+    CHECK(content.find("\"RLC response\"") != std::string::npos);
+
+    auto failed = result;
+    failed.state = ice::JobState::failed;
+    failed.error = "simulated failure";
+    failed.time.clear();
+    failed.traces.clear();
+    const auto failedArtifact = ice::writeSimulationRun(context, failed);
+    std::ifstream failedInput(failedArtifact.path);
+    const std::string failedContent((std::istreambuf_iterator<char>(failedInput)), {});
+    CHECK(failedContent.find("\"state\": \"failed\"") != std::string::npos);
+    CHECK(failedContent.find("simulated failure") != std::string::npos);
+
+    auto traversal = context;
+    traversal.simulationName = "../../escape";
+    const auto directory = ice::simulationRunDirectory(context.projectRoot, traversal);
+    CHECK(directory.string().find("..") == std::string::npos);
+    CHECK(directory.string().find("-escape") != std::string::npos);
+    std::filesystem::remove_all(context.projectRoot);
+}
+
+TEST_CASE("project reports can be created and edited through core helpers") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-report-core-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "report-test";
+    project.name = "report-test";
+    const auto reportId = ice::createProjectReport(project, root, "Comparison Report",
+                                                   "# custom report\ndef build_report(ctx):\n    return \"# ok\"\n");
+    CHECK(project.reports.contains(reportId));
+    const auto &report = project.reports.at(reportId);
+    CHECK(report.name == "Comparison Report");
+    CHECK(report.path == "reports/comparison-report.py");
+    CHECK(std::filesystem::is_regular_file(root / report.path));
+    CHECK(ice::readProjectReportSource(root, report).find("# custom report") != std::string::npos);
+
+    ice::writeProjectReportSource(root, report, "# updated\n");
+    CHECK(ice::readProjectReportSource(root, report) == "# updated\n");
+    CHECK(project.validate().empty());
+    CHECK(ice::sanitizedReportSlug("../../Comp/are") == "comp-are");
+    CHECK_THROWS_AS(ice::createProjectReport(project, root, "Comparison Report", "# duplicate\n"), ice::ProjectError);
+
+    const auto templateReportId = ice::createProjectReport(project, root, "Template Report");
+    CHECK(ice::readProjectReportSource(root, project.reports.at(templateReportId)).find("# ICE simulation report") !=
+          std::string::npos);
+    std::filesystem::remove_all(root);
 }

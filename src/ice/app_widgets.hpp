@@ -47,6 +47,8 @@ class ActivityPanel : public QWidget {
     void setDrcError(const QString &message);
     void showDrcTab();
     void showAgentTab();
+    void appendMessage(const QString &message);
+    void showMessagesTab();
 
   private:
     struct AgentBackend;
@@ -102,8 +104,10 @@ class ActivityPanel : public QWidget {
     QLabel *drcSummary_ = nullptr;
     QTableWidget *drcTable_ = nullptr;
     QTabWidget *tabs_ = nullptr;
+    QPlainTextEdit *messages_ = nullptr;
     int drcTabIndex_ = -1;
     int agentTabIndex_ = -1;
+    int messagesTabIndex_ = -1;
 
     QComboBox *agentSelector_ = nullptr;
     QComboBox *sessionSelector_ = nullptr;

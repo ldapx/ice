@@ -402,4 +402,12 @@ NB_MODULE(icepy, module) {
     } catch (const nb::python_error &) {
         PyErr_Clear();
     }
+
+    // The simulation metrics loader is pure Python and can also be imported
+    // directly as icepy_sim. Attach it as icepy.sim when available.
+    try {
+        module.attr("sim") = nb::module_::import_("icepy_sim");
+    } catch (const nb::python_error &) {
+        PyErr_Clear();
+    }
 }

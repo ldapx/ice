@@ -32,7 +32,7 @@ go to stderr.
 | `ice_version` | Return the ICE version. |
 | `project_create` | Create and open a project file. |
 | `project_open` | Open an existing project. |
-| `project_summary` | List schematics, layouts, layers, and simulations. |
+| `project_summary` | List schematics, layouts, layers, simulations, and reports. |
 | `project_validate` | Return validation diagnostics. |
 | `project_undo` / `project_redo` | Move through project history. |
 | `schematic_create` | Create a drawn schematic cell. |
@@ -46,18 +46,30 @@ go to stderr.
 | `layout_add_polygon` | Add a polygon shape. |
 | `layout_add_port` | Add a port. |
 | `layout_add_instance` | Instance another layout cell. |
+| `report_create` | Create a report file from a template or supplied source. |
+| `report_list` | List project-level reports. |
+| `report_read` | Read report metadata and Python source. |
+| `report_write` | Replace report source. |
+| `report_run` | Run a report and return stdout, stderr, and exit status. |
+| `report_delete` | Delete report metadata; the file remains. |
 
 Cells and layers may be referenced by name or numeric id. Coordinates are
-integer database units.
+integer database units. Reports may be referenced by name or id.
 
-Mutations are transactional in memory and recorded in project history. The MCP
-server does not write them to disk. Use `ice-cli` for persisted project changes.
+Project mutations are transactional in memory and recorded in project history.
+Report source files are written under `reports/`, but report metadata remains in
+memory. Use `ice-cli` for persisted project and report changes.
+
+`report_run` executes the report through the shared Python runner and returns
+`exit_code`, `timed_out`, `stdout`, and `stderr`, so agents can inspect analysis
+results and adjust the schematic in the same session.
 
 ## Resources
 
 | URI | Contents |
 | --- | --- |
 | `ice://project/summary` | JSON summary of the open project. |
+| `ice://project/reports` | Report metadata and Python sources. |
 | `ice://project/json` | Canonical serialized project JSON. |
 | `ice://project/validation` | Validation diagnostics. |
 
