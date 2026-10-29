@@ -54,6 +54,12 @@ Coordinates are integer database units.
 ```sh
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
+ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
+ice-cli simulation-graph-list <project> <simulation>
+ice-cli simulation-graph-info <project> <simulation> <graph>
+ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
+ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
+ice-cli simulation-graph-delete <project> <simulation> <graph>
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
 ```
@@ -70,6 +76,18 @@ build/simulations/<simulation-id>-<name>/runs/<timestamp>-<suffix>.json
 An explicit output path is still accepted but always uses the stored-run
 schema. The result includes the request netlist, simulator provenance, graphs,
 and trace data.
+
+Drawn and text SPICE schematics can both be used. For text schematics the
+stored SPICE source is the circuit netlist; analysis-control directives
+(`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because `simulate`
+supplies the transient analysis.
+
+Simulation graphs are presentation definitions over captured signals.
+`simulation-add` creates a default **Graph 1** using the captured signals, and
+`simulation-graph-add` also defaults to `time` on X and the simulation's
+captured signals on Y. In `simulation-graph-update`, `-` keeps a field unchanged.
+In `simulation-graph-limits`, `-` clears a limit. Deleting the last graph is
+rejected.
 
 ## Reports
 

@@ -150,6 +150,10 @@ TEST_CASE("projects save as split directory files") {
     CHECK(std::filesystem::is_directory(root / "build"));
     CHECK(std::filesystem::is_regular_file(root / ".gitignore"));
     CHECK(std::filesystem::is_regular_file(root / "AGENTS.md"));
+    std::ifstream agentsStream(root / "AGENTS.md");
+    const std::string agentsText((std::istreambuf_iterator<char>(agentsStream)), {});
+    CHECK(agentsText.find("typical workflow") != std::string::npos);
+    CHECK(agentsText.find("tweak the schematic") != std::string::npos);
 
     std::ifstream projectStream(root / "project.icepro");
     const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
@@ -245,6 +249,12 @@ TEST_CASE("text SPICE schematics survive serialization") {
     CHECK(cell.textSchematic);
     CHECK(cell.spiceText.find(".title") != std::string::npos);
     CHECK(project.validate().empty());
+
+    project.schematicCells.at(cellId).spiceText =
+        "* text circuit\nV1 in 0 1\nR1 in out 1k\n.tran 1u 1m\n.ac dec 10 1 1meg\n.end\n";
+    const auto netlist = ice::buildSimulationNetlist(project, cellId);
+    const std::vector<std::string> expectedNetlist = {"* text circuit", "V1 in 0 1", "R1 in out 1k"};
+    CHECK(netlist == expectedNetlist);
 
     const auto serialized = project.serialize();
     const auto roundTrip = ice::Project::deserialize(serialized);
@@ -1201,4 +1211,45 @@ TEST_CASE("project reports can be created and edited through core helpers") {
     CHECK(ice::readProjectReportSource(root, project.reports.at(templateReportId)).find("# ICE simulation report") !=
           std::string::npos);
     std::filesystem::remove_all(root);
+}
+
+TEST_CASE("simulation graph metadata is editable through core helpers") {
+    ice::Project project;
+    project.identity = "graph-test";
+    project.name = "graph-test";
+    ice::SimulationItem simulation;
+    simulation.id = project.nextId();
+    simulation.name = "tran1";
+    project.simulations.emplace(simulation.id, simulation);
+
+    ice::SimulationGraph graph;
+    graph.name = "RLC response";
+    graph.xAxis = "time";
+    graph.ySignals = {"v(n1)", "v(n2)"};
+    const auto graphId = ice::addSimulationGraph(project, simulation.id, graph);
+    CHECK(project.simulations.at(simulation.id).graphs.size() == 1);
+    CHECK(project.simulations.at(simulation.id).graphs.front().id == graphId);
+    CHECK(graphId > simulation.id);
+
+    auto updated = project.simulations.at(simulation.id).graphs.front();
+    updated.name = "Outputs";
+    updated.xAxis = "v(n1)";
+    updated.ySignals = {"v(n2)"};
+    updated.xMin = 0.0;
+    updated.xMax = 1e-3;
+    updated.yMax = 6.0;
+    CHECK(ice::updateSimulationGraph(project, simulation.id, graphId, updated));
+    const auto &stored = project.simulations.at(simulation.id).graphs.front();
+    CHECK(stored.name == "Outputs");
+    CHECK(stored.xAxis == "v(n1)");
+    CHECK(stored.ySignals == std::vector<std::string>{"v(n2)"});
+    CHECK(stored.xMin.has_value());
+    CHECK(stored.xMax.has_value());
+    CHECK(!stored.yMin.has_value());
+    CHECK(stored.yMax.has_value());
+
+    CHECK(ice::removeSimulationGraph(project, simulation.id, graphId));
+    CHECK(project.simulations.at(simulation.id).graphs.empty());
+    CHECK(!ice::removeSimulationGraph(project, simulation.id, graphId));
+    CHECK_THROWS_AS(ice::addSimulationGraph(project, 9999, graph), ice::ProjectError);
 }

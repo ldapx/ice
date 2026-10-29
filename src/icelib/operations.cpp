@@ -25,6 +25,28 @@ std::string lower(std::string text) {
     return text;
 }
 
+std::string trimLine(const std::string &text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+bool isOwnedAnalysisDirective(const std::string &line) {
+    const auto normalized = lower(line);
+    const auto isDirective = [&](const std::string &name) {
+        return normalized == name || (normalized.starts_with(name) && normalized.size() > name.size() &&
+                                      std::isspace(static_cast<unsigned char>(normalized[name.size()])));
+    };
+    if (normalized == ".end")
+        return true;
+    if (normalized.size() > 4 && normalized.starts_with(".end") &&
+        (std::isspace(static_cast<unsigned char>(normalized[4])) || normalized[4] == ';' || normalized[4] == '*'))
+        return true;
+    return isDirective(".tran") || isDirective(".dc") || isDirective(".ac") || isDirective(".op");
+}
+
 bool schematicNameTaken(const Project &project, const std::string &name) {
     return std::any_of(project.schematicCells.begin(), project.schematicCells.end(),
                        [&](const auto &entry) { return entry.second.name == name; });
@@ -593,5 +615,68 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         if (!line.empty())
             lines.push_back(line);
     return lines;
+}
+
+std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId cellId,
+                                                std::vector<std::string> *notes) {
+    const auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    if (!cell.textSchematic)
+        return buildSchematicNetlist(project, cellId, notes);
+
+    std::vector<std::string> lines;
+    std::istringstream stream(cell.spiceText);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto trimmed = trimLine(line);
+        if (trimmed.empty() || isOwnedAnalysisDirective(trimmed))
+            continue;
+        lines.push_back(trimmed);
+    }
+    return lines;
+}
+
+ObjectId addSimulationGraph(Project &project, ObjectId simulationId, const SimulationGraph &graph) {
+    auto simulation = project.simulations.find(simulationId);
+    if (simulation == project.simulations.end())
+        throw ProjectError("simulation.graph", "Unknown simulation id: " + std::to_string(simulationId));
+    if (graph.name.empty())
+        throw ProjectError("simulation.graph.name", "Graph name is required");
+    auto added = graph;
+    added.id = project.nextId();
+    simulation->second.graphs.push_back(std::move(added));
+    return simulation->second.graphs.back().id;
+}
+
+bool updateSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId, const SimulationGraph &graph) {
+    auto simulation = project.simulations.find(simulationId);
+    if (simulation == project.simulations.end())
+        return false;
+    const auto found = std::find_if(simulation->second.graphs.begin(), simulation->second.graphs.end(),
+                                    [graphId](const SimulationGraph &entry) { return entry.id == graphId; });
+    if (found == simulation->second.graphs.end())
+        return false;
+    if (graph.name.empty())
+        throw ProjectError("simulation.graph.name", "Graph name is required");
+    found->name = graph.name;
+    found->xAxis = graph.xAxis;
+    found->ySignals = graph.ySignals;
+    found->xMin = graph.xMin;
+    found->xMax = graph.xMax;
+    found->yMin = graph.yMin;
+    found->yMax = graph.yMax;
+    return true;
+}
+
+bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId) {
+    auto simulation = project.simulations.find(simulationId);
+    if (simulation == project.simulations.end())
+        return false;
+    auto &graphs = simulation->second.graphs;
+    const auto found = std::find_if(graphs.begin(), graphs.end(),
+                                    [graphId](const SimulationGraph &entry) { return entry.id == graphId; });
+    if (found == graphs.end())
+        return false;
+    graphs.erase(found);
+    return true;
 }
 } // namespace ice

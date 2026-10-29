@@ -775,6 +775,14 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
            << "- `sim/*.icesim` contains simulations.\n"
            << "- `reports/*.py` contains project-level simulation reports.\n"
            << "- `build/` contains generated simulation results.\n\n"
+           << "When the user asks you to make a schematic or circuit, use this typical workflow:\n\n"
+           << "1. Clarify the expectations (waveforms, gain, bandwidth, settling, power, etc.).\n"
+           << "2. Create or update the schematic.\n"
+           << "3. Create the simulation and choose the signals to capture.\n"
+           << "4. Create graphs that show the signals needed to check the expectations.\n"
+           << "5. Run the simulation and create/run a project report that compares the results "
+              "with the expectations.\n"
+           << "6. If the expectations are not met, tweak the schematic and continue the loop.\n\n"
            << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";
 }
 

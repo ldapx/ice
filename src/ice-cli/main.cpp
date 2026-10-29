@@ -310,7 +310,8 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                          {"simulator", simulation.simulator},
                                          {"analysis", simulation.analysis},
                                          {"stop", simulation.stop},
-                                         {"step", simulation.step}});
+                                         {"step", simulation.step},
+                                         {"graphs", simulation.graphs.size()}});
     }
     for (const auto &[id, report] : project.reports)
         result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
@@ -319,6 +320,36 @@ json projectSummary(const ice::Project &project, const std::string &path) {
 
 ice::ObjectId resolveReport(const ice::Project &project, const std::string &text) {
     return resolveByIdOrName(project.reports, text, "report");
+}
+
+ice::ObjectId resolveSimulation(const ice::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.simulations, text, "simulation");
+}
+
+const ice::SimulationGraph &resolveSimulationGraph(const ice::SimulationItem &simulation, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        for (const auto &graph : simulation.graphs) {
+            if (graph.id == *id)
+                return graph;
+        }
+    }
+    for (const auto &graph : simulation.graphs) {
+        if (graph.name == text)
+            return graph;
+    }
+    argumentError("Unknown simulation graph: " + text);
+}
+
+json simulationGraphJson(const ice::SimulationGraph &graph) {
+    json result = {{"id", graph.id},
+                   {"name", graph.name},
+                   {"x_axis", graph.xAxis},
+                   {"y_signals", graph.ySignals},
+                   {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
+                   {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
+                   {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
+                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+    return result;
 }
 
 json schematicInfo(const ice::SchematicCell &cell) {
@@ -438,6 +469,12 @@ void printHelp() {
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
               << "  simulation-list <project>\n"
+              << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
+              << "  simulation-graph-list <project> <simulation>\n"
+              << "  simulation-graph-info <project> <simulation> <graph>\n"
+              << "  simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]\n"
+              << "  simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]\n"
+              << "  simulation-graph-delete <project> <simulation> <graph>\n"
               << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
               << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n\n"
               << "Reports:\n"
@@ -612,7 +649,7 @@ int main(int argc, char **argv) {
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveSchematic(project, args[2]);
             std::vector<std::string> notes;
-            const auto lines = ice::buildSchematicNetlist(project, cell, &notes);
+            const auto lines = ice::buildSimulationNetlist(project, cell, &notes);
             printJson({{"cell", cell}, {"netlist", lines}, {"notes", notes}});
             return 0;
         }
@@ -790,15 +827,24 @@ int main(int argc, char **argv) {
             if (args.size() >= 8)
                 simulation.captureSignals = args[7];
             ice::ProjectSession session(project);
+            ice::ObjectId graphId = 0;
             session.execute("simulation-add", [&](ice::Project &p) {
                 simulation.id = p.nextId();
                 p.simulations.emplace(simulation.id, simulation);
+                ice::SimulationGraph graph;
+                graph.id = p.nextId();
+                graph.name = "Graph 1";
+                graph.xAxis = "time";
+                graph.ySignals = splitSignals(simulation.captureSignals);
+                graphId = graph.id;
+                p.simulations.at(simulation.id).graphs.push_back(std::move(graph));
             });
             session.save(args[1]);
             printJson({{"id", simulation.id},
                        {"name", simulation.name},
                        {"schematic", schematic},
-                       {"signals", simulation.captureSignals}});
+                       {"signals", simulation.captureSignals},
+                       {"graph", graphId}});
             return 0;
         }
 
@@ -806,6 +852,138 @@ int main(int argc, char **argv) {
             expectArguments(args, 2, 2, "simulation-list <project>");
             const auto project = ice::Project::load(args[1]);
             printJson(projectSummary(project, args[1])["simulations"]);
+            return 0;
+        }
+
+        if (command == "simulation-graph-add") {
+            expectArguments(args, 4, 6, "simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            ice::SimulationGraph graph;
+            graph.name = args[3];
+            if (args.size() >= 5 && !args[4].empty() && args[4] != "-")
+                graph.xAxis = args[4];
+            if (args.size() >= 6) {
+                if (args[5] != "-")
+                    graph.ySignals = splitSignals(args[5]);
+            } else {
+                graph.ySignals = splitSignals(simulation.captureSignals);
+            }
+            ice::ProjectSession session(project);
+            ice::ObjectId graphId = 0;
+            session.execute("simulation-graph-add",
+                            [&](ice::Project &p) { graphId = ice::addSimulationGraph(p, simulationId, graph); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-list") {
+            expectArguments(args, 3, 3, "simulation-graph-list <project> <simulation>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json graphs = json::array();
+            for (const auto &graph : project.simulations.at(simulationId).graphs)
+                graphs.push_back(simulationGraphJson(graph));
+            printJson(graphs);
+            return 0;
+        }
+
+        if (command == "simulation-graph-info") {
+            expectArguments(args, 4, 4, "simulation-graph-info <project> <simulation> <graph>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &graph = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            printJson(simulationGraphJson(graph));
+            return 0;
+        }
+
+        if (command == "simulation-graph-update") {
+            expectArguments(args, 4, 7,
+                            "simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            if (args.size() >= 5 && !args[4].empty() && args[4] != "-")
+                updated.name = args[4];
+            if (args.size() >= 6 && !args[5].empty() && args[5] != "-")
+                updated.xAxis = args[5];
+            if (args.size() >= 7 && args[6] != "-")
+                updated.ySignals = splitSignals(args[6]);
+            ice::ProjectSession session(project);
+            const auto graphId = updated.id;
+            session.execute("simulation-graph-update",
+                            [&](ice::Project &p) { ice::updateSimulationGraph(p, simulationId, graphId, updated); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-limits") {
+            expectArguments(args, 4, 8,
+                            "simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto applyLimit = [](const std::string &text, std::optional<double> &value, const char *label) {
+                if (text == "-")
+                    value.reset();
+                else
+                    value = parseDouble(text, label);
+            };
+            if (args.size() >= 5 && !args[4].empty())
+                applyLimit(args[4], updated.xMin, "x-min");
+            if (args.size() >= 6 && !args[5].empty())
+                applyLimit(args[5], updated.xMax, "x-max");
+            if (args.size() >= 7 && !args[6].empty())
+                applyLimit(args[6], updated.yMin, "y-min");
+            if (args.size() >= 8 && !args[7].empty())
+                applyLimit(args[7], updated.yMax, "y-max");
+            ice::ProjectSession session(project);
+            const auto graphId = updated.id;
+            session.execute("simulation-graph-limits",
+                            [&](ice::Project &p) { ice::updateSimulationGraph(p, simulationId, graphId, updated); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-delete") {
+            expectArguments(args, 4, 4, "simulation-graph-delete <project> <simulation> <graph>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            if (simulation.graphs.size() <= 1)
+                throw ice::ProjectError("simulation.graph.last", "A simulation must have at least one graph");
+            const auto &graph = resolveSimulationGraph(simulation, args[3]);
+            const auto graphId = graph.id;
+            const auto graphName = graph.name;
+            ice::ProjectSession session(project);
+            session.execute("simulation-graph-delete",
+                            [&](ice::Project &p) { ice::removeSimulationGraph(p, simulationId, graphId); });
+            session.save(args[1]);
+            printJson({{"id", graphId}, {"name", graphName}, {"simulation", simulationId}, {"deleted", true}});
             return 0;
         }
 
@@ -918,7 +1096,7 @@ int main(int argc, char **argv) {
                 const auto project = ice::Project::load(args[1]);
                 const auto schematicId = resolveSchematic(project, args[2]);
                 const auto &schematic = project.schematicCells.at(schematicId);
-                request.netlist = ice::buildSchematicNetlist(project, schematicId);
+                request.netlist = ice::buildSimulationNetlist(project, schematicId);
                 context.projectRoot = args[1];
                 context.projectIdentity = project.identity;
                 context.projectName = project.name;

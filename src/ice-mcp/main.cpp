@@ -92,6 +92,25 @@ std::optional<std::int64_t> optionalInteger(const json &arguments, const char *n
     return static_cast<std::int64_t>(coordinateValue(*it, name));
 }
 
+bool optionalBoolean(const json &arguments, const char *name, bool fallback = false) {
+    const auto it = arguments.find(name);
+    if (it == arguments.end() || it->is_null())
+        return fallback;
+    if (!it->is_boolean())
+        throw ToolError(std::string("Argument must be a boolean: ") + name);
+    return it->get<bool>();
+}
+
+double numberValue(const json &value, const char *name) {
+    if (value.is_number_integer())
+        return static_cast<double>(value.get<std::int64_t>());
+    if (value.is_number_unsigned())
+        return static_cast<double>(value.get<std::uint64_t>());
+    if (value.is_number_float())
+        return value.get<double>();
+    throw ToolError(std::string("Argument must be a number: ") + name);
+}
+
 std::vector<ice::LayoutPoint> parsePoints(const json &arguments) {
     const auto &value = requiredValue(arguments, "points");
     if (!value.is_array() || value.size() < 3)
@@ -161,6 +180,91 @@ ice::ObjectId resolveLayer(const ice::Project &project, const json &arguments, c
     return lookupByIdOrName(project.layers, requiredValue(arguments, key), "layer");
 }
 
+ice::ObjectId resolveSimulation(const ice::Project &project, const json &value) {
+    return lookupByIdOrName(project.simulations, value, "simulation");
+}
+
+std::size_t resolveGraphIndex(const ice::SimulationItem &simulation, const json &value) {
+    if (value.is_number_integer()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::int64_t>());
+        for (std::size_t index = 0; index < simulation.graphs.size(); ++index)
+            if (simulation.graphs[index].id == id)
+                return index;
+        throw ToolError("Unknown graph id: " + std::to_string(id));
+    }
+    if (value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        for (std::size_t index = 0; index < simulation.graphs.size(); ++index)
+            if (simulation.graphs[index].id == id)
+                return index;
+        throw ToolError("Unknown graph id: " + std::to_string(id));
+    }
+    if (value.is_string()) {
+        const auto name = value.get<std::string>();
+        for (std::size_t index = 0; index < simulation.graphs.size(); ++index)
+            if (simulation.graphs[index].name == name)
+                return index;
+        throw ToolError("Unknown graph: " + name);
+    }
+    throw ToolError("Expected a graph name or id.");
+}
+
+std::vector<std::string> splitCommaList(const std::string &text) {
+    std::vector<std::string> values;
+    std::string current;
+    for (const char character : text) {
+        if (character != ',') {
+            current.push_back(character);
+            continue;
+        }
+        const auto first = current.find_first_not_of(" \t");
+        const auto last = current.find_last_not_of(" \t");
+        if (first != std::string::npos)
+            values.push_back(current.substr(first, last - first + 1));
+        current.clear();
+    }
+    const auto first = current.find_first_not_of(" \t");
+    const auto last = current.find_last_not_of(" \t");
+    if (first != std::string::npos)
+        values.push_back(current.substr(first, last - first + 1));
+    return values;
+}
+
+std::vector<std::string> parseSignalListValue(const json &value, const char *name) {
+    if (value.is_string())
+        return splitCommaList(value.get<std::string>());
+    if (value.is_array()) {
+        std::vector<std::string> signals;
+        for (const auto &entry : value) {
+            if (!entry.is_string())
+                throw ToolError(std::string("Argument must contain only strings: ") + name);
+            const auto signal = entry.get<std::string>();
+            if (!signal.empty())
+                signals.push_back(signal);
+        }
+        return signals;
+    }
+    throw ToolError(std::string("Argument must be a string or string array: ") + name);
+}
+
+json graphJson(const ice::SimulationGraph &graph) {
+    return {{"id", graph.id},
+            {"name", graph.name},
+            {"x_axis", graph.xAxis},
+            {"y_signals", graph.ySignals},
+            {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
+            {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
+            {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
+            {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+}
+
+json graphWithSimulation(const ice::SimulationItem &simulation, const ice::SimulationGraph &graph) {
+    auto result = graphJson(graph);
+    result["simulation"] = simulation.id;
+    result["simulation_name"] = simulation.name;
+    return result;
+}
+
 #ifdef ICE_HAVE_AGENTSDK
 
 agentsdk::mcp::tool_result textResult(const std::string &text, bool isError = false) {
@@ -207,7 +311,8 @@ class IceMcpServer {
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
         server.set_instructions(
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
-            "project, schematic, layout, and report tools. Project mutations are transactional in memory; "
+            "project, schematic, layout, simulation graph, and report tools. Project mutations are transactional in "
+            "memory; "
             "report source files are written under reports/, but project metadata remains in memory. "
             "Use ice-cli for persisted project changes.");
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
@@ -301,7 +406,8 @@ class IceMcpServer {
                                              {"name", simulation.name},
                                              {"schematic", simulation.schematic},
                                              {"analysis", simulation.analysis},
-                                             {"simulator", simulation.simulator}});
+                                             {"simulator", simulation.simulator},
+                                             {"graphs", simulation.graphs.size()}});
         }
         for (const auto &[id, report] : project.reports)
             result["reports"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
@@ -363,6 +469,128 @@ class IceMcpServer {
             const bool changed = session.redo();
             return {{"changed", changed}};
         }
+        if (name == "simulation_graph_create") {
+            const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(simulationId);
+            ice::SimulationGraph graph;
+            graph.name = requiredString(arguments, "name");
+            graph.xAxis = optionalString(arguments, "x_axis", "time");
+            const auto ySignals = arguments.find("y_signals");
+            if (ySignals != arguments.end() && !ySignals->is_null()) {
+                graph.ySignals = parseSignalListValue(*ySignals, "y_signals");
+            } else {
+                graph.ySignals = splitCommaList(simulation.captureSignals);
+            }
+            const auto applyLimit = [&](const char *key, std::optional<double> &value) {
+                const auto it = arguments.find(key);
+                if (it == arguments.end())
+                    return;
+                if (it->is_null())
+                    value.reset();
+                else
+                    value = numberValue(*it, key);
+            };
+            applyLimit("x_min", graph.xMin);
+            applyLimit("x_max", graph.xMax);
+            applyLimit("y_min", graph.yMin);
+            applyLimit("y_max", graph.yMax);
+            ice::ObjectId graphId = 0;
+            session.execute("mcp simulation-graph-create", [&](ice::Project &project) {
+                graphId = ice::addSimulationGraph(project, simulationId, graph);
+            });
+            const auto &storedSimulation = session.project().simulations.at(simulationId);
+            for (const auto &entry : storedSimulation.graphs) {
+                if (entry.id == graphId)
+                    return graphWithSimulation(storedSimulation, entry);
+            }
+            throw ToolError("Created graph could not be found.");
+        }
+
+        if (name == "simulation_graph_list") {
+            json result = json::array();
+            const auto simulationValue = arguments.find("simulation");
+            const std::optional<ice::ObjectId> simulationId =
+                simulationValue != arguments.end() && !simulationValue->is_null()
+                    ? std::optional<ice::ObjectId>(resolveSimulation(session.project(), *simulationValue))
+                    : std::nullopt;
+            for (const auto &[id, simulation] : session.project().simulations) {
+                if (simulationId && id != *simulationId)
+                    continue;
+                for (const auto &graph : simulation.graphs)
+                    result.push_back(graphWithSimulation(simulation, graph));
+            }
+            return result;
+        }
+
+        if (name == "simulation_graph_info") {
+            const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(simulationId);
+            const auto index = resolveGraphIndex(simulation, requiredValue(arguments, "graph"));
+            return graphWithSimulation(simulation, simulation.graphs[index]);
+        }
+
+        if (name == "simulation_graph_update") {
+            const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(simulationId);
+            const auto index = resolveGraphIndex(simulation, requiredValue(arguments, "graph"));
+            auto updated = simulation.graphs[index];
+            const auto nameValue = arguments.find("name");
+            if (nameValue != arguments.end() && !nameValue->is_null()) {
+                if (!nameValue->is_string() || nameValue->get<std::string>().empty())
+                    throw ToolError("Argument must be a non-empty string: name");
+                updated.name = nameValue->get<std::string>();
+            }
+            const auto xAxisValue = arguments.find("x_axis");
+            if (xAxisValue != arguments.end() && !xAxisValue->is_null()) {
+                if (!xAxisValue->is_string())
+                    throw ToolError("Argument must be a string: x_axis");
+                updated.xAxis = xAxisValue->get<std::string>();
+            }
+            const auto ySignalsValue = arguments.find("y_signals");
+            if (ySignalsValue != arguments.end() && !ySignalsValue->is_null())
+                updated.ySignals = parseSignalListValue(*ySignalsValue, "y_signals");
+            if (optionalBoolean(arguments, "clear_limits", false)) {
+                updated.xMin.reset();
+                updated.xMax.reset();
+                updated.yMin.reset();
+                updated.yMax.reset();
+            }
+            const auto applyLimit = [&](const char *key, std::optional<double> &value) {
+                const auto it = arguments.find(key);
+                if (it == arguments.end())
+                    return;
+                if (it->is_null())
+                    value.reset();
+                else
+                    value = numberValue(*it, key);
+            };
+            applyLimit("x_min", updated.xMin);
+            applyLimit("x_max", updated.xMax);
+            applyLimit("y_min", updated.yMin);
+            applyLimit("y_max", updated.yMax);
+            session.execute("mcp simulation-graph-update", [&](ice::Project &project) {
+                ice::updateSimulationGraph(project, simulationId, updated.id, updated);
+            });
+            const auto &storedSimulation = session.project().simulations.at(simulationId);
+            for (const auto &entry : storedSimulation.graphs)
+                if (entry.id == updated.id)
+                    return graphWithSimulation(storedSimulation, entry);
+            throw ToolError("Updated graph could not be found.");
+        }
+
+        if (name == "simulation_graph_delete") {
+            const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(simulationId);
+            if (simulation.graphs.size() <= 1)
+                throw ToolError("A simulation must have at least one graph.");
+            const auto index = resolveGraphIndex(simulation, requiredValue(arguments, "graph"));
+            const auto graph = simulation.graphs[index];
+            session.execute("mcp simulation-graph-delete", [&](ice::Project &project) {
+                ice::removeSimulationGraph(project, simulationId, graph.id);
+            });
+            return {{"id", graph.id}, {"name", graph.name}, {"simulation", simulationId}, {"deleted", true}};
+        }
+
         if (name == "report_create") {
             const auto reportName = requiredString(arguments, "name");
             const auto source = optionalString(arguments, "source");
@@ -560,6 +788,44 @@ class IceMcpServer {
                             .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
+        tools.push_back(tool_builder("simulation_graph_create")
+                            .with_description("Add a graph definition to a simulation.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("name", "Graph name")
+                            .with_string_param("x_axis", "Optional X-axis signal or time", false)
+                            .with_string_param("y_signals", "Optional comma-separated Y signals", false)
+                            .with_number_param("x_min", "Optional X minimum", false)
+                            .with_number_param("x_max", "Optional X maximum", false)
+                            .with_number_param("y_min", "Optional Y minimum", false)
+                            .with_number_param("y_max", "Optional Y maximum", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_graph_list")
+                            .with_description("List simulation graph definitions.")
+                            .with_string_param("simulation", "Optional simulation name or id", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_graph_info")
+                            .with_description("Return one simulation graph definition.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("graph", "Graph name or id")
+                            .build());
+        tools.push_back(tool_builder("simulation_graph_update")
+                            .with_description("Update a simulation graph definition.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("graph", "Graph name or id")
+                            .with_string_param("name", "Optional new graph name", false)
+                            .with_string_param("x_axis", "Optional new X-axis signal or time", false)
+                            .with_string_param("y_signals", "Optional new comma-separated Y signals", false)
+                            .with_number_param("x_min", "Optional X minimum", false)
+                            .with_number_param("x_max", "Optional X maximum", false)
+                            .with_number_param("y_min", "Optional Y minimum", false)
+                            .with_number_param("y_max", "Optional Y maximum", false)
+                            .with_boolean_param("clear_limits", "Clear all axis limits before applying new ones", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_graph_delete")
+                            .with_description("Delete a simulation graph; one graph must remain.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("graph", "Graph name or id")
+                            .build());
         tools.push_back(tool_builder("report_create")
                             .with_description("Create a project-level Python report file under reports/.")
                             .with_string_param("name", "Report name")

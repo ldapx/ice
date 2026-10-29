@@ -146,8 +146,12 @@ The **+** button in Schematic **Hierarchy** offers **Schematic** and **Text
 SPICE Schematic**. Text SPICE schematics use a notebook-text icon, appear in the
 schematic tab bar, and open a plain-text SPICE editor in place of the canvas.
 Their source is stored directly in the project and saved with it. They are not
-projected into generated hierarchy symbols and are excluded from the current
-canvas-based simulation selector.
+projected into generated hierarchy symbols, but they can be selected as the
+source for a simulation. For a text schematic, simulation uses the stored SPICE
+source minus analysis-control directives such as `.tran`, `.dc`, `.ac`, `.op`,
+and `.end`. The **Build Netlist** button and the schematic signal picker are
+hidden for text schematics; only **Run Simulation** is shown, and it runs
+directly without a separate build step.
 
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.

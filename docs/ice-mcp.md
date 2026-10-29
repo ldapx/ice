@@ -46,6 +46,11 @@ go to stderr.
 | `layout_add_polygon` | Add a polygon shape. |
 | `layout_add_port` | Add a port. |
 | `layout_add_instance` | Instance another layout cell. |
+| `simulation_graph_create` | Add a graph definition to a simulation. |
+| `simulation_graph_list` | List graph definitions. |
+| `simulation_graph_info` | Read one graph definition. |
+| `simulation_graph_update` | Update axes, signals, or limits. |
+| `simulation_graph_delete` | Delete a graph while keeping the last one. |
 | `report_create` | Create a report file from a template or supplied source. |
 | `report_list` | List project-level reports. |
 | `report_read` | Read report metadata and Python source. |
@@ -53,8 +58,8 @@ go to stderr.
 | `report_run` | Run a report and return stdout, stderr, and exit status. |
 | `report_delete` | Delete report metadata; the file remains. |
 
-Cells and layers may be referenced by name or numeric id. Coordinates are
-integer database units. Reports may be referenced by name or id.
+Cells, layers, simulations, graphs, and reports may be referenced by name or
+numeric id. Coordinates are integer database units.
 
 Project mutations are transactional in memory and recorded in project history.
 Report source files are written under `reports/`, but report metadata remains in

@@ -51,6 +51,12 @@ ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId chi
                            Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
 
+// Simulation graph metadata is presentation-only but agent-facing: it selects
+// the plotted X/Y signals and optional display limits from captured traces.
+ObjectId addSimulationGraph(Project &project, ObjectId simulationId, const SimulationGraph &graph);
+bool updateSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId, const SimulationGraph &graph);
+bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId);
+
 // Converts a schematic cell into a SPICE netlist so a simulation can run the
 // drawn circuit instead of hand-typed directives. Each placed symbol becomes
 // one SPICE element; nets become SPICE nodes. Returns the netlist lines
@@ -73,5 +79,11 @@ void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordina
 // netlisting. Such ambiguous instances are skipped and reported via notes.
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes = nullptr);
+
+// Builds a simulation netlist from either a drawn schematic or a text SPICE
+// schematic. Analysis-control directives that the simulation properties own
+// (.tran, .dc, .ac, .op) and a trailing .end are removed from text sources.
+std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId cellId,
+                                                std::vector<std::string> *notes = nullptr);
 
 } // namespace ice

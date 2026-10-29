@@ -3421,7 +3421,7 @@ class DocumentWindow : public QMainWindow {
                                 : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
         if (cellId != 0) {
             std::vector<std::string> notes;
-            const auto lines = ice::buildSchematicNetlist(project, cellId, &notes);
+            const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
             request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
             for (const auto &noteText : notes)
                 netlistNotes << QString::fromStdString(noteText);
@@ -3446,6 +3446,16 @@ class DocumentWindow : public QMainWindow {
         if (!schematicSelector_)
             return 0;
         return static_cast<ice::ObjectId>(schematicSelector_->currentData().toULongLong());
+    }
+
+    bool selectedSimulationSchematicIsText() const {
+        if (!project_)
+            return false;
+        const auto id = selectedSimulationSchematicId();
+        if (id == 0)
+            return false;
+        const auto cell = project_->project().schematicCells.find(id);
+        return cell != project_->project().schematicCells.end() && cell->second.textSchematic;
     }
 
     ice::SimulationItem currentSimulationFormItem() const {
@@ -3486,19 +3496,23 @@ class DocumentWindow : public QMainWindow {
 
     void updateSimulationBuildButton() {
         const auto schematicId = selectedSimulationSchematicId();
+        const bool textSchematic = selectedSimulationSchematicIsText();
         const bool hasSimulation = project_ && activeSimulationId_ != 0;
         const bool hasSchematic = project_ && schematicId != 0;
         const bool upToDate = builtSimulationNetlistSchematicId_ == schematicId &&
                               builtSimulationNetlist_ == currentSimulationNetlist_ &&
                               builtSimulationNetlistSchematicId_ != 0;
-        if (simulationBuildNetlistButton_)
-            simulationBuildNetlistButton_->setEnabled(hasSimulation && hasSchematic && !upToDate);
+        if (simulationBuildNetlistButton_) {
+            simulationBuildNetlistButton_->setVisible(!textSchematic);
+            simulationBuildNetlistButton_->setEnabled(!textSchematic && hasSimulation && hasSchematic && !upToDate);
+        }
         if (simulationRunButton_)
-            simulationRunButton_->setEnabled(hasSimulation && hasSchematic && upToDate);
+            simulationRunButton_->setEnabled(hasSimulation && hasSchematic && (textSchematic || upToDate));
     }
 
     void updateSimulationControlStates() {
         const bool hasSimulation = project_ && activeSimulationId_ != 0;
+        const bool textSchematic = selectedSimulationSchematicIsText();
         const auto setPropertyEnabled = [hasSimulation](QWidget *widget) {
             if (widget)
                 widget->setEnabled(hasSimulation);
@@ -3512,8 +3526,10 @@ class DocumentWindow : public QMainWindow {
         setPropertyEnabled(analysisControl_);
         setPropertyEnabled(signalsCapture_);
         setPropertyEnabled(additionalDirectives_);
-        if (signalSelectButton_)
-            signalSelectButton_->setEnabled(hasSimulation);
+        if (signalSelectButton_) {
+            signalSelectButton_->setVisible(!textSchematic);
+            signalSelectButton_->setEnabled(hasSimulation && !textSchematic);
+        }
         if (simulationAddGraphButton_)
             simulationAddGraphButton_->setEnabled(hasSimulation);
         if (simulationDeleteGraphButton_)
@@ -3537,6 +3553,8 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         currentSimulationNetlist_ = simulationNetlistText();
+        if (selectedSimulationSchematicIsText())
+            simulationNetlist_->setPlainText(currentSimulationNetlist_);
         updateSimulationControlStates();
     }
 
@@ -4004,11 +4022,8 @@ class DocumentWindow : public QMainWindow {
         QSignalBlocker blocker(schematicSelector_);
         schematicSelector_->clear();
         if (project_) {
-            for (const auto &[id, cell] : project_->project().schematicCells) {
-                if (cell.textSchematic)
-                    continue;
+            for (const auto &[id, cell] : project_->project().schematicCells)
                 schematicSelector_->addItem(QString::fromStdString(cell.name), QVariant::fromValue<qulonglong>(id));
-            }
         }
         const int index = schematicSelector_->findData(QVariant::fromValue<qulonglong>(selected));
         if (index >= 0)

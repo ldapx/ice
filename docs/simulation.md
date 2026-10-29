@@ -17,6 +17,14 @@ adjacent **Select** button switches to the schematic so a node, pin, or wire can
 be picked directly; the resulting `v(node)` signal is appended to the list and
 the editor returns to the Simulation tab.
 
+A simulation may point at either a drawn schematic or a text SPICE schematic.
+Text source is used directly as the circuit netlist, with analysis-control
+directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` removed because the
+simulation properties supply the analysis. For text schematics the **Build
+Netlist** button and the schematic signal-picker button are hidden; **Run
+Simulation** is available immediately. Drawn schematics keep the build-then-run
+flow and the signal picker.
+
 Graphs are presentation-only views over a result. Each graph selects a captured
 signal or the `time` variable for its X axis and one or more captured signals
 (or `time`) for its Y axis. It can also define optional axis limits; blank
@@ -103,6 +111,11 @@ errors, and output are appended to the **Messages** tab.
 ```text
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
+ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
+ice-cli simulation-graph-list <project> <simulation>
+ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
+ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
+ice-cli simulation-graph-delete <project> <simulation> <graph>
 ice-cli report-add <project> <name> [source-file]
 ice-cli report-read <project> <report>
 ice-cli report-write <project> <report> <source-file|->
@@ -111,5 +124,8 @@ ice-cli report-run <project> <report> [timeout-ms]
 
 When no output path is supplied, the run is stored under the project build
 directory. The optional arguments are stop time, step size, timeout in
-milliseconds, and captured signals. The `report-*` commands let agents create,
-inspect, edit, and run reports against stored runs without launching the GUI.
+milliseconds, and captured signals. `simulation-add` creates a default graph
+from the captured signals; the `simulation-graph-*` commands let agents configure
+graph metadata (X/Y signals and optional limits), and the `report-*` commands let
+agents create, inspect, edit, and run reports against stored runs without
+launching the GUI.
