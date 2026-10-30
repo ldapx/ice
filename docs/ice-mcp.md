@@ -16,6 +16,13 @@ Run without a project and open/create one through tools:
 ice-mcp
 ```
 
+The MCP server exposes `simulation_create`, `simulation_update`, and
+`simulation_run`, so a client can create, configure, and run a simulation
+without switching to `ice-cli`. `project_reload` explicitly refreshes an open
+project; the server also detects changes made by another ICE client before a
+mutation. Existing text SPICE schematics can be edited with
+`schematic_set_text`.
+
 Or open a project at startup:
 
 ```sh

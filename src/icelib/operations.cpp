@@ -466,6 +466,16 @@ void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordina
     }
 }
 
+void resizeRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Rect rectangle) {
+    if (!rectangle.valid())
+        throw ProjectError("layout.shape", "Rectangle must have positive dimensions");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &shape = require(cell.shapes, shapeId, "layout.shape", "Shape does not exist");
+    if (!shape.polygon.empty())
+        throw ProjectError("layout.shape", "Only rectangular shapes can be resized");
+    shape.rectangle = rectangle;
+}
+
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes) {
     const auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");

@@ -105,16 +105,22 @@ class LayersPanel : public QWidget {
   public:
     explicit LayersPanel(QWidget *parent = nullptr);
     void setProject(const ice::Project &project);
+    void setOnCreateLayer(std::function<void()> callback);
+    void setOnLayerSelected(std::function<void(ice::ObjectId)> callback);
+    void setSelectedLayer(ice::ObjectId layerId);
     void setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback);
     void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
 
   private:
     void applyFilter(const QString &text);
+    void showContextMenu(const QPoint &pos);
 
     QTreeWidget *tree_ = nullptr;
     QLineEdit *search_ = nullptr;
     std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
     std::function<void(bool)> onAllLayersVisibilityChanged_;
+    std::function<void()> onCreateLayer_;
+    std::function<void(ice::ObjectId)> onLayerSelected_;
 };
 
 class SymbolsPanel : public QWidget {

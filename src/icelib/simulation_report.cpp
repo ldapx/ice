@@ -331,6 +331,9 @@ std::filesystem::path reportRunnerScriptPath(const std::filesystem::path &execut
 
     const auto executable = normalizedExecutable(executablePath);
     std::vector<std::filesystem::path> candidates;
+#ifdef ICE_SOURCE_DIR
+    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "simulation" / "report_runner.py");
+#endif
     auto directory = executable.parent_path();
     for (int level = 0; level < 6 && !directory.empty(); ++level) {
         candidates.push_back(directory / "assets" / "simulation" / "report_runner.py");
@@ -347,6 +350,9 @@ std::filesystem::path reportRunnerScriptPath(const std::filesystem::path &execut
     }
     candidates.push_back("/usr/share/ice/assets/simulation/report_runner.py");
     candidates.push_back("/usr/local/share/ice/assets/simulation/report_runner.py");
+    if (const char *home = std::getenv("HOME"); home && *home)
+        candidates.push_back(std::filesystem::path(home) / ".local" / "share" / "ice" / "assets" / "simulation" /
+                             "report_runner.py");
     for (const auto &candidate : candidates) {
         if (isRegularFile(candidate))
             return candidate;
@@ -361,6 +367,9 @@ std::string reportPythonPath(const std::filesystem::path &executablePath) {
         if (!path.empty() && std::filesystem::is_directory(path, status) && !status)
             paths.push_back(path.string());
     };
+#ifdef ICE_SOURCE_DIR
+    appendIfDirectory(std::filesystem::path(ICE_SOURCE_DIR) / "python");
+#endif
 
     const auto executable = normalizedExecutable(executablePath);
     auto directory = executable.parent_path();
@@ -378,6 +387,8 @@ std::string reportPythonPath(const std::filesystem::path &executablePath) {
     }
     appendIfDirectory("/usr/share/ice/python");
     appendIfDirectory("/usr/local/share/ice/python");
+    if (const char *home = std::getenv("HOME"); home && *home)
+        appendIfDirectory(std::filesystem::path(home) / ".local" / "share" / "ice" / "python");
 
     if (const char *inherited = std::getenv("PYTHONPATH"); inherited && *inherited) {
 #ifdef _WIN32
@@ -435,7 +446,10 @@ ReportProcessResult runProjectReport(const std::filesystem::path &projectRoot, c
         throw ProjectError("report.run", "Report file is missing: " + reportFile.string());
     const auto runner = reportRunnerScriptPath(executablePath);
     if (runner.empty())
-        throw ProjectError("report.runner", "Python report runner is not available");
+        throw ProjectError("report.runner",
+                           "Python report runner is not available. Set ICE_REPORT_RUNNER to "
+                           "assets/simulation/report_runner.py or install it under "
+                           "<prefix>/share/ice/assets/simulation/report_runner.py.");
     const auto python = reportPythonExecutable();
     const auto pythonPath = reportPythonPath(executablePath);
 

@@ -145,3 +145,10 @@ that simulation's build directory. When a simulation is selected, the GUI loads
 its newest stored run into the graph tabs; if no simulation-specific run exists,
 it falls back to the newest run for the simulation's schematic. The GUI also
 watches `build/simulations` and refreshes the active plots when new runs appear.
+
+Text schematics accept ordinary ngspice element cards and comments. ICE owns the
+analysis directive, so `.tran`, `.dc`, `.ac`, `.op`, and `.end` are ignored from
+the text source; the current simulation properties provide the transient
+analysis. Capture node voltages as `v(node)` (or just `node`) and device vectors
+as `i(v1)` or `@l1[i]`. Unsupported requested vectors are reported in the run's
+`warnings` array instead of being silently discarded.

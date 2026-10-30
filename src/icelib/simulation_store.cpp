@@ -142,6 +142,7 @@ static std::string serializeSimulationRunWithIdentity(const SimulationRunContext
         {"input_fingerprint", result.input_fingerprint},
         {"state", jobStateName(result.state)},
         {"error", result.error},
+        {"warnings", result.warnings},
     };
     output["analysis"] = result.analysis;
     output["time"] = result.time;
