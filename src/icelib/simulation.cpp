@@ -120,14 +120,14 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         return result;
     }
 
-    // A signal may be given as "out", "v(out)", "N15" or "v(N15)"; ngspice
-    // stores node voltages under the "v(<node>)" spelling, so normalize before
-    // looking it up. An empty signal list falls back to the legacy "v(out)".
-    const auto voltageVectorName = [](const std::string &signal) {
+    // Bare names are node voltages. Explicit ngspice vector expressions are
+    // passed through so current probes such as i(v1) and @l1[i] work too.
+    const auto vectorName = [](const std::string &signal) {
         std::string name = signal;
         for (auto &character : name)
             character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-        if (name.rfind("v(", 0) == 0 && name.size() >= 3 && name.back() == ')')
+        if ((name.rfind("v(", 0) == 0 || name.rfind("i(", 0) == 0 || name.rfind("@", 0) == 0) &&
+            name.size() >= 3)
             return name;
         return "v(" + name + ")";
     };
@@ -151,8 +151,8 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
     for (const auto &signal : wanted) {
         if (signal.empty())
             continue;
-        const auto vectorName = voltageVectorName(signal);
-        auto *vector = ngGet_Vec_Info(const_cast<char *>(vectorName.c_str()));
+        const auto normalizedName = vectorName(signal);
+        auto *vector = ngGet_Vec_Info(const_cast<char *>(normalizedName.c_str()));
         if (vector == nullptr || vector->v_realdata == nullptr || vector->v_length <= 0) {
             missing.push_back(signal);
             continue;
@@ -183,6 +183,8 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
                        ") — check the Signals to capture list matches the schematic's nets";
         return result;
     }
+    for (const auto &signal : missing)
+        result.warnings.push_back(signal + ": not captured by ngspice");
     if (progress)
         progress({1.0, "ngspice transient analysis complete"});
     result.state = JobState::succeeded;
@@ -307,6 +309,7 @@ std::string serializeSimulationResult(const SimulationResult &result) {
                 {"simulator_version", result.simulator_version},
                 {"input_fingerprint", result.input_fingerprint},
                 {"error", result.error},
+                {"warnings", result.warnings},
                 {"traces", json::array()}};
     for (const auto &trace : result.traces)
         output["traces"].push_back({{"name", trace.name}, {"values", trace.values}});

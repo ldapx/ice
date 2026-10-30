@@ -816,6 +816,22 @@ class DocumentWindow : public QMainWindow {
                 return;
             }
             if (saved == savedSchematic.end()) {
+                // A newly-created schematic can exist only in the GUI while
+                // the agent loads the last saved project from disk. Both
+                // sessions then allocate the same first id. If the GUI cell
+                // is still an empty placeholder (the usual "top" cell), the
+                // disk cell is the completed version the user is expecting;
+                // adopt it instead of hiding it as an external conflict.
+                const auto &localCell = current->second;
+                const bool emptyPlaceholder = localCell.parameters.empty() && localCell.symbols.empty() &&
+                                              localCell.instances.empty() && localCell.nets.empty() &&
+                                              (!localCell.textSchematic || localCell.spiceText.empty());
+                if (emptyPlaceholder) {
+                    current->second = diskCell;
+                    savedSchematic[id] = diskSignature;
+                    adopted = true;
+                    return;
+                }
                 externalSchematic[id] = diskCell;
                 conflictedSchematic.insert(id);
                 return;
@@ -4802,10 +4818,13 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         std::set<ice::ObjectId> schematicIds;
+        ice::ObjectId newlyDiscoveredSchematic = 0;
         for (const auto &[id, _] : project_->project().schematicCells) {
             schematicIds.insert(id);
-            if (knownSchematicCells_.insert(id).second)
+            if (knownSchematicCells_.insert(id).second) {
                 openSchematicTabs_.insert(id);
+                newlyDiscoveredSchematic = id;
+            }
         }
         for (auto it = knownSchematicCells_.begin(); it != knownSchematicCells_.end();) {
             if (!schematicIds.contains(*it)) {
@@ -4821,6 +4840,8 @@ class DocumentWindow : public QMainWindow {
             else
                 ++it;
         }
+        if (newlyDiscoveredSchematic != 0)
+            activeSchematicId_ = newlyDiscoveredSchematic;
 
         std::set<ice::ObjectId> layoutIds;
         for (const auto &[id, _] : project_->project().proceduralLayouts) {
@@ -5570,6 +5591,7 @@ class DocumentWindow : public QMainWindow {
         titleBar->setFixedHeight(0);
         activityDock_->setTitleBarWidget(titleBar);
         activityPanel_ = new ActivityPanel;
+        activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
         activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }

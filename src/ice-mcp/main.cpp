@@ -1,5 +1,7 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/simulation.hpp"
+#include "icelib/simulation_store.hpp"
 #include "icelib/simulation_report.hpp"
 
 #include <nlohmann/json.hpp>
@@ -16,11 +18,13 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -288,6 +292,32 @@ json graphWithSimulation(const ice::SimulationItem &simulation, const ice::Simul
     return result;
 }
 
+std::filesystem::file_time_type projectStateStamp(const std::filesystem::path &path) {
+    auto root = path;
+    std::error_code status;
+    if (!std::filesystem::is_directory(root, status))
+        root = root.parent_path();
+    auto stamp = std::filesystem::file_time_type::min();
+    const auto visit = [&](const std::filesystem::path &candidate) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate, error) && !error) {
+            const auto value = std::filesystem::last_write_time(candidate, error);
+            if (!error)
+                stamp = std::max(stamp, value);
+        }
+    };
+    visit(root / "project.icepro");
+    for (const auto &directory : {"sch", "lay", "sim"}) {
+        std::error_code error;
+        if (!std::filesystem::is_directory(root / directory, error) || error)
+            continue;
+        for (std::filesystem::recursive_directory_iterator it(root / directory, error), end; !error && it != end;
+             it.increment(error))
+            visit(it->path());
+    }
+    return stamp;
+}
+
 #ifdef ICE_HAVE_AGENTSDK
 
 agentsdk::mcp::tool_result textResult(const std::string &text, bool isError = false) {
@@ -313,6 +343,7 @@ class IceMcpServer {
             auto project = ice::Project::load(*projectPath);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = std::move(*projectPath);
+            projectStamp_ = projectStateStamp(projectPath_);
         }
     }
 
@@ -452,10 +483,20 @@ class IceMcpServer {
     }
 
     json call(const std::string &name, const json &arguments) {
+        if (session_ && !projectPath_.empty() && name != "project_open" && name != "project_create") {
+            const auto currentStamp = projectStateStamp(projectPath_);
+            if (currentStamp != projectStamp_) {
+                if (session_->dirty())
+                    throw ToolError("Project changed outside ice-mcp while local changes are pending; save or reopen the project before mutating it.");
+                session_->replaceProject(ice::Project::load(projectPath_));
+                projectStamp_ = projectStateStamp(projectPath_);
+            }
+        }
         auto result = callInternal(name, arguments);
         if (session_ && session_->dirty() && !projectPath_.empty()) {
             try {
                 session_->save(projectPath_);
+                projectStamp_ = projectStateStamp(projectPath_);
                 result["saved"] = true;
             } catch (const ice::ProjectError &error) {
                 throw ToolError("Mutation was applied in memory but could not be saved: " + std::string(error.what()));
@@ -488,6 +529,7 @@ class IceMcpServer {
             project.save(path);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = path;
+            projectStamp_ = projectStateStamp(projectPath_);
             return summary();
         }
 
@@ -496,10 +538,20 @@ class IceMcpServer {
             auto project = ice::Project::load(path);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = path;
+            projectStamp_ = projectStateStamp(projectPath_);
             return summary();
         }
         if (name == "project_summary")
             return summary();
+
+        if (name == "project_reload") {
+            requireSession();
+            if (session_->dirty())
+                throw ToolError("Cannot reload a project with unsaved local changes.");
+            session_->replaceProject(ice::Project::load(projectPath_));
+            projectStamp_ = projectStateStamp(projectPath_);
+            return summary();
+        }
 
         auto &session = requireSession();
 
@@ -512,6 +564,99 @@ class IceMcpServer {
         if (name == "project_redo") {
             const bool changed = session.redo();
             return {{"changed", changed}};
+        }
+        if (name == "simulation_create") {
+            const auto schematic = resolveSchematic(session.project(), arguments, "schematic");
+            ice::SimulationItem simulation;
+            simulation.name = requiredString(arguments, "name");
+            simulation.schematic = schematic;
+            simulation.analysis = optionalString(arguments, "analysis", "transient");
+            if (const auto value = arguments.find("stop"); value != arguments.end())
+                simulation.stop = numberValue(*value, "stop");
+            if (const auto value = arguments.find("step"); value != arguments.end())
+                simulation.step = numberValue(*value, "step");
+            if (arguments.contains("signals")) {
+                const auto signals = parseSignalListValue(arguments.at("signals"), "signals");
+                for (std::size_t index = 0; index < signals.size(); ++index) {
+                    if (index)
+                        simulation.captureSignals += ",";
+                    simulation.captureSignals += signals[index];
+                }
+            }
+            const auto graphName = optionalString(arguments, "graph_name", "Graph 1");
+            ice::ObjectId simulationId = 0;
+            ice::ObjectId graphId = 0;
+            session.execute("mcp simulation-create", [&](ice::Project &project) {
+                simulation.id = project.nextId();
+                simulationId = simulation.id;
+                project.simulations.emplace(simulation.id, simulation);
+                ice::SimulationGraph graph;
+                graph.id = project.nextId();
+                graphId = graph.id;
+                graph.name = graphName;
+                graph.xAxis = "time";
+                graph.ySignals = splitCommaList(simulation.captureSignals);
+                project.simulations.at(simulation.id).graphs.push_back(std::move(graph));
+            });
+            return {{"id", simulationId}, {"name", simulation.name}, {"schematic", schematic},
+                    {"signals", simulation.captureSignals}, {"graph", graphId}};
+        }
+        if (name == "simulation_update") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            auto updated = session.project().simulations.at(id);
+            if (arguments.contains("analysis"))
+                updated.analysis = requiredString(arguments, "analysis");
+            if (arguments.contains("stop"))
+                updated.stop = numberValue(arguments.at("stop"), "stop");
+            if (arguments.contains("step"))
+                updated.step = numberValue(arguments.at("step"), "step");
+            if (arguments.contains("signals")) {
+                const auto signals = parseSignalListValue(arguments.at("signals"), "signals");
+                updated.captureSignals.clear();
+                for (std::size_t index = 0; index < signals.size(); ++index) {
+                    if (index)
+                        updated.captureSignals += ",";
+                    updated.captureSignals += signals[index];
+                }
+            }
+            session.execute("mcp simulation-update", [&](ice::Project &project) {
+                project.simulations.at(id) = updated;
+            });
+            return { {"id", id}, {"name", updated.name}, {"analysis", updated.analysis},
+                     {"stop", updated.stop}, {"step", updated.step}, {"signals", updated.captureSignals} };
+        }
+        if (name == "simulation_run") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(id);
+            const auto schematic = session.project().schematicCells.find(simulation.schematic);
+            if (schematic == session.project().schematicCells.end())
+                throw ToolError("Simulation references a missing schematic.");
+            ice::SimulationRequest request;
+            request.analysis = simulation.analysis;
+            request.stop = simulation.stop;
+            request.step = simulation.step;
+            request.simulator = simulation.simulator;
+            request.use_initial_conditions = simulation.use_initial_conditions;
+            request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
+            request.probeSignals = splitCommaList(simulation.captureSignals);
+            const auto timeout = std::chrono::milliseconds(
+                std::max<std::int64_t>(1, optionalInteger(arguments, "timeout_ms").value_or(60000)));
+            ice::SimulationRunner runner;
+            const auto result = runner.run(request, timeout);
+            ice::SimulationRunContext context;
+            context.projectRoot = projectRootPath();
+            context.projectIdentity = session.project().identity;
+            context.projectName = session.project().name;
+            context.simulationId = id;
+            context.simulationName = simulation.name;
+            context.schematicId = simulation.schematic;
+            context.schematicName = schematic->second.name;
+            context.request = request;
+            context.graphs = simulation.graphs;
+            const auto artifact = ice::writeSimulationRun(context, result);
+            return {{"state", ice::jobStateName(result.state)}, {"run_id", artifact.runId},
+                    {"stored", artifact.path.string()}, {"time_points", result.time.size()},
+                    {"traces", result.traces.size()}, {"warnings", result.warnings}, {"error", result.error}};
         }
         if (name == "simulation_graph_create") {
             const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -707,8 +852,15 @@ class IceMcpServer {
             const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
                                              "simulation script");
             const auto report = session.project().reports.at(id);
+            const bool purge = optionalBoolean(toolArguments, "purge", false);
             session.execute("mcp simulation-script-delete", [&](ice::Project &project) { project.reports.erase(id); });
-            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}};
+            if (purge) {
+                std::error_code status;
+                std::filesystem::remove(projectReportPath(projectRootPath(), report), status);
+                if (status)
+                    throw ToolError("Unable to purge script file: " + status.message());
+            }
+            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}, {"purged", purge}};
         }
 
         if (name == "schematic_delete") {
@@ -738,6 +890,17 @@ class IceMcpServer {
                 id = ice::createTextSchematicCell(project, cellName, pdk, text);
             });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"text", text}};
+        }
+        if (name == "schematic_set_text") {
+            const auto id = resolveSchematic(session.project(), arguments);
+            auto &cell = session.project().schematicCells.at(id);
+            if (!cell.textSchematic)
+                throw ToolError("Schematic is not a text schematic: " + cell.name);
+            const auto text = requiredStringAllowEmpty(arguments, "text");
+            session.execute("mcp schematic-set-text", [&](ice::Project &project) {
+                project.schematicCells.at(id).spiceText = text;
+            });
+            return {{"id", id}, {"name", cell.name}, {"text", text}};
         }
         if (name == "schematic_add_symbol") {
             ice::ObjectId id = 0;
@@ -869,8 +1032,32 @@ class IceMcpServer {
         tools.push_back(tool_builder("project_validate")
                             .with_description("Validate the open project and return diagnostics.")
                             .build());
+        tools.push_back(tool_builder("project_reload").with_description("Reload the open project from disk.").build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
+        tools.push_back(tool_builder("simulation_create")
+                            .with_description("Create a simulation and its first graph.")
+                            .with_string_param("name", "Simulation name")
+                            .with_string_param("schematic", "Schematic name or id")
+                            .with_string_param("analysis", "Analysis type", false)
+                            .with_number_param("stop", "Stop time", false)
+                            .with_number_param("step", "Time step", false)
+                            .with_string_param("signals", "Signals to capture", false)
+                            .with_string_param("graph_name", "Initial graph name", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_update")
+                            .with_description("Update simulation settings and capture signals.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("analysis", "Analysis type", false)
+                            .with_number_param("stop", "Stop time", false)
+                            .with_number_param("step", "Time step", false)
+                            .with_string_param("signals", "Signals to capture", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_run")
+                            .with_description("Run a simulation and store a compact run artifact.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_integer_param("timeout_ms", "Timeout in milliseconds", false)
+                            .build());
         tools.push_back(tool_builder("simulation_graph_create")
                             .with_description("Add a graph definition to a simulation.")
                             .with_string_param("simulation", "Simulation name or id")
@@ -935,8 +1122,9 @@ class IceMcpServer {
                             .with_integer_param("timeout_ms", "Optional timeout in milliseconds", false)
                             .build());
         tools.push_back(tool_builder("simulation_script_delete")
-                            .with_description("Delete simulation script metadata; the Python file remains on disk.")
+                            .with_description("Delete simulation script metadata; optionally purge its Python file.")
                             .with_string_param("script", "Simulation script name or id")
+                            .with_boolean_param("purge", "Also remove the Python source file", false)
                             .build());
         tools.push_back(tool_builder("schematic_create")
                             .with_description("Create a drawn schematic cell.")
@@ -948,6 +1136,11 @@ class IceMcpServer {
                             .with_string_param("name", "Schematic name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("text", "Optional SPICE source", false)
+                            .build());
+        tools.push_back(tool_builder("schematic_set_text")
+                            .with_description("Replace the source of an existing text SPICE schematic.")
+                            .with_string_param("schematic", "Schematic name or id")
+                            .with_string_param("text", "SPICE source")
                             .build());
         tools.push_back(
             tool_builder("schematic_delete")
@@ -1094,6 +1287,7 @@ class IceMcpServer {
     std::unique_ptr<ice::ProjectSession> session_;
     std::filesystem::path projectPath_;
     std::filesystem::path executablePath_;
+    std::filesystem::file_time_type projectStamp_ = std::filesystem::file_time_type::min();
 };
 
 } // namespace

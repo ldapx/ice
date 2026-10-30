@@ -45,6 +45,7 @@ class ActivityPanel : public QWidget {
     ~ActivityPanel() override;
 
     void setProjectPath(const QString &path);
+    void setProjectChangedCallback(std::function<void()> callback);
     void setDrcReport(const ice::VerificationReport &report, const QString &reportPath = {});
     void setDrcRunning(const QString &message = {});
     void setDrcError(const QString &message);
@@ -143,6 +144,7 @@ class ActivityPanel : public QWidget {
     QPushButton *closeSessionButton_ = nullptr;
     QPushButton *sendButton_ = nullptr;
     QPushButton *cancelButton_ = nullptr;
+    QLabel *agentActivity_ = nullptr;
     QListWidget *mcpServers_ = nullptr;
     std::unique_ptr<AgentBackend> agentBackend_;
     std::vector<AgentSession> agentSessions_;
@@ -160,6 +162,7 @@ class ActivityPanel : public QWidget {
     bool refreshingSessionSelector_ = false;
     bool modelChanging_ = false;
     bool updatingModelSelector_ = false;
+    std::function<void()> projectChangedCallback_;
 };
 
 class CommandPalette : public QDialog {

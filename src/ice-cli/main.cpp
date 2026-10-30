@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -499,7 +500,8 @@ void printHelp() {
               << "Project:\n"
               << "  project-create <folder|project.icepro> [name]\n"
               << "  project-info <folder|project.icepro>\n"
-              << "  project-validate <folder|project.icepro>\n\n"
+              << "  project-validate <folder|project.icepro>\n"
+              << "  doctor\n\n"
               << "Schematic:\n"
               << "  schematic-add-cell <project> <name> [pdk]\n"
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
@@ -542,8 +544,8 @@ void printHelp() {
               << "  script-info <project> <script>\n"
               << "  script-read <project> <script>\n"
               << "  script-write <project> <script> <source-file|->\n"
-              << "  script-run <project> <script> [timeout-ms]\n"
-              << "  script-delete <project> <script>\n\n"
+              << "  script-run <project> <script> [timeout-ms] [--json]\n"
+              << "  script-delete <project> <script> [--purge]\n\n"
               << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n"
               << "The legacy report-* command names remain available as aliases.\n";
 }
@@ -577,6 +579,19 @@ int main(int argc, char **argv) {
     }
 
     try {
+        if (command == "doctor") {
+            expectArguments(args, 1, 1, "doctor");
+            const auto runner = ice::reportRunnerScriptPath(executablePath);
+            const auto python = ice::reportPythonExecutable();
+            const bool pythonAvailable = std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
+            const bool ngspiceAvailable = std::filesystem::exists("/usr/lib/libngspice.so.0") ||
+                                          std::filesystem::exists("/usr/lib64/libngspice.so.0");
+            printJson({{"report_runner", runner.empty() ? json(nullptr) : json(runner.string())},
+                       {"python", python}, {"python_available", pythonAvailable},
+                       {"ngspice_library_available", ngspiceAvailable},
+                       {"ok", !runner.empty() && pythonAvailable && ngspiceAvailable}});
+            return 0;
+        }
         if (command == "project-create") {
             expectArguments(args, 2, 3, "project-create <folder|project.icepro> [name]");
             const std::filesystem::path path = args[1];
@@ -1051,6 +1066,7 @@ int main(int argc, char **argv) {
                             {"traces", result.traces.size()},
                             {"stored", storedPath.string()},
                             {"error", result.error}};
+            summary["warnings"] = result.warnings;
             if (!runId.empty())
                 summary["run_id"] = runId;
             printJson(summary);
@@ -1244,12 +1260,21 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-run") {
-            expectArguments(args, 3, 4, "script-run <project> <script> [timeout-ms]");
+            expectArguments(args, 3, 5, "script-run <project> <script> [timeout-ms] [--json]");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto &report = project.reports.at(id);
-            const auto timeoutMs =
-                args.size() > 3 ? parseInteger(args[3], "timeout") : static_cast<ice::Coordinate>(30000);
+            bool fullJson = false;
+            std::optional<ice::Coordinate> timeoutArgument;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--json")
+                    fullJson = true;
+                else if (!timeoutArgument)
+                    timeoutArgument = parseInteger(args[index], "timeout");
+                else
+                    argumentError("Usage: ice-cli script-run <project> <script> [timeout-ms] [--json]");
+            }
+            const auto timeoutMs = timeoutArgument.value_or(30000);
             const auto timeout = std::chrono::milliseconds(std::max<ice::Coordinate>(1, timeoutMs));
             const auto result = ice::runProjectReport(projectRootForCli(args[1]), report, executablePath, timeout);
             const bool ok = !result.timedOut && result.exitCode == 0;
@@ -1259,15 +1284,20 @@ int main(int argc, char **argv) {
                 if (!document.is_discarded() && document.contains("graphs"))
                     graphs = document.at("graphs");
             }
-            printJson({{"id", id},
-                       {"name", report.name},
-                       {"path", report.path},
-                       {"ok", ok},
-                       {"timed_out", result.timedOut},
-                       {"exit_code", result.exitCode},
-                       {"stdout", result.stdoutText},
-                       {"stderr", result.stderrText},
-                       {"graphs", std::move(graphs)}});
+            if (fullJson) {
+                printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"ok", ok},
+                           {"timed_out", result.timedOut}, {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText}, {"stderr", result.stderrText}, {"graphs", std::move(graphs)}});
+            } else {
+                json graphSummary = json::array();
+                for (const auto &graph : graphs)
+                    graphSummary.push_back({{"name", graph.value("name", "")},
+                                            {"points", graph.value("x", json::array()).size()},
+                                            {"series", graph.value("series", json::array()).size()}});
+                printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"ok", ok},
+                           {"timed_out", result.timedOut}, {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText}, {"stderr", result.stderrText}, {"graphs", graphSummary}});
+            }
             if (result.timedOut)
                 throw ice::ProjectError("report.timeout", "Simulation script timed out");
             if (result.exitCode != 0)
@@ -1277,13 +1307,22 @@ int main(int argc, char **argv) {
         }
 
         if (command == "report-delete") {
-            expectArguments(args, 3, 3, "script-delete <project> <script>");
+            expectArguments(args, 3, 4, "script-delete <project> <script> [--purge]");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto report = project.reports.at(id);
+            const bool purge = args.size() == 4 && args[3] == "--purge";
+            if (args.size() == 4 && !purge)
+                argumentError("Usage: ice-cli script-delete <project> <script> [--purge]");
             project.reports.erase(id);
             project.save(args[1]);
-            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}});
+            if (purge) {
+                std::error_code status;
+                std::filesystem::remove(projectRootForCli(args[1]) / report.path, status);
+                if (status)
+                    throw ice::ProjectError("report.delete", "Unable to purge script file: " + status.message());
+            }
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}, {"purged", purge}});
             return 0;
         }
 

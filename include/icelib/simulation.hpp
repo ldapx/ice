@@ -51,6 +51,7 @@ struct SimulationResult {
     std::string simulator_version;
     std::string input_fingerprint;
     std::string error;
+    std::vector<std::string> warnings;
 };
 
 struct SimulationProgress {

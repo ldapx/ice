@@ -293,6 +293,14 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     prompt_->setPlaceholderText(QStringLiteral("Ask the agent about the current project..."));
     prompt_->setEnabled(false);
     promptRow->addWidget(prompt_, 1);
+    agentActivity_ = new QLabel;
+    agentActivity_->setAccessibleName(QStringLiteral("Agent activity"));
+    agentActivity_->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
+                                      .arg(ice::uiColor(ice::UiColor::Accent1).name()));
+    agentActivity_->setText(QStringLiteral("● Thinking…"));
+    agentActivity_->setToolTip(QStringLiteral("The agent is processing the request"));
+    agentActivity_->hide();
+    promptRow->addWidget(agentActivity_);
     sendButton_ = new QPushButton(QStringLiteral("Send"));
     sendButton_->setEnabled(false);
     promptRow->addWidget(sendButton_);
@@ -412,6 +420,10 @@ ActivityPanel::~ActivityPanel() {
 
 void ActivityPanel::setProjectPath(const QString &path) { projectPath_ = path; }
 
+void ActivityPanel::setProjectChangedCallback(std::function<void()> callback) {
+    projectChangedCallback_ = std::move(callback);
+}
+
 ActivityPanel::AgentSession *ActivityPanel::activeAgentSession() {
     if (activeAgentSession_ < 0 || activeAgentSession_ >= static_cast<int>(agentSessions_.size()))
         return nullptr;
@@ -471,6 +483,11 @@ void ActivityPanel::handleToolCallUpdate(AgentSession &session, const std::strin
         call.output = output;
     if (!path.isEmpty())
         call.path = path;
+
+    if (session.promptRunning && &session == activeAgentSession() && agentActivity_) {
+        agentActivity_->setText(QStringLiteral("● Working…"));
+        agentActivity_->setVisible(true);
+    }
 
     if (status.isEmpty() || status == QStringLiteral("pending") || status == QStringLiteral("in_progress")) {
         if (call.kind != QStringLiteral("read"))
@@ -658,8 +675,13 @@ void ActivityPanel::setSessionPromptRunning(const std::string &acpSessionId, boo
     if (!session)
         return;
     session->promptRunning = running;
-    if (session == activeAgentSession())
+    if (session == activeAgentSession()) {
+        if (agentActivity_) {
+            agentActivity_->setText(running ? QStringLiteral("● Thinking…") : QString{});
+            agentActivity_->setVisible(running);
+        }
         updateAgentControls();
+    }
 }
 
 void ActivityPanel::updateAgentUsage(qint64 used, qint64 size) {
@@ -1077,6 +1099,10 @@ void ActivityPanel::updateAgentControls() {
     sendButton_->setEnabled(hasSession && !session->promptRunning && !session->loading && !sessionLoading_ &&
                             !modelChanging_);
     cancelButton_->setEnabled(hasSession && session->promptRunning && !session->loading && !sessionLoading_);
+    if (agentActivity_) {
+        agentActivity_->setText(session && session->promptRunning ? QStringLiteral("● Thinking…") : QString{});
+        agentActivity_->setVisible(session && session->promptRunning);
+    }
     if (modelSelector_)
         modelSelector_->setEnabled(hasSession && session->modelAvailable && !session->promptRunning &&
                                    !session->loading && !sessionLoading_ && !modelChanging_);
@@ -1282,6 +1308,8 @@ void ActivityPanel::sendPrompt() {
                 flushPendingReads(*session);
                 if (!ok)
                     appendSessionTranscript(acpSessionId, QStringLiteral("\n[Turn failed or cancelled]\n"));
+                if (projectChangedCallback_)
+                    projectChangedCallback_();
                 if (session == activeAgentSession())
                     updateAgentControls();
             },
@@ -1410,6 +1438,12 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
             if (toolEvent) {
                 handleToolCallUpdate(*session, toolEvent->id.toStdString(), toolEvent->title, toolEvent->kind,
                                      toolEvent->status, toolEvent->command, toolEvent->output, toolEvent->path);
+                // A tool call may create a new project item before the agent
+                // finishes its turn. Ask the owning window to rescan now as
+                // well as when the final prompt response arrives; this is
+                // important when the project started with an empty sch/ dir.
+                if (projectChangedCallback_)
+                    projectChangedCallback_();
             }
             if (!text.isEmpty()) {
                 flushPendingReads(*session);

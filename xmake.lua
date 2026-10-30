@@ -37,6 +37,7 @@ target("icelib")
     set_kind("static")
     add_files("src/icelib/*.cpp")
     add_includedirs("include", {public = true})
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_cxxflags("-fPIC", {public = true})
     add_cxxflags(first_party_warnings)
     add_packages("spdlog", "nlohmann_json")
@@ -57,7 +58,10 @@ if has_agentsdk then
         add_packages("spdlog", "libcurl", "simdjson", {public = true})
         add_cxxflags("-fPIC")
         if is_plat("linux") then
-            add_syslinks("pthread")
+            -- The package metadata provides headers here, but does not add
+            -- the libraries to the link line when the system installations
+            -- are selected.  Keep the SDK shared object self-contained.
+            add_syslinks("curl", "simdjson", "pthread")
         elseif is_plat("windows") then
             add_syslinks("ws2_32", "wsock32")
         end
@@ -79,7 +83,9 @@ target("ice")
         add_deps("agentsdk")
         add_defines("ICE_HAVE_AGENTSDK=1")
         if is_plat("linux") then
-            add_syslinks("pthread")
+            -- app_widgets.cpp uses simdjson directly, and the SDK's curl
+            -- symbols must also be resolvable when linking the executable.
+            add_syslinks("curl", "simdjson", "pthread")
             add_rpathdirs("$ORIGIN/../lib")
         elseif is_plat("windows") then
             add_syslinks("ws2_32", "wsock32")
@@ -92,6 +98,7 @@ target("ice-cli")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_packages("spdlog", "nlohmann_json")
 
 target("ice-pkg")
@@ -107,12 +114,15 @@ target("ice-mcp")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_packages("nlohmann_json")
     if has_agentsdk then
         add_deps("agentsdk")
         add_defines("ICE_HAVE_AGENTSDK=1")
         if is_plat("linux") then
-            add_syslinks("pthread")
+            -- Keep the executable link complete when the AgentSDK package
+            -- exposes curl and simdjson only through its public headers.
+            add_syslinks("curl", "simdjson", "pthread")
             add_rpathdirs("$ORIGIN/../lib")
         elseif is_plat("windows") then
             add_syslinks("ws2_32", "wsock32")
