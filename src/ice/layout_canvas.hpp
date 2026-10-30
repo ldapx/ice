@@ -36,7 +36,7 @@ using LayoutPathLayerChangedCallback = std::function<void(ice::ObjectId layer, c
 
 class LayoutCanvas : public QGraphicsView {
   public:
-    enum class Tool { select, path, rectangle, placeDevice };
+    enum class Tool { select, path, rectangle, placeDevice, ruler };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
@@ -58,9 +58,11 @@ class LayoutCanvas : public QGraphicsView {
     virtual void deleteSelectedShapes() = 0;
     virtual void setCallbacks(std::function<void(QPointF, QPointF)> rectangleCreated,
                               std::function<void(ice::ObjectId, QPointF)> shapeMoved,
+                              std::function<void(ice::ObjectId, QRectF)> shapeResized,
                               std::function<void(std::vector<ice::ObjectId>)> deleted,
                               std::function<void()> changed) = 0;
     virtual void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) = 0;
+    virtual void setRectangleStyle(const LayerStyle &style) = 0;
     virtual void fitToContent() = 0;
 
     virtual void setPathConfig(const LayoutPathConfig &config) = 0;

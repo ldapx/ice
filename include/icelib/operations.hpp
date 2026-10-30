@@ -50,6 +50,7 @@ ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId l
 ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
                            Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
+void resizeRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Rect rectangle);
 
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.

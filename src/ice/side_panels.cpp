@@ -558,11 +558,16 @@ void SimulationPanel::setProject(const ice::Project &project) {
             applyFilter(search_->text());
     }
     const auto reportId = currentReportId();
+    const auto simId = currentSimulationId();
+    const auto graphId = currentGraphId();
     deleteButton_->setEnabled(currentSimulationId() != 0 || reportId != 0);
     if (reportId != 0)
         return;
-    if (onSelection_)
-        onSelection_(currentSimulationId(), currentGraphId());
+    // Rebuilding the panel is part of ordinary project refreshes. Do not
+    // treat the restored selection as a new user selection, otherwise the
+    // main document tab jumps to Simulation after unrelated edits.
+    if (onSelection_ && (simId != prevSimId || graphId != prevGraphId))
+        onSelection_(simId, graphId);
 }
 
 void SimulationPanel::clear() {
@@ -723,6 +728,7 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     tree_->setUniformRowHeights(true);
     tree_->setIconSize(QSize(36, 18));
     tree_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(tree_, 1);
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
@@ -734,6 +740,15 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
             onLayerVisibilityChanged_(layerId, item->checkState(0) == Qt::Checked);
     });
     connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
+    connect(tree_, &QTreeWidget::customContextMenuRequested, this,
+            [this](const QPoint &pos) { showContextMenu(pos); });
+    connect(tree_, &QTreeWidget::itemSelectionChanged, this, [this] {
+        if (!onLayerSelected_ || !tree_->currentItem())
+            return;
+        const auto id = static_cast<ice::ObjectId>(tree_->currentItem()->data(0, Qt::UserRole).toULongLong());
+        if (id != 0)
+            onLayerSelected_(id);
+    });
     connect(showAllButton, &QPushButton::clicked, this, [this] {
         if (onAllLayersVisibilityChanged_)
             onAllLayersVisibilityChanged_(true);
@@ -742,6 +757,25 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
         if (onAllLayersVisibilityChanged_)
             onAllLayersVisibilityChanged_(false);
     });
+}
+
+void LayersPanel::setOnCreateLayer(std::function<void()> callback) {
+    onCreateLayer_ = std::move(callback);
+}
+
+void LayersPanel::setOnLayerSelected(std::function<void(ice::ObjectId)> callback) {
+    onLayerSelected_ = std::move(callback);
+}
+
+void LayersPanel::setSelectedLayer(ice::ObjectId layerId) {
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+        auto *item = tree_->topLevelItem(index);
+        if (item->data(0, Qt::UserRole).toULongLong() == layerId) {
+            tree_->setCurrentItem(item);
+            return;
+        }
+    }
+    tree_->setCurrentItem(nullptr);
 }
 
 void LayersPanel::setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback) {
@@ -759,6 +793,25 @@ void LayersPanel::applyFilter(const QString &text) {
         auto *item = tree_->topLevelItem(index);
         item->setHidden(!needle.isEmpty() && !item->text(0).contains(needle, Qt::CaseInsensitive));
     }
+}
+
+void LayersPanel::showContextMenu(const QPoint &pos) {
+    // The layer viewport deliberately provides a menu even when the click is
+    // not over an item, matching the Project panel's empty-space behavior.
+    QMenu menu(this);
+    auto *createAction = menu.addAction(QStringLiteral("Create Layer"));
+    menu.addSeparator();
+    auto *showAllAction = menu.addAction(QStringLiteral("Show all layers"));
+    showAllAction->setCheckable(true);
+    bool allVisible = true;
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index)
+        allVisible &= tree_->topLevelItem(index)->checkState(0) == Qt::Checked;
+    showAllAction->setChecked(allVisible && tree_->topLevelItemCount() > 0);
+    const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+    if (chosen == createAction && onCreateLayer_)
+        onCreateLayer_();
+    else if (chosen == showAllAction && onAllLayersVisibilityChanged_)
+        onAllLayersVisibilityChanged_(showAllAction->isChecked());
 }
 
 void LayersPanel::setProject(const ice::Project &project) {

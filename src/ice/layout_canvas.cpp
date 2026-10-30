@@ -7,6 +7,9 @@
 #include <QFontMetricsF>
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
+#include <QGraphicsSimpleTextItem>
+#include <QGraphicsLineItem>
+#include <QGraphicsPolygonItem>
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -144,11 +147,15 @@ class LayoutCanvasImpl : public LayoutCanvas {
             tool = Tool::select;
         if (tool != Tool::path)
             finishPath();
+        if (tool != Tool::ruler)
+            clearRuler();
         tool_ = tool;
         if (tool_ == Tool::select)
             unsetCursor();
         else
             setCursor(Qt::CrossCursor);
+        if (tool_ != Tool::select)
+            updateResizeHandleVisibility(nullptr);
         viewport()->update();
     }
 
@@ -212,9 +219,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setCallbacks(std::function<void(QPointF, QPointF)> rectangleCreated,
                       std::function<void(ice::ObjectId, QPointF)> shapeMoved,
+                      std::function<void(ice::ObjectId, QRectF)> shapeResized,
                       std::function<void(std::vector<ice::ObjectId>)> deleted, std::function<void()> changed) {
         rectangleCreated_ = std::move(rectangleCreated);
         shapeMoved_ = std::move(shapeMoved);
+        shapeResized_ = std::move(shapeResized);
         deleted_ = std::move(deleted);
         changed_ = std::move(changed);
     }
@@ -264,6 +273,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) { layerStyles_ = styles; }
+
+    void setRectangleStyle(const LayerStyle &style) { rectangleStyle_ = style; }
 
     void setPathConfig(const LayoutPathConfig &config) override {
         const bool cellChanged = pathCell_ != config.cell;
@@ -473,6 +484,19 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::ruler && event->button() == Qt::LeftButton) {
+            const auto point = rulerSnapPoint(mapToScene(event->pos()));
+            if (!rulerHasStart_) {
+                rulerStart_ = point;
+                rulerHasStart_ = true;
+            } else {
+                rulerEnd_ = point;
+                rulerHasStart_ = false;
+            }
+            updateRuler(point);
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton) {
             if (readOnly_) {
                 QApplication::beep();
@@ -481,10 +505,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
             drawing_ = true;
             drawStart_ = snapPosition(mapToScene(event->pos()));
-            const auto previewColor = ice::uiColor(ice::UiColor::Accent3);
+            const auto previewColor = rectangleStyle_.color;
+            QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 70),
+                                rectangleStyle_.pattern);
+            if (rectangleStyle_.pattern == Qt::NoBrush)
+                previewBrush = QBrush(Qt::NoBrush);
             drawPreview_ =
-                scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1),
-                                 QBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 50)));
+                scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1), previewBrush);
             event->accept();
             return;
         }
@@ -519,6 +546,24 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
             auto *clicked = itemAt(event->pos());
+            if (clicked && clicked->data(3).toString() == QStringLiteral("resize-handle") && !readOnly_) {
+                QGraphicsItem *shapeItem = nullptr;
+                for (auto *candidate : scene()->items()) {
+                    if (candidate->data(0).toULongLong() == clicked->data(4).toULongLong() &&
+                        candidate->data(3).toString() != QStringLiteral("resize-handle")) {
+                        shapeItem = candidate;
+                        break;
+                    }
+                }
+                if (dynamic_cast<QGraphicsRectItem *>(shapeItem)) {
+                    resizingItem_ = shapeItem;
+                    resizeShapeId_ = clicked->data(4).toULongLong();
+                    resizeCorner_ = clicked->data(5).toInt();
+                    resizeStartRect_ = dynamic_cast<QGraphicsRectItem *>(shapeItem)->rect();
+                    event->accept();
+                    return;
+                }
+            }
             auto *instance = layoutInstanceOwner(clicked);
             if (instance && !readOnly_) {
                 const auto id = instance->data(0).toULongLong();
@@ -552,18 +597,50 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void mouseMoveEvent(QMouseEvent *event) override {
         cursorScenePosition_ = mapToScene(event->pos());
+        if (panning_) {
+            const auto delta = event->pos() - panStartPosition_;
+            centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
+            applyNavigationTransform();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::ruler) {
+            updateRuler(rulerSnapPoint(cursorScenePosition_));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::select) {
+            auto *hovered = itemAt(event->pos());
+            if (hovered && hovered->data(3).toString() == QStringLiteral("resize-handle")) {
+                const int corner = hovered->data(5).toInt();
+                setCursor(corner == 0 || corner == 3 ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+            } else {
+                unsetCursor();
+            }
+        }
+        if (resizingItem_) {
+            const QPointF point = snapPosition(cursorScenePosition_);
+            QRectF rect = resizeStartRect_;
+            const QPointF opposite = resizeCorner_ == 0 ? resizeStartRect_.bottomRight()
+                                      : resizeCorner_ == 1 ? resizeStartRect_.bottomLeft()
+                                      : resizeCorner_ == 2 ? resizeStartRect_.topRight()
+                                                           : resizeStartRect_.topLeft();
+            rect = QRectF(opposite, point).normalized();
+            if (rect.width() < 1.0)
+                rect.setWidth(1.0);
+            if (rect.height() < 1.0)
+                rect.setHeight(1.0);
+            dynamic_cast<QGraphicsRectItem *>(resizingItem_)->setRect(rect);
+            updateResizeHandles(resizeShapeId_, rect);
+            event->accept();
+            return;
+        }
+        updateResizeHandleVisibility(itemAt(event->pos()));
         if (tool_ == Tool::placeDevice)
             viewport()->update();
         if (draggingInstance_) {
             const auto delta = mapToScene(event->pos()) - dragStartScene_;
             draggingInstance_->setPos(snapPosition(dragStartPosition_ + delta));
-            event->accept();
-            return;
-        }
-        if (panning_) {
-            const auto delta = event->pos() - panStartPosition_;
-            centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
-            applyNavigationTransform();
             event->accept();
             return;
         }
@@ -633,6 +710,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (resizingItem_ && event->button() == Qt::LeftButton) {
+            auto *item = resizingItem_;
+            resizingItem_ = nullptr;
+            const auto rect = dynamic_cast<QGraphicsRectItem *>(item)->rect();
+            if (shapeResized_)
+                shapeResized_(resizeShapeId_, rect);
+            resizeShapeId_ = 0;
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && pathDragging_) {
             pathDragging_ = false;
             pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(mapToScene(event->pos())),
@@ -690,7 +777,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (event->key() == Qt::Key_Escape &&
-            (tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle)) {
+            (tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
+             tool_ == Tool::ruler)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -711,6 +799,113 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         QGraphicsView::keyPressEvent(event);
+    }
+
+    void updateResizeHandles(ice::ObjectId shapeId, const QRectF &rect) {
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() != QStringLiteral("resize-handle") ||
+                item->data(4).toULongLong() != shapeId)
+                continue;
+            const int corner = item->data(5).toInt();
+            const QPointF point = corner == 0 ? rect.topLeft() : corner == 1 ? rect.topRight()
+                                      : corner == 2 ? rect.bottomLeft()
+                                                    : rect.bottomRight();
+            item->setPos(point);
+        }
+    }
+
+    void updateResizeHandleVisibility(QGraphicsItem *hovered) {
+        ice::ObjectId shapeId = 0;
+        if (tool_ != Tool::select)
+            hovered = nullptr;
+        for (auto *item = hovered; item; item = item->parentItem()) {
+            if (item->data(0).isValid() && item->data(3).toString() != QStringLiteral("resize-handle")) {
+                shapeId = item->data(0).toULongLong();
+                break;
+            }
+            if (item->data(3).toString() == QStringLiteral("resize-handle")) {
+                shapeId = item->data(4).toULongLong();
+                break;
+            }
+        }
+        for (auto *item : scene()->items())
+            if (item->data(3).toString() == QStringLiteral("resize-handle"))
+                item->setVisible(shapeId != 0 && item->data(4).toULongLong() == shapeId && !readOnly_);
+    }
+
+    QPointF rulerSnapPoint(QPointF point) const {
+        auto best = snapToGrid_ ? snapPosition(point) : point;
+        qreal bestDistance = 12.0 / std::max(zoom_, qreal(1.0e-6));
+        const auto consider = [&](QPointF candidate) {
+            const auto distance = QLineF(point, candidate).length();
+            if (distance < bestDistance) {
+                best = candidate;
+                bestDistance = distance;
+            }
+        };
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() == QStringLiteral("resize-handle") || !item->isVisible())
+                continue;
+            const auto rectItem = dynamic_cast<QGraphicsRectItem *>(item);
+            if (rectItem) {
+                const auto rect = rectItem->sceneBoundingRect();
+                const QPointF candidates[] = {rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight(),
+                                               QPointF(point.x(), rect.top()), QPointF(point.x(), rect.bottom()),
+                                               QPointF(rect.left(), point.y()), QPointF(rect.right(), point.y())};
+                for (const auto candidate : candidates)
+                    consider(candidate);
+                continue;
+            }
+            const auto polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item);
+            if (!polygonItem || polygonItem->polygon().isEmpty())
+                continue;
+            const auto polygon = polygonItem->polygon();
+            for (int index = 0; index < polygon.size(); ++index) {
+                const auto first = item->sceneTransform().map(polygon[index]);
+                const auto second = item->sceneTransform().map(polygon[(index + 1) % polygon.size()]);
+                consider(first);
+                const auto delta = second - first;
+                const auto lengthSquared = QPointF::dotProduct(delta, delta);
+                if (lengthSquared > 0.0) {
+                    const auto fraction = std::clamp(QPointF::dotProduct(point - first, delta) / lengthSquared,
+                                                     qreal(0.0), qreal(1.0));
+                    consider(first + delta * fraction);
+                }
+            }
+        }
+        return best;
+    }
+
+    void updateRuler(QPointF current) {
+        if (!rulerHasStart_ && rulerLine_ == nullptr)
+            return;
+        if (!rulerLine_)
+            rulerLine_ = scene()->addLine(QLineF(), QPen(ice::uiColor(ice::UiColor::Accent1), 2));
+        const auto end = rulerHasStart_ ? current : rulerEnd_;
+        rulerLine_->setLine(QLineF(rulerStart_, end));
+        const auto length = QLineF(rulerStart_, end).length();
+        if (!rulerLabel_)
+            rulerLabel_ = scene()->addSimpleText(QString());
+        rulerLabel_->setText(QStringLiteral("%1 nm").arg(length, 0, 'f', 1));
+        rulerLabel_->setBrush(ice::uiColor(ice::UiColor::Accent1));
+        rulerLabel_->setPos((rulerStart_ + end) * 0.5 + QPointF(6.0, 6.0));
+        rulerLabel_->setScale(1.0 / std::max(zoom_, qreal(1.0e-6)));
+    }
+
+    void clearRuler() {
+        rulerHasStart_ = false;
+        rulerStart_ = {};
+        rulerEnd_ = {};
+        if (rulerLine_) {
+            scene()->removeItem(rulerLine_);
+            delete rulerLine_;
+            rulerLine_ = nullptr;
+        }
+        if (rulerLabel_) {
+            scene()->removeItem(rulerLabel_);
+            delete rulerLabel_;
+            rulerLabel_ = nullptr;
+        }
     }
 
   private:
@@ -888,13 +1083,18 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF drawStart_;
     QGraphicsRectItem *drawPreview_ = nullptr;
     QGraphicsItem *movingItem_ = nullptr;
+    QGraphicsItem *resizingItem_ = nullptr;
     QGraphicsItemGroup *draggingInstance_ = nullptr;
     QPointF dragStartScene_;
     QPointF dragStartPosition_;
     QPointF movingStartPosition_;
+    QRectF resizeStartRect_;
+    ice::ObjectId resizeShapeId_ = 0;
+    int resizeCorner_ = 0;
     ice::ObjectId selectedLayoutInstance_ = 0;
     std::function<void(QPointF, QPointF)> rectangleCreated_;
     std::function<void(ice::ObjectId, QPointF)> shapeMoved_;
+    std::function<void(ice::ObjectId, QRectF)> shapeResized_;
     std::function<void(std::vector<ice::ObjectId>)> deleted_;
     std::function<void()> changed_;
     std::function<void(QPointF)> devicePlacementRequested_;
@@ -906,6 +1106,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF cursorScenePosition_;
     QLineEdit *scaleEditor_ = nullptr;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;
+    LayerStyle rectangleStyle_{ice::uiColor(ice::UiColor::Accent3), Qt::SolidPattern};
+    QGraphicsLineItem *rulerLine_ = nullptr;
+    QGraphicsSimpleTextItem *rulerLabel_ = nullptr;
+    QPointF rulerStart_;
+    QPointF rulerEnd_;
+    bool rulerHasStart_ = false;
     bool gridVisible_ = true;
     bool snapToGrid_ = true;
     qreal gridSpacing_ = 1.0;

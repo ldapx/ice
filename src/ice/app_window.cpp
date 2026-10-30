@@ -2286,6 +2286,14 @@ class DocumentWindow : public QMainWindow {
             updateLayoutPathConfig();
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
+        if (project.layers.size() == 1)
+            activeLayoutLayerId_ = project.layers.begin()->first;
+        else if (!project.layers.contains(activeLayoutLayerId_))
+            activeLayoutLayerId_ = 0;
+        if (activeLayoutLayerId_ != 0 && styles.contains(activeLayoutLayerId_))
+            layoutCanvas_->setRectangleStyle(styles.at(activeLayoutLayerId_));
+        if (layersPanel_ && activeLayoutLayerId_ != 0)
+            layersPanel_->setSelectedLayer(activeLayoutLayerId_);
         const auto layerVisible = [&](ice::ObjectId layerId) {
             const auto layer = project.layers.find(layerId);
             return layer == project.layers.end() || layer->second.visible;
@@ -2316,6 +2324,23 @@ class DocumentWindow : public QMainWindow {
             if (!readOnly) {
                 item->setFlag(QGraphicsItem::ItemIsSelectable);
                 item->setFlag(QGraphicsItem::ItemIsMovable);
+            }
+            if (shape.polygon.empty() && !readOnly) {
+                const auto rect = static_cast<QGraphicsRectItem *>(item)->rect();
+                for (int corner = 0; corner < 4; ++corner) {
+                    const QPointF point = corner == 0 ? rect.topLeft() : corner == 1 ? rect.topRight()
+                                              : corner == 2 ? rect.bottomLeft()
+                                                            : rect.bottomRight();
+                    auto *handle = layoutCanvas_->scene()->addRect(-6.0, -6.0, 12.0, 12.0,
+                                                                      QPen(ice::uiColor(ice::UiColor::Accent1)),
+                                                                      QBrush(ice::uiColor(ice::UiColor::Accent1)));
+                    handle->setPos(point);
+                    handle->setData(3, QStringLiteral("resize-handle"));
+                    handle->setData(4, QVariant::fromValue<qulonglong>(id));
+                    handle->setData(5, corner);
+                    handle->setZValue(20.0);
+                    handle->setVisible(false);
+                }
             }
             item->setToolTip(readOnly ? QStringLiteral("Library cell shape %1").arg(id)
                                       : QStringLiteral("Shape %1").arg(id));
@@ -2527,6 +2552,74 @@ class DocumentWindow : public QMainWindow {
                 instance != cellIt->second.instances.end())
                 project_->setLastHistoryLabel("Snapped " + instance->second.name + " to grid");
         }
+        refreshProject();
+    }
+
+    void rotateSelectedLayoutFigures() {
+        if (!project_ || !layoutCanvas_)
+            return;
+        std::set<ice::ObjectId> ids;
+        for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+            if (item->data(3).toString() == QStringLiteral("resize-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id != 0)
+                ids.insert(id);
+        }
+        const auto instanceId = layoutCanvas_->selectedLayoutInstance();
+        if (ids.empty() && instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Select a layout figure first"));
+            return;
+        }
+        project_->execute("rotate layout figures", [&](ice::Project &project) {
+            auto cellIt = project.layoutCells.find(activeLayoutId_);
+            if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                return;
+            if (instanceId != 0) {
+                if (auto it = cellIt->second.instances.find(instanceId); it != cellIt->second.instances.end())
+                    it->second.orientation = composeOrientation(it->second.orientation, ice::Orientation::r90);
+            }
+            for (const auto id : ids) {
+                if (auto shapeIt = cellIt->second.shapes.find(id); shapeIt != cellIt->second.shapes.end()) {
+                    auto &shape = shapeIt->second;
+                    ice::Coordinate minX = shape.rectangle.x, maxX = shape.rectangle.x + shape.rectangle.width;
+                    ice::Coordinate minY = shape.rectangle.y, maxY = shape.rectangle.y + shape.rectangle.height;
+                    if (!shape.polygon.empty()) {
+                        minX = maxX = shape.polygon.front().x;
+                        minY = maxY = shape.polygon.front().y;
+                        for (const auto &point : shape.polygon) {
+                            minX = std::min(minX, point.x);
+                            maxX = std::max(maxX, point.x);
+                            minY = std::min(minY, point.y);
+                            maxY = std::max(maxY, point.y);
+                        }
+                    }
+                    const auto centerX = (minX + maxX) * 0.5;
+                    const auto centerY = (minY + maxY) * 0.5;
+                    if (shape.polygon.empty()) {
+                        std::swap(shape.rectangle.width, shape.rectangle.height);
+                        shape.rectangle.x = centerX - shape.rectangle.width * 0.5;
+                        shape.rectangle.y = centerY - shape.rectangle.height * 0.5;
+                    } else {
+                        for (auto &point : shape.polygon) {
+                            const auto x = point.x - centerX;
+                            const auto y = point.y - centerY;
+                            point.x = centerX - y;
+                            point.y = centerY + x;
+                        }
+                    }
+                } else if (auto device = cellIt->second.plannedDevices.find(id);
+                           device != cellIt->second.plannedDevices.end()) {
+                    const auto centerX = device->second.x + device->second.width * 0.5;
+                    const auto centerY = device->second.y + device->second.height * 0.5;
+                    std::swap(device->second.width, device->second.height);
+                    device->second.x = centerX - device->second.width * 0.5;
+                    device->second.y = centerY - device->second.height * 0.5;
+                }
+            }
+        });
+        project_->setLastHistoryLabel("Rotated layout figures");
         refreshProject();
     }
 
@@ -5906,6 +5999,15 @@ class DocumentWindow : public QMainWindow {
         layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
+        layersPanel_->setOnCreateLayer([this] { createLayer(); });
+        layersPanel_->setOnLayerSelected([this](ice::ObjectId layerId) {
+            activeLayoutLayerId_ = layerId;
+            if (!project_ || !layoutCanvas_)
+                return;
+            const auto styles = layerStylesFor(project_->project());
+            if (const auto style = styles.find(layerId); style != styles.end())
+                layoutCanvas_->setRectangleStyle(style->second);
+        });
         layersPanel_->setOnLayerVisibilityChanged([this](ice::ObjectId layerId, bool visible) {
             if (!project_)
                 return;
@@ -6611,6 +6713,11 @@ class DocumentWindow : public QMainWindow {
                                                  QStringLiteral("Create a layer before drawing shapes."));
                         return;
                     }
+                    if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+                        QMessageBox::information(this, QStringLiteral("Create Shape"),
+                                                 QStringLiteral("Select a layer before drawing shapes."));
+                        return;
+                    }
                     const auto cellId = project_->project().layoutCells.contains(activeLayoutId_)
                                             ? activeLayoutId_
                                             : (project_->project().layoutCells.empty()
@@ -6624,7 +6731,8 @@ class DocumentWindow : public QMainWindow {
                     if (project_->project().layoutCells.at(cellId).library)
                         return;
                     const auto rectangle = QRectF(first, second).normalized();
-                    const auto layerId = project_->project().layers.begin()->first;
+                    const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_
+                                                                    : project_->project().layers.begin()->first;
                     project_->execute("create layout rectangle", [&](ice::Project &project) {
                         ice::addRectangle(project, cellId, layerId,
                                           {static_cast<ice::Coordinate>(rectangle.left()),
@@ -6658,6 +6766,18 @@ class DocumentWindow : public QMainWindow {
                             instance->second.x += static_cast<ice::Coordinate>(delta.x());
                             instance->second.y -= static_cast<ice::Coordinate>(delta.y());
                         }
+                    });
+                    refreshProject();
+                },
+                [this](ice::ObjectId objectId, QRectF sceneRect) {
+                    if (!project_)
+                        return;
+                    const auto rect = ice::Rect{static_cast<ice::Coordinate>(sceneRect.left()),
+                                                static_cast<ice::Coordinate>(-sceneRect.bottom()),
+                                                static_cast<ice::Coordinate>(sceneRect.width()),
+                                                static_cast<ice::Coordinate>(sceneRect.height())};
+                    project_->execute("resize layout rectangle", [&](ice::Project &project) {
+                        ice::resizeRectangle(project, activeLayoutId_, objectId, rect);
                     });
                     refreshProject();
                 },
@@ -6712,6 +6832,8 @@ class DocumentWindow : public QMainWindow {
         };
 
         auto *selectTool = addTool(QStringLiteral("mouse-pointer-2"), QStringLiteral("Select"));
+        selectTool->setToolTip(QStringLiteral("Select (Space)"));
+        selectTool->setStatusTip(QStringLiteral("Select (Space)"));
         if (layoutEditor) {
             selectTool->setCheckable(true);
             selectTool->setChecked(true);
@@ -6738,12 +6860,20 @@ class DocumentWindow : public QMainWindow {
                     [this] { statusBar()->showMessage(QStringLiteral("Draw Text is not available yet")); });
 
             auto *rulerTool = addTool(QStringLiteral("ruler"), QStringLiteral("Ruler"));
+            rulerTool->setCheckable(true);
+            layoutRulerTool_ = rulerTool;
             connect(rulerTool, &QAction::triggered, this,
-                    [this] { statusBar()->showMessage(QStringLiteral("Ruler is not available yet")); });
+                    [this] {
+                        if (layoutCanvas_) {
+                            layoutCanvas_->setTool(LayoutCanvas::Tool::ruler);
+                            layoutCanvas_->setFocus();
+                        }
+                        statusBar()->showMessage(QStringLiteral("Ruler: click point A, then point B"));
+                    });
 
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
-            for (auto *action : {selectTool, placeSymbolTool, rectangleTool, pathTool})
+            for (auto *action : {selectTool, placeSymbolTool, rectangleTool, pathTool, rulerTool})
                 toolGroup->addAction(action);
 
             connect(selectTool, &QAction::triggered, this, [this] {
@@ -6949,7 +7079,7 @@ class DocumentWindow : public QMainWindow {
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
         connect(rotateTool, &QAction::triggered, this, [this] {
-            transformSelectedLayoutInstance(ice::Orientation::r90, QStringLiteral("rotate layout device"));
+            rotateSelectedLayoutFigures();
         });
         auto *flipHorizontalTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontally"));
         connect(flipHorizontalTool, &QAction::triggered, this, [this] {
@@ -7013,6 +7143,7 @@ class DocumentWindow : public QMainWindow {
     QWidget *layoutOptionsColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
+    ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
     std::set<ice::ObjectId> openSchematicTabs_;
     std::set<ice::ObjectId> openLayoutTabs_;
@@ -7127,6 +7258,7 @@ class DocumentWindow : public QMainWindow {
     QAction *layoutPlaceDeviceTool_ = nullptr;
     QAction *layoutRectangleTool_ = nullptr;
     QAction *layoutPathTool_ = nullptr;
+    QAction *layoutRulerTool_ = nullptr;
     QAction *layoutDeleteTool_ = nullptr;
     int layoutPathWidth_ = 200;
     QShortcut *toolEscapeShortcut_ = nullptr;
