@@ -237,7 +237,12 @@ NB_MODULE(icepy, module) {
         .def_rw("layer", &Shape::layer)
         .def_rw("net", &Shape::net)
         .def_rw("rectangle", &Shape::rectangle)
-        .def_rw("polygon", &Shape::polygon);
+        .def_rw("polygon", &Shape::polygon)
+        .def_rw("centerline", &Shape::centerline)
+        .def_rw("segment_layers", &Shape::segmentLayers)
+        .def_rw("point_vias", &Shape::pointVias)
+        .def_rw("width", &Shape::width)
+        .def_prop_ro("is_path", &Shape::isPath);
 
     nb::class_<Port>(module, "Port")
         .def(nb::init<>())

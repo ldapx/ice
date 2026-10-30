@@ -71,6 +71,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPathStroker>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProcess>
@@ -241,6 +242,8 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
+        activeLayoutPathId_ = 0;
+        activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         selectingReport_ = false;
@@ -1165,6 +1168,8 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
+        activeLayoutPathId_ = 0;
+        activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         selectingReport_ = false;
@@ -1982,6 +1987,119 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Path width: %1 nm").arg(layoutPathWidth_));
     }
 
+    static void rebuildLayoutPathGeometry(ice::Shape &shape) {
+        if (!shape.isPath())
+            return;
+        QPainterPath centerline;
+        centerline.moveTo(shape.centerline.front().x, -shape.centerline.front().y);
+        for (std::size_t index = 1; index < shape.centerline.size(); ++index)
+            centerline.lineTo(shape.centerline[index].x, -shape.centerline[index].y);
+        QPainterPathStroker stroker;
+        stroker.setWidth(shape.width);
+        stroker.setCapStyle(Qt::FlatCap);
+        stroker.setJoinStyle(Qt::MiterJoin);
+        const auto outline = stroker.createStroke(centerline);
+        const auto polygon = outline.toFillPolygon();
+        shape.polygon.clear();
+        shape.polygon.reserve(static_cast<std::size_t>(polygon.size()));
+        ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
+        ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
+        ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
+        for (const auto &point : polygon) {
+            const auto x = static_cast<ice::Coordinate>(std::lround(point.x()));
+            const auto y = static_cast<ice::Coordinate>(std::lround(-point.y()));
+            shape.polygon.push_back({x, y});
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        }
+        if (shape.polygon.size() < 3 || maxX <= minX || maxY <= minY)
+            return;
+        shape.rectangle = {minX, minY, maxX - minX, maxY - minY};
+    }
+
+    void finishActiveLayoutPath() {
+        activeLayoutPathId_ = 0;
+        activeLayoutPathWidth_ = 0;
+    }
+
+    void moveLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
+        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
+        project_->execute("move layout path point", [&](ice::Project &project) {
+            const auto cell = project.layoutCells.find(activeLayoutId_);
+            if (cell == project.layoutCells.end() || cell->second.library)
+                return;
+            const auto shape = cell->second.shapes.find(shapeId);
+            if (shape == cell->second.shapes.end() || !shape->second.isPath())
+                return;
+            if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                return;
+            shape->second.centerline[static_cast<std::size_t>(index)] = {x, y};
+            rebuildLayoutPathGeometry(shape->second);
+        });
+        refreshProject();
+    }
+
+    void insertLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
+        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
+        project_->execute("insert layout path point", [&](ice::Project &project) {
+            const auto cell = project.layoutCells.find(activeLayoutId_);
+            if (cell == project.layoutCells.end() || cell->second.library)
+                return;
+            const auto shape = cell->second.shapes.find(shapeId);
+            if (shape == cell->second.shapes.end() || !shape->second.isPath())
+                return;
+            if (index <= 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                return;
+            auto &path = shape->second;
+            if (path.segmentLayers.empty() && path.centerline.size() > 1)
+                path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+            if (!path.segmentLayers.empty() && index - 1 < static_cast<int>(path.segmentLayers.size()))
+                path.segmentLayers.insert(path.segmentLayers.begin() + index - 1, path.segmentLayers[index - 1]);
+            if (path.pointVias.size() == path.centerline.size())
+                path.pointVias.insert(path.pointVias.begin() + index, {});
+            path.centerline.insert(path.centerline.begin() + index, {x, y});
+            rebuildLayoutPathGeometry(path);
+        });
+        refreshProject();
+    }
+
+    void deleteLayoutPathPoint(ice::ObjectId shapeId, int index) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        project_->execute("delete layout path point", [&](ice::Project &project) {
+            const auto cell = project.layoutCells.find(activeLayoutId_);
+            if (cell == project.layoutCells.end() || cell->second.library)
+                return;
+            const auto shape = cell->second.shapes.find(shapeId);
+            if (shape == cell->second.shapes.end() || !shape->second.isPath() || shape->second.centerline.size() <= 2)
+                return;
+            if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                return;
+            auto &path = shape->second;
+            if (path.segmentLayers.empty() && path.centerline.size() > 1)
+                path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+            if (!path.segmentLayers.empty()) {
+                const auto removeIndex =
+                    std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentLayers.size() - 1);
+                path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
+            }
+            if (index < static_cast<int>(path.pointVias.size()))
+                path.pointVias.erase(path.pointVias.begin() + index);
+            path.centerline.erase(path.centerline.begin() + index);
+            rebuildLayoutPathGeometry(path);
+        });
+        refreshProject();
+    }
+
     void addLayoutPathSegment(QPointF start, QPointF end, int width, ice::ObjectId layerId,
                               const std::vector<ice::ObjectId> &viaLayers) {
         if (!project_ || width <= 0)
@@ -1990,40 +2108,54 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
             !project_->project().layers.contains(layerId))
             return;
-        const auto polygon = layoutPathPolygon(start, end, width);
-        if (polygon.size() < 4)
-            return;
-        std::vector<ice::LayoutPoint> points;
-        points.reserve(static_cast<std::size_t>(polygon.size()));
-        ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
-        ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
-        ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
-        ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
-        for (const auto &point : polygon) {
-            const auto x = static_cast<ice::Coordinate>(std::lround(point.x()));
-            const auto y = static_cast<ice::Coordinate>(std::lround(-point.y()));
-            points.push_back({x, y});
-            minX = std::min(minX, x);
-            minY = std::min(minY, y);
-            maxX = std::max(maxX, x);
-            maxY = std::max(maxY, y);
-        }
-        if (maxX <= minX || maxY <= minY)
-            return;
-        const ice::Rect bounds{minX, minY, maxX - minX, maxY - minY};
-        const auto centerX = static_cast<ice::Coordinate>(std::lround(start.x()));
-        const auto centerY = static_cast<ice::Coordinate>(std::lround(-start.y()));
-        const auto half = static_cast<ice::Coordinate>(width / 2);
+        const auto toModelPoint = [](QPointF point) {
+            return ice::LayoutPoint{static_cast<ice::Coordinate>(std::lround(point.x())),
+                                    static_cast<ice::Coordinate>(std::lround(-point.y()))};
+        };
+        const auto startPoint = toModelPoint(start);
+        const auto endPoint = toModelPoint(end);
         try {
             project_->execute("draw layout path", [&](ice::Project &project) {
                 auto &cell = project.layoutCells.at(activeLayoutId_);
-                const auto shapeId = project.nextId();
-                cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerId, std::nullopt, bounds, points});
-                for (const auto viaLayer : viaLayers) {
-                    if (viaLayer == 0 || !project.layers.contains(viaLayer))
-                        continue;
-                    ice::addRectangle(project, activeLayoutId_, viaLayer,
-                                      {centerX - half, centerY - half, width, width});
+                auto shape = activeLayoutPathId_ == 0 ? cell.shapes.end() : cell.shapes.find(activeLayoutPathId_);
+                const bool append =
+                    shape != cell.shapes.end() && shape->second.isPath() && activeLayoutPathWidth_ == width;
+                if (!append) {
+                    const auto shapeId = project.nextId();
+                    ice::Shape path{shapeId, layerId, std::nullopt, {}, {}};
+                    path.centerline = {startPoint, endPoint};
+                    path.segmentLayers = {layerId};
+                    path.pointVias = {{}, {}};
+                    for (const auto viaLayer : viaLayers) {
+                        if (viaLayer != 0 && project.layers.contains(viaLayer))
+                            path.pointVias.front().push_back(viaLayer);
+                    }
+                    path.width = width;
+                    rebuildLayoutPathGeometry(path);
+                    cell.shapes.emplace(shapeId, std::move(path));
+                    activeLayoutPathId_ = shapeId;
+                    activeLayoutPathWidth_ = width;
+                } else {
+                    auto &path = shape->second;
+                    if (path.segmentLayers.empty())
+                        path.segmentLayers.assign(path.centerline.size() > 0 ? path.centerline.size() - 1 : 0,
+                                                  path.layer);
+                    if (path.pointVias.size() != path.centerline.size())
+                        path.pointVias.resize(path.centerline.size());
+                    for (const auto viaLayer : viaLayers) {
+                        if (viaLayer == 0 || !project.layers.contains(viaLayer))
+                            continue;
+                        auto &vias = path.pointVias.back();
+                        if (std::find(vias.begin(), vias.end(), viaLayer) == vias.end())
+                            vias.push_back(viaLayer);
+                    }
+                    if (path.centerline.empty() || path.centerline.back().x != endPoint.x ||
+                        path.centerline.back().y != endPoint.y) {
+                        path.centerline.push_back(endPoint);
+                        path.segmentLayers.push_back(layerId);
+                        path.pointVias.emplace_back();
+                    }
+                    rebuildLayoutPathGeometry(path);
                 }
             });
         } catch (const ice::ProjectError &error) {
@@ -2285,7 +2417,45 @@ class DocumentWindow : public QMainWindow {
             if (style.pattern == Qt::NoBrush)
                 brush = QBrush(Qt::NoBrush);
             QGraphicsItem *item = nullptr;
-            if (shape.polygon.size() >= 3) {
+            if (shape.isPath()) {
+                std::vector<QPointF> points;
+                points.reserve(shape.centerline.size());
+                for (const auto &point : shape.centerline)
+                    points.emplace_back(point.x, -point.y);
+                std::vector<QColor> segmentColors;
+                segmentColors.reserve(shape.centerline.size() > 0 ? shape.centerline.size() - 1 : 0);
+                for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+                    const auto layerId = shape.layerForSegment(index);
+                    const auto segmentStyle = styles.contains(layerId) ? styles.at(layerId) : style;
+                    segmentColors.push_back(segmentStyle.color);
+                }
+                std::vector<std::vector<QColor>> pointViaColors;
+                pointViaColors.reserve(shape.pointVias.size());
+                for (const auto &vias : shape.pointVias) {
+                    std::vector<QColor> colors;
+                    colors.reserve(vias.size());
+                    for (const auto layerId : vias) {
+                        const auto viaStyle = styles.contains(layerId) ? styles.at(layerId) : style;
+                        colors.push_back(viaStyle.color);
+                    }
+                    pointViaColors.push_back(std::move(colors));
+                }
+                item = createLayoutPathItem(
+                    id, points, shape.width, segmentColors, pointViaColors, readOnly,
+                    [this](ice::ObjectId pathId, int index, QPointF position) {
+                        QTimer::singleShot(
+                            0, this, [this, pathId, index, position] { moveLayoutPathPoint(pathId, index, position); });
+                    },
+                    [this](ice::ObjectId pathId, int index, QPointF position) {
+                        QTimer::singleShot(0, this, [this, pathId, index, position] {
+                            insertLayoutPathPoint(pathId, index, position);
+                        });
+                    },
+                    [this](ice::ObjectId pathId, int index) {
+                        QTimer::singleShot(0, this, [this, pathId, index] { deleteLayoutPathPoint(pathId, index); });
+                    });
+                layoutCanvas_->scene()->addItem(item);
+            } else if (shape.polygon.size() >= 3) {
                 QPolygonF polygon;
                 for (const auto &point : shape.polygon)
                     polygon << QPointF(point.x, -point.y);
@@ -6582,6 +6752,7 @@ class DocumentWindow : public QMainWindow {
                 if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
                     layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), name);
             });
+            layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
                     if (!project_ || project_->project().layers.empty()) {
@@ -6768,7 +6939,7 @@ class DocumentWindow : public QMainWindow {
                 refreshLayoutProperties(true);
                 statusBar()->showMessage(
                     QStringLiteral("Path: %1 · %2 nm · Shift = right angles · hold left + wheel = layer · "
-                                   "right-click = finish")
+                                   "Escape/Space = finish")
                         .arg(QString::fromStdString(layoutCanvas_->pathLayerName()))
                         .arg(layoutCanvas_->pathWidth()));
             });
@@ -6992,6 +7163,8 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeSchematicId_ = 0;
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
+    ice::ObjectId activeLayoutPathId_ = 0;
+    int activeLayoutPathWidth_ = 0;
     std::set<ice::ObjectId> openSchematicTabs_;
     std::set<ice::ObjectId> openLayoutTabs_;
     std::set<ice::ObjectId> knownSchematicCells_;

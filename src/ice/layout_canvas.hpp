@@ -4,6 +4,7 @@
 #include "icelib/layout_library.hpp"
 #include "ui_helpers.hpp"
 
+#include <QColor>
 #include <QGraphicsView>
 #include <QPointF>
 #include <QPolygonF>
@@ -33,6 +34,10 @@ struct LayoutPathConfig {
 using LayoutPathSegmentCallback = std::function<void(QPointF start, QPointF end, int width, ice::ObjectId layer,
                                                      const std::vector<ice::ObjectId> &viaLayers)>;
 using LayoutPathLayerChangedCallback = std::function<void(ice::ObjectId layer, const std::string &name)>;
+using LayoutPathPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
+using LayoutPathPointInsertedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
+using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int index)>;
+using LayoutPathFinishedCallback = std::function<void()>;
 
 class LayoutCanvas : public QGraphicsView {
   public:
@@ -70,11 +75,23 @@ class LayoutCanvas : public QGraphicsView {
     virtual std::string pathLayerName() const = 0;
     virtual void setPathSegmentCallback(LayoutPathSegmentCallback callback) = 0;
     virtual void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) = 0;
+    virtual void setPathFinishedCallback(LayoutPathFinishedCallback callback) = 0;
 };
 
 // Builds the rounded-rectangle polygon for one path segment. Points are in
 // scene coordinates (positive Y downwards).
 QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
+
+// Creates the single selectable item used for a routed path. Points are in
+// scene coordinates. Handles become visible while selected; dragging a handle
+// calls pointMoved, double-clicking a segment calls pointInserted, and
+// right-clicking a handle offers point deletion.
+QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
+                                    const std::vector<QColor> &segmentColors,
+                                    const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
+                                    LayoutPathPointMovedCallback pointMoved,
+                                    LayoutPathPointInsertedCallback pointInserted,
+                                    LayoutPathPointDeletedCallback pointDeleted);
 
 // Creates the selectable/movable canvas box used for a planned device. The
 // rectangle is given in scene coordinates and the item is positioned at its

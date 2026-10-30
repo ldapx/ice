@@ -460,6 +460,10 @@ void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordina
         point.x += dx;
         point.y += dy;
     }
+    for (auto &point : shape.centerline) {
+        point.x += dx;
+        point.y += dy;
+    }
 }
 
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,

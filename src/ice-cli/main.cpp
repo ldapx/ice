@@ -453,9 +453,27 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
         json polygon = json::array();
         for (const auto &point : shape.polygon)
             polygon.push_back({point.x, point.y});
+        json centerline = json::array();
+        for (const auto &point : shape.centerline)
+            centerline.push_back({point.x, point.y});
+        json segmentLayers = json::array();
+        for (const auto layer : shape.segmentLayers)
+            segmentLayers.push_back(layer);
+        json pointVias = json::array();
+        for (const auto &vias : shape.pointVias) {
+            json entry = json::array();
+            for (const auto layer : vias)
+                entry.push_back(layer);
+            pointVias.push_back(std::move(entry));
+        }
         result["shapes"].push_back({{"id", id},
                                     {"layer", shape.layer},
                                     {"layer_name", layer == project.layers.end() ? "" : layer->second.name},
+                                    {"is_path", shape.isPath()},
+                                    {"path_width", shape.width},
+                                    {"centerline", std::move(centerline)},
+                                    {"segment_layers", std::move(segmentLayers)},
+                                    {"point_vias", std::move(pointVias)},
                                     {"rectangle",
                                      {{"x", shape.rectangle.x},
                                       {"y", shape.rectangle.y},

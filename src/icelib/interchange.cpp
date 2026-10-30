@@ -2,6 +2,7 @@
 
 #include "icelib/geometry.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -81,6 +82,31 @@ std::int32_t checkedI32(Coordinate value, const char *field) {
     return static_cast<std::int32_t>(value);
 }
 
+std::vector<LayoutPoint> pathSegmentPolygon(const LayoutPoint &start, const LayoutPoint &end, Coordinate width,
+                                            Coordinate startExtension, Coordinate endExtension) {
+    const double dx = static_cast<double>(end.x - start.x);
+    const double dy = static_cast<double>(end.y - start.y);
+    const double length = std::hypot(dx, dy);
+    if (length < 1.0e-9 || width <= 0)
+        return {};
+    const double ux = dx / length;
+    const double uy = dy / length;
+    const double nx = -uy;
+    const double ny = ux;
+    const double half = static_cast<double>(width) * 0.5;
+    const auto extendedStart =
+        LayoutPoint{static_cast<Coordinate>(std::llround(start.x - ux * static_cast<double>(startExtension))),
+                    static_cast<Coordinate>(std::llround(start.y - uy * static_cast<double>(startExtension)))};
+    const auto extendedEnd =
+        LayoutPoint{static_cast<Coordinate>(std::llround(end.x + ux * static_cast<double>(endExtension))),
+                    static_cast<Coordinate>(std::llround(end.y + uy * static_cast<double>(endExtension)))};
+    const auto point = [&](const LayoutPoint &base, double normalSign) {
+        return LayoutPoint{static_cast<Coordinate>(std::llround(base.x + nx * half * normalSign)),
+                           static_cast<Coordinate>(std::llround(base.y + ny * half * normalSign))};
+    };
+    return {point(extendedStart, 1.0), point(extendedEnd, 1.0), point(extendedEnd, -1.0), point(extendedStart, -1.0)};
+}
+
 void writeCell(const Project &project, const LayoutCell &cell, const std::filesystem::path &path) {
     std::ofstream output(path, std::ios::binary);
     if (!output)
@@ -92,10 +118,7 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
                 {0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0, 0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54});
     writeRecord(output, kBgnStr, 0x02, timestampRecord());
     writeStringRecord(output, kStrName, "TOP");
-    for (const auto &[_, shape] : cell.shapes) {
-        int layerNumber = 0;
-        if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
-            layerNumber = layerIt->second.number;
+    const auto writeBoundary = [&](int layerNumber, std::vector<LayoutPoint> polygon) {
         if (layerNumber < 0 || layerNumber > 65535)
             throw ProjectError("interchange.export", "Layer number out of GDSII range");
         const auto layerValue = static_cast<std::uint32_t>(layerNumber);
@@ -104,16 +127,10 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
         writeEmptyRecord(output, kBoundary);
         writeRecord(output, kLayer, 0x02, layer);
         writeRecord(output, kDataType, 0x02, {0, 0});
-        std::vector<LayoutPoint> polygon = shape.polygon;
-        if (polygon.empty()) {
-            const auto x = shape.rectangle.x;
-            const auto y = shape.rectangle.y;
-            const auto right = shape.rectangle.x + shape.rectangle.width;
-            const auto top = shape.rectangle.y + shape.rectangle.height;
-            polygon = {{x, y}, {right, y}, {right, top}, {x, top}, {x, y}};
-        } else if (polygon.front().x != polygon.back().x || polygon.front().y != polygon.back().y) {
+        if (polygon.empty())
+            return;
+        if (polygon.front().x != polygon.back().x || polygon.front().y != polygon.back().y)
             polygon.push_back(polygon.front());
-        }
         std::vector<unsigned char> points;
         points.reserve(polygon.size() * 8);
         for (const auto &point : polygon) {
@@ -127,6 +144,50 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
         }
         writeRecord(output, kXy, 0x03, points);
         writeEmptyRecord(output, kEndEl);
+    };
+
+    for (const auto &[_, shape] : cell.shapes) {
+        if (shape.isPath()) {
+            const auto half = shape.width / 2;
+            const auto hasVia = [&](std::size_t pointIndex) {
+                return pointIndex < shape.pointVias.size() && !shape.pointVias[pointIndex].empty();
+            };
+            for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+                const auto layerId = shape.layerForSegment(index);
+                int layerNumber = 0;
+                if (const auto layerIt = project.layers.find(layerId); layerIt != project.layers.end())
+                    layerNumber = layerIt->second.number;
+                const auto startExtension = hasVia(index) ? half : 0;
+                const auto endExtension = hasVia(index + 1) ? half : 0;
+                writeBoundary(layerNumber, pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1],
+                                                              shape.width, startExtension, endExtension));
+            }
+            for (std::size_t index = 0; index < shape.pointVias.size() && index < shape.centerline.size(); ++index) {
+                const auto &point = shape.centerline[index];
+                for (const auto viaLayer : shape.pointVias[index]) {
+                    int layerNumber = 0;
+                    if (const auto layerIt = project.layers.find(viaLayer); layerIt != project.layers.end())
+                        layerNumber = layerIt->second.number;
+                    writeBoundary(layerNumber, {{point.x - half, point.y - half},
+                                                {point.x + half, point.y - half},
+                                                {point.x + half, point.y + half},
+                                                {point.x - half, point.y + half}});
+                }
+            }
+            continue;
+        }
+        int layerNumber = 0;
+        if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
+            layerNumber = layerIt->second.number;
+        std::vector<LayoutPoint> polygon = shape.polygon;
+        if (polygon.empty()) {
+            const auto x = shape.rectangle.x;
+            const auto y = shape.rectangle.y;
+            const auto right = shape.rectangle.x + shape.rectangle.width;
+            const auto top = shape.rectangle.y + shape.rectangle.height;
+            polygon = {{x, y}, {right, y}, {right, top}, {x, top}, {x, y}};
+        }
+        writeBoundary(layerNumber, std::move(polygon));
     }
     writeEmptyRecord(output, kEndStr);
     writeEmptyRecord(output, kEndLib);
@@ -172,9 +233,18 @@ void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::
         if (polygon.empty() || maxX <= minX || maxY <= minY)
             continue;
         const auto shapeId = targetProject.nextId();
-        targetCell.shapes.emplace(
-            shapeId,
-            Shape{shapeId, shape.layer, shape.net, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+        Shape flattened{shapeId, shape.layer, shape.net, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)};
+        if (shape.isPath()) {
+            flattened.centerline.reserve(shape.centerline.size());
+            for (const auto &sourcePoint : shape.centerline) {
+                const auto point = applyTransformChain({sourcePoint.x, sourcePoint.y}, chain);
+                flattened.centerline.push_back({point.x, point.y});
+            }
+            flattened.segmentLayers = shape.segmentLayers;
+            flattened.pointVias = shape.pointVias;
+            flattened.width = shape.width;
+        }
+        targetCell.shapes.emplace(shapeId, std::move(flattened));
     }
     for (const auto &[_, instance] : cell.instances) {
         if (!project.layoutCells.contains(instance.cell) || ancestors.contains(instance.cell))

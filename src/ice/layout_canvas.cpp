@@ -7,15 +7,18 @@
 #include <QFontMetricsF>
 #include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
-#include <QLineEdit>
-#include <QRegularExpression>
-#include <QRegularExpressionValidator>
+#include <QGraphicsSceneMouseEvent>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QLineF>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QPen>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -120,6 +123,310 @@ class PlannedDeviceItem : public QGraphicsItem {
   private:
     QString name_;
     QSizeF size_;
+};
+
+class LayoutPathItem : public QGraphicsItem {
+  public:
+    LayoutPathItem(ice::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<QColor> segmentColors,
+                   std::vector<std::vector<QColor>> pointViaColors, bool readOnly,
+                   LayoutPathPointMovedCallback pointMoved, LayoutPathPointInsertedCallback pointInserted,
+                   LayoutPathPointDeletedCallback pointDeleted)
+        : id_(id), points_(std::move(points)), width_(std::max<qreal>(1.0, width)),
+          segmentColors_(std::move(segmentColors)), pointViaColors_(std::move(pointViaColors)), readOnly_(readOnly),
+          pointMoved_(std::move(pointMoved)), pointInserted_(std::move(pointInserted)),
+          pointDeleted_(std::move(pointDeleted)) {
+        setData(0, QVariant::fromValue<qulonglong>(id_));
+        setFlag(QGraphicsItem::ItemIsSelectable);
+        if (!readOnly_)
+            setFlag(QGraphicsItem::ItemIsMovable);
+        setZValue(4.0);
+        setToolTip(QStringLiteral("Path %1").arg(id_));
+    }
+
+    QRectF boundingRect() const override {
+        const auto stroke = strokedPath().boundingRect();
+        // Keep room for screen-sized handles and the enlarged hit area even
+        // when the view is zoomed out.
+        const qreal margin = std::max<qreal>(64.0, width_ * 0.5 + 8.0);
+        return stroke.adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override {
+        QPainterPath result = strokedPath();
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (index < static_cast<int>(pointViaColors_.size()) &&
+                !pointViaColors_[static_cast<std::size_t>(index)].empty())
+                result.addRect(viaRect(index));
+        }
+        // Handles stay hittable even when the path is not selected yet, so a
+        // press near a point never falls through to the rubber-band selection.
+        if (!readOnly_) {
+            for (int index = 0; index < static_cast<int>(points_.size()); ++index)
+                result.addRect(handleHitRect(index));
+        }
+        return result;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        if (points_.size() < 2)
+            return;
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        for (std::size_t start = 0; start + 1 < points_.size();) {
+            const auto color = colorForSegment(start);
+            std::size_t end = start + 1;
+            while (end + 1 < points_.size() && colorForSegment(end) == color)
+                ++end;
+            const auto path = runPath(start, end);
+            if (isSelected()) {
+                QColor halo = color;
+                halo.setAlpha(70);
+                QPen haloPen(halo);
+                haloPen.setWidthF(width_ + 6.0);
+                haloPen.setCapStyle(Qt::FlatCap);
+                haloPen.setJoinStyle(Qt::MiterJoin);
+                painter->setPen(haloPen);
+                painter->setBrush(Qt::NoBrush);
+                painter->drawPath(path);
+            }
+            QPen pen(color);
+            pen.setWidthF(width_);
+            pen.setCapStyle(Qt::FlatCap);
+            pen.setJoinStyle(Qt::MiterJoin);
+            painter->setPen(pen);
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(path);
+            start = end;
+        }
+
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (index >= static_cast<int>(pointViaColors_.size()))
+                break;
+            for (const auto &color : pointViaColors_[static_cast<std::size_t>(index)]) {
+                QColor fill = color;
+                fill.setAlpha(180);
+                QPen viaPen(color);
+                viaPen.setCosmetic(true);
+                viaPen.setWidthF(1.0);
+                painter->setPen(viaPen);
+                painter->setBrush(fill);
+                painter->drawRect(viaRect(index));
+            }
+        }
+
+        if (!isSelected() || readOnly_) {
+            painter->restore();
+            return;
+        }
+        const auto accent = ice::uiColor(ice::UiColor::Accent5);
+        QPen handlePen(accent);
+        handlePen.setCosmetic(true);
+        handlePen.setWidthF(1.5);
+        QBrush handleBrush(ice::uiColor(ice::UiColor::Background1));
+        painter->setPen(handlePen);
+        painter->setBrush(handleBrush);
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index)
+            painter->drawRect(handleRect(index));
+        painter->restore();
+    }
+
+    void mousePressEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!readOnly_) {
+            if (event->button() == Qt::LeftButton) {
+                const int handle = nearestHandle(event->pos());
+                if (handle >= 0) {
+                    if (!isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier) && scene())
+                            scene()->clearSelection();
+                        setSelected(true);
+                    }
+                    draggingHandle_ = handle;
+                    event->accept();
+                    return;
+                }
+            } else if (event->button() == Qt::RightButton && isSelected()) {
+                const int handle = nearestHandle(event->pos());
+                if (handle >= 0 && points_.size() > 2 && pointDeleted_) {
+                    QMenu menu;
+                    auto *remove = menu.addAction(QStringLiteral("Delete path point"));
+                    if (menu.exec(event->screenPos()) == remove) {
+                        pointDeleted_(id_, handle);
+                        event->accept();
+                        return;
+                    }
+                }
+            }
+        }
+        QGraphicsItem::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *event) override {
+        if (draggingHandle_ >= 0 && draggingHandle_ < static_cast<int>(points_.size())) {
+            prepareGeometryChange();
+            points_[static_cast<std::size_t>(draggingHandle_)] = mapFromScene(event->scenePos());
+            update();
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override {
+        if (draggingHandle_ >= 0) {
+            const int index = draggingHandle_;
+            draggingHandle_ = -1;
+            if (pointMoved_ && index < static_cast<int>(points_.size()))
+                pointMoved_(id_, index, mapToScene(points_[static_cast<std::size_t>(index)]));
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseReleaseEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!readOnly_ && event->button() == Qt::LeftButton && nearestHandle(event->pos()) < 0 && pointInserted_) {
+            const auto local = mapFromScene(event->scenePos());
+            const int segment = nearestSegment(local);
+            if (segment >= 0) {
+                const auto point = event->scenePos();
+                prepareGeometryChange();
+                points_.insert(points_.begin() + segment, mapFromScene(point));
+                update();
+                pointInserted_(id_, segment, point);
+                event->accept();
+                return;
+            }
+        }
+        QGraphicsItem::mouseDoubleClickEvent(event);
+    }
+
+  private:
+    bool hasVia(std::size_t index) const { return index < pointViaColors_.size() && !pointViaColors_[index].empty(); }
+
+    QPainterPath runPath(std::size_t start, std::size_t end) const {
+        QPainterPath path;
+        if (start >= points_.size() || end >= points_.size() || start >= end)
+            return path;
+        // Extend runs that touch a via so the copper reaches the far edge of
+        // the via square instead of stopping at its center.
+        const auto extension = width_ * 0.5;
+        auto first = points_[start];
+        auto last = points_[end];
+        if (hasVia(start)) {
+            const auto delta = points_[start + 1] - points_[start];
+            const auto length = std::hypot(delta.x(), delta.y());
+            if (length > 0.0)
+                first -= delta * (extension / length);
+        }
+        if (hasVia(end)) {
+            const auto delta = points_[end] - points_[end - 1];
+            const auto length = std::hypot(delta.x(), delta.y());
+            if (length > 0.0)
+                last += delta * (extension / length);
+        }
+        path.moveTo(first);
+        for (std::size_t index = start + 1; index < end; ++index)
+            path.lineTo(points_[index]);
+        path.lineTo(last);
+        return path;
+    }
+
+    QColor colorForSegment(std::size_t index) const {
+        if (segmentColors_.empty())
+            return ice::uiColor(ice::UiColor::Accent4);
+        return segmentColors_[std::min(index, segmentColors_.size() - 1)];
+    }
+
+    QPainterPath strokedPath() const {
+        QPainterPath result;
+        for (std::size_t start = 0; start + 1 < points_.size();) {
+            const auto color = colorForSegment(start);
+            std::size_t end = start + 1;
+            while (end + 1 < points_.size() && colorForSegment(end) == color)
+                ++end;
+            QPainterPathStroker stroker;
+            stroker.setWidth(width_ + 2.0);
+            stroker.setCapStyle(Qt::FlatCap);
+            stroker.setJoinStyle(Qt::MiterJoin);
+            result.addPath(stroker.createStroke(runPath(start, end)));
+            start = end;
+        }
+        return result;
+    }
+
+    qreal handleSize() const {
+        qreal scale = 1.0;
+        if (scene() && !scene()->views().empty())
+            scale = std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return 8.0 / scale;
+    }
+
+    QRectF handleRect(int index) const {
+        const auto size = handleSize();
+        return QRectF(points_[static_cast<std::size_t>(index)].x() - size * 0.5,
+                      points_[static_cast<std::size_t>(index)].y() - size * 0.5, size, size);
+    }
+
+    QRectF handleHitRect(int index) const {
+        const auto pad = handleSize() * 0.5;
+        return handleRect(index).adjusted(-pad, -pad, pad, pad);
+    }
+
+    QRectF viaRect(int index) const {
+        const auto half = width_ * 0.5;
+        return QRectF(points_[static_cast<std::size_t>(index)].x() - half,
+                      points_[static_cast<std::size_t>(index)].y() - half, width_, width_);
+    }
+
+    int nearestHandle(const QPointF &position) const {
+        int nearest = -1;
+        qreal nearestDistance = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (!handleHitRect(index).contains(position))
+                continue;
+            const auto distance = QLineF(position, points_[static_cast<std::size_t>(index)]).length();
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = index;
+            }
+        }
+        return nearest;
+    }
+
+    int nearestSegment(const QPointF &position) const {
+        if (points_.size() < 2)
+            return -1;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        int bestIndex = -1;
+        for (std::size_t index = 1; index < points_.size(); ++index) {
+            const auto start = points_[index - 1];
+            const auto end = points_[index];
+            const auto delta = end - start;
+            const auto lengthSquared = QPointF::dotProduct(delta, delta);
+            const auto fraction =
+                lengthSquared > 0.0
+                    ? std::clamp(QPointF::dotProduct(position - start, delta) / lengthSquared, qreal(0.0), qreal(1.0))
+                    : qreal(0.0);
+            const auto candidate = start + delta * fraction;
+            const auto distance = QLineF(position, candidate).length();
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = static_cast<int>(index);
+            }
+        }
+        return bestDistance <= width_ * 0.5 + handleSize() ? bestIndex : -1;
+    }
+
+    ice::ObjectId id_ = 0;
+    std::vector<QPointF> points_;
+    qreal width_ = 1.0;
+    std::vector<QColor> segmentColors_;
+    std::vector<std::vector<QColor>> pointViaColors_;
+    bool readOnly_ = false;
+    int draggingHandle_ = -1;
+    LayoutPathPointMovedCallback pointMoved_;
+    LayoutPathPointInsertedCallback pointInserted_;
+    LayoutPathPointDeletedCallback pointDeleted_;
 };
 } // namespace
 
@@ -305,6 +612,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         pathLayerChanged_ = std::move(callback);
     }
 
+    void setPathFinishedCallback(LayoutPathFinishedCallback callback) override { pathFinished_ = std::move(callback); }
+
     void setInitialView(const QRectF &bounds) {
         if (!bounds.isValid() || bounds.isNull())
             return;
@@ -489,12 +798,6 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (tool_ == Tool::path && !readOnly_) {
-            if (event->button() == Qt::RightButton) {
-                finishPath();
-                viewport()->update();
-                event->accept();
-                return;
-            }
             if (event->button() == Qt::LeftButton) {
                 if (!pathAvailable()) {
                     QApplication::beep();
@@ -663,8 +966,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
-            pathDragging_ = false;
-            finishPath();
+            // Clicking repeatedly adds points; finish the path with Escape or
+            // Space instead of treating the second click as a finish gesture.
             event->accept();
             return;
         }
@@ -741,9 +1044,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
         if (!scaleEditor_)
             return;
         const auto text = scaleEditor_->text().trimmed();
-        const auto match = QRegularExpression(QStringLiteral("^([0-9]+)\\s*(mm|um|nm|pm)$"),
-                                              QRegularExpression::CaseInsensitiveOption)
-                               .match(text);
+        const auto match =
+            QRegularExpression(QStringLiteral("^([0-9]+)\\s*(mm|um|nm|pm)$"), QRegularExpression::CaseInsensitiveOption)
+                .match(text);
         if (match.hasMatch()) {
             const auto number = match.captured(1).toLongLong();
             const auto unit = match.captured(2).toLower();
@@ -845,11 +1148,14 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void finishPath() {
+        const bool hadCommitted = pathHasCommitted_;
         pathActive_ = false;
         pathDragging_ = false;
         pathHasCommitted_ = false;
         pathEnd_ = pathAnchor_;
         viewport()->update();
+        if (hadCommitted && pathFinished_)
+            pathFinished_();
     }
 
     void applyNavigationTransform() {
@@ -881,6 +1187,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF pathEnd_;
     LayoutPathSegmentCallback pathSegmentCreated_;
     LayoutPathLayerChangedCallback pathLayerChanged_;
+    LayoutPathFinishedCallback pathFinished_;
     bool panning_ = false;
     bool drawing_ = false;
     QPoint panStartPosition_;
@@ -931,6 +1238,16 @@ QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &na
         item->setFlag(QGraphicsItem::ItemIsMovable);
     }
     return item;
+}
+
+QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
+                                    const std::vector<QColor> &segmentColors,
+                                    const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
+                                    LayoutPathPointMovedCallback pointMoved,
+                                    LayoutPathPointInsertedCallback pointInserted,
+                                    LayoutPathPointDeletedCallback pointDeleted) {
+    return new LayoutPathItem(id, points, width, segmentColors, pointViaColors, readOnly, std::move(pointMoved),
+                              std::move(pointInserted), std::move(pointDeleted));
 }
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent) { return new LayoutCanvasImpl(parent); }

@@ -1312,6 +1312,67 @@ TEST_CASE("project items can be removed with reference checks") {
     CHECK(!project.layoutCells.contains(generatedId));
 }
 
+TEST_CASE("layout paths persist and move as one shape") {
+    ice::Project project;
+    project.identity = "path-test";
+    project.name = "path-test";
+    const auto layer = ice::addLayer(project, "Metal1", 1);
+    const auto secondLayer = ice::addLayer(project, "Metal2", 2);
+    const auto viaLayer = ice::addLayer(project, "Via1", 3);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto pathId = project.nextId();
+    ice::Shape path{pathId, layer, std::nullopt, {0, -200, 1200, 400}, {}};
+    path.centerline = {{0, 0}, {1000, 0}, {1000, 200}};
+    path.segmentLayers = {layer, secondLayer};
+    path.pointVias = {{}, {viaLayer}, {}};
+    path.width = 200;
+    path.polygon = {{-100, -100}, {1100, -100}, {1100, 300}, {-100, 300}};
+    project.layoutCells.at(cell).shapes.emplace(pathId, path);
+    CHECK(project.validate().empty());
+
+    auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto &loaded = roundTrip.layoutCells.at(cell).shapes.at(pathId);
+    CHECK(loaded.isPath());
+    CHECK(loaded.width == 200);
+    CHECK(loaded.centerline.size() == 3);
+    CHECK(loaded.segmentLayers.size() == 2);
+    CHECK(loaded.layerForSegment(1) == secondLayer);
+    CHECK(loaded.pointVias.size() == 3);
+    CHECK(loaded.pointVias[1].size() == 1);
+    CHECK(loaded.pointVias[1].front() == viaLayer);
+
+    ice::moveRectangle(roundTrip, cell, pathId, 50, 25);
+    const auto &moved = roundTrip.layoutCells.at(cell).shapes.at(pathId);
+    CHECK(moved.centerline.front().x == 50);
+    CHECK(moved.centerline.front().y == 25);
+    CHECK(moved.polygon.front().x == -50);
+    CHECK(moved.polygon.front().y == -75);
+
+    const auto gds = std::filesystem::temp_directory_path() / "ice-layout-path-test.gds";
+    ice::LayoutInterchange::exportGds(project, cell, gds);
+    CHECK(std::filesystem::is_regular_file(gds));
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto &importedCell = imported.layoutCells.begin()->second;
+    bool metal1ReachesVia = false;
+    bool metal2ReachesVia = false;
+    bool viaExported = false;
+    for (const auto &[_, shape] : importedCell.shapes) {
+        const auto importedLayer = imported.layers.find(shape.layer);
+        if (importedLayer == imported.layers.end())
+            continue;
+        if (importedLayer->second.number == 1)
+            metal1ReachesVia = shape.rectangle.x + shape.rectangle.width == 1100;
+        else if (importedLayer->second.number == 2)
+            metal2ReachesVia = shape.rectangle.y == -100;
+        else if (importedLayer->second.number == 3)
+            viaExported = true;
+    }
+    CHECK(metal1ReachesVia);
+    CHECK(metal2ReachesVia);
+    CHECK(viaExported);
+    std::filesystem::remove(gds);
+}
+
 TEST_CASE("simulation graph metadata is editable through core helpers") {
     ice::Project project;
     project.identity = "graph-test";

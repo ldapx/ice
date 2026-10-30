@@ -237,16 +237,24 @@ points to another interpreter. If the checkout or Python module is unavailable,
 ICE reports the error and leaves the existing geometry unchanged.
 
 The layout toolbar also provides a **Draw Path** tool for routing. Click to set
-the path start and click again to commit each segment; right-click or
-double-click finishes the current path and Escape leaves the tool. Holding Shift
+the path start and click again to commit each segment. Escape or Space finishes
+the current path and leaves the tool. Holding Shift
 constrains the active segment to horizontal or vertical so all turns are right
 angles. While the Path tool is active, **Properties** shows the current path
 layer and an editable `width (nm)` value (200 nm by default). Hold the left
 mouse button while scrolling the wheel to move the next segment up or down one
 metal layer; ICE inserts the corresponding via at the connection point
 automatically. For the IHP stack, for example, scrolling from Metal2 down to
-Metal1 adds a Via1 at the junction. Path segments are polygon shapes on the
-selected metal layer, and vias are square shapes on the matching via layer.
+Metal1 adds a Via1 at the junction. A routed path is stored as one path shape
+with an editable centerline, width, and cached outline; it moves as a single
+object rather than as independent segment rectangles. Select a path to show its
+point handles. Drag a handle to move a point, double-click a segment to insert a
+point, and right-click a handle to delete it. Changing layers while drawing
+keeps the same path and records the layer for each segment; changing the width
+starts a new path at the current endpoint. Corners and endpoints are square,
+not rounded. Layer-change vias are stored with the path and move with it.
+Segments adjacent to a via extend by half the via size so the copper fully
+overlaps the via on both layers.
 
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses

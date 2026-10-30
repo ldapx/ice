@@ -189,6 +189,45 @@ std::vector<Diagnostic> Project::validate() const {
                                           !onGrid(shape.rectangle.width) || !onGrid(shape.rectangle.height)))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.shape.grid", "Shape geometry is off-grid", shapeId});
+            if (!shape.centerline.empty()) {
+                if (shape.centerline.size() < 2 || shape.width <= 0)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.geometry",
+                                      "Path must have at least two points and a positive width", shapeId});
+                if (!shape.segmentLayers.empty() && shape.segmentLayers.size() != shape.centerline.size() - 1)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.layers",
+                                      "Path segment layer count does not match its points", shapeId});
+                if (!shape.pointVias.empty() && shape.pointVias.size() != shape.centerline.size())
+                    result.push_back({Diagnostic::Severity::error, "layout.path.vias",
+                                      "Path via count does not match its points", shapeId});
+                for (const auto &point : shape.centerline) {
+                    if (!onGrid(point.x) || !onGrid(point.y)) {
+                        result.push_back(
+                            {Diagnostic::Severity::error, "layout.path.grid", "Path point is off-grid", shapeId});
+                        break;
+                    }
+                }
+                for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+                    if (!layers.contains(shape.layerForSegment(index))) {
+                        result.push_back({Diagnostic::Severity::error, "layout.path.layer",
+                                          "Path segment references a missing layer", shapeId});
+                        break;
+                    }
+                }
+                for (const auto &vias : shape.pointVias) {
+                    bool missing = false;
+                    for (const auto layer : vias) {
+                        if (!layers.contains(layer)) {
+                            missing = true;
+                            break;
+                        }
+                    }
+                    if (missing) {
+                        result.push_back({Diagnostic::Severity::error, "layout.path.via",
+                                          "Path via references a missing layer", shapeId});
+                        break;
+                    }
+                }
+            }
         }
         for (const auto &[portId, port] : cell.ports) {
             if (!layers.contains(port.layer))
@@ -352,6 +391,26 @@ std::string Project::serialize() const {
                 s["polygon"] = json::array();
                 for (const auto &point : shape.polygon)
                     s["polygon"].push_back({{"x", point.x}, {"y", point.y}});
+            }
+            if (!shape.centerline.empty()) {
+                s["centerline"] = json::array();
+                for (const auto &point : shape.centerline)
+                    s["centerline"].push_back({{"x", point.x}, {"y", point.y}});
+                if (!shape.segmentLayers.empty()) {
+                    s["segment_layers"] = json::array();
+                    for (const auto layer : shape.segmentLayers)
+                        s["segment_layers"].push_back(layer);
+                }
+                if (!shape.pointVias.empty()) {
+                    s["point_vias"] = json::array();
+                    for (const auto &vias : shape.pointVias) {
+                        json entry = json::array();
+                        for (const auto layer : vias)
+                            entry.push_back(layer);
+                        s["point_vias"].push_back(std::move(entry));
+                    }
+                }
+                s["path_width"] = shape.width;
             }
             c["shapes"].push_back(s);
         }
@@ -538,6 +597,20 @@ Project Project::deserialize(const std::string &text) {
                 if (s.contains("polygon"))
                     for (const auto &point : s.at("polygon"))
                         shape.polygon.push_back({point.at("x"), point.at("y")});
+                if (s.contains("centerline"))
+                    for (const auto &point : s.at("centerline"))
+                        shape.centerline.push_back({point.at("x"), point.at("y")});
+                if (s.contains("segment_layers"))
+                    for (const auto &layer : s.at("segment_layers"))
+                        shape.segmentLayers.push_back(layer.get<ObjectId>());
+                if (s.contains("point_vias"))
+                    for (const auto &entry : s.at("point_vias")) {
+                        std::vector<ObjectId> vias;
+                        for (const auto &layer : entry)
+                            vias.push_back(layer.get<ObjectId>());
+                        shape.pointVias.push_back(std::move(vias));
+                    }
+                shape.width = s.value("path_width", Coordinate{0});
                 cell.shapes.emplace(shape.id, shape);
             }
             for (const auto &port : c.at("ports"))

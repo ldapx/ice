@@ -136,6 +136,20 @@ struct Shape {
     std::optional<ObjectId> net;
     Rect rectangle;
     std::vector<LayoutPoint> polygon;
+    // Non-empty for routed paths. The centerline is the editable geometry;
+    // polygon is the cached outline used for rendering, DRC, and GDS export.
+    std::vector<LayoutPoint> centerline;
+    // Layer of each centerline segment (size centerline.size() - 1). Empty
+    // means every segment uses `layer`.
+    std::vector<ObjectId> segmentLayers;
+    // Via layers at each centerline point (size centerline.size()). Each inner
+    // vector lists the via layers stacked at that point.
+    std::vector<std::vector<ObjectId>> pointVias;
+    Coordinate width = 0;
+    bool isPath() const { return centerline.size() >= 2 && width > 0; }
+    ObjectId layerForSegment(std::size_t index) const {
+        return index < segmentLayers.size() ? segmentLayers[index] : layer;
+    }
 };
 
 struct Port {
