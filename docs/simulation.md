@@ -119,6 +119,7 @@ editor, while runner messages, errors, and Markdown output are appended to the
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+ice-cli simulation-remove <project> <simulation>
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]

@@ -1268,6 +1268,50 @@ TEST_CASE("simulation script graph payloads are parsed for the GUI") {
                     ice::ProjectError);
 }
 
+TEST_CASE("project items can be removed with reference checks") {
+    ice::Project project;
+    project.identity = "remove-test";
+    project.name = "remove-test";
+
+    const auto usedSchematic = ice::createSchematicCell(project, "used");
+    const auto unusedSchematic = ice::createSchematicCell(project, "unused");
+    ice::SimulationItem simulation;
+    simulation.id = project.nextId();
+    simulation.name = "sim";
+    simulation.schematic = usedSchematic;
+    project.simulations.emplace(simulation.id, simulation);
+    CHECK_THROWS_AS(ice::removeSchematicCell(project, usedSchematic), ice::ProjectError);
+    ice::removeSimulationItem(project, simulation.id);
+    CHECK(!project.simulations.contains(simulation.id));
+    ice::removeSchematicCell(project, usedSchematic);
+    ice::removeSchematicCell(project, unusedSchematic);
+    CHECK(project.schematicCells.empty());
+
+    const auto parentSchematic = ice::createSchematicCell(project, "parent");
+    const auto childSchematic = ice::createSchematicCell(project, "child");
+    ice::addSymbol(project, parentSchematic, "child_block", {}, childSchematic);
+    CHECK_THROWS_AS(ice::removeSchematicCell(project, childSchematic), ice::ProjectError);
+
+    const auto parentLayout = ice::createLayoutCell(project, "parent_layout");
+    const auto childLayout = ice::createLayoutCell(project, "child_layout");
+    ice::addLayoutInstance(project, parentLayout, childLayout, "I1", 0, 0);
+    CHECK_THROWS_AS(ice::removeLayoutItem(project, childLayout), ice::ProjectError);
+    ice::removeLayoutItem(project, parentLayout);
+    ice::removeLayoutItem(project, childLayout);
+    CHECK(project.layoutCells.empty());
+
+    const auto libraryLayout = ice::createLayoutCell(project, "library_layout");
+    project.layoutCells.at(libraryLayout).library = true;
+    CHECK_THROWS_AS(ice::removeLayoutItem(project, libraryLayout), ice::ProjectError);
+
+    const auto proceduralId = ice::createProceduralLayout(project, "generated");
+    const auto generatedId = project.proceduralLayouts.at(proceduralId).generatedCell;
+    CHECK_THROWS_AS(ice::removeLayoutItem(project, generatedId), ice::ProjectError);
+    ice::removeLayoutItem(project, proceduralId);
+    CHECK(!project.proceduralLayouts.contains(proceduralId));
+    CHECK(!project.layoutCells.contains(generatedId));
+}
+
 TEST_CASE("simulation graph metadata is editable through core helpers") {
     ice::Project project;
     project.identity = "graph-test";

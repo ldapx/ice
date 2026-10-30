@@ -327,9 +327,11 @@ stdio.
   elicitation response.
 - Token usage updates the session page when the agent reports `usage_update`.
 
-ACP support is compiled in when an `agentsdk-cpp` checkout is available next to
-the ICE repository or through `AGENTSDK_CPP_DIR`. Without it, the Agent tab is
-disabled and explains that the SDK is unavailable.
+ACP support is built from the bundled `third_party/agentsdk-cpp` submodule into
+a shared `libagentsdk` library. Initialize the submodule with
+`git submodule update --init --recursive` before building. The installed
+`ice`/`ice-mcp` binaries load the shared library from the installation's `lib`
+directory.
 
 ## Styling
 

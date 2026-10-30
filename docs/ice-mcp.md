@@ -37,10 +37,12 @@ go to stderr.
 | `project_undo` / `project_redo` | Move through project history. |
 | `schematic_create` | Create a drawn schematic cell. |
 | `schematic_create_text` | Create a text SPICE schematic. |
+| `schematic_delete` | Delete a schematic, blocked when simulations or symbols use it. |
 | `schematic_add_symbol` | Add a symbol definition. |
 | `schematic_add_instance` | Place a symbol instance. |
 | `layout_create` | Create a static layout cell. |
 | `layout_create_from_schematic` | Generate a layout from a schematic. |
+| `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 | `layout_add_layer` | Add a layout layer. |
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_polygon` | Add a polygon shape. |
@@ -51,6 +53,7 @@ go to stderr.
 | `simulation_graph_info` | Read one graph definition. |
 | `simulation_graph_update` | Update axes, signals, or limits. |
 | `simulation_graph_delete` | Delete a graph while keeping the last one. |
+| `simulation_delete` | Delete a simulation and all its graph definitions. |
 | `simulation_script_create` | Create a simulation script from a template or supplied source. |
 | `simulation_script_list` | List project-level simulation scripts. |
 | `simulation_script_read` | Read simulation script metadata and Python source. |
@@ -81,6 +84,7 @@ session. The legacy `report_*` tool names remain accepted as aliases.
 
 ## Dependencies
 
-`ice-mcp` is compiled with ACP/MCP support when an `agentsdk-cpp` checkout is
-found next to the ICE repository or through `AGENTSDK_CPP_DIR`. Without it the
-executable reports that the MCP server is unavailable.
+`ice-mcp` is built against the bundled `third_party/agentsdk-cpp` submodule as a
+shared `libagentsdk` library. Initialize the submodule with
+`git submodule update --init --recursive`; the installed executable loads the
+library from the installation's `lib` directory.

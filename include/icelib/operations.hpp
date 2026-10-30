@@ -51,6 +51,12 @@ ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId chi
                            Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
 
+// Removes a project item after checking references that would become invalid.
+// These throw ProjectError with a descriptive code when removal is unsafe.
+void removeSchematicCell(Project &project, ObjectId cellId);
+void removeLayoutItem(Project &project, ObjectId id);
+void removeSimulationItem(Project &project, ObjectId simulationId);
+
 // Simulation graph metadata is presentation-only but agent-facing: it selects
 // the plotted X/Y signals and optional display limits from captured traces.
 ObjectId addSimulationGraph(Project &project, ObjectId simulationId, const SimulationGraph &graph);

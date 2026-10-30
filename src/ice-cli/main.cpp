@@ -118,6 +118,22 @@ ice::ObjectId resolveLayout(const ice::Project &project, const std::string &text
     return resolveByIdOrName(project.layoutCells, text, "layout cell");
 }
 
+ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        if (project.layoutCells.contains(*id) || project.proceduralLayouts.contains(*id))
+            return *id;
+    }
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.name == text)
+            return id;
+    }
+    for (const auto &[id, cell] : project.layoutCells) {
+        if (cell.name == text)
+            return id;
+    }
+    argumentError("Unknown layout or procedural layout: " + text);
+}
+
 ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
     return resolveByIdOrName(project.layers, text, "layer");
 }
@@ -489,6 +505,7 @@ void printHelp() {
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
+              << "  schematic-remove <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
               << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
@@ -498,7 +515,8 @@ void printHelp() {
               << "  layout-add-procedural <project> <name> [pdk] [script-file]\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
-              << "  layout-info <project> <cell>\n"
+              << "  layout-info <project> <cell|procedural>\n"
+              << "  layout-remove <project> <cell|procedural>\n"
               << "  layout-add-layer <project> <name> <number>\n"
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
@@ -508,6 +526,7 @@ void printHelp() {
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
               << "  simulation-list <project>\n"
+              << "  simulation-remove <project> <simulation>\n"
               << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
               << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
               << "  simulation-graph-list <project> <simulation>\n"
@@ -641,6 +660,18 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-remove" || command == "schematic-delete") {
+            expectArguments(args, 3, 3, "schematic-remove <project> <cell>");
+            auto project = ice::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto name = project.schematicCells.at(id).name;
+            ice::ProjectSession session(project);
+            session.execute("remove schematic", [&](ice::Project &p) { ice::removeSchematicCell(p, id); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", name}, {"deleted", true}});
+            return 0;
+        }
+
         if (command == "schematic-add-symbol") {
             expectArguments(args, 4, 5, "schematic-add-symbol <project> <cell> <name> [source-cell]");
             const auto project = ice::Project::load(args[1]);
@@ -747,6 +778,7 @@ int main(int argc, char **argv) {
                 result.push_back({{"id", id},
                                   {"name", cell.name},
                                   {"pdk", cell.pdk},
+                                  {"procedural", false},
                                   {"library", cell.library},
                                   {"device", cell.device},
                                   {"generated_by", cell.generatedBy},
@@ -754,15 +786,50 @@ int main(int argc, char **argv) {
                                   {"ports", cell.ports.size()},
                                   {"instances", cell.instances.size()}});
             }
+            for (const auto &[id, procedural] : project.proceduralLayouts) {
+                result.push_back({{"id", id},
+                                  {"name", procedural.name},
+                                  {"pdk", procedural.pdk},
+                                  {"procedural", true},
+                                  {"generated_cell", procedural.generatedCell},
+                                  {"script_length", procedural.script.size()}});
+            }
             printJson(result);
             return 0;
         }
 
         if (command == "layout-info") {
-            expectArguments(args, 3, 3, "layout-info <project> <cell>");
+            expectArguments(args, 3, 3, "layout-info <project> <cell|procedural>");
             const auto project = ice::Project::load(args[1]);
-            const auto id = resolveLayout(project, args[2]);
-            printJson(layoutInfo(project, project.layoutCells.at(id)));
+            const auto id = resolveLayoutItem(project, args[2]);
+            if (const auto procedural = project.proceduralLayouts.find(id);
+                procedural != project.proceduralLayouts.end()) {
+                printJson({{"id", id},
+                           {"name", procedural->second.name},
+                           {"pdk", procedural->second.pdk},
+                           {"procedural", true},
+                           {"generated_cell", procedural->second.generatedCell},
+                           {"script", procedural->second.script}});
+            } else {
+                printJson(layoutInfo(project, project.layoutCells.at(id)));
+            }
+            return 0;
+        }
+
+        if (command == "layout-remove" || command == "layout-delete") {
+            expectArguments(args, 3, 3, "layout-remove <project> <cell|procedural>");
+            auto project = ice::Project::load(args[1]);
+            const auto id = resolveLayoutItem(project, args[2]);
+            std::string name;
+            if (const auto procedural = project.proceduralLayouts.find(id);
+                procedural != project.proceduralLayouts.end())
+                name = procedural->second.name;
+            else
+                name = project.layoutCells.at(id).name;
+            ice::ProjectSession session(project);
+            session.execute("remove layout", [&](ice::Project &p) { ice::removeLayoutItem(p, id); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", name}, {"deleted", true}});
             return 0;
         }
 
@@ -895,6 +962,18 @@ int main(int argc, char **argv) {
             expectArguments(args, 2, 2, "simulation-list <project>");
             const auto project = ice::Project::load(args[1]);
             printJson(projectSummary(project, args[1])["simulations"]);
+            return 0;
+        }
+
+        if (command == "simulation-remove" || command == "simulation-delete") {
+            expectArguments(args, 3, 3, "simulation-remove <project> <simulation>");
+            auto project = ice::Project::load(args[1]);
+            const auto id = resolveSimulation(project, args[2]);
+            const auto name = project.simulations.at(id).name;
+            ice::ProjectSession session(project);
+            session.execute("remove simulation", [&](ice::Project &p) { ice::removeSimulationItem(p, id); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", name}, {"deleted", true}});
             return 0;
         }
 

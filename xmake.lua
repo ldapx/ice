@@ -5,9 +5,16 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("spdlog", "nlohmann_json")
 
--- Agent Client Protocol support. Point AGENTSDK_CPP_DIR at an agentsdk-cpp
--- checkout, or keep the checkout next to the ICE repository.
+-- Agent Client Protocol support. The normal build uses the bundled
+-- third_party/agentsdk-cpp submodule. AGENTSDK_CPP_DIR and a sibling checkout
+-- remain supported for downstream packaging.
 local agentsdk_dir = os.getenv("AGENTSDK_CPP_DIR")
+if not agentsdk_dir or not os.isdir(agentsdk_dir) then
+    local bundled = path.join(os.projectdir(), "third_party", "agentsdk-cpp")
+    if os.isdir(bundled) then
+        agentsdk_dir = bundled
+    end
+end
 if not agentsdk_dir or not os.isdir(agentsdk_dir) then
     local sibling = path.join(os.projectdir(), "..", "agentsdk-cpp")
     if os.isdir(sibling) then
@@ -18,6 +25,8 @@ local has_agentsdk = agentsdk_dir and os.isdir(path.join(agentsdk_dir, "src", "a
 if has_agentsdk then
     agentsdk_dir = path.absolute(agentsdk_dir)
     add_requires("simdjson", "libcurl")
+else
+    print("warning: agentsdk-cpp is missing; run `git submodule update --init --recursive` to enable the Agent tab")
 end
 
 -- First-party warnings. Third-party headers are included via system paths, so
@@ -39,6 +48,21 @@ target("icelib")
     add_includedirs("/usr/include/ngspice")
     add_links("ngspice")
 
+if has_agentsdk then
+    target("agentsdk")
+        set_kind("shared")
+        set_languages("c++20")
+        add_files(path.join(agentsdk_dir, "src", "agentsdk", "**.cpp"))
+        add_includedirs(path.join(agentsdk_dir, "src"), {public = true})
+        add_packages("spdlog", "libcurl", "simdjson", {public = true})
+        add_cxxflags("-fPIC")
+        if is_plat("linux") then
+            add_syslinks("pthread")
+        elseif is_plat("windows") then
+            add_syslinks("ws2_32", "wsock32")
+        end
+end
+
 target("ice")
     set_kind("binary")
     add_files("src/ice/*.cpp")
@@ -52,12 +76,11 @@ target("ice")
     add_cxxflags(first_party_warnings)
     add_ldflags("-no-pie", {force = true})
     if has_agentsdk then
-        add_includedirs(path.join(agentsdk_dir, "src"))
-        add_files(path.join(agentsdk_dir, "src", "agentsdk", "**.cpp"))
-        add_packages("spdlog", "simdjson", "libcurl")
+        add_deps("agentsdk")
         add_defines("ICE_HAVE_AGENTSDK=1")
         if is_plat("linux") then
             add_syslinks("pthread")
+            add_rpathdirs("$ORIGIN/../lib")
         elseif is_plat("windows") then
             add_syslinks("ws2_32", "wsock32")
         end
@@ -86,15 +109,11 @@ target("ice-mcp")
     add_includedirs("include")
     add_packages("nlohmann_json")
     if has_agentsdk then
-        add_includedirs(path.join(agentsdk_dir, "src"))
-        add_files(path.join(agentsdk_dir, "src", "agentsdk", "common", "json_builder.cpp"),
-                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_server.cpp"),
-                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_json.cpp"),
-                  path.join(agentsdk_dir, "src", "agentsdk", "mcp", "mcp_types.cpp"))
-        add_packages("spdlog", "simdjson")
+        add_deps("agentsdk")
         add_defines("ICE_HAVE_AGENTSDK=1")
         if is_plat("linux") then
             add_syslinks("pthread")
+            add_rpathdirs("$ORIGIN/../lib")
         elseif is_plat("windows") then
             add_syslinks("ws2_32", "wsock32")
         end

@@ -65,8 +65,9 @@ simulations are stored as individual files.
 - `spdlog`, `nlohmann_json` (via xmake packages)
 - `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
 - Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
-- Optional `agentsdk-cpp` checkout for the Agent Client Protocol tab (sibling
-  directory or `AGENTSDK_CPP_DIR`)
+- Bundled `agentsdk-cpp` submodule for the Agent Client Protocol tab and MCP
+  server. Clone with `--recursive`, or run
+  `git submodule update --init --recursive` after cloning
 - `clang-format` (formatting via `xmake format`), `doctest` sources (bundled under `include/doctest`)
 
 ## Build

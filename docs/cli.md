@@ -22,6 +22,7 @@ ice-cli schematic-add-cell <project> <name> [pdk]
 ice-cli schematic-add-text <project> <name> [pdk] [spice-file]
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
+ice-cli schematic-remove <project> <cell>
 ice-cli schematic-add-symbol <project> <cell> <name> [source-cell]
 ice-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
 ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
@@ -29,7 +30,8 @@ ice-cli schematic-netlist <project> <cell>
 ```
 
 Cells, symbols, and pins may be referenced by name or id. Pins can also use the
-`<symbol>.<pin>` form.
+`<symbol>.<pin>` form. `schematic-remove` is blocked when the cell is used by a
+simulation or a hierarchical symbol.
 
 ## Layout
 
@@ -38,7 +40,8 @@ ice-cli layout-add-cell <project> <name> [pdk]
 ice-cli layout-add-procedural <project> <name> [pdk] [script-file]
 ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
-ice-cli layout-info <project> <cell>
+ice-cli layout-info <project> <cell|procedural>
+ice-cli layout-remove <project> <cell|procedural>
 ice-cli layout-add-layer <project> <name> <number>
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
 ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
@@ -47,13 +50,17 @@ ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientati
 ice-cli layout-export-gds <project> <cell> <output.gds>
 ```
 
-Coordinates are integer database units.
+Coordinates are integer database units. `layout-remove` accepts either a static
+layout cell or a procedural layout; removing a procedural layout also removes
+its generated static child. Removal is blocked when instances reference the
+layout, and library cells cannot be removed.
 
 ## Simulation
 
 ```sh
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
+ice-cli simulation-remove <project> <simulation>
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
@@ -73,6 +80,8 @@ Time values accept SPICE-style engineering suffixes such as `1u`, `100n`, and
 `simulation-run` uses the stored simulation definition and writes its result
 under the simulation's build directory, so the GUI can load it as the latest
 run. `simulate` runs a schematic directly without a simulation definition.
+`simulation-remove` deletes the simulation and its graph definitions; stored
+build runs remain on disk.
 
 Without an explicit output path, the simulation writes a stored run under:
 

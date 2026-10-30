@@ -1734,7 +1734,7 @@ Qt 6
 CLI11
 reflect-cpp
 Clipper2
-agentsdk-cpp (MCP server + ACP client; pulls in simdjson, libcurl, spdlog)
+agentsdk-cpp (bundled submodule; shared MCP server + ACP client library; pulls in simdjson, libcurl, spdlog)
 toml++ (TOML parsing)
 spdlog (logging)
 nanobind (C++ to Python bindings)

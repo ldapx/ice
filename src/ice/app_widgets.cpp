@@ -321,10 +321,11 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
         setAgentStatus(QStringLiteral("Install an ACP-capable agent on PATH (for example opencode)."));
     }
 #else
-    agentSelector_->addItem(QStringLiteral("agentsdk-cpp not built"));
+    agentSelector_->addItem(QStringLiteral("Agent support unavailable"));
     agentSelector_->setEnabled(false);
     agentConnectButton_->setEnabled(false);
-    setAgentStatus(QStringLiteral("Build with agentsdk-cpp available or set AGENTSDK_CPP_DIR."));
+    setAgentStatus(QStringLiteral("Agent support is unavailable. Initialize the bundled agentsdk-cpp submodule with "
+                                  "`git submodule update --init --recursive` and rebuild."));
 #endif
 
     connect(agentConnectButton_, &QPushButton::clicked, this, [this] {
@@ -1206,7 +1207,8 @@ void ActivityPanel::connectAgent() {
             Qt::QueuedConnection);
     }));
 #else
-    setAgentStatus(QStringLiteral("agentsdk-cpp is not available in this build."));
+    setAgentStatus(QStringLiteral("Agent support is unavailable in this build. Initialize the agentsdk-cpp submodule "
+                                  "and rebuild."));
 #endif
 }
 

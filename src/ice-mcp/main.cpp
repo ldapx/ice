@@ -177,6 +177,28 @@ ice::ObjectId resolveLayoutCell(const ice::Project &project, const json &argumen
     return lookupByIdOrName(project.layoutCells, requiredValue(arguments, key), "layout cell");
 }
 
+ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        if (project.layoutCells.contains(id) || project.proceduralLayouts.contains(id))
+            return id;
+        throw ToolError("Unknown layout or procedural layout id: " + std::to_string(id));
+    }
+    if (value.is_string()) {
+        const auto name = value.get<std::string>();
+        for (const auto &[id, procedural] : project.proceduralLayouts) {
+            if (procedural.name == name)
+                return id;
+        }
+        for (const auto &[id, cell] : project.layoutCells) {
+            if (cell.name == name)
+                return id;
+        }
+        throw ToolError("Unknown layout or procedural layout: " + name);
+    }
+    throw ToolError("Expected a layout or procedural layout name or id.");
+}
+
 ice::ObjectId resolveLayer(const ice::Project &project, const json &arguments, const char *key = "layer") {
     return lookupByIdOrName(project.layers, requiredValue(arguments, key), "layer");
 }
@@ -613,6 +635,14 @@ class IceMcpServer {
             return {{"id", graph.id}, {"name", graph.name}, {"simulation", simulationId}, {"deleted", true}};
         }
 
+        if (name == "simulation_delete") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto simulationName = session.project().simulations.at(id).name;
+            session.execute("mcp simulation-delete",
+                            [&](ice::Project &project) { ice::removeSimulationItem(project, id); });
+            return {{"id", id}, {"name", simulationName}, {"deleted", true}};
+        }
+
         if (toolName == "report_create") {
             const auto reportName = requiredString(toolArguments, "name");
             const auto source = optionalString(toolArguments, "source");
@@ -681,6 +711,14 @@ class IceMcpServer {
             return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}};
         }
 
+        if (name == "schematic_delete") {
+            const auto id = resolveSchematic(session.project(), arguments, "schematic");
+            const auto schematicName = session.project().schematicCells.at(id).name;
+            session.execute("mcp schematic-delete",
+                            [&](ice::Project &project) { ice::removeSchematicCell(project, id); });
+            return {{"id", id}, {"name", schematicName}, {"deleted", true}};
+        }
+
         if (name == "schematic_create") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
@@ -727,6 +765,18 @@ class IceMcpServer {
             });
             return {{"id", id}, {"cell", cell}, {"name", instanceName}};
         }
+        if (name == "layout_delete") {
+            const auto id = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
+            std::string layoutName;
+            if (const auto procedural = session.project().proceduralLayouts.find(id);
+                procedural != session.project().proceduralLayouts.end())
+                layoutName = procedural->second.name;
+            else
+                layoutName = session.project().layoutCells.at(id).name;
+            session.execute("mcp layout-delete", [&](ice::Project &project) { ice::removeLayoutItem(project, id); });
+            return {{"id", id}, {"name", layoutName}, {"deleted", true}};
+        }
+
         if (name == "layout_create") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
@@ -859,6 +909,10 @@ class IceMcpServer {
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("graph", "Graph name or id")
                             .build());
+        tools.push_back(tool_builder("simulation_delete")
+                            .with_description("Delete a simulation and all its graph definitions.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .build());
         tools.push_back(tool_builder("simulation_script_create")
                             .with_description("Create a project-level Python simulation script under scripts/.")
                             .with_string_param("name", "Simulation script name")
@@ -895,6 +949,11 @@ class IceMcpServer {
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("text", "Optional SPICE source", false)
                             .build());
+        tools.push_back(
+            tool_builder("schematic_delete")
+                .with_description("Delete a schematic; blocked when simulations or hierarchical symbols use it.")
+                .with_string_param("schematic", "Schematic name or id")
+                .build());
         tools.push_back(tool_builder("schematic_add_symbol")
                             .with_description("Add a symbol definition to a schematic cell.")
                             .with_string_param("cell", "Schematic name or id")
@@ -919,6 +978,10 @@ class IceMcpServer {
                             .with_description("Create a layout from a schematic.")
                             .with_string_param("schematic", "Schematic name or id")
                             .with_string_param("name", "Optional layout name", false)
+                            .build());
+        tools.push_back(tool_builder("layout_delete")
+                            .with_description("Delete a static or procedural layout; blocked when instances use it.")
+                            .with_string_param("layout", "Layout or procedural layout name or id")
                             .build());
         tools.push_back(tool_builder("layout_add_layer")
                             .with_description("Add a layout layer.")
