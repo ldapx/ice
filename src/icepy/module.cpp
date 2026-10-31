@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/verification.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/filesystem.h>
@@ -242,6 +243,8 @@ NB_MODULE(icepy, module) {
         .def_rw("segment_layers", &Shape::segmentLayers)
         .def_rw("point_vias", &Shape::pointVias)
         .def_rw("width", &Shape::width)
+        .def_rw("text", &Shape::text)
+        .def_rw("name", &Shape::name)
         .def_prop_ro("is_path", &Shape::isPath);
 
     nb::class_<Port>(module, "Port")
@@ -384,6 +387,61 @@ NB_MODULE(icepy, module) {
         .def("save", &Project::save)
         .def_static("deserialize", &Project::deserialize)
         .def_static("load", &Project::load);
+
+    nb::enum_<VerificationSeverity>(module, "VerificationSeverity")
+        .value("info", VerificationSeverity::info)
+        .value("warning", VerificationSeverity::warning)
+        .value("error", VerificationSeverity::error);
+
+    nb::class_<LvsMismatch>(module, "LvsMismatch")
+        .def(nb::init<>())
+        .def_rw("schema_version", &LvsMismatch::schemaVersion)
+        .def_rw("category", &LvsMismatch::category)
+        .def_rw("message", &LvsMismatch::message)
+        .def_rw("severity", &LvsMismatch::severity)
+        .def_rw("schematic_object", &LvsMismatch::schematicObject)
+        .def_rw("layout_object", &LvsMismatch::layoutObject);
+
+    nb::class_<LvsOptions>(module, "LvsOptions")
+        .def(nb::init<>())
+        .def_rw("compare_parameters", &LvsOptions::compareParameters);
+
+    nb::class_<LvsReport>(module, "LvsReport")
+        .def(nb::init<>())
+        .def_rw("schema_version", &LvsReport::schemaVersion)
+        .def_rw("schematic", &LvsReport::schematic)
+        .def_rw("layout", &LvsReport::layout)
+        .def_rw("mismatches", &LvsReport::mismatches)
+        .def_prop_ro("matched", &LvsReport::matched);
+
+    module.def("schematic_for_layout", &schematicForLayout, nb::arg("project"), nb::arg("layout"));
+    module.def("run_lvs", &runLvs, nb::arg("project"), nb::arg("schematic"), nb::arg("layout"),
+               nb::arg("options") = LvsOptions{});
+    module.def("lvs_report_json", &serializeLvsReport, nb::arg("report"));
+    module.def(
+        "run_lvs_named",
+        [](const Project &project, const std::string &schematicName, const std::string &layoutName) {
+            ObjectId schematic = 0;
+            ObjectId layout = 0;
+            for (const auto &[id, cell] : project.schematicCells) {
+                if (cell.name == schematicName) {
+                    schematic = id;
+                    break;
+                }
+            }
+            for (const auto &[id, cell] : project.layoutCells) {
+                if (cell.name == layoutName) {
+                    layout = id;
+                    break;
+                }
+            }
+            if (schematic == 0)
+                throw ProjectError("icepy.schematic", "Unknown schematic: " + schematicName);
+            if (layout == 0)
+                throw ProjectError("icepy.layout", "Unknown layout: " + layoutName);
+            return runLvs(project, schematic, layout);
+        },
+        nb::arg("project"), nb::arg("schematic"), nb::arg("layout"));
 
     module.def("load_project", [](const std::string &path) { return Project::load(path); });
     module.def("new_project", [](const std::string &name) {

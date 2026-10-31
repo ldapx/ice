@@ -356,8 +356,8 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             pinDevices[pin.id].push_back(deviceId);
     }
 
-    std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
     for (const auto &[_, net] : schematic.nets) {
+        std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
         std::vector<ObjectId> devices;
         for (const auto pinId : net.pins) {
             const auto entry = pinDevices.find(pinId);
@@ -384,6 +384,18 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     }
     return layoutId;
 }
+std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
+    std::set<std::string> names;
+    for (const auto &[_, shape] : cell.shapes)
+        if (!shape.name.empty())
+            names.insert(shape.name);
+    for (int index = 1;; ++index) {
+        auto name = type + " " + std::to_string(index);
+        if (!names.contains(name))
+            return name;
+    }
+}
+
 ObjectId addLayer(Project &project, std::string name, int number) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
@@ -401,9 +413,33 @@ ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect 
     if (!project.layers.contains(layerId))
         throw ProjectError("layout.layer", "Layer does not exist");
     ObjectId id = project.nextId();
-    cell.shapes.emplace(id, Shape{id, layerId, net, rectangle});
+    Shape shape{id, layerId, net, rectangle};
+    shape.name = nextShapeName(cell, "Rectangle");
+    cell.shapes.emplace(id, std::move(shape));
     return id;
 }
+ObjectId addText(Project &project, ObjectId cellId, ObjectId layerId, Coordinate x, Coordinate y, std::string text,
+                 Coordinate height, std::optional<ObjectId> net) {
+    if (text.empty())
+        throw ProjectError("layout.text", "Text must not be empty");
+    if (height <= 0)
+        throw ProjectError("layout.text", "Text height must be positive");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (!project.layers.contains(layerId))
+        throw ProjectError("layout.layer", "Layer does not exist");
+    const auto grid = std::max<Coordinate>(1, project.grid);
+    const auto snappedHeight = ((height + grid - 1) / grid) * grid;
+    const auto estimatedWidth = static_cast<Coordinate>(
+        std::llround(static_cast<double>(text.size()) * static_cast<double>(snappedHeight) * 0.6));
+    const auto width = std::max(grid, ((estimatedWidth + grid - 1) / grid) * grid);
+    const auto id = project.nextId();
+    Shape shape{id, layerId, net, {x, y, width, snappedHeight}, {}};
+    shape.text = std::move(text);
+    shape.name = nextShapeName(cell, "Text");
+    cell.shapes.emplace(id, std::move(shape));
+    return id;
+}
+
 ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const std::vector<LayoutPoint> &points,
                     std::optional<ObjectId> net) {
     if (points.size() < 3)
@@ -424,7 +460,9 @@ ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const s
     if (maxX <= minX || maxY <= minY)
         throw ProjectError("layout.polygon", "Polygon must have a positive bounding box");
     ObjectId id = project.nextId();
-    cell.shapes.emplace(id, Shape{id, layerId, net, Rect{minX, minY, maxX - minX, maxY - minY}, points});
+    Shape shape{id, layerId, net, Rect{minX, minY, maxX - minX, maxY - minY}, points};
+    shape.name = nextShapeName(cell, "Polygon");
+    cell.shapes.emplace(id, std::move(shape));
     return id;
 }
 ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle) {
@@ -474,6 +512,152 @@ void resizeRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Rect r
     if (!shape.polygon.empty())
         throw ProjectError("layout.shape", "Only rectangular shapes can be resized");
     shape.rectangle = rectangle;
+}
+
+void movePolygonPoint(Project &project, ObjectId cellId, ObjectId shapeId, std::size_t index, LayoutPoint point) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &shape = require(cell.shapes, shapeId, "layout.shape", "Shape does not exist");
+    if (shape.isPath() || shape.polygon.size() < 3)
+        throw ProjectError("layout.shape", "Only polygon shapes can have points edited");
+    if (index >= shape.polygon.size())
+        throw ProjectError("layout.shape", "Polygon point index is out of range");
+    shape.polygon[index] = point;
+    Coordinate minX = std::numeric_limits<Coordinate>::max();
+    Coordinate minY = std::numeric_limits<Coordinate>::max();
+    Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+    Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+    for (const auto &polygonPoint : shape.polygon) {
+        minX = std::min(minX, polygonPoint.x);
+        minY = std::min(minY, polygonPoint.y);
+        maxX = std::max(maxX, polygonPoint.x);
+        maxY = std::max(maxY, polygonPoint.y);
+    }
+    shape.rectangle = {minX, minY, std::max<Coordinate>(1, maxX - minX), std::max<Coordinate>(1, maxY - minY)};
+}
+
+std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                          BooleanOperation operation) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (shapeIds.size() < 2)
+        throw ProjectError("layout.boolean", "Select at least two shapes for a boolean operation");
+
+    std::vector<Shape *> operands;
+    std::optional<ObjectId> layer;
+    std::optional<ObjectId> net;
+    bool firstNet = true;
+    std::set<ObjectId> seen;
+    for (const auto id : shapeIds) {
+        if (!seen.insert(id).second)
+            continue;
+        auto shapeIt = cell.shapes.find(id);
+        if (shapeIt == cell.shapes.end())
+            throw ProjectError("layout.shape", "Shape does not exist");
+        auto &shape = shapeIt->second;
+        if (shape.isPath() || shape.isText())
+            throw ProjectError("layout.boolean", "Boolean operations support rectangles and polygons only");
+        if (shape.polygon.empty() && !shape.rectangle.valid())
+            throw ProjectError("layout.shape", "Shape does not contain a valid filled outline");
+        if (layer && *layer != shape.layer)
+            throw ProjectError("layout.boolean", "Select shapes on the same layer");
+        layer = shape.layer;
+        if (firstNet) {
+            net = shape.net;
+            firstNet = false;
+        } else if (net != shape.net) {
+            net.reset();
+        }
+        operands.push_back(&shape);
+    }
+    if (operands.size() < 2)
+        throw ProjectError("layout.boolean", "Select at least two shapes for a boolean operation");
+
+    const auto outline = [](const Shape &shape) {
+        if (shape.polygon.size() >= 3)
+            return shape.polygon;
+        return std::vector<LayoutPoint>{
+            {shape.rectangle.x, shape.rectangle.y},
+            {shape.rectangle.x + shape.rectangle.width, shape.rectangle.y},
+            {shape.rectangle.x + shape.rectangle.width, shape.rectangle.y + shape.rectangle.height},
+            {shape.rectangle.x, shape.rectangle.y + shape.rectangle.height}};
+    };
+    const auto toPolygon = [&](const Shape &shape) {
+        Polygon polygon;
+        const auto points = outline(shape);
+        polygon.reserve(points.size());
+        for (const auto &point : points)
+            polygon.push_back({point.x, point.y});
+        return polygon;
+    };
+
+    GeometryKernel kernel;
+    MultiPolygon result;
+    switch (operation) {
+    case BooleanOperation::union_: {
+        MultiPolygon polygons;
+        polygons.reserve(operands.size());
+        for (const auto *shape : operands)
+            polygons.push_back(toPolygon(*shape));
+        result = kernel.booleanOp(polygons, {}, BooleanOperation::union_);
+        break;
+    }
+    case BooleanOperation::intersection:
+        result = {toPolygon(*operands.front())};
+        for (std::size_t index = 1; index < operands.size() && !result.empty(); ++index)
+            result = kernel.booleanOp(result, {toPolygon(*operands[index])}, BooleanOperation::intersection);
+        break;
+    case BooleanOperation::difference: {
+        MultiPolygon clips;
+        clips.reserve(operands.size() - 1);
+        for (std::size_t index = 1; index < operands.size(); ++index)
+            clips.push_back(toPolygon(*operands[index]));
+        if (clips.size() > 1)
+            clips = kernel.booleanOp(clips, {}, BooleanOperation::union_);
+        result = kernel.booleanOp({toPolygon(*operands.front())}, clips, BooleanOperation::difference);
+        break;
+    }
+    case BooleanOperation::xor_:
+        result = {toPolygon(*operands.front())};
+        for (std::size_t index = 1; index < operands.size() && !result.empty(); ++index)
+            result = kernel.booleanOp(result, {toPolygon(*operands[index])}, BooleanOperation::xor_);
+        break;
+    }
+
+    result = kernel.cleanup(result);
+    if (result.empty())
+        throw ProjectError("layout.boolean", "Boolean operation produced no geometry");
+
+    std::string type;
+    switch (operation) {
+    case BooleanOperation::union_:
+        type = "Union";
+        break;
+    case BooleanOperation::difference:
+        type = "Difference";
+        break;
+    case BooleanOperation::intersection:
+        type = "Intersection";
+        break;
+    case BooleanOperation::xor_:
+        type = "Xor";
+        break;
+    }
+
+    for (const auto &shape : operands)
+        cell.shapes.erase(shape->id);
+    std::vector<ObjectId> resultIds;
+    resultIds.reserve(result.size());
+    for (const auto &polygon : result) {
+        const auto id = project.nextId();
+        std::vector<LayoutPoint> points;
+        points.reserve(polygon.size());
+        for (const auto &point : polygon)
+            points.push_back({point.x, point.y});
+        Shape shape{id, *layer, net, GeometryKernel::bounds(polygon), std::move(points)};
+        shape.name = nextShapeName(cell, type);
+        cell.shapes.emplace(id, std::move(shape));
+        resultIds.push_back(id);
+    }
+    return resultIds;
 }
 
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,

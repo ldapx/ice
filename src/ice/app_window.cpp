@@ -10,6 +10,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/verification.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
 #include "properties_panel.hpp"
@@ -46,7 +47,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
+#include <QFont>
 #include <QFontDatabase>
+#include <QFontMetricsF>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsColorizeEffect>
@@ -57,6 +60,7 @@
 #include <QGraphicsPolygonItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
+#include <QGraphicsSimpleTextItem>
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGuiApplication>
@@ -80,6 +84,7 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStringList>
@@ -2139,6 +2144,7 @@ class DocumentWindow : public QMainWindow {
                 if (!append) {
                     const auto shapeId = project.nextId();
                     ice::Shape path{shapeId, layerId, std::nullopt, {}, {}};
+                    path.name = ice::nextShapeName(cell, "Path");
                     path.centerline = {startPoint, endPoint};
                     path.segmentLayers = {layerId};
                     path.pointVias = {{}, {}};
@@ -2181,6 +2187,271 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
+    void selectLayoutShapeItem(ice::ObjectId shapeId) {
+        if (!layoutCanvas_ || shapeId == 0 ||
+            (layoutCanvas_->currentTool() != LayoutCanvas::Tool::select &&
+             layoutCanvas_->currentTool() != LayoutCanvas::Tool::move))
+            return;
+        for (auto *item : layoutCanvas_->scene()->items()) {
+            if (item->data(0).toULongLong() != shapeId)
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                !item->data(0).isValid())
+                continue;
+            layoutCanvas_->scene()->clearSelection();
+            item->setSelected(true);
+            break;
+        }
+    }
+
+    std::vector<ice::ObjectId> selectedLayoutShapeIds() const {
+        std::vector<ice::ObjectId> result;
+        if (!project_ || !layoutCanvas_ || activeLayoutId_ == 0)
+            return result;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end())
+            return result;
+        for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                !item->data(0).isValid())
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id == 0 || !cellIt->second.shapes.contains(id))
+                continue;
+            if (std::find(result.begin(), result.end(), id) == result.end())
+                result.push_back(id);
+        }
+        std::sort(result.begin(), result.end());
+        return result;
+    }
+
+    void selectLayoutShapeItems(const std::vector<ice::ObjectId> &shapeIds) {
+        if (!layoutCanvas_ || shapeIds.empty() ||
+            (layoutCanvas_->currentTool() != LayoutCanvas::Tool::select &&
+             layoutCanvas_->currentTool() != LayoutCanvas::Tool::move))
+            return;
+        layoutCanvas_->scene()->clearSelection();
+        for (auto *item : layoutCanvas_->scene()->items()) {
+            if (!item->data(0).isValid())
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (std::find(shapeIds.begin(), shapeIds.end(), id) != shapeIds.end())
+                item->setSelected(true);
+        }
+    }
+
+    void refreshLayoutBooleanActions() {
+        bool enabled = false;
+        if (project_ && activeLayoutId_ != 0) {
+            const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+            if (cellIt != project_->project().layoutCells.end() && !cellIt->second.library) {
+                const auto ids = selectedLayoutShapeIds();
+                if (ids.size() >= 2) {
+                    enabled = true;
+                    std::optional<ice::ObjectId> layer;
+                    for (const auto id : ids) {
+                        const auto shapeIt = cellIt->second.shapes.find(id);
+                        if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.isPath() ||
+                            shapeIt->second.isText() || (layer && *layer != shapeIt->second.layer)) {
+                            enabled = false;
+                            break;
+                        }
+                        layer = shapeIt->second.layer;
+                    }
+                }
+            }
+        }
+        for (auto *action : {layoutUnionTool_, layoutIntersectionTool_, layoutDifferenceTool_, layoutXorTool_}) {
+            if (action)
+                action->setEnabled(enabled);
+        }
+    }
+
+    void applyLayoutBoolean(ice::BooleanOperation operation) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto shapeIds = selectedLayoutShapeIds();
+        if (shapeIds.size() < 2) {
+            statusBar()->showMessage(QStringLiteral("Select at least two rectangles or polygons on one layer"));
+            return;
+        }
+
+        QString name;
+        switch (operation) {
+        case ice::BooleanOperation::union_:
+            name = QStringLiteral("Union");
+            break;
+        case ice::BooleanOperation::difference:
+            name = QStringLiteral("Difference");
+            break;
+        case ice::BooleanOperation::intersection:
+            name = QStringLiteral("Intersection");
+            break;
+        case ice::BooleanOperation::xor_:
+            name = QStringLiteral("Xor");
+            break;
+        }
+
+        std::vector<ice::ObjectId> resultIds;
+        try {
+            project_->execute(name.toLower().toStdString() + " layout shapes", [&](ice::Project &project) {
+                resultIds = ice::booleanLayoutShapes(project, activeLayoutId_, shapeIds, operation);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, name, QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("%1: %2 shapes → %3 polygon%4")
+                                     .arg(name)
+                                     .arg(shapeIds.size())
+                                     .arg(resultIds.size())
+                                     .arg(resultIds.size() == 1 ? QString() : QStringLiteral("s")));
+        QTimer::singleShot(0, this, [this, resultIds] { selectLayoutShapeItems(resultIds); });
+    }
+
+    void moveLayoutPolygonPoint(ice::ObjectId shapeId, int index, QPointF position) {
+        if (!project_ || activeLayoutId_ == 0 || index < 0)
+            return;
+        const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
+        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
+        try {
+            project_->execute("move layout polygon point", [&](ice::Project &project) {
+                ice::movePolygonPoint(project, activeLayoutId_, shapeId, static_cast<std::size_t>(index), {x, y});
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Edit Polygon"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        QTimer::singleShot(0, this, [this, shapeId] { selectLayoutShapeItem(shapeId); });
+    }
+
+    void resizeLayoutRectangle(ice::ObjectId shapeId, int width, int height) {
+        if (!project_ || activeLayoutId_ == 0 || shapeId == 0 || width <= 0 || height <= 0)
+            return;
+        try {
+            project_->execute("resize layout rectangle", [&](ice::Project &project) {
+                const auto cellIt = project.layoutCells.find(activeLayoutId_);
+                if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                    return;
+                const auto shapeIt = cellIt->second.shapes.find(shapeId);
+                if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.isPath() || shapeIt->second.isText() ||
+                    !shapeIt->second.polygon.empty())
+                    return;
+                const auto grid = std::max<ice::Coordinate>(1, project.grid);
+                auto rectangle = shapeIt->second.rectangle;
+                const auto requestedWidth = static_cast<ice::Coordinate>(width);
+                const auto requestedHeight = static_cast<ice::Coordinate>(height);
+                if (requestedWidth != rectangle.width)
+                    rectangle.width = std::max(grid, ((requestedWidth + grid - 1) / grid) * grid);
+                if (requestedHeight != rectangle.height)
+                    rectangle.height = std::max(grid, ((requestedHeight + grid - 1) / grid) * grid);
+                ice::resizeRectangle(project, activeLayoutId_, shapeId, rectangle);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Resize Rectangle"), QString::fromStdString(error.what()));
+            return;
+        }
+        QTimer::singleShot(0, this, [this, shapeId] {
+            refreshProject();
+            selectLayoutShapeItem(shapeId);
+        });
+    }
+
+    void addLayoutPolygon(const std::vector<QPointF> &points) {
+        if (!project_ || activeLayoutId_ == 0 || points.size() < 3)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        if (project_->project().layers.empty()) {
+            QMessageBox::information(this, QStringLiteral("Create Polygon"),
+                                     QStringLiteral("Create a layer before drawing polygons."));
+            return;
+        }
+        if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Create Polygon"),
+                                     QStringLiteral("Select a layer before drawing polygons."));
+            return;
+        }
+        const auto layerId =
+            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
+        std::vector<ice::LayoutPoint> modelPoints;
+        modelPoints.reserve(points.size());
+        for (const auto &point : points)
+            modelPoints.push_back({static_cast<ice::Coordinate>(std::lround(point.x())),
+                                   static_cast<ice::Coordinate>(std::lround(-point.y()))});
+        ice::ObjectId shapeId = 0;
+        try {
+            project_->execute("create layout polygon", [&](ice::Project &project) {
+                shapeId = ice::addPolygon(project, activeLayoutId_, layerId, modelPoints);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create Polygon"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        if (shapeId != 0)
+            QTimer::singleShot(0, this, [this, shapeId] { selectLayoutShapeItem(shapeId); });
+    }
+
+    void addLayoutText(QPointF position) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        if (project_->project().layers.empty()) {
+            QMessageBox::information(this, QStringLiteral("Draw Text"),
+                                     QStringLiteral("Create a layer before drawing text."));
+            return;
+        }
+        if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Draw Text"),
+                                     QStringLiteral("Select a layer before drawing text."));
+            return;
+        }
+        const auto layerId =
+            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
+        bool accepted = false;
+        const auto text = QInputDialog::getText(this, QStringLiteral("Draw Text"), QStringLiteral("Text:"),
+                                                QLineEdit::Normal, QString(), &accepted);
+        if (!accepted || text.trimmed().isEmpty())
+            return;
+        const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
+        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
+        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
+        const auto height = ((layoutTextHeight_ + grid - 1) / grid) * grid;
+        QFont font;
+        font.setPixelSize(std::max(1, static_cast<int>(height)));
+        const QFontMetricsF metrics(font);
+        const auto width = std::max<ice::Coordinate>(
+            grid, static_cast<ice::Coordinate>(std::ceil(metrics.horizontalAdvance(text) / grid)) * grid);
+        try {
+            project_->execute("create layout text", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                const auto shapeId = project.nextId();
+                ice::Shape shape{shapeId, layerId, std::nullopt, {x, y, width, height}, {}};
+                shape.name = ice::nextShapeName(cell, "Text");
+                shape.text = text.toStdString();
+                cell.shapes.emplace(shapeId, std::move(shape));
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Draw Text"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
     void removeSchematic(ice::ObjectId cellId) {
         if (!project_ || cellId == 0)
             return;
@@ -2209,6 +2480,121 @@ class DocumentWindow : public QMainWindow {
             activeSchematicId_ = 0;
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Schematic '%1' removed").arg(name));
+    }
+
+    static bool layoutNameExists(const ice::Project &project, const std::string &name, ice::ObjectId exceptCell,
+                                 ice::ObjectId exceptProcedural) {
+        for (const auto &[id, cell] : project.layoutCells)
+            if (id != exceptCell && cell.name == name)
+                return true;
+        for (const auto &[id, procedural] : project.proceduralLayouts)
+            if (id != exceptProcedural && procedural.name == name)
+                return true;
+        return false;
+    }
+
+    void renameLayoutCell(ice::ObjectId cellId, const std::string &name) {
+        if (!project_ || cellId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename layout", [&](ice::Project &project) {
+                const auto cellIt = project.layoutCells.find(cellId);
+                if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                    return;
+                if (layoutNameExists(project, name, cellId, 0))
+                    throw ice::ProjectError("layout.name", "A layout with this name already exists");
+                cellIt->second.name = name;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Rename Layout"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
+    void renameProceduralLayout(ice::ObjectId proceduralId, const std::string &name) {
+        if (!project_ || proceduralId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename procedural layout", [&](ice::Project &project) {
+                const auto proceduralIt = project.proceduralLayouts.find(proceduralId);
+                if (proceduralIt == project.proceduralLayouts.end())
+                    return;
+                if (layoutNameExists(project, name, 0, proceduralId))
+                    throw ice::ProjectError("layout.name", "A layout with this name already exists");
+                proceduralIt->second.name = name;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Rename Script"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
+    void renameLayoutInstance(ice::ObjectId cellId, ice::ObjectId instanceId, const std::string &name) {
+        if (!project_ || cellId == 0 || instanceId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename layout instance", [&](ice::Project &project) {
+                const auto cellIt = project.layoutCells.find(cellId);
+                if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                    return;
+                const auto instanceIt = cellIt->second.instances.find(instanceId);
+                if (instanceIt == cellIt->second.instances.end())
+                    return;
+                for (const auto &[id, instance] : cellIt->second.instances)
+                    if (id != instanceId && instance.name == name)
+                        throw ice::ProjectError("layout.instance.name", "An instance with this name already exists");
+                instanceIt->second.name = name;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Rename Instance"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
+    void renameLayoutPlannedDevice(ice::ObjectId cellId, ice::ObjectId deviceId, const std::string &name) {
+        if (!project_ || cellId == 0 || deviceId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename planned device", [&](ice::Project &project) {
+                const auto cellIt = project.layoutCells.find(cellId);
+                if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                    return;
+                const auto deviceIt = cellIt->second.plannedDevices.find(deviceId);
+                if (deviceIt == cellIt->second.plannedDevices.end())
+                    return;
+                for (const auto &[id, device] : cellIt->second.plannedDevices)
+                    if (id != deviceId && device.name == name)
+                        throw ice::ProjectError("layout.device.name", "A device with this name already exists");
+                deviceIt->second.name = name;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Rename Device"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+    }
+
+    void renameLayoutShape(ice::ObjectId cellId, ice::ObjectId shapeId, const std::string &name) {
+        if (!project_ || cellId == 0 || shapeId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename layout shape", [&](ice::Project &project) {
+                const auto cellIt = project.layoutCells.find(cellId);
+                if (cellIt == project.layoutCells.end() || cellIt->second.library)
+                    return;
+                const auto shapeIt = cellIt->second.shapes.find(shapeId);
+                if (shapeIt == cellIt->second.shapes.end())
+                    return;
+                shapeIt->second.name = name;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Rename Shape"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
     }
 
     void removeLayoutCell(ice::ObjectId cellId) {
@@ -2384,6 +2770,8 @@ class DocumentWindow : public QMainWindow {
         layoutCanvas_->scene()->clear();
         const auto &project = project_->project();
         layoutCanvas_->setGridSpacing(static_cast<qreal>(project.grid));
+        if (gridStatusLabel_)
+            gridStatusLabel_->setText(QStringLiteral("Grid: %1").arg(project.grid));
         auto cellIt = project.layoutCells.find(activeLayoutId_);
         if (cellIt == project.layoutCells.end()) {
             if (project.layoutCells.empty()) {
@@ -2400,10 +2788,16 @@ class DocumentWindow : public QMainWindow {
         const bool readOnly = cellIt->second.library;
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
+        if (layoutMoveTool_)
+            layoutMoveTool_->setEnabled(!readOnly);
         if (layoutRectangleTool_)
             layoutRectangleTool_->setEnabled(!readOnly);
         if (layoutPathTool_)
             layoutPathTool_->setEnabled(!readOnly && !project.layers.empty());
+        if (layoutPolygonTool_)
+            layoutPolygonTool_->setEnabled(!readOnly && !project.layers.empty());
+        if (layoutTextTool_)
+            layoutTextTool_->setEnabled(!readOnly && !project.layers.empty());
         if (layoutDeleteTool_)
             layoutDeleteTool_->setEnabled(!readOnly);
         if (layoutCanvas_) {
@@ -2441,7 +2835,17 @@ class DocumentWindow : public QMainWindow {
             if (style.pattern == Qt::NoBrush)
                 brush = QBrush(Qt::NoBrush);
             QGraphicsItem *item = nullptr;
-            if (shape.isPath()) {
+            if (shape.isText()) {
+                auto *textItem = new QGraphicsSimpleTextItem(QString::fromStdString(shape.text));
+                QFont font = textItem->font();
+                font.setPixelSize(std::max(1, static_cast<int>(shape.rectangle.height)));
+                textItem->setFont(font);
+                textItem->setBrush(QBrush(style.color));
+                textItem->setPos(shape.rectangle.x, -shape.rectangle.y - shape.rectangle.height);
+                textItem->setZValue(2.0);
+                item = textItem;
+                layoutCanvas_->scene()->addItem(item);
+            } else if (shape.isPath()) {
                 std::vector<QPointF> points;
                 points.reserve(shape.centerline.size());
                 for (const auto &point : shape.centerline)
@@ -2495,21 +2899,24 @@ class DocumentWindow : public QMainWindow {
                 item->setFlag(QGraphicsItem::ItemIsSelectable);
                 item->setFlag(QGraphicsItem::ItemIsMovable);
             }
-            if (shape.polygon.empty() && !readOnly) {
-                const auto rect = static_cast<QGraphicsRectItem *>(item)->rect();
-                for (int corner = 0; corner < 4; ++corner) {
-                    const QPointF point = corner == 0 ? rect.topLeft() : corner == 1 ? rect.topRight()
-                                              : corner == 2 ? rect.bottomLeft()
-                                                            : rect.bottomRight();
-                    auto *handle = layoutCanvas_->scene()->addRect(-6.0, -6.0, 12.0, 12.0,
-                                                                      QPen(ice::uiColor(ice::UiColor::Accent1)),
-                                                                      QBrush(ice::uiColor(ice::UiColor::Accent1)));
-                    handle->setPos(point);
-                    handle->setData(3, QStringLiteral("resize-handle"));
-                    handle->setData(4, QVariant::fromValue<qulonglong>(id));
-                    handle->setData(5, corner);
-                    handle->setZValue(20.0);
-                    handle->setVisible(false);
+            if (shape.polygon.empty() && !shape.isText() && !shape.isPath() && !readOnly) {
+                if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(item)) {
+                    const auto rect = rectItem->rect();
+                    for (int handle = 0; handle < 8; ++handle) {
+                        auto *resizeHandle = createLayoutResizeHandleItem(id, handle);
+                        resizeHandle->setPos(layoutResizeHandlePosition(rect, handle));
+                        layoutCanvas_->scene()->addItem(resizeHandle);
+                    }
+                }
+            }
+            if (shape.polygon.size() >= 3 && !shape.isPath() && !shape.isText() && !readOnly) {
+                if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item)) {
+                    const auto polygon = polygonItem->polygon();
+                    for (int index = 0; index < polygon.size(); ++index) {
+                        auto *vertexHandle = createLayoutPolygonHandleItem(id, index);
+                        vertexHandle->setPos(polygon[index]);
+                        layoutCanvas_->scene()->addItem(vertexHandle);
+                    }
                 }
             }
             item->setToolTip(readOnly ? QStringLiteral("Library cell shape %1").arg(id)
@@ -2660,6 +3067,7 @@ class DocumentWindow : public QMainWindow {
                                                                           plannedRect(device), readOnly));
         }
         layoutCanvas_->restoreLayoutInstanceSelection();
+        layoutCanvas_->refreshInteractionState();
         if (!layoutViewInitialized_) {
             layoutCanvas_->fitToContent();
             layoutViewInitialized_ = true;
@@ -2767,7 +3175,16 @@ class DocumentWindow : public QMainWindow {
                     }
                     const auto centerX = (minX + maxX) * 0.5;
                     const auto centerY = (minY + maxY) * 0.5;
-                    if (shape.polygon.empty()) {
+                    if (shape.isText()) {
+                        // Layout text stays horizontal; rotate its anchor with
+                        // the selected group without swapping its font size.
+                        const auto textCenterX = shape.rectangle.x + shape.rectangle.width * 0.5;
+                        const auto textCenterY = shape.rectangle.y + shape.rectangle.height * 0.5;
+                        const auto x = textCenterX - centerX;
+                        const auto y = textCenterY - centerY;
+                        shape.rectangle.x = centerX - y - shape.rectangle.width * 0.5;
+                        shape.rectangle.y = centerY + x - shape.rectangle.height * 0.5;
+                    } else if (shape.polygon.empty()) {
                         std::swap(shape.rectangle.width, shape.rectangle.height);
                         shape.rectangle.x = centerX - shape.rectangle.width * 0.5;
                         shape.rectangle.y = centerY - shape.rectangle.height * 0.5;
@@ -2794,6 +3211,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     void refreshLayoutProperties(bool bringToFront = false) {
+        refreshLayoutBooleanActions();
         if (!layoutPropertiesPanel_)
             return;
         if (layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path) {
@@ -2802,7 +3220,9 @@ class DocumentWindow : public QMainWindow {
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             return;
         }
-        if (project_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::select) {
+        if (project_ && layoutCanvas_ &&
+            (layoutCanvas_->currentTool() == LayoutCanvas::Tool::select ||
+             layoutCanvas_->currentTool() == LayoutCanvas::Tool::move)) {
             const auto instanceId = layoutCanvas_->selectedLayoutInstance();
             if (instanceId != 0) {
                 const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
@@ -2823,8 +3243,55 @@ class DocumentWindow : public QMainWindow {
                     }
                 }
             }
+
+            const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
+            if (activeIt != project_->project().layoutCells.end()) {
+                ice::ObjectId selectedShapeId = 0;
+                bool multipleShapes = false;
+                for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+                    const auto kind = item->data(3).toString();
+                    if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                        continue;
+                    const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+                    if (id == 0 || !activeIt->second.shapes.contains(id))
+                        continue;
+                    if (selectedShapeId != 0 && selectedShapeId != id) {
+                        multipleShapes = true;
+                        break;
+                    }
+                    selectedShapeId = id;
+                }
+                if (!multipleShapes && selectedShapeId != 0) {
+                    const auto shapeIt = activeIt->second.shapes.find(selectedShapeId);
+                    if (shapeIt != activeIt->second.shapes.end()) {
+                        const auto &shape = shapeIt->second;
+                        QString typeName;
+                        if (shape.isText())
+                            typeName = QStringLiteral("Text");
+                        else if (shape.isPath())
+                            typeName = QStringLiteral("Path");
+                        else if (!shape.polygon.empty())
+                            typeName = QStringLiteral("Polygon");
+                        else
+                            typeName = QStringLiteral("Rectangle");
+                        const auto displayName = shape.name.empty()
+                                                     ? QStringLiteral("%1 #%2").arg(typeName).arg(selectedShapeId)
+                                                     : QString::fromStdString(shape.name);
+                        QString layerName;
+                        if (const auto layerIt = project_->project().layers.find(shape.layer);
+                            layerIt != project_->project().layers.end())
+                            layerName = QString::fromStdString(layerIt->second.name);
+                        layoutPropertiesPanel_->setLayoutShape(shape, layerName.toStdString(),
+                                                               displayName.toStdString(), typeName.toStdString());
+                        if (bringToFront && layoutRightTabs_)
+                            layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                        return;
+                    }
+                }
+            }
         }
-        if (layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+        if (layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_ &&
+            selectedLayoutDevice_) {
             layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
             return;
         }
@@ -2835,9 +3302,12 @@ class DocumentWindow : public QMainWindow {
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt != project_->project().layoutCells.end()) {
             std::optional<ice::LayoutDeviceCell> preview;
-            if (cellIt->second.library && !cellIt->second.device.empty() && layoutDevicesPanel_)
+            if (layoutDevicesPanel_)
                 preview = makeLayoutCellPreview(project_->project(), cellIt->second, layoutDevicesPanel_->library());
-            layoutPropertiesPanel_->setLayoutCell(cellIt->second, preview ? &*preview : nullptr);
+            layoutPropertiesPanel_->setLayoutOverview(cellIt->second, preview ? &*preview : nullptr,
+                                                      static_cast<int>(project_->project().grid));
+            if (bringToFront && layoutRightTabs_)
+                layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
         } else {
             layoutPropertiesPanel_->clearSelection();
         }
@@ -4872,6 +5342,98 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("DRC failed"));
     }
 
+    void runLvs() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Run LVS"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto &project = project_->project();
+        if (project.layoutCells.empty()) {
+            QMessageBox::information(this, QStringLiteral("Run LVS"),
+                                     QStringLiteral("Create or import a layout cell first."));
+            return;
+        }
+        if (project.schematicCells.empty()) {
+            QMessageBox::information(this, QStringLiteral("Run LVS"), QStringLiteral("Create a schematic cell first."));
+            return;
+        }
+
+        auto layoutId = activeLayoutId_;
+        if (!project.layoutCells.contains(layoutId))
+            layoutId = project.layoutCells.begin()->first;
+        const auto &layout = project.layoutCells.at(layoutId);
+        if (layout.library) {
+            QMessageBox::information(this, QStringLiteral("Run LVS"),
+                                     QStringLiteral("LVS compares user layout cells, not library cells."));
+            return;
+        }
+
+        auto schematicId = ice::schematicForLayout(project, layoutId);
+        if (schematicId == 0) {
+            std::vector<std::pair<QString, ice::ObjectId>> choices;
+            choices.reserve(project.schematicCells.size());
+            for (const auto &[id, cell] : project.schematicCells)
+                choices.emplace_back(QString::fromStdString(cell.name), id);
+            std::sort(choices.begin(), choices.end(),
+                      [](const auto &left, const auto &right) { return left.first < right.first; });
+            QStringList names;
+            int current = 0;
+            for (std::size_t index = 0; index < choices.size(); ++index) {
+                names << choices[index].first;
+                if (choices[index].second == activeSchematicId_)
+                    current = static_cast<int>(index);
+            }
+            bool accepted = false;
+            const auto selected = QInputDialog::getItem(this, QStringLiteral("Run LVS"), QStringLiteral("Schematic:"),
+                                                        names, current, false, &accepted);
+            if (!accepted)
+                return;
+            schematicId = choices[static_cast<std::size_t>(names.indexOf(selected))].second;
+        }
+
+        try {
+            const auto report = ice::runLvs(project, schematicId, layoutId);
+            if (activityPanel_)
+                activityPanel_->setLvsReport(report);
+            if (activityDock_)
+                activityDock_->show();
+            if (activityPanel_)
+                activityPanel_->showLvsTab();
+
+            int errors = 0;
+            int warnings = 0;
+            for (const auto &mismatch : report.mismatches) {
+                if (mismatch.severity == ice::VerificationSeverity::error)
+                    ++errors;
+                else if (mismatch.severity == ice::VerificationSeverity::warning)
+                    ++warnings;
+            }
+            if (report.matched()) {
+                statusBar()->showMessage(
+                    QStringLiteral("LVS matched: %1 vs %2")
+                        .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout)));
+            } else {
+                statusBar()->showMessage(
+                    QStringLiteral("LVS completed: %1 error(s), %2 warning(s)").arg(errors).arg(warnings));
+            }
+        } catch (const ice::ProjectError &error) {
+            const auto message = QString::fromStdString(error.what());
+            if (activityPanel_)
+                activityPanel_->setLvsError(message);
+            if (activityDock_)
+                activityDock_->show();
+            QMessageBox::critical(this, QStringLiteral("Run LVS"), message);
+        } catch (const std::exception &error) {
+            const auto message = QString::fromUtf8(error.what());
+            if (activityPanel_)
+                activityPanel_->setLvsError(message);
+            if (activityDock_)
+                activityDock_->show();
+            QMessageBox::critical(this, QStringLiteral("Run LVS"), message);
+        }
+    }
+
     void refreshProject() {
         if (!project_)
             return;
@@ -5765,7 +6327,8 @@ class DocumentWindow : public QMainWindow {
         toolsMenu->addAction(simulationAction);
         auto *drcAction = addCommand(QStringLiteral("Run DRC"));
         toolsMenu->addAction(drcAction);
-        toolsMenu->addAction(addCommand(QStringLiteral("Run LVS")));
+        auto *lvsAction = addCommand(QStringLiteral("Run LVS"));
+        toolsMenu->addAction(lvsAction);
         toolsMenu->addAction(addCommand(QStringLiteral("Run PEX")));
         toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
 
@@ -5811,6 +6374,7 @@ class DocumentWindow : public QMainWindow {
         connect(placeSymbolAction, &QAction::triggered, this, &DocumentWindow::placeSymbol);
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
         connect(drcAction, &QAction::triggered, this, &DocumentWindow::runDrc);
+        connect(lvsAction, &QAction::triggered, this, &DocumentWindow::runLvs);
         connect(systemAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::System); });
         connect(lightAppearanceAction, &QAction::triggered, this,
@@ -6107,6 +6671,22 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutItem(id); });
         layoutHierarchy_->setOnActivateLayout([this](ice::ObjectId id) { selectLayoutTab(id); });
         layoutHierarchy_->setOnRegenerateProceduralLayout([this](ice::ObjectId id) { regenerateProceduralLayout(id); });
+        layoutHierarchy_->setOnRenameLayout(
+            [this](ice::ObjectId id, const std::string &name) { renameLayoutCell(id, name); });
+        layoutHierarchy_->setOnRenameProceduralLayout(
+            [this](ice::ObjectId id, const std::string &name) { renameProceduralLayout(id, name); });
+        layoutHierarchy_->setOnRenameInstance(
+            [this](ice::ObjectId cellId, ice::ObjectId instanceId, const std::string &name) {
+                renameLayoutInstance(cellId, instanceId, name);
+            });
+        layoutHierarchy_->setOnRenamePlannedDevice(
+            [this](ice::ObjectId cellId, ice::ObjectId deviceId, const std::string &name) {
+                renameLayoutPlannedDevice(cellId, deviceId, name);
+            });
+        layoutHierarchy_->setOnRenameShape(
+            [this](ice::ObjectId cellId, ice::ObjectId shapeId, const std::string &name) {
+                renameLayoutShape(cellId, shapeId, name);
+            });
         layoutLeftTabs_ = new QTabWidget;
         layoutLeftTabs_->addTab(layoutHierarchy_, QStringLiteral("Hierarchy"));
         layoutDevicesPanel_ = new LayoutDevicesPanel;
@@ -6167,6 +6747,17 @@ class DocumentWindow : public QMainWindow {
                 updateLayoutDeviceParameter(deviceName, name, value);
             });
         layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
+        layoutPropertiesPanel_->setOnGridSpacingChanged([this](int spacing) {
+            if (!project_ || spacing <= 0)
+                return;
+            project_->execute("set layout grid", [&](ice::Project &project) { project.grid = spacing; });
+            if (layoutCanvas_)
+                layoutCanvas_->setGridSpacing(spacing);
+            if (gridStatusLabel_)
+                gridStatusLabel_->setText(QStringLiteral("Grid: %1").arg(spacing));
+        });
+        layoutPropertiesPanel_->setOnLayoutShapeSizeChanged(
+            [this](ice::ObjectId shapeId, int width, int height) { resizeLayoutRectangle(shapeId, width, height); });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
         layersPanel_->setOnCreateLayer([this] { createLayer(); });
@@ -6865,6 +7456,10 @@ class DocumentWindow : public QMainWindow {
             view = schematicCanvas_;
         } else {
             layoutCanvas_ = createLayoutCanvas();
+            layoutCanvas_->setGridVisible(layoutGridVisible_);
+            layoutCanvas_->setSnapToGrid(layoutSnapToGrid_);
+            connect(layoutCanvas_->scene(), &QGraphicsScene::selectionChanged, this,
+                    [this] { refreshLayoutProperties(); });
             layoutCanvas_->setPathSegmentCallback([this](QPointF start, QPointF end, int width, ice::ObjectId layer,
                                                          const std::vector<ice::ObjectId> &viaLayers) {
                 addLayoutPathSegment(start, end, width, layer, viaLayers);
@@ -6877,6 +7472,11 @@ class DocumentWindow : public QMainWindow {
                     layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), name);
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
+            layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
+            layoutCanvas_->setPolygonCreatedCallback(
+                [this](const std::vector<QPointF> &points) { addLayoutPolygon(points); });
+            layoutCanvas_->setPolygonPointMovedCallback(
+                [this](ice::ObjectId id, int index, QPointF position) { moveLayoutPolygonPoint(id, index, position); });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
                     if (!project_ || project_->project().layers.empty()) {
@@ -6902,8 +7502,8 @@ class DocumentWindow : public QMainWindow {
                     if (project_->project().layoutCells.at(cellId).library)
                         return;
                     const auto rectangle = QRectF(first, second).normalized();
-                    const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_
-                                                                    : project_->project().layers.begin()->first;
+                    const auto layerId =
+                        activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
                     project_->execute("create layout rectangle", [&](ice::Project &project) {
                         ice::addRectangle(project, cellId, layerId,
                                           {static_cast<ice::Coordinate>(rectangle.left()),
@@ -6951,6 +7551,7 @@ class DocumentWindow : public QMainWindow {
                         ice::resizeRectangle(project, activeLayoutId_, objectId, rect);
                     });
                     refreshProject();
+                    QTimer::singleShot(0, this, [this, objectId] { selectLayoutShapeItem(objectId); });
                 },
                 [this](std::vector<ice::ObjectId> ids) {
                     if (!project_)
@@ -7010,6 +7611,19 @@ class DocumentWindow : public QMainWindow {
             selectTool->setChecked(true);
             layoutSelectTool_ = selectTool;
 
+            auto *moveTool = addTool(QStringLiteral("hand"), QStringLiteral("Move"));
+            moveTool->setCheckable(true);
+            moveTool->setToolTip(QStringLiteral("Move objects"));
+            moveTool->setStatusTip(QStringLiteral("Move objects"));
+            layoutMoveTool_ = moveTool;
+            connect(moveTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::move);
+                    layoutCanvas_->setFocus();
+                }
+                statusBar()->showMessage(QStringLiteral("Move: drag objects and instances"));
+            });
+
             auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Symbol"));
             placeSymbolTool->setCheckable(true);
             layoutPlaceDeviceTool_ = placeSymbolTool;
@@ -7019,32 +7633,54 @@ class DocumentWindow : public QMainWindow {
             layoutRectangleTool_ = rectangleTool;
 
             auto *polygonTool = addTool(QStringLiteral("pentagon"), QStringLiteral("Create Polygon"));
-            connect(polygonTool, &QAction::triggered, this,
-                    [this] { statusBar()->showMessage(QStringLiteral("Create Polygon is not available yet")); });
+            polygonTool->setCheckable(true);
+            layoutPolygonTool_ = polygonTool;
+            connect(polygonTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::polygon);
+                    layoutCanvas_->setFocus();
+                }
+                statusBar()->showMessage(
+                    QStringLiteral("Polygon: click vertices · double-click/Escape/Space = finish"));
+            });
 
             auto *pathTool = addTool(QStringLiteral("route"), QStringLiteral("Draw Path"));
             pathTool->setCheckable(true);
             layoutPathTool_ = pathTool;
 
             auto *textTool = addTool(QStringLiteral("type"), QStringLiteral("Draw Text"));
-            connect(textTool, &QAction::triggered, this,
-                    [this] { statusBar()->showMessage(QStringLiteral("Draw Text is not available yet")); });
+            textTool->setCheckable(true);
+            layoutTextTool_ = textTool;
+            connect(textTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::text);
+                    layoutCanvas_->setFocus();
+                }
+                QString message = QStringLiteral("Text: click to place text");
+                if (project_ && activeLayoutLayerId_ != 0) {
+                    if (const auto layer = project_->project().layers.find(activeLayoutLayerId_);
+                        layer != project_->project().layers.end())
+                        message += QStringLiteral(" on %1").arg(QString::fromStdString(layer->second.name));
+                }
+                message += QStringLiteral(" · height %1 nm").arg(layoutTextHeight_);
+                statusBar()->showMessage(message);
+            });
 
             auto *rulerTool = addTool(QStringLiteral("ruler"), QStringLiteral("Ruler"));
             rulerTool->setCheckable(true);
             layoutRulerTool_ = rulerTool;
-            connect(rulerTool, &QAction::triggered, this,
-                    [this] {
-                        if (layoutCanvas_) {
-                            layoutCanvas_->setTool(LayoutCanvas::Tool::ruler);
-                            layoutCanvas_->setFocus();
-                        }
-                        statusBar()->showMessage(QStringLiteral("Ruler: click point A, then point B"));
-                    });
+            connect(rulerTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::ruler);
+                    layoutCanvas_->setFocus();
+                }
+                statusBar()->showMessage(QStringLiteral("Ruler: click point A, then point B"));
+            });
 
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
-            for (auto *action : {selectTool, placeSymbolTool, rectangleTool, pathTool, rulerTool})
+            for (auto *action :
+                 {selectTool, moveTool, placeSymbolTool, rectangleTool, polygonTool, pathTool, rulerTool, textTool})
                 toolGroup->addAction(action);
 
             connect(selectTool, &QAction::triggered, this, [this] {
@@ -7095,6 +7731,15 @@ class DocumentWindow : public QMainWindow {
                         .arg(QString::fromStdString(layoutCanvas_->pathLayerName()))
                         .arg(layoutCanvas_->pathWidth()));
             });
+            toolbar->addSeparator();
+            auto *hierarchyUpTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Hierarchy Go Up"));
+            hierarchyUpTool->setToolTip(QStringLiteral("Go to the parent layout"));
+            hierarchyUpTool->setStatusTip(hierarchyUpTool->toolTip());
+            connect(hierarchyUpTool, &QAction::triggered, this, [this] { openLayoutParentCell(); });
+            auto *hierarchyDownTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Hierarchy Go Down"));
+            hierarchyDownTool->setToolTip(QStringLiteral("Open the selected layout instance"));
+            hierarchyDownTool->setStatusTip(hierarchyDownTool->toolTip());
+            connect(hierarchyDownTool, &QAction::triggered, this, [this] { openSelectedLayoutCell(); });
             return toolbar;
         }
 
@@ -7229,15 +7874,17 @@ class DocumentWindow : public QMainWindow {
 
         auto *gridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
         gridTool->setCheckable(true);
-        gridTool->setChecked(true);
+        gridTool->setChecked(layoutGridVisible_);
         connect(gridTool, &QAction::toggled, this, [this](bool checked) {
+            layoutGridVisible_ = checked;
             if (layoutCanvas_)
                 layoutCanvas_->setGridVisible(checked);
         });
         auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
         snapTool->setCheckable(true);
-        snapTool->setChecked(true);
+        snapTool->setChecked(layoutSnapToGrid_);
         connect(snapTool, &QAction::toggled, this, [this](bool enabled) {
+            layoutSnapToGrid_ = enabled;
             if (layoutCanvas_)
                 layoutCanvas_->setSnapToGrid(enabled);
         });
@@ -7249,9 +7896,7 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
-        connect(rotateTool, &QAction::triggered, this, [this] {
-            rotateSelectedLayoutFigures();
-        });
+        connect(rotateTool, &QAction::triggered, this, [this] { rotateSelectedLayoutFigures(); });
         auto *flipHorizontalTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontally"));
         connect(flipHorizontalTool, &QAction::triggered, this, [this] {
             transformSelectedLayoutInstance(ice::Orientation::my, QStringLiteral("flip layout device"));
@@ -7262,10 +7907,36 @@ class DocumentWindow : public QMainWindow {
         });
 
         toolbar->addSeparator();
-        auto *upTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Hierarchy Go Up"));
-        connect(upTool, &QAction::triggered, this, [this] { openLayoutParentCell(); });
-        auto *downTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Hierarchy Go Down"));
-        connect(downTool, &QAction::triggered, this, [this] { openSelectedLayoutCell(); });
+        auto *unionTool = addTool(QStringLiteral("squares-unite"), QStringLiteral("Union"));
+        unionTool->setToolTip(
+            QStringLiteral("Union selected rectangles and polygons (requires two shapes on one layer)"));
+        unionTool->setStatusTip(unionTool->toolTip());
+        layoutUnionTool_ = unionTool;
+        connect(unionTool, &QAction::triggered, this, [this] { applyLayoutBoolean(ice::BooleanOperation::union_); });
+
+        auto *intersectionTool = addTool(QStringLiteral("squares-intersect"), QStringLiteral("Intersection"));
+        intersectionTool->setToolTip(
+            QStringLiteral("Intersect selected rectangles and polygons (requires two shapes on one layer)"));
+        intersectionTool->setStatusTip(intersectionTool->toolTip());
+        layoutIntersectionTool_ = intersectionTool;
+        connect(intersectionTool, &QAction::triggered, this,
+                [this] { applyLayoutBoolean(ice::BooleanOperation::intersection); });
+
+        auto *differenceTool = addTool(QStringLiteral("squares-subtract"), QStringLiteral("Difference"));
+        differenceTool->setToolTip(
+            QStringLiteral("Subtract newer shapes from the oldest selected shape (requires two shapes on one layer)"));
+        differenceTool->setStatusTip(differenceTool->toolTip());
+        layoutDifferenceTool_ = differenceTool;
+        connect(differenceTool, &QAction::triggered, this,
+                [this] { applyLayoutBoolean(ice::BooleanOperation::difference); });
+
+        auto *xorTool = addTool(QStringLiteral("squares-exclude"), QStringLiteral("Exclusive Or"));
+        xorTool->setToolTip(
+            QStringLiteral("Keep the non-overlapping area of selected shapes (requires two shapes on one layer)"));
+        xorTool->setStatusTip(xorTool->toolTip());
+        layoutXorTool_ = xorTool;
+        connect(xorTool, &QAction::triggered, this, [this] { applyLayoutBoolean(ice::BooleanOperation::xor_); });
+        refreshLayoutBooleanActions();
 
         toolbar->addSeparator();
         auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
@@ -7284,7 +7955,8 @@ class DocumentWindow : public QMainWindow {
         bar->setProjectName(QStringLiteral("No project open"));
         bar->showMessage(QStringLiteral("Ready — no project open"));
         bar->addPermanentWidget(new QLabel(QStringLiteral("DBU: 1 nm")));
-        bar->addPermanentWidget(new QLabel(QStringLiteral("Grid: 1")));
+        gridStatusLabel_ = new QLabel(QStringLiteral("Grid: 1"));
+        bar->addPermanentWidget(gridStatusLabel_);
         selectionStatus_ = new QLabel(QStringLiteral("Selection: none"));
         bar->addPermanentWidget(selectionStatus_);
     }
@@ -7425,15 +8097,26 @@ class DocumentWindow : public QMainWindow {
     std::optional<SymbolDefinition> selectedSchematicSymbol_;
     StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
+    QLabel *gridStatusLabel_ = nullptr;
     QAction *schematicSelectTool_ = nullptr;
     QAction *schematicPlaceSymbolTool_ = nullptr;
     QAction *layoutSelectTool_ = nullptr;
+    QAction *layoutMoveTool_ = nullptr;
     QAction *layoutPlaceDeviceTool_ = nullptr;
     QAction *layoutRectangleTool_ = nullptr;
     QAction *layoutPathTool_ = nullptr;
+    QAction *layoutPolygonTool_ = nullptr;
+    QAction *layoutTextTool_ = nullptr;
     QAction *layoutRulerTool_ = nullptr;
+    QAction *layoutUnionTool_ = nullptr;
+    QAction *layoutIntersectionTool_ = nullptr;
+    QAction *layoutDifferenceTool_ = nullptr;
+    QAction *layoutXorTool_ = nullptr;
+    bool layoutGridVisible_ = true;
+    bool layoutSnapToGrid_ = true;
     QAction *layoutDeleteTool_ = nullptr;
     int layoutPathWidth_ = 200;
+    int layoutTextHeight_ = 1000;
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
     QList<QAction *> commands_;

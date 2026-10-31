@@ -42,8 +42,11 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
 // the new layout cell id.
 ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {});
 ObjectId addLayer(Project &project, std::string name, int number);
+std::string nextShapeName(const LayoutCell &cell, const std::string &type);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);
+ObjectId addText(Project &project, ObjectId cellId, ObjectId layerId, Coordinate x, Coordinate y, std::string text,
+                 Coordinate height = 1000, std::optional<ObjectId> net = std::nullopt);
 ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const std::vector<LayoutPoint> &points,
                     std::optional<ObjectId> net = std::nullopt);
 ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle);
@@ -51,6 +54,14 @@ ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId chi
                            Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
 void resizeRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Rect rectangle);
+void movePolygonPoint(Project &project, ObjectId cellId, ObjectId shapeId, std::size_t index, LayoutPoint point);
+// Replaces two or more selected rectangles/polygons with the result of a
+// boolean operation. All operands must share one layer. For difference, the
+// lowest shape id is the subject and the remaining shapes are subtracted.
+// Complex results with holes are split into independently fillable polygons.
+// Returns the ids of the new shapes and throws when the result is empty.
+std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                          BooleanOperation operation);
 
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.

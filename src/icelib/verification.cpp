@@ -76,6 +76,7 @@ std::string serializeVerificationReport(const VerificationReport &report) {
                                  {"cell", item.cell}});
     for (const auto &item : report.lvs)
         output["lvs"].push_back({{"schema_version", item.schemaVersion},
+                                 {"severity", verificationSeverityName(item.severity)},
                                  {"category", item.category},
                                  {"message", item.message},
                                  {"schematic_object", optionalId(item.schematicObject)},

@@ -13,8 +13,10 @@
 
 class QFormLayout;
 class QFrame;
+class QGroupBox;
 class QLabel;
 class QPushButton;
+class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
 class QTableWidgetItem;
@@ -33,6 +35,8 @@ class PropertiesPanel : public QWidget {
     using LayoutDeviceParameterChanged =
         std::function<void(const std::string &deviceName, const std::string &name, const std::string &value)>;
     using PathWidthChanged = std::function<void(int width)>;
+    using GridSpacingChanged = std::function<void(int spacing)>;
+    using LayoutShapeSizeChanged = std::function<void(ice::ObjectId shapeId, int width, int height)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr);
 
@@ -43,6 +47,8 @@ class PropertiesPanel : public QWidget {
     void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback);
     void setOnLayoutDeviceParameterChanged(LayoutDeviceParameterChanged callback);
     void setOnPathWidthChanged(PathWidthChanged callback);
+    void setOnGridSpacingChanged(GridSpacingChanged callback);
+    void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
 
     void refreshAppearance();
     void clearSelection();
@@ -52,10 +58,14 @@ class PropertiesPanel : public QWidget {
     void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell = nullptr);
     void setLayoutDevice(const ice::LayoutDeviceCell *cell);
     void setPathTool(int width, const std::string &layerName);
+    void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
+                        const std::string &typeName);
+    void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell, int spacing);
 
   private:
     static QLabel *addRow(QFormLayout *form, const QString &label);
     void populateParameters(const std::vector<ice::Parameter> &parameters);
+    void setParametersVisible(bool visible);
     void populateLayoutDeviceParameters(const std::vector<ice::LayoutDeviceParameter> &parameters);
     void handleParameterEdit(QTableWidgetItem *item);
     void updateParameterButtons();
@@ -76,8 +86,16 @@ class PropertiesPanel : public QWidget {
     ice::ObjectId layoutCellId_ = 0;
     std::string layoutDeviceName_;
     bool pathMode_ = false;
+    bool shapeMode_ = false;
+    bool shapeIsRectangle_ = false;
+    ice::ObjectId layoutShapeId_ = 0;
+    int layoutShapeWidth_ = 0;
+    int layoutShapeHeight_ = 0;
     int pathWidth_ = 200;
     std::string pathLayerName_;
+    QGroupBox *gridOptions_ = nullptr;
+    QSpinBox *gridSpacingSpin_ = nullptr;
+    QWidget *parametersHeader_ = nullptr;
     ParameterChanged onParameterChanged_;
     CellParameterChanged onCellParameterChanged_;
     CellParameterAdded onCellParameterAdded_;
@@ -85,4 +103,6 @@ class PropertiesPanel : public QWidget {
     LayoutCellParameterChanged onLayoutCellParameterChanged_;
     LayoutDeviceParameterChanged onLayoutDeviceParameterChanged_;
     PathWidthChanged onPathWidthChanged_;
+    GridSpacingChanged onGridSpacingChanged_;
+    LayoutShapeSizeChanged onLayoutShapeSizeChanged_;
 };

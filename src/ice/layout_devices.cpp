@@ -26,7 +26,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <set>
 #include <utility>
 
 void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk) {
@@ -195,7 +197,9 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     clone.shapes.clear();
     for (const auto &[_, shape] : source.shapes) {
         const auto id = nextId++;
-        clone.shapes.emplace(id, ice::Shape{id, shape.layer, shape.net, shape.rectangle, shape.polygon});
+        auto cloned = shape;
+        cloned.id = id;
+        clone.shapes.emplace(id, std::move(cloned));
     }
     clone.ports.clear();
     for (const auto &[_, port] : source.ports) {
@@ -315,38 +319,70 @@ std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &p
 
     ice::LayoutDeviceCell preview;
     preview.name = cell.name;
-    preview.category = "Device";
+    preview.category = "Layout";
     ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
     ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
     ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
     ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
-    for (const auto &[_, shape] : cell.shapes) {
-        const auto layerIt = project.layers.find(shape.layer);
-        if (layerIt == project.layers.end())
-            continue;
-        ice::LayoutDeviceShape previewShape;
-        previewShape.layer = layerIt->second.number;
-        const auto datatype = datatypes.find({layerIt->second.number, layerIt->second.name});
-        previewShape.datatype = datatype == datatypes.end() ? 0 : datatype->second;
-        if (shape.polygon.size() >= 3) {
-            previewShape.polygon.reserve(shape.polygon.size());
-            for (const auto &point : shape.polygon)
-                previewShape.polygon.push_back({point.x, point.y});
-        } else {
-            const auto &rect = shape.rectangle;
-            previewShape.polygon = {{rect.x, rect.y},
-                                    {rect.x + rect.width, rect.y},
-                                    {rect.x + rect.width, rect.y + rect.height},
-                                    {rect.x, rect.y + rect.height}};
-        }
-        for (const auto &point : previewShape.polygon) {
+    const auto addPolygon = [&](std::vector<ice::Point> points, int layerNumber, int datatype) {
+        if (points.size() < 3)
+            return;
+        for (const auto &point : points) {
             minX = std::min(minX, point.x);
             minY = std::min(minY, point.y);
             maxX = std::max(maxX, point.x);
             maxY = std::max(maxY, point.y);
         }
-        preview.shapes.push_back(std::move(previewShape));
-    }
+        preview.shapes.push_back(ice::LayoutDeviceShape{layerNumber, datatype, std::move(points)});
+    };
+
+    std::set<ice::ObjectId> ancestors{cell.id};
+    std::function<void(const ice::LayoutCell &, const std::function<ice::Point(ice::Point)> &)> collect;
+    collect = [&](const ice::LayoutCell &current, const std::function<ice::Point(ice::Point)> &mapper) {
+        for (const auto &[_, shape] : current.shapes) {
+            std::vector<ice::Point> points;
+            if (shape.polygon.size() >= 3) {
+                points.reserve(shape.polygon.size());
+                for (const auto &point : shape.polygon)
+                    points.push_back(mapper({point.x, point.y}));
+            } else if (shape.isPath()) {
+                continue;
+            } else {
+                const auto &rect = shape.rectangle;
+                points = {mapper({rect.x, rect.y}), mapper({rect.x + rect.width, rect.y}),
+                          mapper({rect.x + rect.width, rect.y + rect.height}), mapper({rect.x, rect.y + rect.height})};
+            }
+            int layerNumber = 0;
+            int datatype = 0;
+            if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end()) {
+                layerNumber = layerIt->second.number;
+                if (const auto datatypeIt = datatypes.find({layerNumber, layerIt->second.name});
+                    datatypeIt != datatypes.end())
+                    datatype = datatypeIt->second;
+            }
+            addPolygon(std::move(points), layerNumber, datatype);
+        }
+        for (const auto &[_, device] : current.plannedDevices) {
+            std::vector<ice::Point> points = {mapper({device.x, device.y}), mapper({device.x + device.width, device.y}),
+                                              mapper({device.x + device.width, device.y + device.height}),
+                                              mapper({device.x, device.y + device.height})};
+            addPolygon(std::move(points), 0, 0);
+        }
+        for (const auto &[_, instance] : current.instances) {
+            const auto childIt = project.layoutCells.find(instance.cell);
+            if (childIt == project.layoutCells.end() || ancestors.contains(instance.cell))
+                continue;
+            const ice::Transform transform{instance.x, instance.y, instance.orientation};
+            const auto parentMapper = mapper;
+            const auto childMapper = [parentMapper, transform](ice::Point point) {
+                return parentMapper(transform.apply(point));
+            };
+            ancestors.insert(instance.cell);
+            collect(childIt->second, childMapper);
+            ancestors.erase(instance.cell);
+        }
+    };
+    collect(cell, [](ice::Point point) { return point; });
     if (preview.shapes.empty() || maxX <= minX || maxY <= minY)
         return std::nullopt;
     preview.bounds = ice::Rect{minX, minY, maxX - minX, maxY - minY};

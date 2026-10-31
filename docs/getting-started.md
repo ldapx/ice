@@ -23,7 +23,7 @@ Python scientific stack.
 - C++20 compiler
 - [xmake](https://xmake.io/) 2.9.8+ (build system, see `xmake.lua`)
 - Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
-- `spdlog`, `nlohmann_json` (via xmake packages)
+- `spdlog`, `nlohmann_json`, `clipper2` (via xmake packages)
 - `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
 - Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
 - `clang-format` (formatting via `xmake format`)

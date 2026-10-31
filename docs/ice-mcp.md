@@ -52,9 +52,11 @@ go to stderr.
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 | `layout_add_layer` | Add a layout layer. |
 | `layout_add_rectangle` | Add a rectangle shape. |
+| `layout_add_text` | Add text to a layout cell on a layer. |
 | `layout_add_polygon` | Add a polygon shape. |
 | `layout_add_port` | Add a port. |
 | `layout_add_instance` | Instance another layout cell. |
+| `lvs_run` | Compare a layout against a schematic and return the LVS report. |
 | `simulation_graph_create` | Add a graph definition to a simulation. |
 | `simulation_graph_list` | List graph definitions. |
 | `simulation_graph_info` | Read one graph definition. |
@@ -69,7 +71,9 @@ go to stderr.
 | `simulation_script_delete` | Delete script metadata; the file remains. |
 
 Cells, layers, simulations, graphs, and simulation scripts may be referenced by
-name or numeric id. Coordinates are integer database units.
+name or numeric id. Coordinates are integer database units. `lvs_run` accepts a
+layout name or id and an optional schematic; when the schematic is omitted, ICE
+infers it from planned-device links or matching layout/schematic names.
 
 Project mutations are recorded in project history and saved automatically after
 each successful tool call, so the GUI and `ice-cli` see them immediately.

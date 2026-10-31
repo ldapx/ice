@@ -186,17 +186,29 @@ The layout editor should initially provide:
 
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
 column contains **Properties** and **Layers**. Layout entries use a notebook-pen
-icon and placed devices use a puzzle icon. Every layout has a **Root Layer**
-child with a network icon that contains its devices by default. Right-click a
-layout entry and toggle **Flatten Layout** to promote its descendants directly
-under the layout; toggling it again restores the Root Layer grouping. When the
-active layout is flattened, **Run DRC** exports the flattened instance geometry
-instead of only the layout cell's own shapes. Right-clicking a schematic in the
-Schematic **Hierarchy** tab offers **Make Layout from Schematic**. This creates
-a layout with the schematic's technology and projects every schematic instance
-into a movable **Planned Device** box under the new layout's Root Layer. Nets
-are drawn as straight connections between the boxes; planned devices use a box
-icon in the hierarchy and can be selected and moved directly on the canvas.
+icon. Each layout node lists its child layout/device instances, planned
+devices, rectangles, polygons, paths, and texts directly, with a distinct icon
+for each entry type. Right-click an entry and choose **Rename…** to rename a
+layout, script, instance, planned device, or shape. Right-click a layout entry
+and toggle **Flatten Layout for DRC** to control whether **Run DRC** exports the
+flattened instance geometry instead of only the layout cell's own shapes.
+Right-clicking a schematic in the Schematic **Hierarchy** tab offers **Make
+Layout from Schematic**. This creates a layout with the schematic's technology
+and projects every schematic instance into a movable **Planned Device** box
+under the new layout. Nets are drawn as straight connections between the boxes;
+planned devices use a box icon in the hierarchy and can be selected and moved
+directly on the canvas. Use **Hierarchy Go Up** and **Hierarchy Go Down** in the
+left layout tool column to open the parent layout or the selected child
+instance.
+
+With nothing selected in the layout, **Properties** shows a fitted preview of
+the layout geometry and a **Grid** section with the snap spacing in nanometers.
+The layout toolbar keeps the grid visibility and snap toggles. The layout cell
+parameter table is hidden while nothing is selected. Selecting a rectangle
+shows its name, type, layer, and editable width and height in database units;
+selected polygons, paths, and texts show read-only name, type, and layer
+information.
+
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
 Python script editor in the middle view, and contain a generated static layout
@@ -236,6 +248,17 @@ repository or through `ICE_IHP_ROOT`, and uses `python3` unless `ICE_PYTHON`
 points to another interpreter. If the checkout or Python module is unavailable,
 ICE reports the error and leaves the existing geometry unchanged.
 
+The layout toolbar separates **Select** from **Move**. **Select** supports
+rubber-band selection and handle editing: drag path points, polygon vertices,
+and rectangle corner or edge handles, but it does not move whole objects.
+**Move** drags rectangles, polygons, paths, texts, planned devices, and placed
+instances; selection handles are hidden while Move is active.
+
+The **Create Polygon** tool draws a filled polygon on the selected layer. Click
+each vertex; Shift constrains the current edge to horizontal or vertical.
+Double-click, Escape, or Space closes the polygon and leaves the tool. Select a
+polygon to show square vertex handles; drag a handle to move that vertex.
+
 The layout toolbar also provides a **Draw Path** tool for routing. Click to set
 the path start and click again to commit each segment. Escape or Space finishes
 the current path and leaves the tool. Holding Shift
@@ -256,10 +279,44 @@ not rounded. Layer-change vias are stored with the path and move with it.
 Segments adjacent to a via extend by half the via size so the copper fully
 overlaps the via on both layers.
 
+Select a rectangle to show square point handles at its four corners and at the
+midpoints of its left, right, top, and bottom edges. Drag a handle to resize
+from that corner or side while the opposite side stays fixed. The handles use
+the same square style as path points, and dragging the rectangle body moves it.
+
+With two or more rectangles or polygons selected on the same layer, the
+Boolean buttons in the right layout tool column perform **Union**,
+**Intersection**, **Difference**, and **Exclusive Or**. The operands are
+replaced by one or more polygon shapes named after the operation. **Difference**
+subtracts the newer shapes from the oldest selected shape. Results with holes
+are split into independently fillable polygons, and an operation that produces
+no geometry leaves its operands unchanged. Use undo to restore the original
+shapes.
+
+The **Ruler** tool measures between two clicked points. The ruler line keeps a
+constant screen width as you zoom, and shows minor and major tick marks with
+distance labels along its length.
+
+The **Draw Text** tool places a text label on the currently selected layer.
+Click the canvas, enter the string, and ICE creates a movable text object with
+a 1 um nominal height. Text is stored in the project and exported as GDSII
+TEXT records.
+
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
 the activity dock with severity, rule, message, cell, and location columns.
+
+**Tools → Run LVS** compares the active layout against its source schematic.
+ICE infers the schematic from planned-device links, then from matching layout
+and schematic names, and asks for a schematic when the match is ambiguous. LVS
+checks device presence, reference names, device types, shared parameters on
+placed device instances, and net topology from planned connections. Device
+parameters are compared numerically when both sides use compatible quantity
+values, so `0.15u` and `150n` are equivalent. If the layout has no planned
+connectivity, LVS reports a warning and compares devices only. Results appear in
+the **LVS Report** tab with mismatch categories and schematic/layout object ids.
+Text SPICE schematics are not supported by LVS yet.
 
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database

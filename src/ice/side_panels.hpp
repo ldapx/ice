@@ -29,6 +29,13 @@ class ProjectPanel : public QWidget {
     void setOnActivateSchematic(std::function<void(ice::ObjectId)> callback);
     void setOnActivateLayout(std::function<void(ice::ObjectId)> callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
+    using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
+    using RenameChildCallback = std::function<void(ice::ObjectId parentId, ice::ObjectId id, const std::string &name)>;
+    void setOnRenameLayout(RenameCallback callback);
+    void setOnRenameProceduralLayout(RenameCallback callback);
+    void setOnRenameInstance(RenameChildCallback callback);
+    void setOnRenamePlannedDevice(RenameChildCallback callback);
+    void setOnRenameShape(RenameChildCallback callback);
     void setOnFlattenChanged(std::function<void()> callback);
     void setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state);
     void setProject(const ice::Project &project);
@@ -56,6 +63,11 @@ class ProjectPanel : public QWidget {
     std::function<void(ice::ObjectId)> onActivateSchematic_;
     std::function<void(ice::ObjectId)> onActivateLayout_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
+    RenameCallback onRenameLayout_;
+    RenameCallback onRenameProceduralLayout_;
+    RenameChildCallback onRenameInstance_;
+    RenameChildCallback onRenamePlannedDevice_;
+    RenameChildCallback onRenameShape_;
     bool showLayoutHierarchy_ = true;
 };
 

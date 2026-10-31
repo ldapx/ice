@@ -31,8 +31,9 @@ class QTableWidget;
 class QTabWidget;
 
 namespace ice {
+struct LvsReport;
 struct VerificationReport;
-}
+} // namespace ice
 
 class DiagnosticsPanel : public QWidget {
   public:
@@ -50,6 +51,9 @@ class ActivityPanel : public QWidget {
     void setDrcRunning(const QString &message = {});
     void setDrcError(const QString &message);
     void showDrcTab();
+    void setLvsReport(const ice::LvsReport &report);
+    void setLvsError(const QString &message);
+    void showLvsTab();
     void showAgentTab();
     void appendMessage(const QString &message);
     void showMessagesTab();
@@ -123,7 +127,9 @@ class ActivityPanel : public QWidget {
     QTableWidget *drcTable_ = nullptr;
     QTabWidget *tabs_ = nullptr;
     QPlainTextEdit *messages_ = nullptr;
+    QPlainTextEdit *lvsReport_ = nullptr;
     int drcTabIndex_ = -1;
+    int lvsTabIndex_ = -1;
     int agentTabIndex_ = -1;
     int messagesTabIndex_ = -1;
 

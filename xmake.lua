@@ -3,7 +3,7 @@ set_version("0.1.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")
 
-add_requires("spdlog", "nlohmann_json")
+add_requires("spdlog", "nlohmann_json", "clipper2")
 
 -- Agent Client Protocol support. The normal build uses the bundled
 -- third_party/agentsdk-cpp submodule. AGENTSDK_CPP_DIR and a sibling checkout
@@ -40,11 +40,10 @@ target("icelib")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_cxxflags("-fPIC", {public = true})
     add_cxxflags(first_party_warnings)
-    add_packages("spdlog", "nlohmann_json")
+    add_packages("spdlog", "nlohmann_json", "clipper2")
     -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
     -- TODO: replace hardcoded /usr paths with packaged deps or pkg-config checks.
     add_includedirs("/usr/include/toml++", "/usr/include")
-    add_linkdirs("/usr/lib")
     add_links("crypto")
     add_includedirs("/usr/include/ngspice")
     add_links("ngspice")

@@ -1,63 +1,160 @@
 #include "icelib/geometry.hpp"
 
+#include "clipper2/clipper.h"
+
 #include <algorithm>
+#include <iterator>
+#include <limits>
+#include <set>
 
 namespace ice {
 namespace {
-Polygon rectanglePolygon(Rect rectangle) {
-    return {{rectangle.x, rectangle.y},
-            {rectangle.x + rectangle.width, rectangle.y},
-            {rectangle.x + rectangle.width, rectangle.y + rectangle.height},
-            {rectangle.x, rectangle.y + rectangle.height}};
+using ClipperPath = Clipper2Lib::Path64;
+using ClipperPaths = Clipper2Lib::Paths64;
+
+ClipperPath toClipperPath(const Polygon &polygon) {
+    ClipperPath path;
+    path.reserve(polygon.size());
+    for (const auto &point : polygon)
+        path.emplace_back(point.x, point.y);
+    // Shape polygons are filled outlines, so normalize their winding. Mixed
+    // windings would otherwise cancel each other under the NonZero fill rule.
+    if (!path.empty() && !Clipper2Lib::IsPositive(path))
+        std::reverse(path.begin(), path.end());
+    return path;
 }
 
-Rect unionBounds(const MultiPolygon &polygons) {
-    Rect result{};
-    bool first = true;
+ClipperPaths toClipperPaths(const MultiPolygon &polygons) {
+    ClipperPaths paths;
+    paths.reserve(polygons.size());
     for (const auto &polygon : polygons) {
-        const Rect bounds = GeometryKernel::bounds(polygon);
-        if (first) {
-            result = bounds;
-            first = false;
-        } else {
-            const Coordinate x0 = std::min(result.x, bounds.x);
-            const Coordinate y0 = std::min(result.y, bounds.y);
-            const Coordinate x1 = std::max(result.x + result.width, bounds.x + bounds.width);
-            const Coordinate y1 = std::max(result.y + result.height, bounds.y + bounds.height);
-            result = {x0, y0, x1 - x0, y1 - y0};
+        if (polygon.size() < 3)
+            continue;
+        auto path = toClipperPath(polygon);
+        if (path.size() >= 3)
+            paths.push_back(std::move(path));
+    }
+    return paths;
+}
+
+Polygon fromClipperPath(const ClipperPath &path) {
+    Polygon polygon;
+    polygon.reserve(path.size());
+    for (const auto &point : path)
+        polygon.push_back({point.x, point.y});
+    return polygon;
+}
+
+void collectContours(const Clipper2Lib::PolyPath64 &node, ClipperPaths &paths) {
+    for (const auto &child : node) {
+        paths.push_back(child->Polygon());
+        collectContours(*child, paths);
+    }
+}
+
+// A shape stores one filled outline rather than an outer contour plus holes.
+// When a boolean result contains holes, split the result into vertical slabs
+// at every vertex x coordinate. Each fragment is then a simple, hole-free
+// polygon and the fragments together reproduce the exact result.
+MultiPolygon decomposeHoledResult(const Clipper2Lib::PolyTree64 &tree) {
+    ClipperPaths contours;
+    collectContours(tree, contours);
+    if (contours.empty())
+        return {};
+
+    Coordinate minY = std::numeric_limits<Coordinate>::max();
+    Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+    std::set<Coordinate> columns;
+    for (const auto &path : contours) {
+        for (const auto &point : path) {
+            minY = std::min(minY, point.y);
+            maxY = std::max(maxY, point.y);
+            columns.insert(point.x);
         }
     }
-    return result;
+    if (columns.size() < 2 || maxY <= minY)
+        return {};
+
+    const auto lower = minY > std::numeric_limits<Coordinate>::lowest() ? minY - 1 : minY;
+    const auto upper = maxY < std::numeric_limits<Coordinate>::max() ? maxY + 1 : maxY;
+    MultiPolygon result;
+    for (auto it = columns.begin(); std::next(it) != columns.end(); ++it) {
+        const auto left = *it;
+        const auto right = *std::next(it);
+        if (right <= left)
+            continue;
+        ClipperPath slab{{left, lower}, {right, lower}, {right, upper}, {left, upper}};
+        auto fragments = Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Intersection, Clipper2Lib::FillRule::NonZero,
+                                                contours, ClipperPaths{slab});
+        for (const auto &fragment : fragments) {
+            if (fragment.size() < 3 || Clipper2Lib::Area(fragment) <= 0.0)
+                continue;
+            auto polygon = fromClipperPath(fragment);
+            if (GeometryKernel::valid(polygon))
+                result.push_back(std::move(polygon));
+        }
+    }
+    GeometryKernel kernel;
+    return kernel.cleanup(result);
 }
 } // namespace
 
-// NOTE: Bounding-box approximation. Replace with the Clipper2 backend once the
-// Clipper2 dependency is wired into the build; the public GeometryKernel API
-// already isolates callers from the backend.
 MultiPolygon GeometryKernel::booleanOp(const MultiPolygon &subject, const MultiPolygon &clip,
                                        BooleanOperation operation) const {
-    if (subject.empty())
-        return operation == BooleanOperation::union_ ? clip : MultiPolygon{};
-    if (clip.empty())
-        return operation == BooleanOperation::difference || operation == BooleanOperation::union_ ? subject
-                                                                                                  : MultiPolygon{};
-    const auto a = unionBounds(subject);
-    const auto b = unionBounds(clip);
-    Rect overlap{std::max(a.x, b.x), std::max(a.y, b.y), std::min(a.x + a.width, b.x + b.width) - std::max(a.x, b.x),
-                 std::min(a.y + a.height, b.y + b.height) - std::max(a.y, b.y)};
-    if (operation == BooleanOperation::intersection)
-        return overlap.valid() ? MultiPolygon{rectanglePolygon(overlap)} : MultiPolygon{};
-    if (operation == BooleanOperation::union_) {
-        Rect united{std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x + a.width, b.x + b.width) - std::min(a.x, b.x),
-                    std::max(a.y + a.height, b.y + b.height) - std::min(a.y, b.y)};
-        return {rectanglePolygon(united)};
+    auto subjects = toClipperPaths(subject);
+    auto clips = toClipperPaths(clip);
+    if (subjects.empty() && clips.empty())
+        return {};
+    if (subjects.empty()) {
+        if (operation != BooleanOperation::union_ && operation != BooleanOperation::xor_)
+            return {};
+        subjects = std::move(clips);
+        clips.clear();
+    }
+    if (operation == BooleanOperation::intersection && clips.empty())
+        return {};
+
+    Clipper2Lib::Clipper64 clipper;
+    clipper.AddSubject(subjects);
+    if (!clips.empty())
+        clipper.AddClip(clips);
+
+    Clipper2Lib::ClipType clipType = Clipper2Lib::ClipType::Union;
+    switch (operation) {
+    case BooleanOperation::union_:
+        clipType = Clipper2Lib::ClipType::Union;
+        break;
+    case BooleanOperation::difference:
+        clipType = Clipper2Lib::ClipType::Difference;
+        break;
+    case BooleanOperation::intersection:
+        clipType = Clipper2Lib::ClipType::Intersection;
+        break;
+    case BooleanOperation::xor_:
+        clipType = Clipper2Lib::ClipType::Xor;
+        break;
     }
 
-    if (!overlap.valid())
-        return subject;
-    if (operation == BooleanOperation::xor_)
-        return {};
-    return {};
+    Clipper2Lib::PolyTree64 tree;
+    clipper.Execute(clipType, Clipper2Lib::FillRule::NonZero, tree);
+
+    bool hasHoles = false;
+    for (const auto &child : tree) {
+        if (child->Count() > 0) {
+            hasHoles = true;
+            break;
+        }
+    }
+    if (hasHoles)
+        return decomposeHoledResult(tree);
+
+    MultiPolygon result;
+    for (const auto &child : tree) {
+        auto polygon = fromClipperPath(child->Polygon());
+        if (valid(polygon))
+            result.push_back(std::move(polygon));
+    }
+    return cleanup(result);
 }
 
 MultiPolygon Clipper2Adapter::unionPolygons(const MultiPolygon &left, const MultiPolygon &right) const {
@@ -74,17 +171,19 @@ MultiPolygon Clipper2Adapter::xorPolygons(const MultiPolygon &left, const MultiP
 }
 
 MultiPolygon GeometryKernel::offset(const MultiPolygon &subject, Coordinate delta) const {
+    const auto paths = toClipperPaths(subject);
+    if (paths.empty())
+        return {};
+    const auto inflated = Clipper2Lib::InflatePaths(paths, static_cast<double>(delta), Clipper2Lib::JoinType::Miter,
+                                                    Clipper2Lib::EndType::Polygon);
     MultiPolygon result;
-    for (const auto &polygon : subject) {
-        auto bounds = GeometryKernel::bounds(polygon);
-        bounds.x -= delta;
-        bounds.y -= delta;
-        bounds.width += 2 * delta;
-        bounds.height += 2 * delta;
-        if (bounds.valid())
-            result.push_back(rectanglePolygon(bounds));
+    result.reserve(inflated.size());
+    for (const auto &path : inflated) {
+        auto polygon = fromClipperPath(path);
+        if (valid(polygon))
+            result.push_back(std::move(polygon));
     }
-    return result;
+    return cleanup(result);
 }
 
 MultiPolygon GeometryKernel::cleanup(const MultiPolygon &subject) const {

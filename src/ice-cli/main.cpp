@@ -4,6 +4,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -471,6 +472,9 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
                                     {"layer", shape.layer},
                                     {"layer_name", layer == project.layers.end() ? "" : layer->second.name},
                                     {"is_path", shape.isPath()},
+                                    {"is_text", shape.isText()},
+                                    {"name", shape.name},
+                                    {"text", shape.text},
                                     {"path_width", shape.width},
                                     {"centerline", std::move(centerline)},
                                     {"segment_layers", std::move(segmentLayers)},
@@ -539,10 +543,14 @@ void printHelp() {
               << "  layout-remove <project> <cell|procedural>\n"
               << "  layout-add-layer <project> <name> <number>\n"
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
+              << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
               << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
               << "  layout-export-gds <project> <cell> <output.gds>\n\n"
+              << "Verification:\n"
+              << "  lvs <project> <schematic> <layout>\n"
+              << "  lvs-auto <project> <layout>\n\n"
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
               << "  simulation-list <project>\n"
@@ -605,7 +613,8 @@ int main(int argc, char **argv) {
             const bool ngspiceAvailable = std::filesystem::exists("/usr/lib/libngspice.so.0") ||
                                           std::filesystem::exists("/usr/lib64/libngspice.so.0");
             printJson({{"report_runner", runner.empty() ? json(nullptr) : json(runner.string())},
-                       {"python", python}, {"python_available", pythonAvailable},
+                       {"python", python},
+                       {"python_available", pythonAvailable},
                        {"ngspice_library_available", ngspiceAvailable},
                        {"ok", !runner.empty() && pythonAvailable && ngspiceAvailable}});
             return 0;
@@ -639,6 +648,29 @@ int main(int argc, char **argv) {
             const auto diagnostics = diagnosticsJson(project);
             printJson({{"valid", diagnostics.empty()}, {"diagnostics", diagnostics}});
             return 0;
+        }
+
+        if (command == "lvs") {
+            expectArguments(args, 4, 4, "lvs <project> <schematic> <layout>");
+            const auto project = ice::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[2]);
+            const auto layout = resolveLayout(project, args[3]);
+            const auto report = ice::runLvs(project, schematic, layout);
+            std::cout << ice::serializeLvsReport(report);
+            return report.matched() ? 0 : 1;
+        }
+
+        if (command == "lvs-auto") {
+            expectArguments(args, 3, 3, "lvs-auto <project> <layout>");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto schematic = ice::schematicForLayout(project, layout);
+            if (schematic == 0)
+                throw ice::ProjectError(
+                    "lvs.schematic", "Unable to infer a schematic for this layout; use lvs with an explicit schematic");
+            const auto report = ice::runLvs(project, schematic, layout);
+            std::cout << ice::serializeLvsReport(report);
+            return report.matched() ? 0 : 1;
         }
 
         if (command == "schematic-add-cell") {
@@ -891,6 +923,23 @@ int main(int argc, char **argv) {
                             [&](ice::Project &p) { id = ice::addRectangle(p, cell, layer, rect); });
             session.save(args[1]);
             printJson({{"id", id}, {"cell", cell}, {"layer", layer}});
+            return 0;
+        }
+
+        if (command == "layout-add-text") {
+            expectArguments(args, 7, 8, "layout-add-text <project> <cell> <layer> <x> <y> <text> [height]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const auto x = parseInteger(args[4], "x");
+            const auto y = parseInteger(args[5], "y");
+            const auto height = args.size() > 7 ? parseInteger(args[7], "height") : ice::Coordinate{1000};
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-add-text",
+                            [&](ice::Project &p) { id = ice::addText(p, cell, layer, x, y, args[6], height); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}, {"text", args[6]}});
             return 0;
         }
 
@@ -1303,18 +1352,30 @@ int main(int argc, char **argv) {
                     graphs = document.at("graphs");
             }
             if (fullJson) {
-                printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"ok", ok},
-                           {"timed_out", result.timedOut}, {"exit_code", result.exitCode},
-                           {"stdout", result.stdoutText}, {"stderr", result.stderrText}, {"graphs", std::move(graphs)}});
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"ok", ok},
+                           {"timed_out", result.timedOut},
+                           {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText},
+                           {"stderr", result.stderrText},
+                           {"graphs", std::move(graphs)}});
             } else {
                 json graphSummary = json::array();
                 for (const auto &graph : graphs)
                     graphSummary.push_back({{"name", graph.value("name", "")},
                                             {"points", graph.value("x", json::array()).size()},
                                             {"series", graph.value("series", json::array()).size()}});
-                printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"ok", ok},
-                           {"timed_out", result.timedOut}, {"exit_code", result.exitCode},
-                           {"stdout", result.stdoutText}, {"stderr", result.stderrText}, {"graphs", graphSummary}});
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"ok", ok},
+                           {"timed_out", result.timedOut},
+                           {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText},
+                           {"stderr", result.stderrText},
+                           {"graphs", graphSummary}});
             }
             if (result.timedOut)
                 throw ice::ProjectError("report.timeout", "Simulation script timed out");

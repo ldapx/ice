@@ -295,8 +295,8 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     promptRow->addWidget(prompt_, 1);
     agentActivity_ = new QLabel;
     agentActivity_->setAccessibleName(QStringLiteral("Agent activity"));
-    agentActivity_->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
-                                      .arg(ice::uiColor(ice::UiColor::Accent1).name()));
+    agentActivity_->setStyleSheet(
+        QStringLiteral("color: %1; font-weight: 600;").arg(ice::uiColor(ice::UiColor::Accent1).name()));
     agentActivity_->setText(QStringLiteral("● Thinking…"));
     agentActivity_->setToolTip(QStringLiteral("The agent is processing the request"));
     agentActivity_->hide();
@@ -396,11 +396,12 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     drcLayout->addWidget(drcTable_, 1);
     drcTabIndex_ = tabs->addTab(drcPage, QStringLiteral("DRC Report"));
 
-    auto *lvsReport = new QPlainTextEdit;
-    lvsReport->setReadOnly(true);
-    lvsReport->setAccessibleName(QStringLiteral("LVS report"));
-    lvsReport->setPlaceholderText(QStringLiteral("LVS report will appear here after a layout-versus-schematic check."));
-    tabs->addTab(lvsReport, QStringLiteral("LVS Report"));
+    lvsReport_ = new QPlainTextEdit;
+    lvsReport_->setReadOnly(true);
+    lvsReport_->setAccessibleName(QStringLiteral("LVS report"));
+    lvsReport_->setPlaceholderText(
+        QStringLiteral("LVS report will appear here after a layout-versus-schematic check."));
+    lvsTabIndex_ = tabs->addTab(lvsReport_, QStringLiteral("LVS Report"));
 
     layout->addWidget(tabs);
     tabs_ = tabs;
@@ -1868,6 +1869,62 @@ void ActivityPanel::setDrcError(const QString &message) {
 void ActivityPanel::showDrcTab() {
     if (tabs_ && drcTabIndex_ >= 0)
         tabs_->setCurrentIndex(drcTabIndex_);
+}
+
+void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
+    if (!lvsReport_)
+        return;
+    int errors = 0;
+    int warnings = 0;
+    int infos = 0;
+    QStringList lines;
+    lines << (report.matched() ? QStringLiteral("LVS matched.") : QStringLiteral("LVS found mismatches."));
+    lines << QStringLiteral("Schematic: %1").arg(QString::fromStdString(report.schematic));
+    lines << QStringLiteral("Layout: %1").arg(QString::fromStdString(report.layout));
+    lines << QString();
+    if (report.mismatches.empty()) {
+        lines << QStringLiteral("No mismatches found.");
+    } else {
+        for (const auto &mismatch : report.mismatches) {
+            switch (mismatch.severity) {
+            case ice::VerificationSeverity::error:
+                ++errors;
+                break;
+            case ice::VerificationSeverity::warning:
+                ++warnings;
+                break;
+            case ice::VerificationSeverity::info:
+                ++infos;
+                break;
+            }
+            lines << QStringLiteral("[%1] %2: %3")
+                         .arg(drcSeverityLabel(mismatch.severity), QString::fromStdString(mismatch.category),
+                              QString::fromStdString(mismatch.message));
+            if (mismatch.schematicObject)
+                lines << QStringLiteral("  schematic object: %1").arg(*mismatch.schematicObject);
+            if (mismatch.layoutObject)
+                lines << QStringLiteral("  layout object: %1").arg(*mismatch.layoutObject);
+        }
+        lines << QString();
+        lines << QStringLiteral("Summary: %1 error(s), %2 warning(s), %3 info item(s).")
+                     .arg(errors)
+                     .arg(warnings)
+                     .arg(infos);
+    }
+    lvsReport_->setPlainText(lines.join(QLatin1Char('\n')));
+    showLvsTab();
+}
+
+void ActivityPanel::setLvsError(const QString &message) {
+    if (!lvsReport_)
+        return;
+    lvsReport_->setPlainText(message);
+    showLvsTab();
+}
+
+void ActivityPanel::showLvsTab() {
+    if (tabs_ && lvsTabIndex_ >= 0)
+        tabs_->setCurrentIndex(lvsTabIndex_);
 }
 
 void ActivityPanel::showAgentTab() {

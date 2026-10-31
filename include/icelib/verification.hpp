@@ -28,7 +28,31 @@ struct LvsMismatch {
     std::string message;
     std::optional<ObjectId> schematicObject;
     std::optional<ObjectId> layoutObject;
+    VerificationSeverity severity = VerificationSeverity::error;
 };
+
+struct LvsOptions {
+    bool compareParameters = true;
+};
+
+// Result of comparing a schematic cell against a layout cell. Layout
+// connectivity is taken from planned-device connections; device identity is
+// matched through planned-device schematic links first and reference names
+// second.
+struct LvsReport {
+    int schemaVersion = 1;
+    std::string schematic;
+    std::string layout;
+    std::vector<LvsMismatch> mismatches;
+    bool matched() const;
+};
+
+// Infers the schematic a layout was derived from. Planned-device links take
+// precedence; otherwise exact and "<name> Layout" name matches are used.
+ObjectId schematicForLayout(const Project &project, ObjectId layoutCellId);
+LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layoutCellId,
+                 const LvsOptions &options = {});
+std::string serializeLvsReport(const LvsReport &report);
 
 struct ParasiticElement {
     int schemaVersion = 1;

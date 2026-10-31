@@ -44,6 +44,7 @@ ice-cli layout-info <project> <cell|procedural>
 ice-cli layout-remove <project> <cell|procedural>
 ice-cli layout-add-layer <project> <name> <number>
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
+ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
 ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
 ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>
 ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
@@ -54,6 +55,20 @@ Coordinates are integer database units. `layout-remove` accepts either a static
 layout cell or a procedural layout; removing a procedural layout also removes
 its generated static child. Removal is blocked when instances reference the
 layout, and library cells cannot be removed.
+
+## Verification
+
+```sh
+ice-cli lvs <project> <schematic> <layout>
+ice-cli lvs-auto <project> <layout>
+```
+
+`lvs` compares a schematic against a layout and prints the LVS report as JSON.
+`lvs-auto` infers the schematic from planned-device links or matching names.
+Both commands exit with status `0` for a match and `1` when the report contains
+errors or warnings. The comparison covers device presence, reference names,
+device types, shared device parameters, and net topology from planned
+connections.
 
 ## Simulation
 

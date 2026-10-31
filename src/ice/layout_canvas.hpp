@@ -38,10 +38,13 @@ using LayoutPathPointMovedCallback = std::function<void(ice::ObjectId id, int in
 using LayoutPathPointInsertedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int index)>;
 using LayoutPathFinishedCallback = std::function<void()>;
+using LayoutTextPlacedCallback = std::function<void(QPointF)>;
+using LayoutPolygonCreatedCallback = std::function<void(const std::vector<QPointF> &points)>;
+using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 
 class LayoutCanvas : public QGraphicsView {
   public:
-    enum class Tool { select, path, rectangle, placeDevice, ruler };
+    enum class Tool { select, move, path, rectangle, polygon, placeDevice, ruler, text };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
@@ -78,6 +81,10 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setPathSegmentCallback(LayoutPathSegmentCallback callback) = 0;
     virtual void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) = 0;
     virtual void setPathFinishedCallback(LayoutPathFinishedCallback callback) = 0;
+    virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
+    virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;
+    virtual void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) = 0;
+    virtual void refreshInteractionState() = 0;
 };
 
 // Builds the rounded-rectangle polygon for one path segment. Points are in
@@ -99,5 +106,12 @@ QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF>
 // rectangle is given in scene coordinates and the item is positioned at its
 // top-left corner so drag deltas map directly onto layout coordinates.
 QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &name, const QRectF &rect, bool readOnly);
+
+// Rectangle resize handles use the same square point style as routed paths.
+// Handle 0..3 are the corners; 4..7 are the left, right, top, and bottom
+// midpoints.
+QPointF layoutResizeHandlePosition(const QRectF &rect, int handle);
+QGraphicsItem *createLayoutResizeHandleItem(ice::ObjectId shapeId, int handle);
+QGraphicsItem *createLayoutPolygonHandleItem(ice::ObjectId shapeId, int index);
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent = nullptr);

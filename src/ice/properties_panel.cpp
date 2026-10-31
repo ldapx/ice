@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -14,6 +15,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -41,8 +43,19 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     auto *form = new QFormLayout;
     selection_ = addRow(form, QStringLiteral("Selection"));
     layout->addLayout(form);
-    auto *parametersHeader = new QWidget;
-    auto *parametersHeaderLayout = new QHBoxLayout(parametersHeader);
+
+    gridOptions_ = new QGroupBox(QStringLiteral("Grid"));
+    auto *gridForm = new QFormLayout(gridOptions_);
+    gridSpacingSpin_ = new QSpinBox;
+    gridSpacingSpin_->setRange(1, 1000000000);
+    gridSpacingSpin_->setSuffix(QStringLiteral(" nm"));
+    gridSpacingSpin_->setKeyboardTracking(false);
+    gridForm->addRow(QStringLiteral("Spacing"), gridSpacingSpin_);
+    gridOptions_->setVisible(false);
+    layout->addWidget(gridOptions_);
+
+    parametersHeader_ = new QWidget;
+    auto *parametersHeaderLayout = new QHBoxLayout(parametersHeader_);
     parametersHeaderLayout->setContentsMargins(0, 0, 0, 0);
     parametersHeaderLayout->addWidget(heading(QStringLiteral("Parameters")));
     parametersHeaderLayout->addStretch();
@@ -58,7 +71,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     setLucideIcon(removeParameterButton_, QStringLiteral("trash"), 14);
     parametersHeaderLayout->addWidget(addParameterButton_);
     parametersHeaderLayout->addWidget(removeParameterButton_);
-    layout->addWidget(parametersHeader);
+    layout->addWidget(parametersHeader_);
     parameters_ = new QTableWidget(0, 2);
     parameters_->setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Value")});
     parameters_->setAccessibleName(QStringLiteral("Parameters"));
@@ -80,6 +93,10 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     connect(parameters_, &QTableWidget::itemSelectionChanged, this, [this] { updateParameterButtons(); });
     connect(addParameterButton_, &QPushButton::clicked, this, [this] { addParameter(); });
     connect(removeParameterButton_, &QPushButton::clicked, this, [this] { removeParameters(); });
+    connect(gridSpacingSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int spacing) {
+        if (onGridSpacingChanged_)
+            onGridSpacingChanged_(spacing);
+    });
     updateParameterButtons();
     refreshAppearance();
 }
@@ -108,6 +125,14 @@ void PropertiesPanel::setOnLayoutDeviceParameterChanged(LayoutDeviceParameterCha
 
 void PropertiesPanel::setOnPathWidthChanged(PathWidthChanged callback) { onPathWidthChanged_ = std::move(callback); }
 
+void PropertiesPanel::setOnGridSpacingChanged(GridSpacingChanged callback) {
+    onGridSpacingChanged_ = std::move(callback);
+}
+
+void PropertiesPanel::setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback) {
+    onLayoutShapeSizeChanged_ = std::move(callback);
+}
+
 void PropertiesPanel::refreshAppearance() {
     previewFrame_->setStyleSheet(
         QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
@@ -120,6 +145,11 @@ void PropertiesPanel::clearSelection() {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(false);
     selection_->setText(QStringLiteral("Nothing selected"));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
@@ -134,6 +164,11 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
     const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
     selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
     previewStack_->setCurrentWidget(symbolPreview_);
@@ -149,6 +184,11 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
     selection_->setText(QStringLiteral("%1 (Schematic)").arg(QString::fromStdString(cell.name)));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(symbolSvg.toUtf8());
@@ -163,6 +203,11 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     layoutCellId_ = cell.id;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
     const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                        : QString::fromStdString(cell.pdk);
     const auto kind = cell.device.empty() ? QStringLiteral("Layout") : QStringLiteral("Device");
@@ -188,6 +233,11 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(cell != nullptr);
     if (!cell) {
         selection_->setText(QStringLiteral("No device selected"));
         previewFrame_->setVisible(false);
@@ -210,6 +260,11 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = true;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
     pathWidth_ = std::max(1, width);
     pathLayerName_ = layerName;
     selection_->setText(QStringLiteral("Path tool"));
@@ -236,6 +291,83 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     updateParameterButtons();
 }
 
+void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string &layerName,
+                                     const std::string &displayName, const std::string &typeName) {
+    instanceId_ = 0;
+    cellId_ = 0;
+    layoutCellId_ = 0;
+    layoutDeviceName_.clear();
+    pathMode_ = false;
+    shapeMode_ = true;
+    shapeIsRectangle_ = !shape.isPath() && !shape.isText() && shape.polygon.empty();
+    layoutShapeId_ = shape.id;
+    layoutShapeWidth_ = static_cast<int>(std::clamp<ice::Coordinate>(shape.rectangle.width, 1, 1000000000));
+    layoutShapeHeight_ = static_cast<int>(std::clamp<ice::Coordinate>(shape.rectangle.height, 1, 1000000000));
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
+    selection_->setText(
+        QStringLiteral("%1 (%2)").arg(QString::fromStdString(displayName), QString::fromStdString(typeName)));
+    previewFrame_->setVisible(false);
+    QSignalBlocker blocker(parameters_);
+    parameters_->setRowCount(0);
+    const auto addReadOnlyRow = [&](const QString &name, const QString &value) {
+        const int row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        auto *valueItem = new QTableWidgetItem(value);
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(row, 0, nameItem);
+        parameters_->setItem(row, 1, valueItem);
+    };
+    addReadOnlyRow(QStringLiteral("name"), QString::fromStdString(displayName));
+    addReadOnlyRow(QStringLiteral("type"), QString::fromStdString(typeName));
+    addReadOnlyRow(QStringLiteral("layer"), QString::fromStdString(layerName));
+    if (shapeIsRectangle_) {
+        const int widthRow = parameters_->rowCount();
+        parameters_->insertRow(widthRow);
+        auto *widthName = new QTableWidgetItem(QStringLiteral("width (nm)"));
+        widthName->setFlags(widthName->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(widthRow, 0, widthName);
+        parameters_->setItem(widthRow, 1, new QTableWidgetItem(QString::number(layoutShapeWidth_)));
+        const int heightRow = parameters_->rowCount();
+        parameters_->insertRow(heightRow);
+        auto *heightName = new QTableWidgetItem(QStringLiteral("height (nm)"));
+        heightName->setFlags(heightName->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(heightRow, 0, heightName);
+        parameters_->setItem(heightRow, 1, new QTableWidgetItem(QString::number(layoutShapeHeight_)));
+    }
+    updateParameterButtons();
+}
+
+void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell,
+                                        int spacing) {
+    instanceId_ = 0;
+    cellId_ = 0;
+    layoutCellId_ = 0;
+    layoutDeviceName_.clear();
+    pathMode_ = false;
+    shapeMode_ = false;
+    layoutShapeId_ = 0;
+    setParametersVisible(false);
+    layoutCellPreview_ = previewCell ? *previewCell : ice::LayoutDeviceCell{};
+    layoutDevicePreview_->setCell(previewCell && !previewCell->shapes.empty() ? &layoutCellPreview_ : nullptr);
+    previewStack_->setCurrentWidget(layoutDevicePreview_);
+    previewFrame_->setVisible(true);
+    const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
+                                                                       : QString::fromStdString(cell.pdk);
+    selection_->setText(QStringLiteral("%1 (Layout · %2)").arg(QString::fromStdString(cell.name), pdk));
+    QSignalBlocker blocker(parameters_);
+    parameters_->setRowCount(0);
+    if (gridOptions_) {
+        QSignalBlocker spacingBlocker(gridSpacingSpin_);
+        gridSpacingSpin_->setValue(std::clamp(spacing, 1, 1000000000));
+        gridOptions_->setVisible(true);
+    }
+    updateParameterButtons();
+}
+
 QLabel *PropertiesPanel::addRow(QFormLayout *form, const QString &label) {
     auto *value = new QLabel(QStringLiteral("—"));
     value->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -255,6 +387,13 @@ void PropertiesPanel::populateParameters(const std::vector<ice::Parameter> &para
         parameters_->setItem(row, 0, name);
         parameters_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(parameter.value)));
     }
+}
+
+void PropertiesPanel::setParametersVisible(bool visible) {
+    if (parametersHeader_)
+        parametersHeader_->setVisible(visible);
+    if (parameters_)
+        parameters_->setVisible(visible);
 }
 
 void PropertiesPanel::populateLayoutDeviceParameters(const std::vector<ice::LayoutDeviceParameter> &parameters) {
@@ -282,6 +421,36 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
     const auto *name = parameters_->item(item->row(), 0);
     if (!name)
         return;
+    if (shapeMode_) {
+        if (name->text() != QStringLiteral("width (nm)") && name->text() != QStringLiteral("height (nm)"))
+            return;
+        bool accepted = false;
+        const auto value = item->text().toInt(&accepted);
+        const bool width = name->text() == QStringLiteral("width (nm)");
+        if (!accepted || value <= 0) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(QString::number(width ? layoutShapeWidth_ : layoutShapeHeight_));
+            return;
+        }
+        const int clamped = std::clamp(value, 1, 1000000000);
+        const int previous = width ? layoutShapeWidth_ : layoutShapeHeight_;
+        if (clamped == previous) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(QString::number(previous));
+            return;
+        }
+        if (clamped != value) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(QString::number(clamped));
+        }
+        if (width)
+            layoutShapeWidth_ = clamped;
+        else
+            layoutShapeHeight_ = clamped;
+        if (onLayoutShapeSizeChanged_)
+            onLayoutShapeSizeChanged_(layoutShapeId_, layoutShapeWidth_, layoutShapeHeight_);
+        return;
+    }
     if (pathMode_) {
         if (name->text() != QStringLiteral("width (nm)"))
             return;

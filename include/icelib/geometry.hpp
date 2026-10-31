@@ -20,6 +20,8 @@ enum class BooleanOperation { union_, difference, intersection, xor_ };
 
 class GeometryKernel {
   public:
+    // Returns independently fillable polygons. Results that contain holes are
+    // split into simple polygons so callers can store one outline per shape.
     MultiPolygon booleanOp(const MultiPolygon &subject, const MultiPolygon &clip, BooleanOperation operation) const;
     MultiPolygon offset(const MultiPolygon &subject, Coordinate delta) const;
     MultiPolygon cleanup(const MultiPolygon &subject) const;

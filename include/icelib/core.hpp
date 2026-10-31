@@ -146,7 +146,14 @@ struct Shape {
     // vector lists the via layers stacked at that point.
     std::vector<std::vector<ObjectId>> pointVias;
     Coordinate width = 0;
+    // Non-empty for layout text. rectangle stores the nominal text box; x/y is
+    // the lower-left corner and height is the text size in database units.
+    std::string text;
+    // Optional hierarchy display name. Shapes without a name use a generated
+    // type/id label in the layout hierarchy.
+    std::string name;
     bool isPath() const { return centerline.size() >= 2 && width > 0; }
+    bool isText() const { return !text.empty(); }
     ObjectId layerForSegment(std::size_t index) const {
         return index < segmentLayers.size() ? segmentLayers[index] : layer;
     }

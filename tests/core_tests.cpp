@@ -15,6 +15,18 @@
 #include <filesystem>
 #include <fstream>
 
+namespace {
+long double polygonArea(const ice::Polygon &polygon) {
+    long double area = 0.0L;
+    for (std::size_t index = 0; index < polygon.size(); ++index) {
+        const auto &current = polygon[index];
+        const auto &next = polygon[(index + 1) % polygon.size()];
+        area += static_cast<long double>(current.x) * next.y - static_cast<long double>(next.x) * current.y;
+    }
+    return area / 2.0L;
+}
+} // namespace
+
 TEST_CASE("project serialization and transactions are deterministic") {
     ice::Project project;
     project.identity = "demo";
@@ -83,6 +95,19 @@ TEST_CASE("geometry operations are deterministic and queryable") {
     auto intersection = kernel.booleanOp(first, second, ice::BooleanOperation::intersection);
     CHECK(intersection.size() == 1);
     CHECK(ice::GeometryKernel::bounds(intersection.front()).width == 5);
+    CHECK(polygonArea(intersection.front()) == 50.0L);
+    auto united = kernel.booleanOp(first, second, ice::BooleanOperation::union_);
+    CHECK(united.size() == 1);
+    CHECK(polygonArea(united.front()) == 150.0L);
+    auto difference = kernel.booleanOp(first, second, ice::BooleanOperation::difference);
+    CHECK(difference.size() == 1);
+    CHECK(polygonArea(difference.front()) == 50.0L);
+    auto exclusive = kernel.booleanOp(first, second, ice::BooleanOperation::xor_);
+    CHECK(exclusive.size() == 2);
+    long double exclusiveArea = 0.0L;
+    for (const auto &polygon : exclusive)
+        exclusiveArea += std::abs(polygonArea(polygon));
+    CHECK(exclusiveArea == 100.0L);
     auto expanded = kernel.offset(first, 2);
     CHECK(!expanded.empty());
 
@@ -962,6 +987,68 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(project.validate().empty());
 }
 
+TEST_CASE("layout shape boolean operations replace their operands") {
+    ice::Project project;
+    project.identity = "boolean-demo";
+    project.name = "boolean-demo";
+    const auto layerId = project.nextId();
+    project.layers.emplace(layerId, ice::Layer{layerId, "metal1", 1});
+    const auto cellId = ice::createLayoutCell(project, "top");
+    const auto first = ice::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
+    const auto second = ice::addRectangle(project, cellId, layerId, {50, 0, 100, 100});
+    const auto unionIds = ice::booleanLayoutShapes(project, cellId, {first, second}, ice::BooleanOperation::union_);
+    const auto &cell = project.layoutCells.at(cellId);
+    CHECK(unionIds.size() == 1);
+    CHECK(cell.shapes.size() == 1);
+    const auto &united = cell.shapes.at(unionIds.front());
+    CHECK(united.name == "Union 1");
+    CHECK(united.polygon.size() >= 4);
+    CHECK(united.rectangle.x == 0);
+    CHECK(united.rectangle.y == 0);
+    CHECK(united.rectangle.width == 150);
+    CHECK(united.rectangle.height == 100);
+    CHECK(project.validate().empty());
+
+    const auto outer = ice::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
+    const auto inner = ice::addRectangle(project, cellId, layerId, {25, 25, 50, 50});
+    const auto differenceIds =
+        ice::booleanLayoutShapes(project, cellId, {outer, inner}, ice::BooleanOperation::difference);
+    CHECK(differenceIds.size() > 1);
+    const auto &differenceCell = project.layoutCells.at(cellId);
+    long double area = 0.0L;
+    for (const auto id : differenceIds) {
+        const auto &shape = differenceCell.shapes.at(id);
+        CHECK(!shape.polygon.empty());
+        ice::Polygon polygon;
+        polygon.reserve(shape.polygon.size());
+        for (const auto &point : shape.polygon)
+            polygon.push_back({point.x, point.y});
+        area += std::abs(polygonArea(polygon));
+    }
+    CHECK(area == 7500.0L);
+    CHECK(differenceCell.shapes.size() == 1 + differenceIds.size());
+    CHECK(project.validate().empty());
+}
+
+TEST_CASE("layout shape boolean operations reject mixed layers and empty results") {
+    ice::Project project;
+    const auto firstLayer = project.nextId();
+    project.layers.emplace(firstLayer, ice::Layer{firstLayer, "metal1", 1});
+    const auto secondLayer = project.nextId();
+    project.layers.emplace(secondLayer, ice::Layer{secondLayer, "metal2", 2});
+    const auto cellId = ice::createLayoutCell(project, "top");
+    const auto first = ice::addRectangle(project, cellId, firstLayer, {0, 0, 100, 100});
+    const auto second = ice::addRectangle(project, cellId, secondLayer, {50, 0, 100, 100});
+    CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {first, second}, ice::BooleanOperation::union_),
+                    ice::ProjectError);
+    CHECK(project.layoutCells.at(cellId).shapes.size() == 2);
+
+    const auto third = ice::addRectangle(project, cellId, secondLayer, {500, 500, 10, 10});
+    CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {second, third}, ice::BooleanOperation::intersection),
+                    ice::ProjectError);
+    CHECK(project.layoutCells.at(cellId).shapes.size() == 3);
+}
+
 TEST_CASE("layout polygons ports and instances use core operations") {
     ice::Project project;
     project.identity = "layout-ops";
@@ -1371,6 +1458,63 @@ TEST_CASE("layout paths persist and move as one shape") {
     CHECK(metal2ReachesVia);
     CHECK(viaExported);
     std::filesystem::remove(gds);
+}
+
+TEST_CASE("layout text persists and exports as GDS text") {
+    ice::Project project;
+    project.identity = "text-test";
+    project.name = "text-test";
+    const auto layer = ice::addLayer(project, "Metal1", 1);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto textId = ice::addText(project, cell, layer, 1000, 2000, "VDD", 500);
+    const auto &text = project.layoutCells.at(cell).shapes.at(textId);
+    CHECK(text.isText());
+    CHECK(text.name == "Text 1");
+    CHECK(text.text == "VDD");
+    CHECK(text.rectangle.x == 1000);
+    CHECK(text.rectangle.y == 2000);
+    CHECK(text.rectangle.height == 500);
+    CHECK(project.validate().empty());
+    CHECK_THROWS_AS(ice::addText(project, cell, layer, 0, 0, "", 500), ice::ProjectError);
+
+    auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto &loaded = roundTrip.layoutCells.at(cell).shapes.at(textId);
+    CHECK(loaded.isText());
+    CHECK(loaded.name == "Text 1");
+    CHECK(loaded.text == "VDD");
+
+    const auto gds = std::filesystem::temp_directory_path() / "ice-layout-text-test.gds";
+    ice::LayoutInterchange::exportGds(project, cell, gds);
+    CHECK(std::filesystem::is_regular_file(gds));
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    bool foundText = false;
+    for (const auto &[_, shape] : imported.layoutCells.begin()->second.shapes) {
+        if (shape.isText() && shape.text == "VDD") {
+            foundText = true;
+            CHECK(shape.rectangle.height == 1000);
+        }
+    }
+    CHECK(foundText);
+    std::filesystem::remove(gds);
+}
+
+TEST_CASE("layout polygon points can be moved") {
+    ice::Project project;
+    project.identity = "polygon-edit-test";
+    project.name = "polygon-edit-test";
+    const auto layer = ice::addLayer(project, "Metal1", 1);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto polygonId = ice::addPolygon(project, cell, layer, {{0, 0}, {1000, 0}, {500, 800}});
+    ice::movePolygonPoint(project, cell, polygonId, 2, {600, 900});
+    const auto &shape = project.layoutCells.at(cell).shapes.at(polygonId);
+    CHECK(shape.name == "Polygon 1");
+    CHECK(shape.polygon.at(2).x == 600);
+    CHECK(shape.polygon.at(2).y == 900);
+    CHECK(shape.rectangle.x == 0);
+    CHECK(shape.rectangle.y == 0);
+    CHECK(shape.rectangle.width == 1000);
+    CHECK(shape.rectangle.height == 900);
+    CHECK_THROWS_AS(ice::movePolygonPoint(project, cell, polygonId, 3, {0, 0}), ice::ProjectError);
 }
 
 TEST_CASE("simulation graph metadata is editable through core helpers") {

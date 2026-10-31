@@ -4,13 +4,13 @@
 #include "ui_helpers.hpp"
 
 #include <QApplication>
+#include <QFont>
 #include <QFontMetricsF>
 #include <QGraphicsItemGroup>
-#include <QGraphicsLineItem>
 #include <QGraphicsPolygonItem>
 #include <QGraphicsRectItem>
+#include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
-#include <QGraphicsSimpleTextItem>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QLineF>
@@ -22,11 +22,13 @@
 #include <QPen>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QStyleOptionGraphicsItem>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}
 LayoutCanvas::~LayoutCanvas() = default;
@@ -150,7 +152,7 @@ class LayoutPathItem : public QGraphicsItem {
         const auto stroke = strokedPath().boundingRect();
         // Keep room for screen-sized handles and the enlarged hit area even
         // when the view is zoomed out.
-        const qreal margin = std::max<qreal>(64.0, width_ * 0.5 + 8.0);
+        const qreal margin = std::max({qreal(64.0), width_ * 0.5 + 8.0, handleSize() * 2.0});
         return stroke.adjusted(-margin, -margin, margin, margin);
     }
 
@@ -217,7 +219,7 @@ class LayoutPathItem : public QGraphicsItem {
             }
         }
 
-        if (!isSelected() || readOnly_) {
+        if (!isSelected() || readOnly_ || !pointEditingEnabled_) {
             painter->restore();
             return;
         }
@@ -235,7 +237,7 @@ class LayoutPathItem : public QGraphicsItem {
 
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override {
         if (!readOnly_) {
-            if (event->button() == Qt::LeftButton) {
+            if (event->button() == Qt::LeftButton && pointEditingEnabled_) {
                 const int handle = nearestHandle(event->pos());
                 if (handle >= 0) {
                     if (!isSelected()) {
@@ -244,10 +246,11 @@ class LayoutPathItem : public QGraphicsItem {
                         setSelected(true);
                     }
                     draggingHandle_ = handle;
+                    handleDragStart_ = points_[static_cast<std::size_t>(handle)];
                     event->accept();
                     return;
                 }
-            } else if (event->button() == Qt::RightButton && isSelected()) {
+            } else if (event->button() == Qt::RightButton && isSelected() && pointEditingEnabled_) {
                 const int handle = nearestHandle(event->pos());
                 if (handle >= 0 && points_.size() > 2 && pointDeleted_) {
                     QMenu menu;
@@ -287,7 +290,8 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
-        if (!readOnly_ && event->button() == Qt::LeftButton && nearestHandle(event->pos()) < 0 && pointInserted_) {
+        if (!readOnly_ && pointEditingEnabled_ && event->button() == Qt::LeftButton &&
+            nearestHandle(event->pos()) < 0 && pointInserted_) {
             const auto local = mapFromScene(event->scenePos());
             const int segment = nearestSegment(local);
             if (segment >= 0) {
@@ -301,6 +305,64 @@ class LayoutPathItem : public QGraphicsItem {
             }
         }
         QGraphicsItem::mouseDoubleClickEvent(event);
+    }
+
+    ice::ObjectId pathId() const { return id_; }
+
+    void setPointEditingEnabled(bool enabled) {
+        if (pointEditingEnabled_ == enabled)
+            return;
+        pointEditingEnabled_ = enabled;
+        if (!enabled)
+            cancelHandleDrag();
+        update();
+    }
+
+    int handleAtScenePosition(const QPointF &scenePos) const {
+        if (readOnly_ || !pointEditingEnabled_)
+            return -1;
+        return nearestHandle(mapFromScene(scenePos));
+    }
+
+    QPointF handleScenePosition(int index) const {
+        if (index < 0 || index >= static_cast<int>(points_.size()))
+            return {};
+        return mapToScene(points_[static_cast<std::size_t>(index)]);
+    }
+
+    void beginHandleDrag(int index) {
+        if (index < 0 || index >= static_cast<int>(points_.size()))
+            return;
+        draggingHandle_ = index;
+        handleDragStart_ = points_[static_cast<std::size_t>(index)];
+    }
+
+    void dragHandleToScenePosition(const QPointF &scenePos) {
+        if (draggingHandle_ < 0 || draggingHandle_ >= static_cast<int>(points_.size()))
+            return;
+        prepareGeometryChange();
+        points_[static_cast<std::size_t>(draggingHandle_)] = mapFromScene(scenePos);
+        update();
+    }
+
+    bool endHandleDrag() {
+        if (draggingHandle_ < 0 || draggingHandle_ >= static_cast<int>(points_.size()))
+            return false;
+        const int index = draggingHandle_;
+        draggingHandle_ = -1;
+        const bool moved = points_[static_cast<std::size_t>(index)] != handleDragStart_;
+        if (moved && pointMoved_)
+            pointMoved_(id_, index, mapToScene(points_[static_cast<std::size_t>(index)]));
+        return moved;
+    }
+
+    void cancelHandleDrag() {
+        if (draggingHandle_ >= 0 && draggingHandle_ < static_cast<int>(points_.size())) {
+            prepareGeometryChange();
+            points_[static_cast<std::size_t>(draggingHandle_)] = handleDragStart_;
+        }
+        draggingHandle_ = -1;
+        update();
     }
 
   private:
@@ -371,7 +433,7 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     QRectF handleHitRect(int index) const {
-        const auto pad = handleSize() * 0.5;
+        const auto pad = handleSize();
         return handleRect(index).adjusted(-pad, -pad, pad, pad);
     }
 
@@ -426,17 +488,219 @@ class LayoutPathItem : public QGraphicsItem {
     std::vector<QColor> segmentColors_;
     std::vector<std::vector<QColor>> pointViaColors_;
     bool readOnly_ = false;
+    bool pointEditingEnabled_ = true;
     int draggingHandle_ = -1;
+    QPointF handleDragStart_;
     LayoutPathPointMovedCallback pointMoved_;
     LayoutPathPointInsertedCallback pointInserted_;
     LayoutPathPointDeletedCallback pointDeleted_;
 };
+
+class LayoutResizeHandleItem : public QGraphicsItem {
+  public:
+    LayoutResizeHandleItem(ice::ObjectId shapeId, int handle, bool polygonVertex = false) {
+        setData(3, polygonVertex ? QStringLiteral("polygon-handle") : QStringLiteral("resize-handle"));
+        setData(4, QVariant::fromValue<qulonglong>(shapeId));
+        setData(5, handle);
+        setZValue(20.0);
+        setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        setAcceptedMouseButtons(Qt::NoButton);
+        setVisible(false);
+    }
+
+    QRectF boundingRect() const override { return QRectF(-12.0, -12.0, 24.0, 24.0); }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.addRect(boundingRect());
+        return path;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        const auto accent = ice::uiColor(ice::UiColor::Accent5);
+        QPen pen(accent);
+        pen.setCosmetic(true);
+        pen.setWidthF(1.5);
+        painter->setPen(pen);
+        painter->setBrush(ice::uiColor(ice::UiColor::Background1));
+        painter->drawRect(QRectF(-4.0, -4.0, 8.0, 8.0));
+    }
+};
+
+QString formatLayoutLength(qreal length) {
+    if (length >= 1000000.0)
+        return QStringLiteral("%1 mm").arg(length / 1000000.0, 0, 'g', 4);
+    if (length >= 1000.0)
+        return QStringLiteral("%1 um").arg(length / 1000.0, 0, 'g', 4);
+    if (length >= 1.0)
+        return QStringLiteral("%1 nm").arg(length, 0, 'g', 4);
+    return QStringLiteral("%1 pm").arg(length * 1000.0, 0, 'g', 4);
+}
+
+class LayoutRulerItem : public QGraphicsItem {
+  public:
+    LayoutRulerItem() {
+        setZValue(50.0);
+        setFlag(QGraphicsItem::ItemUsesExtendedStyleOption);
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    void setLine(const QLineF &line) {
+        prepareGeometryChange();
+        line_ = line;
+        update();
+    }
+
+    void prepareForScaleChange() { prepareGeometryChange(); }
+
+    QRectF boundingRect() const override {
+        const auto margin = 160.0 / viewScale();
+        return QRectF(line_.p1(), line_.p2()).normalized().adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override { return {}; }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *) override {
+        const auto scale = viewScale();
+        if (scale <= 0.0 || line_.length() < 1.0e-9)
+            return;
+        const auto color = ice::uiColor(ice::UiColor::Accent1);
+        painter->setRenderHint(QPainter::Antialiasing);
+        QPen linePen(color);
+        linePen.setCosmetic(true);
+        linePen.setWidthF(2.0);
+        painter->setPen(linePen);
+        painter->drawLine(line_);
+
+        const auto delta = line_.p2() - line_.p1();
+        const auto length = std::hypot(delta.x(), delta.y());
+        if (length <= 0.0)
+            return;
+        const auto direction = delta / length;
+        const QPointF normal(-direction.y(), direction.x());
+
+        const auto target = 80.0 / scale;
+        const auto magnitude = std::pow(10.0, std::floor(std::log10(std::max(target, 1.0e-12))));
+        const auto normalized = target / magnitude;
+        const auto factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const auto major = magnitude * factor;
+        const auto minor = major / 5.0;
+        if (minor <= 0.0)
+            return;
+
+        const auto minorTick = 4.0 / scale;
+        const auto majorTick = 9.0 / scale;
+        QPen tickPen(color);
+        tickPen.setCosmetic(true);
+        tickPen.setWidthF(1.0);
+
+        qreal t0 = 0.0;
+        qreal t1 = 1.0;
+        const auto exposed = option ? option->exposedRect : boundingRect();
+        const auto clipAxis = [&](qreal origin, qreal step, qreal low, qreal high) {
+            if (std::abs(step) < 1.0e-12)
+                return origin >= low && origin <= high;
+            qreal a = (low - origin) / step;
+            qreal b = (high - origin) / step;
+            if (a > b)
+                std::swap(a, b);
+            t0 = std::max(t0, a);
+            t1 = std::min(t1, b);
+            return t0 <= t1;
+        };
+        if (!clipAxis(line_.p1().x(), delta.x(), exposed.left(), exposed.right()) ||
+            !clipAxis(line_.p1().y(), delta.y(), exposed.top(), exposed.bottom()))
+            return;
+
+        const auto startDistance = t0 * length;
+        const auto endDistance = t1 * length;
+        const auto firstTick = static_cast<long long>(std::floor(startDistance / minor));
+        const auto lastTick = static_cast<long long>(std::ceil(endDistance / minor));
+        constexpr long long maxTicks = 2000;
+        painter->setPen(tickPen);
+        long long drawn = 0;
+        for (long long tick = firstTick; tick <= lastTick && drawn < maxTicks; ++tick, ++drawn) {
+            const auto distance = static_cast<qreal>(tick) * minor;
+            if (distance < -1.0e-9 || distance > length + 1.0e-9)
+                continue;
+            const auto point = line_.p1() + direction * distance;
+            const bool isMajor = tick % 5 == 0;
+            const auto tickLength = isMajor ? majorTick : minorTick;
+            painter->drawLine(point, point + normal * tickLength);
+            if (isMajor && distance > minor * 0.5 && distance < length - minor * 0.5)
+                drawLabel(painter, point + normal * (majorTick + 5.0 / scale), formatLayoutLength(distance), scale,
+                          false);
+        }
+
+        painter->setPen(linePen);
+        painter->drawLine(line_.p1() - normal * majorTick, line_.p1() + normal * majorTick);
+        painter->drawLine(line_.p2() - normal * majorTick, line_.p2() + normal * majorTick);
+        drawLabel(painter, (line_.p1() + line_.p2()) * 0.5 - normal * (18.0 / scale),
+                  QStringLiteral("%1 nm").arg(length, 0, 'f', 1), scale, true);
+    }
+
+  private:
+    static void drawLabel(QPainter *painter, const QPointF &scenePos, const QString &text, qreal scale,
+                          bool emphasized) {
+        painter->save();
+        painter->translate(scenePos);
+        painter->scale(1.0 / scale, 1.0 / scale);
+        QFont font = painter->font();
+        font.setPointSizeF(emphasized ? 9.0 : 8.0);
+        font.setBold(emphasized);
+        painter->setFont(font);
+        const auto metrics = painter->fontMetrics();
+        const auto width = metrics.horizontalAdvance(text);
+        const auto height = metrics.height();
+        painter->setPen(ice::uiColor(ice::UiColor::Accent1));
+        painter->drawText(QRectF(-width * 0.5 - 2.0, -height * 0.5, width + 4.0, height), Qt::AlignCenter, text);
+        painter->restore();
+    }
+
+    qreal viewScale() const {
+        if (scene() && !scene()->views().empty())
+            return std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return 1.0;
+    }
+
+    QLineF line_;
+};
 } // namespace
+
+QPointF layoutResizeHandlePosition(const QRectF &rect, int handle) {
+    switch (handle) {
+    case 0:
+        return rect.topLeft();
+    case 1:
+        return rect.topRight();
+    case 2:
+        return rect.bottomLeft();
+    case 3:
+        return rect.bottomRight();
+    case 4:
+        return QPointF(rect.left(), rect.center().y());
+    case 5:
+        return QPointF(rect.right(), rect.center().y());
+    case 6:
+        return QPointF(rect.center().x(), rect.top());
+    default:
+        return QPointF(rect.center().x(), rect.bottom());
+    }
+}
+
+QGraphicsItem *createLayoutResizeHandleItem(ice::ObjectId shapeId, int handle) {
+    return new LayoutResizeHandleItem(shapeId, handle);
+}
+
+QGraphicsItem *createLayoutPolygonHandleItem(ice::ObjectId shapeId, int index) {
+    return new LayoutResizeHandleItem(shapeId, index, true);
+}
 
 class LayoutCanvasImpl : public LayoutCanvas {
   public:
     explicit LayoutCanvasImpl(QWidget *parent = nullptr) : LayoutCanvas(parent) {
         setScene(new QGraphicsScene(this));
+        connect(scene(), &QGraphicsScene::selectionChanged, this, [this] { updateResizeHandleVisibility(nullptr); });
         setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
         setRenderHint(QPainter::Antialiasing);
         setDragMode(QGraphicsView::RubberBandDrag);
@@ -452,23 +716,57 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setTool(Tool tool) {
         if (readOnly_ && tool != Tool::select)
             tool = Tool::select;
+        cancelManualPathDrag();
+        cancelPolygonDrag();
+        resizingItem_ = nullptr;
+        draggingInstance_ = nullptr;
+        movingItem_ = nullptr;
         if (tool != Tool::path)
             finishPath();
+        if (tool != Tool::polygon)
+            finishPolygon();
         if (tool != Tool::ruler)
             clearRuler();
         tool_ = tool;
         if (tool_ == Tool::select)
             unsetCursor();
+        else if (tool_ == Tool::move)
+            setCursor(Qt::SizeAllCursor);
         else
             setCursor(Qt::CrossCursor);
-        if (tool_ != Tool::select)
-            updateResizeHandleVisibility(nullptr);
+        applyInteractionState();
         viewport()->update();
     }
 
+    void refreshInteractionState() override { applyInteractionState(); }
+
+    void applyInteractionState() {
+        if (!scene())
+            return;
+        const bool moveMode = tool_ == Tool::move && !readOnly_;
+        const bool selectMode = tool_ == Tool::select && !readOnly_;
+        for (auto *item : scene()->items()) {
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item))
+                path->setPointEditingEnabled(selectMode);
+            if (!item->data(0).isValid() || item->data(0).toULongLong() == 0)
+                continue;
+            if (!(item->flags() & QGraphicsItem::ItemIsSelectable))
+                continue;
+            item->setFlag(QGraphicsItem::ItemIsMovable, moveMode);
+        }
+        updateResizeHandleVisibility(nullptr);
+    }
+
     void setReadOnly(bool readOnly) {
+        if (readOnly_ != readOnly) {
+            cancelManualPathDrag();
+            cancelPolygonDrag();
+        }
         readOnly_ = readOnly;
         if (readOnly_) {
+            polygonActive_ = false;
+            polygonPoints_.clear();
+            polygonCursor_ = {};
             selectedLayoutInstance_ = 0;
             applyLayoutInstanceSelection();
             setTool(Tool::select);
@@ -625,6 +923,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setPathFinishedCallback(LayoutPathFinishedCallback callback) override { pathFinished_ = std::move(callback); }
 
+    void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
+
+    void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) override {
+        polygonCreated_ = std::move(callback);
+    }
+
+    void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) override {
+        polygonPointMoved_ = std::move(callback);
+    }
+
     void setInitialView(const QRectF &bounds) {
         if (!bounds.isValid() || bounds.isNull())
             return;
@@ -684,6 +992,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::path && pathActive_)
             drawPathPreview(*painter, rect);
+        if (tool_ == Tool::polygon && polygonActive_)
+            drawPolygonPreview(*painter, rect);
     }
 
     void drawPathPreview(QPainter &painter, const QRectF &rect) {
@@ -735,6 +1045,37 @@ class LayoutCanvasImpl : public LayoutCanvas {
         painter.restore();
     }
 
+    void drawPolygonPreview(QPainter &painter, const QRectF &rect) {
+        if (polygonPoints_.empty())
+            return;
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const auto color = rectangleStyle_.color;
+        QPolygonF preview;
+        for (const auto &point : polygonPoints_)
+            preview << point;
+        preview << polygonCursor_;
+        QPen outline(color);
+        outline.setCosmetic(true);
+        outline.setWidthF(1.4);
+        outline.setStyle(Qt::DashLine);
+        QColor fill = color;
+        fill.setAlpha(60);
+        painter.setPen(outline);
+        painter.setBrush(preview.size() >= 3 ? QBrush(fill) : QBrush(Qt::NoBrush));
+        painter.drawPolygon(preview);
+        QPen markerPen(color);
+        markerPen.setCosmetic(true);
+        markerPen.setWidthF(1.0);
+        painter.setPen(markerPen);
+        painter.setBrush(ice::uiColor(ice::UiColor::Background1));
+        const auto size = 6.0 / std::max(zoom_, qreal(1.0e-6));
+        for (const auto &point : polygonPoints_)
+            painter.drawRect(QRectF(point.x() - size * 0.5, point.y() - size * 0.5, size, size));
+        painter.restore();
+    }
+
     void drawScaleIndicator(QPainter &painter) {
         if (zoom_ <= 0.0)
             return;
@@ -767,6 +1108,36 @@ class LayoutCanvasImpl : public LayoutCanvas {
         drawScaleIndicator(painter);
     }
 
+    LayoutPathItem *findPathItem(ice::ObjectId id) const {
+        if (id == 0)
+            return nullptr;
+        for (auto *item : scene()->items())
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item); path && path->pathId() == id)
+                return path;
+        return nullptr;
+    }
+
+    void cancelManualPathDrag() {
+        if (manualPathDragHandle_ >= 0) {
+            if (auto *path = findPathItem(manualPathDragId_))
+                path->cancelHandleDrag();
+        }
+        manualPathDragId_ = 0;
+        manualPathDragHandle_ = -1;
+    }
+
+    void cancelPolygonDrag() {
+        if (polygonDragItem_ && polygonDragIndex_ >= 0 && polygonDragIndex_ < polygonDragItem_->polygon().size()) {
+            auto polygon = polygonDragItem_->polygon();
+            polygon[polygonDragIndex_] = polygonDragStartLocalPoint_;
+            polygonDragItem_->setPolygon(polygon);
+            updatePolygonHandles(polygonDragShapeId_, scenePolygon(polygonDragItem_));
+        }
+        polygonDragItem_ = nullptr;
+        polygonDragShapeId_ = 0;
+        polygonDragIndex_ = -1;
+    }
+
     void mousePressEvent(QMouseEvent *event) override {
         if (event->button() == Qt::LeftButton && isScaleIndicatorPosition(event->pos())) {
             beginScaleEdit();
@@ -781,6 +1152,50 @@ class LayoutCanvasImpl : public LayoutCanvas {
             setCursor(Qt::ClosedHandCursor);
             event->accept();
             return;
+        }
+        if (tool_ == Tool::select && event->button() == Qt::LeftButton && !readOnly_) {
+            auto *clicked = itemAt(event->pos());
+            const auto clickedKind = clicked ? clicked->data(3).toString() : QString();
+            const bool onResizeHandle =
+                clickedKind == QStringLiteral("resize-handle") || clickedKind == QStringLiteral("polygon-handle");
+            if (!onResizeHandle) {
+                const auto scenePos = mapToScene(event->pos());
+                LayoutPathItem *bestPath = nullptr;
+                int bestHandle = -1;
+                qreal bestDistance = std::numeric_limits<qreal>::max();
+                for (auto *item : scene()->items()) {
+                    auto *path = dynamic_cast<LayoutPathItem *>(item);
+                    if (!path || !path->isVisible())
+                        continue;
+                    const int handle = path->handleAtScenePosition(scenePos);
+                    if (handle < 0)
+                        continue;
+                    const auto distance = QLineF(scenePos, path->handleScenePosition(handle)).length();
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestPath = path;
+                        bestHandle = handle;
+                    }
+                }
+                if (bestPath) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    draggingInstance_ = nullptr;
+                    movingItem_ = nullptr;
+                    if (!bestPath->isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier))
+                            scene()->clearSelection();
+                        bestPath->setSelected(true);
+                    }
+                    bestPath->beginHandleDrag(bestHandle);
+                    manualPathDragId_ = bestPath->pathId();
+                    manualPathDragHandle_ = bestHandle;
+                    event->accept();
+                    return;
+                }
+            }
         }
         if (tool_ == Tool::placeDevice && event->button() == Qt::LeftButton) {
             if (readOnly_) {
@@ -803,6 +1218,38 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 rulerHasStart_ = false;
             }
             updateRuler(point);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::text && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (textPlaced_)
+                textPlaced_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            auto point = snapPosition(mapToScene(event->pos()));
+            if (polygonActive_ && event->modifiers().testFlag(Qt::ShiftModifier))
+                point = constrainedPathPoint(polygonPoints_.back(), point, true);
+            if (!polygonActive_) {
+                polygonActive_ = true;
+                polygonPoints_.clear();
+                polygonPoints_.push_back(point);
+            } else if (QLineF(polygonPoints_.back(), point).length() >= 0.5) {
+                polygonPoints_.push_back(point);
+            }
+            polygonCursor_ = point;
+            viewport()->update();
             event->accept();
             return;
         }
@@ -846,9 +1293,43 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 return;
             }
         }
-        if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
+        if ((tool_ == Tool::select || tool_ == Tool::move) && event->button() == Qt::LeftButton) {
             auto *clicked = itemAt(event->pos());
-            if (clicked && clicked->data(3).toString() == QStringLiteral("resize-handle") && !readOnly_) {
+            if (tool_ == Tool::select && clicked && clicked->data(3).toString() == QStringLiteral("polygon-handle") &&
+                !readOnly_) {
+                QGraphicsPolygonItem *polygonItem = nullptr;
+                for (auto *candidate : scene()->items()) {
+                    if (candidate->data(0).toULongLong() != clicked->data(4).toULongLong())
+                        continue;
+                    if (auto *poly = dynamic_cast<QGraphicsPolygonItem *>(candidate)) {
+                        polygonItem = poly;
+                        break;
+                    }
+                }
+                if (polygonItem) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    draggingInstance_ = nullptr;
+                    movingItem_ = nullptr;
+                    if (!polygonItem->isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier))
+                            scene()->clearSelection();
+                        polygonItem->setSelected(true);
+                    }
+                    polygonDragItem_ = polygonItem;
+                    polygonDragShapeId_ = clicked->data(4).toULongLong();
+                    polygonDragIndex_ = clicked->data(5).toInt();
+                    const auto polygon = polygonItem->polygon();
+                    if (polygonDragIndex_ >= 0 && polygonDragIndex_ < polygon.size())
+                        polygonDragStartLocalPoint_ = polygon[polygonDragIndex_];
+                    event->accept();
+                    return;
+                }
+            }
+            if (tool_ == Tool::select && clicked && clicked->data(3).toString() == QStringLiteral("resize-handle") &&
+                !readOnly_) {
                 QGraphicsItem *shapeItem = nullptr;
                 for (auto *candidate : scene()->items()) {
                     if (candidate->data(0).toULongLong() == clicked->data(4).toULongLong() &&
@@ -858,6 +1339,15 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     }
                 }
                 if (dynamic_cast<QGraphicsRectItem *>(shapeItem)) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    if (!shapeItem->isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier))
+                            scene()->clearSelection();
+                        shapeItem->setSelected(true);
+                    }
                     resizingItem_ = shapeItem;
                     resizeShapeId_ = clicked->data(4).toULongLong();
                     resizeCorner_ = clicked->data(5).toInt();
@@ -880,15 +1370,22 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 selectedLayoutInstance_ = id;
                 applyLayoutInstanceSelection();
                 movingItem_ = nullptr;
-                draggingInstance_ = instance;
-                dragStartScene_ = mapToScene(event->pos());
-                dragStartPosition_ = instance->pos();
+                if (tool_ == Tool::move) {
+                    draggingInstance_ = instance;
+                    dragStartScene_ = mapToScene(event->pos());
+                    dragStartPosition_ = instance->pos();
+                }
                 event->accept();
                 return;
             }
             if (selectedLayoutInstance_ != 0) {
                 selectedLayoutInstance_ = 0;
                 applyLayoutInstanceSelection();
+            }
+            if (tool_ == Tool::move && (!clicked || !(clicked->flags() & QGraphicsItem::ItemIsSelectable))) {
+                scene()->clearSelection();
+                event->accept();
+                return;
             }
             movingItem_ = clicked;
             if (movingItem_)
@@ -899,6 +1396,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void mouseMoveEvent(QMouseEvent *event) override {
         cursorScenePosition_ = mapToScene(event->pos());
+        if (manualPathDragHandle_ >= 0) {
+            if (auto *path = findPathItem(manualPathDragId_)) {
+                path->dragHandleToScenePosition(cursorScenePosition_);
+            } else {
+                manualPathDragId_ = 0;
+                manualPathDragHandle_ = -1;
+            }
+            event->accept();
+            return;
+        }
         if (panning_) {
             const auto delta = event->pos() - panStartPosition_;
             centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
@@ -911,23 +1418,88 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::polygon && polygonActive_) {
+            auto point = snapPosition(cursorScenePosition_);
+            if (event->modifiers().testFlag(Qt::ShiftModifier))
+                point = constrainedPathPoint(polygonPoints_.back(), point, true);
+            polygonCursor_ = point;
+            viewport()->update();
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::select) {
             auto *hovered = itemAt(event->pos());
-            if (hovered && hovered->data(3).toString() == QStringLiteral("resize-handle")) {
-                const int corner = hovered->data(5).toInt();
-                setCursor(corner == 0 || corner == 3 ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+            const auto hoveredKind = hovered ? hovered->data(3).toString() : QString();
+            if (hoveredKind == QStringLiteral("polygon-handle")) {
+                setCursor(Qt::SizeAllCursor);
+            } else if (hoveredKind == QStringLiteral("resize-handle")) {
+                switch (hovered->data(5).toInt()) {
+                case 0:
+                case 3:
+                    setCursor(Qt::SizeFDiagCursor);
+                    break;
+                case 1:
+                case 2:
+                    setCursor(Qt::SizeBDiagCursor);
+                    break;
+                case 4:
+                case 5:
+                    setCursor(Qt::SizeHorCursor);
+                    break;
+                case 6:
+                case 7:
+                    setCursor(Qt::SizeVerCursor);
+                    break;
+                default:
+                    unsetCursor();
+                    break;
+                }
             } else {
                 unsetCursor();
             }
         }
+        if (polygonDragItem_) {
+            auto polygon = polygonDragItem_->polygon();
+            if (polygonDragIndex_ >= 0 && polygonDragIndex_ < polygon.size()) {
+                polygon[polygonDragIndex_] = polygonDragItem_->mapFromScene(snapPosition(cursorScenePosition_));
+                polygonDragItem_->setPolygon(polygon);
+                updatePolygonHandles(polygonDragShapeId_, scenePolygon(polygonDragItem_));
+            }
+            event->accept();
+            return;
+        }
         if (resizingItem_) {
             const QPointF point = snapPosition(cursorScenePosition_);
             QRectF rect = resizeStartRect_;
-            const QPointF opposite = resizeCorner_ == 0   ? resizeStartRect_.bottomRight()
-                                     : resizeCorner_ == 1 ? resizeStartRect_.bottomLeft()
-                                     : resizeCorner_ == 2 ? resizeStartRect_.topRight()
-                                                          : resizeStartRect_.topLeft();
-            rect = QRectF(opposite, point).normalized();
+            switch (resizeCorner_) {
+            case 0:
+                rect.setTopLeft(point);
+                break;
+            case 1:
+                rect.setTopRight(point);
+                break;
+            case 2:
+                rect.setBottomLeft(point);
+                break;
+            case 3:
+                rect.setBottomRight(point);
+                break;
+            case 4:
+                rect.setLeft(point.x());
+                break;
+            case 5:
+                rect.setRight(point.x());
+                break;
+            case 6:
+                rect.setTop(point.y());
+                break;
+            case 7:
+                rect.setBottom(point.y());
+                break;
+            default:
+                break;
+            }
+            rect = rect.normalized();
             if (rect.width() < 1.0)
                 rect.setWidth(1.0);
             if (rect.height() < 1.0)
@@ -959,6 +1531,18 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         QGraphicsView::mouseMoveEvent(event);
+        if (movingItem_) {
+            if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(movingItem_)) {
+                const auto id = movingItem_->data(0).toULongLong();
+                if (id != 0)
+                    updateResizeHandles(id, movingItem_->mapRectToScene(rectItem->rect()));
+            }
+            if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(movingItem_)) {
+                const auto id = movingItem_->data(0).toULongLong();
+                if (id != 0)
+                    updatePolygonHandles(id, scenePolygon(polygonItem));
+            }
+        }
     }
 
     void wheelEvent(QWheelEvent *event) override {
@@ -992,9 +1576,21 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
+        if (manualPathDragHandle_ >= 0 && event->button() == Qt::LeftButton) {
+            if (auto *path = findPathItem(manualPathDragId_))
+                path->endHandleDrag();
+            manualPathDragId_ = 0;
+            manualPathDragHandle_ = -1;
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::MiddleButton) {
             panning_ = false;
             setTool(tool_);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
             event->accept();
             return;
         }
@@ -1012,11 +1608,28 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (polygonDragItem_ && event->button() == Qt::LeftButton) {
+            auto *item = polygonDragItem_;
+            const int index = polygonDragIndex_;
+            const auto shapeId = polygonDragShapeId_;
+            const auto startLocal = polygonDragStartLocalPoint_;
+            polygonDragItem_ = nullptr;
+            polygonDragShapeId_ = 0;
+            polygonDragIndex_ = -1;
+            const auto polygon = item->polygon();
+            if (index >= 0 && index < polygon.size()) {
+                const auto currentLocal = polygon[index];
+                if (currentLocal != startLocal && polygonPointMoved_)
+                    polygonPointMoved_(shapeId, index, item->mapToScene(currentLocal));
+            }
+            event->accept();
+            return;
+        }
         if (resizingItem_ && event->button() == Qt::LeftButton) {
             auto *item = resizingItem_;
             resizingItem_ = nullptr;
             const auto rect = dynamic_cast<QGraphicsRectItem *>(item)->rect();
-            if (shapeResized_)
+            if (rect != resizeStartRect_ && shapeResized_)
                 shapeResized_(resizeShapeId_, rect);
             resizeShapeId_ = 0;
             event->accept();
@@ -1041,16 +1654,29 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         QGraphicsView::mouseReleaseEvent(event);
-        if (tool_ == Tool::select && event->button() == Qt::LeftButton && movingItem_) {
-            movingItem_->setPos(snapPosition(movingItem_->pos()));
-            const auto delta = movingItem_->pos() - movingStartPosition_;
-            if ((delta.x() != 0.0 || delta.y() != 0.0) && shapeMoved_)
-                shapeMoved_(movingItem_->data(0).toULongLong(), delta);
+        if (event->button() == Qt::LeftButton && movingItem_) {
+            if (tool_ == Tool::move) {
+                movingItem_->setPos(snapPosition(movingItem_->pos()));
+                const auto delta = movingItem_->pos() - movingStartPosition_;
+                if ((delta.x() != 0.0 || delta.y() != 0.0) && shapeMoved_)
+                    shapeMoved_(movingItem_->data(0).toULongLong(), delta);
+            }
             movingItem_ = nullptr;
         }
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
+            setTool(Tool::select);
+            if (toolEscapeRequested_)
+                toolEscapeRequested_();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::text && event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
             // Clicking repeatedly adds points; finish the path with Escape or
             // Space instead of treating the second click as a finish gesture.
@@ -1079,7 +1705,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (event->key() == Qt::Key_Escape &&
-            (tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle || tool_ == Tool::ruler)) {
+            (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
+             tool_ == Tool::polygon || tool_ == Tool::ruler || tool_ == Tool::text)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -1106,32 +1733,55 @@ class LayoutCanvasImpl : public LayoutCanvas {
         for (auto *item : scene()->items()) {
             if (item->data(3).toString() != QStringLiteral("resize-handle") || item->data(4).toULongLong() != shapeId)
                 continue;
-            const int corner = item->data(5).toInt();
-            const QPointF point = corner == 0   ? rect.topLeft()
-                                  : corner == 1 ? rect.topRight()
-                                  : corner == 2 ? rect.bottomLeft()
-                                                : rect.bottomRight();
-            item->setPos(point);
+            item->setPos(layoutResizeHandlePosition(rect, item->data(5).toInt()));
+        }
+    }
+
+    static QPolygonF scenePolygon(const QGraphicsPolygonItem *item) {
+        QPolygonF polygon;
+        for (const auto &point : item->polygon())
+            polygon << item->mapToScene(point);
+        return polygon;
+    }
+
+    void updatePolygonHandles(ice::ObjectId shapeId, const QPolygonF &polygon) {
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() != QStringLiteral("polygon-handle") || item->data(4).toULongLong() != shapeId)
+                continue;
+            const int index = item->data(5).toInt();
+            if (index >= 0 && index < polygon.size())
+                item->setPos(polygon[index]);
         }
     }
 
     void updateResizeHandleVisibility(QGraphicsItem *hovered) {
-        ice::ObjectId shapeId = 0;
-        if (tool_ != Tool::select)
-            hovered = nullptr;
-        for (auto *item = hovered; item; item = item->parentItem()) {
-            if (item->data(0).isValid() && item->data(3).toString() != QStringLiteral("resize-handle")) {
-                shapeId = item->data(0).toULongLong();
-                break;
+        std::set<ice::ObjectId> shapeIds;
+        if (tool_ == Tool::select) {
+            for (auto *item = hovered; item; item = item->parentItem()) {
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle")) {
+                    shapeIds.insert(item->data(4).toULongLong());
+                    break;
+                }
+                if (item->data(0).isValid()) {
+                    shapeIds.insert(item->data(0).toULongLong());
+                    break;
+                }
             }
-            if (item->data(3).toString() == QStringLiteral("resize-handle")) {
-                shapeId = item->data(4).toULongLong();
-                break;
+            for (auto *item : scene()->selectedItems()) {
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                    !item->data(0).isValid())
+                    continue;
+                if (dynamic_cast<QGraphicsRectItem *>(item) || dynamic_cast<QGraphicsPolygonItem *>(item))
+                    shapeIds.insert(item->data(0).toULongLong());
             }
         }
-        for (auto *item : scene()->items())
-            if (item->data(3).toString() == QStringLiteral("resize-handle"))
-                item->setVisible(shapeId != 0 && item->data(4).toULongLong() == shapeId && !readOnly_);
+        for (auto *item : scene()->items()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                item->setVisible(!readOnly_ && shapeIds.contains(item->data(4).toULongLong()));
+        }
     }
 
     QPointF rulerSnapPoint(QPointF point) const {
@@ -1183,34 +1833,24 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void updateRuler(QPointF current) {
-        if (!rulerHasStart_ && rulerLine_ == nullptr)
+        if (!rulerHasStart_ && rulerItem_ == nullptr)
             return;
-        if (!rulerLine_)
-            rulerLine_ = scene()->addLine(QLineF(), QPen(ice::uiColor(ice::UiColor::Accent1), 2));
+        if (!rulerItem_) {
+            rulerItem_ = new LayoutRulerItem();
+            scene()->addItem(rulerItem_);
+        }
         const auto end = rulerHasStart_ ? current : rulerEnd_;
-        rulerLine_->setLine(QLineF(rulerStart_, end));
-        const auto length = QLineF(rulerStart_, end).length();
-        if (!rulerLabel_)
-            rulerLabel_ = scene()->addSimpleText(QString());
-        rulerLabel_->setText(QStringLiteral("%1 nm").arg(length, 0, 'f', 1));
-        rulerLabel_->setBrush(ice::uiColor(ice::UiColor::Accent1));
-        rulerLabel_->setPos((rulerStart_ + end) * 0.5 + QPointF(6.0, 6.0));
-        rulerLabel_->setScale(1.0 / std::max(zoom_, qreal(1.0e-6)));
+        rulerItem_->setLine(QLineF(rulerStart_, end));
     }
 
     void clearRuler() {
         rulerHasStart_ = false;
         rulerStart_ = {};
         rulerEnd_ = {};
-        if (rulerLine_) {
-            scene()->removeItem(rulerLine_);
-            delete rulerLine_;
-            rulerLine_ = nullptr;
-        }
-        if (rulerLabel_) {
-            scene()->removeItem(rulerLabel_);
-            delete rulerLabel_;
-            rulerLabel_ = nullptr;
+        if (rulerItem_) {
+            scene()->removeItem(rulerItem_);
+            delete rulerItem_;
+            rulerItem_ = nullptr;
         }
     }
 
@@ -1356,21 +1996,28 @@ class LayoutCanvasImpl : public LayoutCanvas {
             pathFinished_();
     }
 
+    void finishPolygon() {
+        auto points = polygonPoints_;
+        if (points.size() >= 3 && QLineF(points.front(), points.back()).length() < 0.5)
+            points.pop_back();
+        const bool hasPolygon = points.size() >= 3;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        viewport()->update();
+        if (hasPolygon && polygonCreated_)
+            polygonCreated_(points);
+    }
+
     void applyNavigationTransform() {
+        if (rulerItem_)
+            rulerItem_->prepareForScaleChange();
         setTransform(QTransform(zoom_, 0.0, 0.0, zoom_, 0.0, 0.0), false);
         centerOn(centerScene_);
         viewport()->update();
     }
 
-    QString formatScaleLength(qreal length) const {
-        if (length >= 1000000.0)
-            return QStringLiteral("%1 mm").arg(length / 1000000.0, 0, 'g', 4);
-        if (length >= 1000.0)
-            return QStringLiteral("%1 um").arg(length / 1000.0, 0, 'g', 4);
-        if (length >= 1.0)
-            return QStringLiteral("%1 nm").arg(length, 0, 'g', 4);
-        return QStringLiteral("%1 pm").arg(length * 1000.0, 0, 'g', 4);
-    }
+    QString formatScaleLength(qreal length) const { return formatLayoutLength(length); }
 
     Tool tool_ = Tool::select;
     LayoutPathConfig pathConfig_;
@@ -1386,6 +2033,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     LayoutPathSegmentCallback pathSegmentCreated_;
     LayoutPathLayerChangedCallback pathLayerChanged_;
     LayoutPathFinishedCallback pathFinished_;
+    LayoutTextPlacedCallback textPlaced_;
+    LayoutPolygonCreatedCallback polygonCreated_;
+    LayoutPolygonPointMovedCallback polygonPointMoved_;
+    bool polygonActive_ = false;
+    std::vector<QPointF> polygonPoints_;
+    QPointF polygonCursor_;
     bool panning_ = false;
     bool drawing_ = false;
     QPoint panStartPosition_;
@@ -1393,6 +2046,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF drawStart_;
     QGraphicsRectItem *drawPreview_ = nullptr;
     QGraphicsItem *movingItem_ = nullptr;
+    ice::ObjectId manualPathDragId_ = 0;
+    int manualPathDragHandle_ = -1;
+    QGraphicsPolygonItem *polygonDragItem_ = nullptr;
+    ice::ObjectId polygonDragShapeId_ = 0;
+    int polygonDragIndex_ = -1;
+    QPointF polygonDragStartLocalPoint_;
     QGraphicsItem *resizingItem_ = nullptr;
     QGraphicsItemGroup *draggingInstance_ = nullptr;
     QPointF dragStartScene_;
@@ -1417,8 +2076,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QLineEdit *scaleEditor_ = nullptr;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;
     LayerStyle rectangleStyle_{ice::uiColor(ice::UiColor::Accent3), Qt::SolidPattern};
-    QGraphicsLineItem *rulerLine_ = nullptr;
-    QGraphicsSimpleTextItem *rulerLabel_ = nullptr;
+    LayoutRulerItem *rulerItem_ = nullptr;
     QPointF rulerStart_;
     QPointF rulerEnd_;
     bool rulerHasStart_ = false;

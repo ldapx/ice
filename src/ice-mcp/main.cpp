@@ -1,8 +1,9 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/simulation.hpp"
-#include "icelib/simulation_store.hpp"
 #include "icelib/simulation_report.hpp"
+#include "icelib/simulation_store.hpp"
+#include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -16,9 +17,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -487,7 +488,8 @@ class IceMcpServer {
             const auto currentStamp = projectStateStamp(projectPath_);
             if (currentStamp != projectStamp_) {
                 if (session_->dirty())
-                    throw ToolError("Project changed outside ice-mcp while local changes are pending; save or reopen the project before mutating it.");
+                    throw ToolError("Project changed outside ice-mcp while local changes are pending; save or reopen "
+                                    "the project before mutating it.");
                 session_->replaceProject(ice::Project::load(projectPath_));
                 projectStamp_ = projectStateStamp(projectPath_);
             }
@@ -598,8 +600,11 @@ class IceMcpServer {
                 graph.ySignals = splitCommaList(simulation.captureSignals);
                 project.simulations.at(simulation.id).graphs.push_back(std::move(graph));
             });
-            return {{"id", simulationId}, {"name", simulation.name}, {"schematic", schematic},
-                    {"signals", simulation.captureSignals}, {"graph", graphId}};
+            return {{"id", simulationId},
+                    {"name", simulation.name},
+                    {"schematic", schematic},
+                    {"signals", simulation.captureSignals},
+                    {"graph", graphId}};
         }
         if (name == "simulation_update") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -619,11 +624,14 @@ class IceMcpServer {
                     updated.captureSignals += signals[index];
                 }
             }
-            session.execute("mcp simulation-update", [&](ice::Project &project) {
-                project.simulations.at(id) = updated;
-            });
-            return { {"id", id}, {"name", updated.name}, {"analysis", updated.analysis},
-                     {"stop", updated.stop}, {"step", updated.step}, {"signals", updated.captureSignals} };
+            session.execute("mcp simulation-update",
+                            [&](ice::Project &project) { project.simulations.at(id) = updated; });
+            return {{"id", id},
+                    {"name", updated.name},
+                    {"analysis", updated.analysis},
+                    {"stop", updated.stop},
+                    {"step", updated.step},
+                    {"signals", updated.captureSignals}};
         }
         if (name == "simulation_run") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -654,9 +662,13 @@ class IceMcpServer {
             context.request = request;
             context.graphs = simulation.graphs;
             const auto artifact = ice::writeSimulationRun(context, result);
-            return {{"state", ice::jobStateName(result.state)}, {"run_id", artifact.runId},
-                    {"stored", artifact.path.string()}, {"time_points", result.time.size()},
-                    {"traces", result.traces.size()}, {"warnings", result.warnings}, {"error", result.error}};
+            return {{"state", ice::jobStateName(result.state)},
+                    {"run_id", artifact.runId},
+                    {"stored", artifact.path.string()},
+                    {"time_points", result.time.size()},
+                    {"traces", result.traces.size()},
+                    {"warnings", result.warnings},
+                    {"error", result.error}};
         }
         if (name == "simulation_graph_create") {
             const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -897,9 +909,8 @@ class IceMcpServer {
             if (!cell.textSchematic)
                 throw ToolError("Schematic is not a text schematic: " + cell.name);
             const auto text = requiredStringAllowEmpty(arguments, "text");
-            session.execute("mcp schematic-set-text", [&](ice::Project &project) {
-                project.schematicCells.at(id).spiceText = text;
-            });
+            session.execute("mcp schematic-set-text",
+                            [&](ice::Project &project) { project.schematicCells.at(id).spiceText = text; });
             return {{"id", id}, {"name", cell.name}, {"text", text}};
         }
         if (name == "schematic_add_symbol") {
@@ -975,6 +986,19 @@ class IceMcpServer {
                             [&](ice::Project &project) { id = ice::addRectangle(project, cell, layer, rectangle); });
             return {{"id", id}, {"cell", cell}, {"layer", layer}};
         }
+        if (name == "layout_add_text") {
+            ice::ObjectId id = 0;
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto layer = resolveLayer(session.project(), arguments);
+            const auto x = requiredInteger(arguments, "x");
+            const auto y = requiredInteger(arguments, "y");
+            const auto text = requiredString(arguments, "text");
+            const auto height = optionalInteger(arguments, "height").value_or(1000);
+            session.execute("mcp layout-add-text", [&](ice::Project &project) {
+                id = ice::addText(project, cell, layer, x, y, text, height);
+            });
+            return {{"id", id}, {"cell", cell}, {"layer", layer}, {"text", text}};
+        }
         if (name == "layout_add_polygon") {
             ice::ObjectId id = 0;
             const auto cell = resolveLayoutCell(session.project(), arguments);
@@ -1008,6 +1032,20 @@ class IceMcpServer {
                 id = ice::addLayoutInstance(project, parent, child, instanceName, x, y, orientation);
             });
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
+        }
+
+        if (name == "lvs_run") {
+            const auto layout = resolveLayoutCell(session.project(), arguments, "layout");
+            ice::ObjectId schematic = 0;
+            const auto schematicValue = arguments.find("schematic");
+            if (schematicValue != arguments.end() && !schematicValue->is_null())
+                schematic = lookupByIdOrName(session.project().schematicCells, *schematicValue, "schematic");
+            else
+                schematic = ice::schematicForLayout(session.project(), layout);
+            if (schematic == 0)
+                throw ToolError("Unable to infer a schematic for the layout; provide 'schematic'.");
+            const auto report = ice::runLvs(session.project(), schematic, layout);
+            return json::parse(ice::serializeLvsReport(report));
         }
 
         throw ToolError("Unknown tool: " + name);
@@ -1190,6 +1228,15 @@ class IceMcpServer {
                             .with_integer_param("width", "Width")
                             .with_integer_param("height", "Height")
                             .build());
+        tools.push_back(tool_builder("layout_add_text")
+                            .with_description("Add text to a layout cell on a layer.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("layer", "Layer name or id")
+                            .with_integer_param("x", "X coordinate")
+                            .with_integer_param("y", "Y coordinate")
+                            .with_string_param("text", "Text to place")
+                            .with_integer_param("height", "Optional text height in database units", false)
+                            .build());
         tools.push_back(tool_builder("layout_add_port")
                             .with_description("Add a port to a layout cell.")
                             .with_string_param("cell", "Layout cell name or id")
@@ -1200,15 +1247,12 @@ class IceMcpServer {
                             .with_integer_param("width", "Width")
                             .with_integer_param("height", "Height")
                             .build());
-        tools.push_back(tool_builder("layout_add_instance")
-                            .with_description("Place a layout cell instance.")
-                            .with_string_param("parent", "Parent layout name or id")
-                            .with_string_param("child", "Child layout name or id")
-                            .with_string_param("name", "Instance name")
-                            .with_integer_param("x", "X coordinate")
-                            .with_integer_param("y", "Y coordinate")
-                            .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
-                            .build());
+        tools.push_back(
+            tool_builder("lvs_run")
+                .with_description("Compare a layout against its schematic and report mismatches.")
+                .with_string_param("layout", "Layout cell name or id")
+                .with_string_param("schematic", "Optional schematic name or id; inferred when omitted", false)
+                .build());
 
         agentsdk::mcp::tool polygon;
         polygon.name = "layout_add_polygon";

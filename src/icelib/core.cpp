@@ -189,6 +189,9 @@ std::vector<Diagnostic> Project::validate() const {
                                           !onGrid(shape.rectangle.width) || !onGrid(shape.rectangle.height)))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.shape.grid", "Shape geometry is off-grid", shapeId});
+            if (!shape.text.empty() && !shape.centerline.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.text.geometry",
+                                  "Text cannot also be a routed path", shapeId});
             if (!shape.centerline.empty()) {
                 if (shape.centerline.size() < 2 || shape.width <= 0)
                     result.push_back({Diagnostic::Severity::error, "layout.path.geometry",
@@ -412,6 +415,10 @@ std::string Project::serialize() const {
                 }
                 s["path_width"] = shape.width;
             }
+            if (!shape.text.empty())
+                s["text"] = shape.text;
+            if (!shape.name.empty())
+                s["name"] = shape.name;
             c["shapes"].push_back(s);
         }
         for (const auto &[pid, port] : cell.ports) {
@@ -611,6 +618,8 @@ Project Project::deserialize(const std::string &text) {
                         shape.pointVias.push_back(std::move(vias));
                     }
                 shape.width = s.value("path_width", Coordinate{0});
+                shape.text = s.value("text", std::string{});
+                shape.name = s.value("name", std::string{});
                 cell.shapes.emplace(shape.id, shape);
             }
             for (const auto &port : c.at("ports"))

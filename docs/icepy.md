@@ -64,6 +64,31 @@ format. The root contains `project.icepro`, `sch/*.icesch`,
 `lay/*.icelay`, `sim/*.icesim`, `scripts/`, `build/`, `.gitignore`, and
 `AGENTS.md`.
 
+## Layout versus schematic
+
+`icepy.run_lvs(project, schematic, layout)` compares a drawn schematic against a
+layout and returns an `LvsReport` with `matched`, `schematic`, `layout`, and
+`mismatches`. Each mismatch exposes its `category`, `message`, `severity`, and
+optional schematic/layout object ids. `schematic_for_layout(project, layout)`
+applies the same source-schematic inference used by the GUI and CLI, and
+`lvs_report_json(report)` serializes the report.
+
+```python
+import icepy
+
+report = icepy.run_lvs_named(project, "top", "top_layout")
+if not report.matched:
+    for mismatch in report.mismatches:
+        print(mismatch.category, mismatch.message)
+```
+
+Use `run_lvs(project, schematic_id, layout_id)` when object ids are already
+known, or `run_lvs_named(...)` with cell names.
+
+LVS compares device presence, reference names, device types, shared parameters
+on placed device instances, and net topology from planned connections. Text
+SPICE schematics are not supported yet.
+
 ## Simulation metrics
 
 Simulation result loading and metrics live in the pure-Python `icepy_sim`
