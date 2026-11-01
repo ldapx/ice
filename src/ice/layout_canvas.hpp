@@ -84,6 +84,14 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
     virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;
     virtual void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) = 0;
+    virtual void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
+    // Highlights the layout shapes and planned connections that belong to one
+    // logical net. Overlays are presentation-only and are cleared on the next
+    // canvas interaction.
+    virtual void highlightLayoutNet(const std::vector<ice::ObjectId> &shapeIds,
+                                    const std::vector<ice::ObjectId> &connectionIds,
+                                    const std::vector<ice::ObjectId> &plannedDeviceIds, const std::string &label) = 0;
+    virtual void clearLayoutNetHighlight() = 0;
     virtual void refreshInteractionState() = 0;
 };
 

@@ -254,6 +254,22 @@ and rectangle corner or edge handles, but it does not move whole objects.
 **Move** drags rectangles, polygons, paths, texts, planned devices, and placed
 instances; selection handles are hidden while Move is active.
 
+In **Select**, click an already-selected rectangle or polygon again to trace and
+highlight its net in the layout. Tracing follows touching conductive shapes and
+crosses layers through via shapes, using a connectivity stack inferred from the
+project's `Metal*`, `TopMetal*`, `Via*`, `TopVia*`, and `Contact` layer names.
+For example, `Metal1` connects to `Metal2` only through `Via1`. `Contact` links
+`Activ` and `Poly2` to `Metal1` when those layers exist. Shapes on layers that do
+not belong to the stack are reported in the status bar instead of being traced.
+
+Net labels are taken from shape `net` assignments or text shapes placed on the
+traced geometry; otherwise the trace is shown as **Traced net**. Related planned
+connections and planned devices are included when they touch the traced
+geometry. The canvas and status bar show the net name and a summary with shape,
+via, and layer counts. **Tools → Net Trace Layer Stack** shows the inferred
+stack and via connections. The highlight clears on the next click, selection
+change, or tool change.
+
 The **Create Polygon** tool draws a filled polygon on the selected layer. Click
 each vertex; Shift constrains the current edge to horizontal or vertical.
 Double-click, Escape, or Space closes the polygon and leaves the tool. Select a

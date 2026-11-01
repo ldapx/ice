@@ -75,6 +75,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPainterPathStroker>
 #include <QPixmap>
 #include <QPlainTextEdit>
@@ -101,6 +102,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -114,6 +116,204 @@
 #include <utility>
 
 namespace {
+
+QPainterPath layoutShapeScenePath(const ice::Shape &shape) {
+    if (shape.isText())
+        return {};
+    if (shape.polygon.size() >= 3) {
+        QPolygonF polygon;
+        polygon.reserve(static_cast<int>(shape.polygon.size()));
+        for (const auto &point : shape.polygon)
+            polygon << QPointF(point.x, -point.y);
+        QPainterPath path;
+        path.addPolygon(polygon);
+        path.closeSubpath();
+        return path;
+    }
+    if (shape.isPath() && !shape.centerline.empty()) {
+        QPainterPath centerline;
+        centerline.moveTo(shape.centerline.front().x, -shape.centerline.front().y);
+        for (std::size_t index = 1; index < shape.centerline.size(); ++index)
+            centerline.lineTo(shape.centerline[index].x, -shape.centerline[index].y);
+        QPainterPathStroker stroker;
+        stroker.setWidth(std::max<qreal>(1.0, shape.width));
+        stroker.setCapStyle(Qt::FlatCap);
+        stroker.setJoinStyle(Qt::MiterJoin);
+        return stroker.createStroke(centerline);
+    }
+    QPainterPath path;
+    path.addRect(QRectF(static_cast<qreal>(shape.rectangle.x),
+                        -static_cast<qreal>(shape.rectangle.y) - static_cast<qreal>(shape.rectangle.height),
+                        static_cast<qreal>(shape.rectangle.width), static_cast<qreal>(shape.rectangle.height)));
+    return path;
+}
+
+QRectF layoutPlannedDeviceSceneRect(const ice::PlannedDevice &device) {
+    return QRectF(static_cast<qreal>(device.x), -static_cast<qreal>(device.y) - static_cast<qreal>(device.height),
+                  static_cast<qreal>(device.width), static_cast<qreal>(device.height));
+}
+
+QPointF layoutPlannedEdgeScenePoint(const QRectF &rect, const QPointF &toward) {
+    const auto center = rect.center();
+    const auto delta = toward - center;
+    if (delta.isNull())
+        return center;
+    const auto scaleX = delta.x() != 0.0 ? rect.width() * 0.5 / std::abs(delta.x()) : std::numeric_limits<qreal>::max();
+    const auto scaleY =
+        delta.y() != 0.0 ? rect.height() * 0.5 / std::abs(delta.y()) : std::numeric_limits<qreal>::max();
+    return center + delta * std::min(scaleX, scaleY);
+}
+
+struct LayoutConnectivity {
+    std::set<ice::ObjectId> conductors;
+    std::map<ice::ObjectId, std::set<ice::ObjectId>> viaConductors;
+    std::set<std::pair<ice::ObjectId, ice::ObjectId>> directPairs;
+};
+
+struct LayoutNetTrace {
+    std::set<ice::ObjectId> shapes;
+    std::set<ice::ObjectId> connections;
+    std::set<ice::ObjectId> devices;
+    std::set<ice::ObjectId> layers;
+    std::string label;
+    bool layerInStack = true;
+    std::size_t viaShapes = 0;
+};
+
+std::string layerKey(std::string name) {
+    std::string result;
+    result.reserve(name.size());
+    for (const auto character : name) {
+        const auto value = static_cast<unsigned char>(character);
+        if (std::isalnum(value))
+            result.push_back(static_cast<char>(std::tolower(value)));
+    }
+    return result;
+}
+
+bool parseIndexedLayer(const std::string &key, const std::string &prefix, int &index) {
+    if (!key.starts_with(prefix))
+        return false;
+    const auto digits = key.substr(prefix.size());
+    if (digits.empty() ||
+        !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c) != 0; }))
+        return false;
+    try {
+        index = std::stoi(digits);
+    } catch (const std::exception &) {
+        return false;
+    }
+    return index >= 0;
+}
+
+LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
+    LayoutConnectivity connectivity;
+    std::map<std::string, ice::ObjectId> layersByKey;
+    for (const auto &[id, layer] : project.layers) {
+        const auto key = layerKey(layer.name);
+        if (!key.empty())
+            layersByKey.emplace(key, id);
+    }
+    const auto layerFor = [&](const std::string &key) -> ice::ObjectId {
+        const auto layer = layersByKey.find(key);
+        return layer == layersByKey.end() ? 0 : layer->second;
+    };
+    const auto addConductor = [&](ice::ObjectId layer) {
+        if (layer != 0)
+            connectivity.conductors.insert(layer);
+    };
+
+    std::vector<std::pair<int, ice::ObjectId>> metals;
+    std::vector<std::pair<int, ice::ObjectId>> topMetals;
+    for (const auto &[key, id] : layersByKey) {
+        int index = 0;
+        if (parseIndexedLayer(key, "metal", index))
+            metals.emplace_back(index, id);
+        else if (parseIndexedLayer(key, "topmetal", index))
+            topMetals.emplace_back(index, id);
+    }
+    std::sort(metals.begin(), metals.end(),
+              [](const auto &left, const auto &right) { return left.first < right.first; });
+    std::sort(topMetals.begin(), topMetals.end(),
+              [](const auto &left, const auto &right) { return left.first < right.first; });
+
+    std::vector<std::pair<int, bool>> stack; // layer index, is top metal
+    for (const auto &entry : metals)
+        stack.emplace_back(entry.first, false);
+    for (const auto &entry : topMetals)
+        stack.emplace_back(entry.first, true);
+    if (!stack.empty()) {
+        for (const auto &[_, id] : metals)
+            addConductor(id);
+        for (const auto &[_, id] : topMetals)
+            addConductor(id);
+        for (std::size_t index = 0; index + 1 < stack.size(); ++index) {
+            const auto lowerLayer = stack[index].second ? layerFor("topmetal" + std::to_string(stack[index].first))
+                                                        : layerFor("metal" + std::to_string(stack[index].first));
+            const auto upperLayer = stack[index + 1].second
+                                        ? layerFor("topmetal" + std::to_string(stack[index + 1].first))
+                                        : layerFor("metal" + std::to_string(stack[index + 1].first));
+            if (lowerLayer == 0 || upperLayer == 0)
+                continue;
+            std::string viaKey;
+            if (!stack[index].second && !stack[index + 1].second)
+                viaKey = "via" + std::to_string(stack[index].first);
+            else if (!stack[index].second && stack[index + 1].second)
+                viaKey = "topvia" + std::to_string(stack[index + 1].first);
+            else
+                viaKey = "topvia" + std::to_string(stack[index + 1].first);
+            const auto viaLayer = layerFor(viaKey);
+            if (viaLayer != 0) {
+                auto &allowed = connectivity.viaConductors[viaLayer];
+                allowed.insert(lowerLayer);
+                allowed.insert(upperLayer);
+            } else {
+                connectivity.directPairs.emplace(std::min(lowerLayer, upperLayer), std::max(lowerLayer, upperLayer));
+            }
+        }
+    }
+
+    // A contact layer connects active/poly to the first metal layer. Include
+    // those device layers so a trace can continue from metal into a device.
+    const auto contactLayer = layerFor("contact");
+    if (contactLayer != 0) {
+        std::set<ice::ObjectId> contactConductors;
+        for (const auto &key : {"activ", "poly2", "metal1"}) {
+            if (const auto layer = layerFor(key); layer != 0)
+                contactConductors.insert(layer);
+        }
+        if (contactConductors.size() >= 2) {
+            auto &allowed = connectivity.viaConductors[contactLayer];
+            for (const auto layer : contactConductors) {
+                allowed.insert(layer);
+                addConductor(layer);
+            }
+        }
+    }
+
+    if (connectivity.conductors.empty()) {
+        // Generic projects may not use technology layer names. Fall back to a
+        // permissive stack so tracing still works for custom layer naming.
+        std::vector<ice::ObjectId> viaLayers;
+        for (const auto &[key, id] : layersByKey) {
+            const bool via = key.find("via") != std::string::npos || key.find("contact") != std::string::npos;
+            const bool ignored = key.find("text") != std::string::npos || key.find("label") != std::string::npos ||
+                                 key.find("boundary") != std::string::npos;
+            if (via) {
+                viaLayers.push_back(id);
+            } else if (!ignored) {
+                addConductor(id);
+            }
+        }
+        if (connectivity.conductors.empty()) {
+            for (const auto &[_, layer] : project.layers)
+                addConductor(layer.id);
+        }
+        for (const auto via : viaLayers)
+            connectivity.viaConductors[via] = connectivity.conductors;
+    }
+    return connectivity;
+}
 
 class DocumentWindow : public QMainWindow {
   public:
@@ -2188,6 +2388,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     void selectLayoutShapeItem(ice::ObjectId shapeId) {
+        if (layoutCanvas_)
+            layoutCanvas_->clearLayoutNetHighlight();
         if (!layoutCanvas_ || shapeId == 0 ||
             (layoutCanvas_->currentTool() != LayoutCanvas::Tool::select &&
              layoutCanvas_->currentTool() != LayoutCanvas::Tool::move))
@@ -2228,6 +2430,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     void selectLayoutShapeItems(const std::vector<ice::ObjectId> &shapeIds) {
+        if (layoutCanvas_)
+            layoutCanvas_->clearLayoutNetHighlight();
         if (!layoutCanvas_ || shapeIds.empty() ||
             (layoutCanvas_->currentTool() != LayoutCanvas::Tool::select &&
              layoutCanvas_->currentTool() != LayoutCanvas::Tool::move))
@@ -2243,6 +2447,440 @@ class DocumentWindow : public QMainWindow {
             if (std::find(shapeIds.begin(), shapeIds.end(), id) != shapeIds.end())
                 item->setSelected(true);
         }
+    }
+
+    std::string layoutNetName(ice::ObjectId netId) const {
+        if (!project_ || netId == 0)
+            return {};
+        const auto findInSchematic = [&](ice::ObjectId schematicId) -> std::string {
+            const auto cell = project_->project().schematicCells.find(schematicId);
+            if (cell == project_->project().schematicCells.end())
+                return {};
+            const auto net = cell->second.nets.find(netId);
+            return net == cell->second.nets.end() ? std::string{} : net->second.name;
+        };
+        if (activeLayoutId_ != 0) {
+            const auto preferred = ice::schematicForLayout(project_->project(), activeLayoutId_);
+            if (preferred != 0) {
+                const auto name = findInSchematic(preferred);
+                if (!name.empty())
+                    return name;
+            }
+        }
+        for (const auto &[cellId, _] : project_->project().schematicCells) {
+            const auto name = findInSchematic(cellId);
+            if (!name.empty())
+                return name;
+        }
+        return {};
+    }
+
+    LayoutNetTrace traceLayoutNet(ice::ObjectId seedShapeId) const {
+        LayoutNetTrace trace;
+        if (!project_ || activeLayoutId_ == 0)
+            return trace;
+        const auto cell = project_->project().layoutCells.find(activeLayoutId_);
+        if (cell == project_->project().layoutCells.end())
+            return trace;
+        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto shapeLayers = [](const ice::Shape &shape) {
+            std::set<ice::ObjectId> layers;
+            if (shape.isPath()) {
+                if (shape.segmentLayers.empty()) {
+                    if (shape.layer != 0)
+                        layers.insert(shape.layer);
+                } else {
+                    for (const auto layer : shape.segmentLayers) {
+                        if (layer != 0)
+                            layers.insert(layer);
+                    }
+                }
+            } else if (shape.layer != 0) {
+                layers.insert(shape.layer);
+            }
+            return layers;
+        };
+
+        struct Entry {
+            ice::ObjectId id = 0;
+            ice::ObjectId primaryLayer = 0;
+            std::set<ice::ObjectId> layers;
+            bool conductor = false;
+            bool via = false;
+            QPainterPath path;
+            QPainterPath expanded;
+            QRectF bounds;
+        };
+        std::vector<Entry> entries;
+        QPainterPathStroker stroker;
+        stroker.setWidth(1.0);
+        stroker.setJoinStyle(Qt::MiterJoin);
+        for (const auto &[id, shape] : cell->second.shapes) {
+            if (shape.isText())
+                continue;
+            auto path = layoutShapeScenePath(shape);
+            if (path.isEmpty())
+                continue;
+            auto layers = shapeLayers(shape);
+            bool conductor = false;
+            bool via = false;
+            for (const auto layer : layers) {
+                if (connectivity.conductors.contains(layer))
+                    conductor = true;
+                if (connectivity.viaConductors.contains(layer))
+                    via = true;
+            }
+            if (!conductor && !via)
+                continue;
+            Entry entry;
+            entry.id = id;
+            entry.primaryLayer = shape.layer;
+            entry.layers = std::move(layers);
+            entry.conductor = conductor;
+            entry.via = via;
+            entry.bounds = path.boundingRect().adjusted(-1.0, -1.0, 1.0, 1.0);
+            entry.expanded = stroker.createStroke(path);
+            entry.expanded.addPath(path);
+            entry.path = std::move(path);
+            entries.push_back(std::move(entry));
+        }
+
+        std::size_t seed = entries.size();
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            if (entries[index].id == seedShapeId) {
+                seed = index;
+                break;
+            }
+        }
+        if (seed == entries.size()) {
+            trace.shapes.insert(seedShapeId);
+            trace.layerInStack = false;
+            return trace;
+        }
+
+        std::vector<std::vector<std::size_t>> conductorNeighbors(entries.size());
+        for (std::size_t first = 0; first < entries.size(); ++first) {
+            if (!entries[first].conductor)
+                continue;
+            for (std::size_t second = first + 1; second < entries.size(); ++second) {
+                if (!entries[second].conductor)
+                    continue;
+                bool sharesLayer = false;
+                for (const auto layer : entries[first].layers) {
+                    if (entries[second].layers.contains(layer)) {
+                        sharesLayer = true;
+                        break;
+                    }
+                }
+                bool directPair = false;
+                if (!sharesLayer) {
+                    for (const auto left : entries[first].layers) {
+                        for (const auto right : entries[second].layers) {
+                            if (connectivity.directPairs.contains({std::min(left, right), std::max(left, right)})) {
+                                directPair = true;
+                                break;
+                            }
+                        }
+                        if (directPair)
+                            break;
+                    }
+                }
+                if (!sharesLayer && !directPair)
+                    continue;
+                if (!entries[first].bounds.intersects(entries[second].bounds))
+                    continue;
+                if (!entries[first].expanded.intersects(entries[second].path) &&
+                    !entries[second].expanded.intersects(entries[first].path))
+                    continue;
+                conductorNeighbors[first].push_back(second);
+                conductorNeighbors[second].push_back(first);
+            }
+        }
+
+        std::vector<std::vector<std::size_t>> viaGroup(entries.size());
+        std::vector<std::vector<std::size_t>> conductorVias(entries.size());
+        for (std::size_t viaIndex = 0; viaIndex < entries.size(); ++viaIndex) {
+            if (!entries[viaIndex].via)
+                continue;
+            const auto allowedLayers = connectivity.viaConductors.find(entries[viaIndex].primaryLayer);
+            if (allowedLayers == connectivity.viaConductors.end())
+                continue;
+            for (std::size_t conductorIndex = 0; conductorIndex < entries.size(); ++conductorIndex) {
+                if (!entries[conductorIndex].conductor)
+                    continue;
+                bool allowed = false;
+                for (const auto layer : entries[conductorIndex].layers) {
+                    if (allowedLayers->second.contains(layer)) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (!allowed)
+                    continue;
+                if (!entries[viaIndex].bounds.intersects(entries[conductorIndex].bounds))
+                    continue;
+                if (!entries[viaIndex].expanded.intersects(entries[conductorIndex].path) &&
+                    !entries[conductorIndex].expanded.intersects(entries[viaIndex].path))
+                    continue;
+                viaGroup[viaIndex].push_back(conductorIndex);
+                conductorVias[conductorIndex].push_back(viaIndex);
+            }
+        }
+
+        std::vector<bool> visited(entries.size(), false);
+        std::vector<std::size_t> pending{seed};
+        visited[seed] = true;
+        while (!pending.empty()) {
+            const auto current = pending.back();
+            pending.pop_back();
+            if (entries[current].conductor) {
+                for (const auto neighbor : conductorNeighbors[current]) {
+                    if (!visited[neighbor]) {
+                        visited[neighbor] = true;
+                        pending.push_back(neighbor);
+                    }
+                }
+                for (const auto via : conductorVias[current]) {
+                    if (!visited[via]) {
+                        visited[via] = true;
+                        pending.push_back(via);
+                    }
+                }
+            }
+            if (entries[current].via) {
+                for (const auto conductor : viaGroup[current]) {
+                    if (!visited[conductor]) {
+                        visited[conductor] = true;
+                        pending.push_back(conductor);
+                    }
+                }
+            }
+        }
+
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            if (!visited[index])
+                continue;
+            trace.shapes.insert(entries[index].id);
+            for (const auto layer : entries[index].layers)
+                trace.layers.insert(layer);
+            if (entries[index].via)
+                ++trace.viaShapes;
+        }
+
+        for (const auto id : trace.shapes) {
+            const auto shape = cell->second.shapes.find(id);
+            if (shape == cell->second.shapes.end() || !shape->second.net)
+                continue;
+            const auto name = layoutNetName(*shape->second.net);
+            if (!name.empty()) {
+                trace.label = name;
+                break;
+            }
+        }
+        if (trace.label.empty()) {
+            for (const auto &[_, shape] : cell->second.shapes) {
+                if (!shape.isText() || shape.text.empty())
+                    continue;
+                const QRectF textRect(
+                    static_cast<qreal>(shape.rectangle.x),
+                    -static_cast<qreal>(shape.rectangle.y) - static_cast<qreal>(shape.rectangle.height),
+                    static_cast<qreal>(shape.rectangle.width), static_cast<qreal>(shape.rectangle.height));
+                QPainterPath textPath;
+                textPath.addRect(textRect);
+                for (const auto traceId : trace.shapes) {
+                    const auto traced = cell->second.shapes.find(traceId);
+                    if (traced == cell->second.shapes.end())
+                        continue;
+                    const auto path = layoutShapeScenePath(traced->second);
+                    if (path.isEmpty())
+                        continue;
+                    if (path.intersects(textPath) || path.contains(textRect.center())) {
+                        trace.label = shape.text;
+                        break;
+                    }
+                }
+                if (!trace.label.empty())
+                    break;
+            }
+        }
+        const auto plannedName = plannedNetNameForShapes(cell->second, trace.shapes, trace.connections, trace.devices);
+        if (trace.label.empty())
+            trace.label = plannedName;
+        return trace;
+    }
+
+    std::string plannedNetNameForShapes(const ice::LayoutCell &cell, const std::set<ice::ObjectId> &shapeIds,
+                                        std::set<ice::ObjectId> &connectionIds,
+                                        std::set<ice::ObjectId> &deviceIds) const {
+        std::vector<QPainterPath> shapePaths;
+        shapePaths.reserve(shapeIds.size());
+        for (const auto shapeId : shapeIds) {
+            const auto shape = cell.shapes.find(shapeId);
+            if (shape == cell.shapes.end())
+                continue;
+            auto path = layoutShapeScenePath(shape->second);
+            if (!path.isEmpty())
+                shapePaths.push_back(std::move(path));
+        }
+        if (shapePaths.empty())
+            return {};
+
+        QPainterPathStroker hitStroker;
+        hitStroker.setWidth(4.0);
+        const auto touches = [&](const QPainterPath &path) {
+            auto hit = hitStroker.createStroke(path);
+            hit.addPath(path);
+            return std::any_of(shapePaths.begin(), shapePaths.end(),
+                               [&](const QPainterPath &shapePath) { return hit.intersects(shapePath); });
+        };
+
+        std::set<ice::ObjectId> touchedDevices;
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            QPainterPath box;
+            box.addRect(layoutPlannedDeviceSceneRect(device));
+            if (touches(box))
+                touchedDevices.insert(deviceId);
+        }
+
+        std::set<ice::ObjectId> touchedConnections;
+        for (const auto &[connectionId, connection] : cell.plannedConnections) {
+            const auto from = cell.plannedDevices.find(connection.from);
+            const auto to = cell.plannedDevices.find(connection.to);
+            if (from == cell.plannedDevices.end() || to == cell.plannedDevices.end())
+                continue;
+            const auto fromRect = layoutPlannedDeviceSceneRect(from->second);
+            const auto toRect = layoutPlannedDeviceSceneRect(to->second);
+            QPainterPath line;
+            line.moveTo(layoutPlannedEdgeScenePoint(fromRect, toRect.center()));
+            line.lineTo(layoutPlannedEdgeScenePoint(toRect, fromRect.center()));
+            if (touches(line) || touchedDevices.contains(connection.from) || touchedDevices.contains(connection.to)) {
+                touchedConnections.insert(connectionId);
+                touchedDevices.insert(connection.from);
+                touchedDevices.insert(connection.to);
+            }
+        }
+        if (touchedConnections.empty() && touchedDevices.empty())
+            return {};
+
+        std::string netName;
+        for (const auto connectionId : touchedConnections) {
+            const auto connection = cell.plannedConnections.find(connectionId);
+            if (connection != cell.plannedConnections.end() && !connection->second.name.empty()) {
+                netName = connection->second.name;
+                break;
+            }
+        }
+        if (!netName.empty()) {
+            for (const auto &[connectionId, connection] : cell.plannedConnections) {
+                if (connection.name != netName)
+                    continue;
+                touchedConnections.insert(connectionId);
+                touchedDevices.insert(connection.from);
+                touchedDevices.insert(connection.to);
+            }
+        }
+        connectionIds.insert(touchedConnections.begin(), touchedConnections.end());
+        deviceIds.insert(touchedDevices.begin(), touchedDevices.end());
+        return netName;
+    }
+
+    void showNetTraceStack() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Net Trace Layer Stack"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto nameOf = [&](ice::ObjectId layerId) -> QString {
+            const auto layer = project_->project().layers.find(layerId);
+            return layer == project_->project().layers.end() ? QStringLiteral("#%1").arg(layerId)
+                                                             : QString::fromStdString(layer->second.name);
+        };
+        QStringList conductors;
+        for (const auto layer : connectivity.conductors)
+            conductors << nameOf(layer);
+        conductors.sort(Qt::CaseInsensitive);
+
+        QStringList lines;
+        lines << QStringLiteral("Conductive layers: %1")
+                     .arg(conductors.isEmpty() ? QStringLiteral("none") : conductors.join(QStringLiteral(", ")));
+        lines << QString();
+        lines << QStringLiteral("Via connections:");
+        bool haveVia = false;
+        for (const auto &[viaLayer, allowedLayers] : connectivity.viaConductors) {
+            QStringList allowed;
+            for (const auto layer : allowedLayers)
+                allowed << nameOf(layer);
+            allowed.sort(Qt::CaseInsensitive);
+            lines << QStringLiteral("  %1: %2").arg(nameOf(viaLayer), allowed.join(QStringLiteral(" <-> ")));
+            haveVia = true;
+        }
+        if (!haveVia)
+            lines << QStringLiteral("  none");
+        lines << QString();
+        lines << QStringLiteral("Direct connections (no via required):");
+        if (connectivity.directPairs.empty()) {
+            lines << QStringLiteral("  none");
+        } else {
+            for (const auto &[first, second] : connectivity.directPairs)
+                lines << QStringLiteral("  %1 <-> %2").arg(nameOf(first), nameOf(second));
+        }
+        lines << QString();
+        lines << QStringLiteral("The stack is inferred from Metal*/TopMetal*/Via*/TopVia*/Contact layer names. "
+                                "Net tracing follows touching shapes and crosses layers through via shapes.");
+        QMessageBox::information(this, QStringLiteral("Net Trace Layer Stack"), lines.join(QChar('\n')));
+    }
+
+    void highlightLayoutNet(ice::ObjectId shapeId) {
+        if (!project_ || activeLayoutId_ == 0 || !layoutCanvas_)
+            return;
+        const auto cell = project_->project().layoutCells.find(activeLayoutId_);
+        if (cell == project_->project().layoutCells.end())
+            return;
+        const auto shape = cell->second.shapes.find(shapeId);
+        if (shape == cell->second.shapes.end())
+            return;
+        if (shape->second.isText() || shape->second.isPath()) {
+            statusBar()->showMessage(QStringLiteral("Select a rectangle or polygon to trace its net"));
+            return;
+        }
+
+        const auto trace = traceLayoutNet(shapeId);
+        std::string label = trace.label;
+        if (label.empty() && shape->second.net)
+            label = "net " + std::to_string(*shape->second.net);
+        if (label.empty())
+            label = "Traced net";
+        layoutCanvas_->highlightLayoutNet(
+            std::vector<ice::ObjectId>(trace.shapes.begin(), trace.shapes.end()),
+            std::vector<ice::ObjectId>(trace.connections.begin(), trace.connections.end()),
+            std::vector<ice::ObjectId>(trace.devices.begin(), trace.devices.end()), label);
+
+        const auto layerName = [&](ice::ObjectId layerId) -> std::string {
+            const auto layer = project_->project().layers.find(layerId);
+            return layer == project_->project().layers.end() ? std::string{} : layer->second.name;
+        };
+        if (!trace.layerInStack) {
+            const auto name = layerName(shape->second.layer);
+            statusBar()->showMessage(
+                QStringLiteral("Layer %1 is not in the inferred connectivity stack")
+                    .arg(name.empty() ? QStringLiteral("#%1").arg(shape->second.layer) : QString::fromStdString(name)));
+            return;
+        }
+        if (trace.shapes.size() <= 1 && trace.connections.empty()) {
+            statusBar()->showMessage(QStringLiteral("Net trace: no connected shapes on layer %1")
+                                         .arg(QString::fromStdString(layerName(shape->second.layer))));
+            return;
+        }
+        const auto summary = QStringLiteral("%1 shape(s), %2 via shape(s), %3 layer(s), %4 planned connection(s)")
+                                 .arg(trace.shapes.size())
+                                 .arg(trace.viaShapes)
+                                 .arg(trace.layers.size())
+                                 .arg(trace.connections.size());
+        if (trace.label.empty() && !shape->second.net)
+            statusBar()->showMessage(QStringLiteral("Traced net: %1").arg(summary));
+        else
+            statusBar()->showMessage(QStringLiteral("Traced net %1: %2").arg(QString::fromStdString(label), summary));
     }
 
     void refreshLayoutBooleanActions() {
@@ -3058,6 +3696,7 @@ class DocumentWindow : public QMainWindow {
                 QLineF(plannedEdge(fromRect, toRect.center()), plannedEdge(toRect, fromRect.center())), connectionPen);
             line->setZValue(-5.0);
             line->setData(0, QVariant::fromValue<qulonglong>(connectionId));
+            line->setData(2, QStringLiteral("planned-connection"));
             line->setAcceptedMouseButtons(Qt::NoButton);
             if (!connection.name.empty())
                 line->setToolTip(QString::fromStdString(connection.name));
@@ -3211,6 +3850,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     void refreshLayoutProperties(bool bringToFront = false) {
+        if (layoutCanvas_)
+            layoutCanvas_->clearLayoutNetHighlight();
         refreshLayoutBooleanActions();
         if (!layoutPropertiesPanel_)
             return;
@@ -6329,6 +6970,8 @@ class DocumentWindow : public QMainWindow {
         toolsMenu->addAction(drcAction);
         auto *lvsAction = addCommand(QStringLiteral("Run LVS"));
         toolsMenu->addAction(lvsAction);
+        auto *netStackAction = addCommand(QStringLiteral("Net Trace Layer Stack"));
+        toolsMenu->addAction(netStackAction);
         toolsMenu->addAction(addCommand(QStringLiteral("Run PEX")));
         toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
 
@@ -6375,6 +7018,7 @@ class DocumentWindow : public QMainWindow {
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
         connect(drcAction, &QAction::triggered, this, &DocumentWindow::runDrc);
         connect(lvsAction, &QAction::triggered, this, &DocumentWindow::runLvs);
+        connect(netStackAction, &QAction::triggered, this, &DocumentWindow::showNetTraceStack);
         connect(systemAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::System); });
         connect(lightAppearanceAction, &QAction::triggered, this,
@@ -7477,6 +8121,7 @@ class DocumentWindow : public QMainWindow {
                 [this](const std::vector<QPointF> &points) { addLayoutPolygon(points); });
             layoutCanvas_->setPolygonPointMovedCallback(
                 [this](ice::ObjectId id, int index, QPointF position) { moveLayoutPolygonPoint(id, index, position); });
+            layoutCanvas_->setShapeActivatedCallback([this](ice::ObjectId id) { highlightLayoutNet(id); });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
                     if (!project_ || project_->project().layers.empty()) {

@@ -11,6 +11,7 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
+#include <QGraphicsSimpleTextItem>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QLineF>
@@ -171,6 +172,8 @@ class LayoutPathItem : public QGraphicsItem {
         }
         return result;
     }
+
+    QPainterPath highlightPath() const { return strokedPath(); }
 
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
         if (points_.size() < 2)
@@ -714,6 +717,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void setTool(Tool tool) {
+        clearLayoutNetHighlight();
         if (readOnly_ && tool != Tool::select)
             tool = Tool::select;
         cancelManualPathDrag();
@@ -808,6 +812,131 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     ice::ObjectId selectedLayoutInstance() const { return selectedLayoutInstance_; }
+
+    void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) {
+        shapeActivated_ = std::move(callback);
+    }
+
+    void clearLayoutNetHighlight() override {
+        if (!scene())
+            return;
+        std::vector<QGraphicsItem *> overlays;
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() == QStringLiteral("net-highlight"))
+                overlays.push_back(item);
+        }
+        for (auto *item : overlays) {
+            scene()->removeItem(item);
+            delete item;
+        }
+    }
+
+    void highlightLayoutNet(const std::vector<ice::ObjectId> &shapeIds, const std::vector<ice::ObjectId> &connectionIds,
+                            const std::vector<ice::ObjectId> &plannedDeviceIds, const std::string &label) override {
+        clearLayoutNetHighlight();
+        if (!scene())
+            return;
+
+        const auto accent = ice::uiColor(ice::UiColor::Accent2);
+        QPen shapePen(accent);
+        shapePen.setCosmetic(true);
+        shapePen.setWidthF(2.0);
+        QColor shapeFill = accent;
+        shapeFill.setAlpha(36);
+        const QBrush shapeBrush(shapeFill);
+        QPen devicePen(accent);
+        devicePen.setCosmetic(true);
+        devicePen.setWidthF(1.5);
+        devicePen.setStyle(Qt::DashLine);
+        QColor deviceFill = accent;
+        deviceFill.setAlpha(24);
+        const QBrush deviceBrush(deviceFill);
+        QPen connectionPen(accent);
+        connectionPen.setCosmetic(true);
+        connectionPen.setWidthF(3.0);
+
+        const std::set<ice::ObjectId> shapeSet(shapeIds.begin(), shapeIds.end());
+        const std::set<ice::ObjectId> connectionSet(connectionIds.begin(), connectionIds.end());
+        const std::set<ice::ObjectId> deviceSet(plannedDeviceIds.begin(), plannedDeviceIds.end());
+        QRectF bounds;
+        bool haveBounds = false;
+        const auto accumulate = [&](const QRectF &rect) {
+            if (!rect.isValid())
+                return;
+            bounds = haveBounds ? bounds.united(rect) : rect;
+            haveBounds = true;
+        };
+        const auto addOverlay = [&](QGraphicsItem *item, qreal z) {
+            item->setData(0, QStringLiteral("net-highlight"));
+            item->setZValue(z);
+            item->setAcceptedMouseButtons(Qt::NoButton);
+            scene()->addItem(item);
+            accumulate(item->sceneBoundingRect());
+        };
+
+        for (auto *item : scene()->items()) {
+            if (!item->data(0).isValid())
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            const auto tag = item->data(2).toString();
+            if (tag == QStringLiteral("planned-connection")) {
+                if (!connectionSet.contains(id))
+                    continue;
+                if (auto *lineItem = dynamic_cast<QGraphicsLineItem *>(item)) {
+                    auto *overlay = new QGraphicsLineItem(lineItem->line());
+                    overlay->setPen(connectionPen);
+                    addOverlay(overlay, 16.0);
+                }
+                continue;
+            }
+            if (tag == QStringLiteral("planned-device")) {
+                if (!deviceSet.contains(id))
+                    continue;
+                auto *overlay = new QGraphicsRectItem(item->sceneBoundingRect());
+                overlay->setPen(devicePen);
+                overlay->setBrush(deviceBrush);
+                addOverlay(overlay, 15.0);
+                continue;
+            }
+            if (!shapeSet.contains(id) || item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(item)) {
+                auto *overlay = new QGraphicsRectItem(item->mapRectToScene(rectItem->rect()));
+                overlay->setPen(shapePen);
+                overlay->setBrush(shapeBrush);
+                addOverlay(overlay, 15.0);
+            } else if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item)) {
+                QPolygonF polygon;
+                for (const auto &point : polygonItem->polygon())
+                    polygon << item->mapToScene(point);
+                auto *overlay = new QGraphicsPolygonItem(polygon);
+                overlay->setPen(shapePen);
+                overlay->setBrush(shapeBrush);
+                addOverlay(overlay, 15.0);
+            } else if (auto *pathItem = dynamic_cast<LayoutPathItem *>(item)) {
+                auto *overlay = new QGraphicsPathItem(pathItem->sceneTransform().map(pathItem->highlightPath()));
+                overlay->setPen(shapePen);
+                overlay->setBrush(Qt::NoBrush);
+                addOverlay(overlay, 15.0);
+            }
+        }
+
+        if (!haveBounds || label.empty())
+            return;
+        auto *text = new QGraphicsSimpleTextItem(QString::fromStdString(label));
+        QFont font = text->font();
+        font.setPointSize(9);
+        font.setBold(true);
+        text->setFont(font);
+        text->setBrush(accent);
+        text->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        const auto offset = 10.0 / std::max<qreal>(zoom_, 1.0e-6);
+        text->setPos(bounds.topLeft() + QPointF(offset, -offset));
+        addOverlay(text, 17.0);
+    }
 
     void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
 
@@ -1139,6 +1268,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        clearLayoutNetHighlight();
         if (event->button() == Qt::LeftButton && isScaleIndicatorPosition(event->pos())) {
             beginScaleEdit();
             event->accept();
@@ -1381,6 +1511,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
             if (selectedLayoutInstance_ != 0) {
                 selectedLayoutInstance_ = 0;
                 applyLayoutInstanceSelection();
+            }
+            if (tool_ == Tool::select && clicked && clicked->isSelected() &&
+                !event->modifiers().testFlag(Qt::ControlModifier) &&
+                (dynamic_cast<QGraphicsRectItem *>(clicked) || dynamic_cast<QGraphicsPolygonItem *>(clicked))) {
+                const auto id = static_cast<ice::ObjectId>(clicked->data(0).toULongLong());
+                if (id != 0 && shapeActivated_) {
+                    shapeActivated_(id);
+                    event->accept();
+                    return;
+                }
             }
             if (tool_ == Tool::move && (!clicked || !(clicked->flags() & QGraphicsItem::ItemIsSelectable))) {
                 scene()->clearSelection();
@@ -2070,6 +2210,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     std::function<void(ice::ObjectId)> instanceActivated_;
     std::function<void(ice::ObjectId)> instanceSelectionChanged_;
     std::function<void()> toolEscapeRequested_;
+    std::function<void(ice::ObjectId)> shapeActivated_;
     ice::ObjectId notifiedLayoutInstance_ = 0;
     const ice::LayoutDeviceCell *devicePreview_ = nullptr;
     QPointF cursorScenePosition_;
