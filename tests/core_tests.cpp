@@ -183,6 +183,12 @@ TEST_CASE("projects save as split directory files") {
     CHECK(agentsText.find("saved to disk automatically") != std::string::npos);
     CHECK(agentsText.find("scripts/*.py") != std::string::npos);
     CHECK(agentsText.find("simulation script") != std::string::npos);
+    CHECK(agentsText.find("canvas schematic") != std::string::npos);
+    CHECK(agentsText.find("text SPICE schematic") != std::string::npos);
+    CHECK(agentsText.find("showcase the schematic behavior") != std::string::npos);
+    CHECK(agentsText.find("useful circuit metrics") != std::string::npos);
+    CHECK(agentsText.find("array of simulations") != std::string::npos);
+    CHECK(agentsText.find("normal simulation for simplicity") != std::string::npos);
 
     std::ifstream projectStream(root / "project.icepro");
     const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
