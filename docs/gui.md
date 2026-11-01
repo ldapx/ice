@@ -372,6 +372,14 @@ after a short pause. **Run** saves any pending edits and executes the script.
 **Open File** opens the Python source externally. Deleting a script removes only
 its project metadata; the file remains on disk.
 
+Simulation plots downsample traces to at most two display points per horizontal
+pixel column. The minimum and maximum sample in each column are kept so narrow
+spikes remain visible, while the painter path stays proportional to the plot
+width instead of the stored sample count. Rendered paths are cached per plot
+size, graph definition, and result, so switching graph tabs does not re-render
+large traces. This keeps large transient results responsive without changing the
+stored simulation data.
+
 ## Agent tab
 
 The **Agent** tab is the Agent Client Protocol (ACP) chat interface. It uses

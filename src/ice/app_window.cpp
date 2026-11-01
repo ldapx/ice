@@ -4447,14 +4447,14 @@ class DocumentWindow : public QMainWindow {
         // discarding it and forcing another simulation run.
         struct PreviousPlot {
             ice::SimulationGraph graph;
-            ice::SimulationResult result;
+            std::shared_ptr<const ice::SimulationResult> result;
         };
         std::map<ice::ObjectId, PreviousPlot> previousPlots;
         for (int i = 0; i < graphTabs_->count(); ++i) {
             const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong());
             const auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(i));
-            if (graphId != 0 && plot && !plot->result().time.empty())
-                previousPlots.emplace(graphId, PreviousPlot{plot->graph(), plot->result()});
+            if (graphId != 0 && plot && plot->resultPtr() && !plot->resultPtr()->time.empty())
+                previousPlots.emplace(graphId, PreviousPlot{plot->graph(), plot->resultPtr()});
         }
 
         // Remove all tabs except the first (which holds simulationPlot_).
@@ -4501,7 +4501,7 @@ class DocumentWindow : public QMainWindow {
         graphTabs_->setCurrentIndex(restored);
     }
 
-    void applySimulationResultToGraphTabs(const ice::SimulationResult &result) {
+    void applySimulationResultToGraphTabs(std::shared_ptr<const ice::SimulationResult> result) {
         if (!graphTabs_)
             return;
         for (int index = 0; index < graphTabs_->count(); ++index) {
@@ -4538,15 +4538,15 @@ class DocumentWindow : public QMainWindow {
         if (loadedCachedRunPath_ == path)
             return;
         loadedCachedRunPath_ = path;
-        applySimulationResultToGraphTabs(stored->result);
-        if (simulationOutput_ && stored->result.state != ice::JobState::succeeded) {
+        auto result = std::make_shared<ice::SimulationResult>(std::move(stored->result));
+        applySimulationResultToGraphTabs(result);
+        if (simulationOutput_ && result->state != ice::JobState::succeeded) {
             simulationOutput_->setPlainText(
                 QStringLiteral("Loaded last stored run %1: %2%3")
                     .arg(QString::fromStdString(stored->runId),
-                         QString::fromStdString(ice::jobStateName(stored->result.state)),
-                         stored->result.error.empty()
-                             ? QString()
-                             : QStringLiteral("\n%1").arg(QString::fromStdString(stored->result.error))));
+                         QString::fromStdString(ice::jobStateName(result->state)),
+                         result->error.empty() ? QString()
+                                               : QStringLiteral("\n%1").arg(QString::fromStdString(result->error))));
         }
     }
 
@@ -5001,11 +5001,11 @@ class DocumentWindow : public QMainWindow {
         for (const auto &graph : graphs) {
             if (graph.x.empty() || graph.series.empty())
                 continue;
-            ice::SimulationResult result;
-            result.state = ice::JobState::succeeded;
-            result.analysis = "simulation script";
-            result.time = graph.x;
-            result.traces = graph.series;
+            auto result = std::make_shared<ice::SimulationResult>();
+            result->state = ice::JobState::succeeded;
+            result->analysis = "simulation script";
+            result->time = graph.x;
+            result->traces = graph.series;
 
             ice::SimulationGraph definition;
             definition.name = graph.name;
@@ -5794,7 +5794,7 @@ class DocumentWindow : public QMainWindow {
 
         QStringList netlistNotes;
         const auto request = buildSimulationRequest(sim, netlistNotes);
-        const auto result =
+        auto result =
             ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
         auto report = formatSimulationReport(request, result, netlistNotes);
         QString storedPath;
@@ -5835,7 +5835,7 @@ class DocumentWindow : public QMainWindow {
         if (graphTabs_) {
             auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->currentWidget());
             if (plot)
-                plot->setResult(result);
+                plot->setResult(std::make_shared<ice::SimulationResult>(std::move(result)));
         }
         statusBar()->showMessage(storedPath.isEmpty() ? QStringLiteral("Simulation finished")
                                                       : QStringLiteral("Simulation stored: %1").arg(storedPath));
