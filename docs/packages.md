@@ -177,16 +177,36 @@ deterministic BOUNDARY-only subset. OASIS extensions are accepted for workflow
 compatibility but OASIS import/export is explicitly rejected until a native
 OASIS adapter exists.
 
-## PDK-provided device generators
+## PDK-provided layout libraries and device generators
 
-Layout device libraries declare PCell generator metadata (`module` and `class`).
-ICE loads the generator from the active PDK package:
+Each PDK package owns its layout device library:
 
 ```text
+<pdk-root>/layout/devices.json
 <pdk-root>/layout/device_generator.py
+<pdk-root>/layout/pcells.py          # ICE-native packages
+<pdk-root>/layout/generate_devices.py
 ```
 
-The IHP SG13G2 package supplies this hook and routes generation through
-`icepy.pcells`, which evaluates the upstream IHP PyCell implementation and
-transfers polygons into an `icepy` layout cell. Building `icepy` is required for
-PDK device regeneration.
+ICE resolves this library for the active layout PDK. The library declares
+PCell generator metadata (`module` and `class`) and a `cell_prefix` used for
+instance names (for example `IHP `, `SKY130 `, or `GF180 `). Devices are edited
+and regenerated through the package-local generator; no global PDK installation
+is consulted.
+
+The IHP SG13G2 package ships its complete device library plus vendored IHP
+PyCell sources under `upstream/ihp`. Parametric regeneration evaluates those
+sources through `icepy.pcells` and transfers polygons into an `icepy` layout
+cell.
+
+The Sky130 and GF180MCU packages ship ICE-native replicas of their PCell
+families in `layout/pcells.py`. They use the `icepy` layout builder API directly
+and do not require KLayout, gdsfactory, Volare, CIEL, or `PDK_ROOT`. Their
+`layout/devices.json` files are generated from the same definitions with
+`layout/generate_devices.py`, so the default geometry shown in **Devices** and
+the geometry produced after a parameter edit share one implementation.
+
+`ice-cli pdk-info <pdk>` reports the resolved `layout_library` and
+`layout_generator` paths for each installed package.
+
+Building `icepy` is required for PDK device regeneration.

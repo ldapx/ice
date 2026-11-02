@@ -57,6 +57,8 @@ struct LayoutDeviceGeometry {
 struct LayoutDeviceLibrary {
     std::string name;
     std::string pdk;
+    // Prefix used for instance cell names, for example "IHP " or "SKY130 ".
+    std::string cellPrefix;
     std::vector<LayoutDeviceLayer> layers;
     std::vector<LayoutDeviceCell> cells;
 

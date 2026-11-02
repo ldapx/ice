@@ -120,9 +120,29 @@ The API is new-format-only and reads runs from `build/simulations`.
 
 ## PCell runtime
 
-The upstream IHP PyCell implementations stay in the IHP checkout. `icepy`
-provides the ICE-side runtime and transfers generated polygons directly into an
-`icepy` layout cell:
+`icepy.pcells` has two package-facing paths.
+
+**ICE-native package PCells** use `PackagePcell` subclasses stored in
+`<package>/layout/pcells.py`. Each class declares its parameter metadata,
+logical layer map, and device family. The runtime builds it through the normal
+`icepy` layout builder and returns JSON geometry:
+
+```python
+from icepy import pcells
+
+geometry = pcells.generate_package_geometry(
+    "/path/to/ice-pkg-sky130", "pcells", "nfet", {"w": "2u", "l": "0.2u"}
+)
+```
+
+`generate_package_geometry(...)` is the contract behind
+`layout/device_generator.py` and `layout/generate_devices.py`. The Sky130 and
+GF180MCU packages use this path, so their PCell replicas are defined entirely
+with the ICE layout API.
+
+**IHP PyCell runtime.** The upstream IHP PyCell implementations are vendored
+inside the IHP package under `upstream/ihp`. `icepy` provides the ICE-side
+runtime and transfers generated polygons directly into an `icepy` layout cell:
 
 ```python
 import icepy
@@ -149,8 +169,20 @@ The IHP package uses this runtime through:
 ice-pkg-ihp/layout/device_generator.py
 ```
 
-ICE loads that package hook for layout-device regeneration. Building `icepy`
-is therefore required for IHP PCell regeneration.
+ICE loads that package hook for layout-device regeneration, and the package
+passes its vendored `upstream/ihp` tree as the IHP root. Building `icepy` is
+therefore required for IHP PCell regeneration.
+
+The generic package generator contract is:
+
+```text
+<pdk-root>/layout/device_generator.py --pdk-root <package> \
+    --module <module> --class <class> \
+    --params-file <params.json> --output <geometry.json>
+```
+
+`icepy.pcells.package_main_cli(...)` implements this contract for ICE-native
+package PCells.
 
 ## Package implementation guidance
 
@@ -174,3 +206,12 @@ PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_smoke.py
 The test exercises the layout builder and project round-trip. If
 `ICE_IHP_ROOT` is set, or an `IHP` checkout exists next to the ICE repository,
 it also generates the IHP nmos PCell through `icepy.pcells`.
+
+Package PCell regression coverage is available separately:
+
+```sh
+PYTHONPATH=build/linux/x86_64/release:python python3 tests/package_pcells_test.py
+```
+
+It validates the package libraries and regenerates every declared PCell through
+the package generator contract.

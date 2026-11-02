@@ -55,6 +55,7 @@ class LayoutDevicesPanel : public QWidget {
     void rebuildList(const QString &keepSelected = {});
 
     ice::LayoutDeviceLibrary library_;
+    std::filesystem::path libraryPath_;
     std::map<std::string, std::vector<ice::LayoutDeviceParameter>> defaultParameters_;
     std::map<std::string, ice::LayoutDeviceGeometry> defaultGeometry_;
     std::optional<std::string> activePdk_;
@@ -66,7 +67,10 @@ class LayoutDevicesPanel : public QWidget {
     std::function<void()> onDeviceActivated_;
 };
 
-std::filesystem::path layoutDeviceLibraryPath();
+std::filesystem::path layoutDeviceLibraryPath(const std::string &pdk = {});
+std::string layoutDeviceCellPrefix(const ice::LayoutDeviceLibrary &library);
+std::string stripLayoutDevicePrefix(const ice::LayoutDeviceLibrary &library, const std::string &cellName);
+bool layoutPdkIdsMatch(const std::string &left, const std::string &right);
 std::filesystem::path ihpSourceRoot();
 QString pythonExecutable();
 QString icepyPythonPath();
@@ -82,7 +86,8 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibr
                                                      const ice::LayoutCell &cell);
 const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
                                                          const std::string &cellName);
-std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName);
+std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName,
+                                 const std::string &prefix = {});
 ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCell &source, const std::string &name);
 
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,

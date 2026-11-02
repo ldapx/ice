@@ -225,9 +225,11 @@ the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
-is used. The bundled IHP SG13G2 device library appears in
-**Devices**, with search, category filtering, and a geometry preview in
-**Properties**. The device list starts with no selection; selecting a device
+is used. The active PDK package's layout device library (`layout/devices.json`)
+appears in **Devices**, with search, category filtering, and a geometry preview
+in **Properties**. IHP SG13G2, Sky130, and GF180MCU packages ship their own
+libraries, and switching the active layout to a cell from another PDK loads that
+package's devices. The device list starts with no selection; selecting a device
 switches to **Place Device** and shows a cursor-following preview, while
 activating **Select** clears the list selection.
 Clicking in the canvas imports the device geometry into the project and creates
@@ -239,14 +241,17 @@ descriptions are shown in **Properties** for the device preview and for imported
 library cells. Selecting
 a placed device instance shows that instance's own geometry preview and
 parameter values. Editing a parameter regenerates that instance's geometry
-through the IHP PyCell implementation without changing other instances. Editing
+through the package-local generator without changing other instances. Editing
 a device in the **Devices** tab changes the defaults used by future placements.
 
-Regeneration uses the pure-Python PyCell layer from an IHP source checkout,
-including KLayout's `pya` module. ICE looks for the checkout next to the ICE
-repository or through `ICE_IHP_ROOT`, and uses `python3` unless `ICE_PYTHON`
-points to another interpreter. If the checkout or Python module is unavailable,
-ICE reports the error and leaves the existing geometry unchanged.
+The generator contract is
+`<pdk-root>/layout/device_generator.py --pdk-root <package> --module <module>
+--class <class> --params-file <json> --output <json>`. IHP evaluates the
+vendored upstream PyCell sources (and KLayout's `pya` module) through
+`icepy.pcells`. Sky130 and GF180MCU use ICE-native PCells implemented directly
+with the `icepy` layout builder. ICE uses `python3` unless `ICE_PYTHON` points
+to another interpreter. If the package generator or Python module is
+unavailable, ICE reports the error and leaves the existing geometry unchanged.
 
 The layout toolbar separates **Select** from **Move**. **Select** supports
 rubber-band selection and handle editing: drag path points, polygon vertices,

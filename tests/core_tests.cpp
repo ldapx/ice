@@ -910,11 +910,51 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(defaults["Current Source"]["current"] == "1m");
 }
 
+TEST_CASE("package layout device libraries load") {
+    const auto repositoryRoot = std::filesystem::path(ICE_SOURCE_DIR).parent_path();
+    struct PackageLibrary {
+        const char *directory;
+        const char *name;
+        const char *pdk;
+        const char *prefix;
+        const char *device;
+    };
+    const std::vector<PackageLibrary> packages = {
+        {"ice-pkg-ihp-sg13g2", "IHP SG13G2", "ihp-sg13g2", "IHP ", "nmos"},
+        {"ice-pkg-sky130", "SkyWater SKY130", "sky130A", "SKY130 ", "nfet"},
+        {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos"},
+    };
+    for (const auto &package : packages) {
+        const auto path = repositoryRoot / package.directory / "layout" / "devices.json";
+        if (!std::filesystem::is_regular_file(path))
+            continue;
+        const auto library = ice::LayoutDeviceLibrary::load(path);
+        CHECK(library.name == package.name);
+        CHECK(library.pdk == package.pdk);
+        CHECK(library.cellPrefix == package.prefix);
+        CHECK(!library.cells.empty());
+        const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
+            for (const auto &cell : library.cells)
+                if (cell.name == name)
+                    return &cell;
+            return nullptr;
+        };
+        const auto *device = findCell(package.device);
+        CHECK(device != nullptr);
+        if (device) {
+            CHECK(device->generator.has_value());
+            CHECK(!device->parameters.empty());
+            CHECK(!device->shapes.empty());
+            CHECK(device->bounds.valid());
+        }
+    }
+}
+
 TEST_CASE("shipped IHP layout device library loads") {
     const auto libraryPath = std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json";
     const auto library = ice::LayoutDeviceLibrary::load(libraryPath);
     CHECK(library.name == "IHP SG13G2");
-    CHECK(library.pdk == "ihp.sg13g2");
+    CHECK(library.pdk == "ihp-sg13g2");
     CHECK(library.cells.size() >= 100);
     CHECK(!library.layers.empty());
     for (const auto &cell : library.cells) {

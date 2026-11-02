@@ -28,6 +28,7 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
         LayoutDeviceLibrary library;
         library.name = document.value("name", std::string{});
         library.pdk = document.value("pdk", std::string{});
+        library.cellPrefix = document.value("cell_prefix", std::string{});
         for (const auto &layerJson : document.at("layers")) {
             LayoutDeviceLayer layer;
             layer.number = layerJson.at("number").get<int>();

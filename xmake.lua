@@ -157,6 +157,11 @@ target("icepy")
                     "/usr/lib/python3.14/site-packages/nanobind/include",
                     "/usr/lib/python3.14/site-packages/nanobind/src")
     add_links("python3.14", "dl")
+    add_installfiles("python/icepy_pcells.py", {prefixdir = "share/ice/python"})
+    add_installfiles("python/icepy_sim.py", {prefixdir = "share/ice/python"})
+    add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/ice/assets/simulation"})
+    add_installfiles("assets/layout/procedural_runner.py", {prefixdir = "share/ice/assets/layout"})
+    add_installfiles("assets/layout/ihp.sg13g2.json", {prefixdir = "share/ice/assets/layout"})
 
 task("test")
     on_run(function ()
