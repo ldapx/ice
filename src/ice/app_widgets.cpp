@@ -2362,7 +2362,8 @@ void EmptySchematicPanel::refreshPdks(const std::filesystem::path &installDirect
         auto label = packagePdkDisplayName(entry.spec);
         if (label != packageName)
             label += QStringLiteral("  (%1)").arg(packageName);
-        pdk_->addItem(label, packageName);
+        pdk_->addItem(label, QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
+                                                                                                  : entry.spec.name));
     }
     const auto index = pdk_->findData(current);
     if (index >= 0)
@@ -2460,7 +2461,8 @@ void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory
         auto label = packagePdkDisplayName(entry.spec);
         if (label != packageName)
             label += QStringLiteral("  (%1)").arg(packageName);
-        pdk_->addItem(label, packageName);
+        pdk_->addItem(label, QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
+                                                                                                  : entry.spec.name));
     }
     const auto index = pdk_->findData(current);
     if (index >= 0)
@@ -2510,7 +2512,8 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
         if (displayName != packageName)
             label += QStringLiteral("  (%1)").arg(packageName);
         label += QStringLiteral("  %1").arg(QString::fromStdString(entry.spec.version));
-        pdk_->addItem(label, packageName);
+        pdk_->addItem(label, QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
+                                                                                                  : entry.spec.name));
         auto detail = QStringLiteral("Package PDK.");
         if (!entry.spec.description.empty())
             detail = QString::fromStdString(entry.spec.description) + QStringLiteral("  ") + detail;

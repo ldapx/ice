@@ -639,8 +639,8 @@ Lockfile PackageManager::resolve(const std::vector<std::filesystem::path> &repos
         if (!satisfies(spec.version, constraint))
             throw ProjectError("package.resolve", "Resolved version does not satisfy constraint: " + name);
         resolved[name] = spec.version;
-        lock.packages.push_back(
-            {spec.name, spec.version, root.generic_string(), contentHash(root), spec.trusted, spec.capabilities});
+        lock.packages.push_back({spec.name, spec.version, root.generic_string(), contentHash(root), spec.trusted,
+                                 spec.capabilities, spec.pdk ? spec.pdk->id : std::string{}});
         for (const auto &dependency : spec.dependencies)
             pending.emplace(dependency.first, dependency.second);
     }
@@ -667,6 +667,8 @@ std::string serializeLockfile(const Lockfile &lockfile) {
         output << "[[package]]\nname = \"" << escape(package.name) << "\"\nversion = \"" << escape(package.version)
                << "\"\nsource = \"" << escape(package.source) << "\"\ncontent_hash = \"" << escape(package.contentHash)
                << "\"\ntrusted = " << (package.trusted ? "true" : "false") << "\n";
+        if (!package.pdkId.empty())
+            output << "pdk_id = \"" << escape(package.pdkId) << "\"\n";
         for (const auto &[capability, enabled] : package.capabilities)
             output << "provides." << capability << " = " << (enabled ? "true" : "false") << "\n";
         output << "\n";
@@ -701,7 +703,8 @@ Lockfile PackageManager::readLockfile(const std::filesystem::path &path) {
                 }
                 lock.packages.push_back({readString(*package, "name"), readString(*package, "version"),
                                          readString(*package, "source"), readString(*package, "content_hash"),
-                                         (*package)["trusted"].value_or(false), std::move(capabilities)});
+                                         (*package)["trusted"].value_or(false), std::move(capabilities),
+                                         readString(*package, "pdk_id")});
             }
         return lock;
     } catch (const std::exception &error) {

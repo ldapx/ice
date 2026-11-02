@@ -11,3 +11,5 @@ jobs:
           xmake-version: 2.9.8
       - run: xmake build doctest ice-cli ice-pkg ice-mcp
       - run: xmake run doctest
+      - run: python3 -m pip install -r docs/requirements.txt
+      - run: sphinx-build -b html docs docs/_build -W --keep-going

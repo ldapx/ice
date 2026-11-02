@@ -70,6 +70,9 @@ struct LockedPackage {
     std::string contentHash;
     bool trusted = false;
     std::map<std::string, bool> capabilities;
+    // Canonical PDK id when the package provides one. The content hash covers
+    // the package's model files, so this plus version pins the simulation stack.
+    std::string pdkId;
 };
 
 struct Lockfile {

@@ -470,7 +470,7 @@ bool regenerateProceduralLayout(Project &project, ObjectId proceduralLayoutId, Q
     if (proceduralIt->second.pdk != genericPdkId) {
         const auto packages = installedPackages(configuredPackageInstallDirectory());
         const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
-            return entry.spec.name == proceduralIt->second.pdk;
+            return ice::packageMatchesPdk(entry.spec, proceduralIt->second.pdk);
         });
         if (package != packages.end())
             pdkRoot = package->spec.root;

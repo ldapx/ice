@@ -700,6 +700,15 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     auto serialized = ice::serializeLockfile(lock);
     CHECK(serialized == ice::serializeLockfile(lock));
     CHECK(serialized.find("content_hash = \"sha256:") != std::string::npos);
+    CHECK(serialized.find("pdk_id = \"example.pdk\"") != std::string::npos);
+    const auto parsed = ice::PackageManager::readLockfile([&] {
+        const auto path = repositoryRoot / "ice.lock";
+        ice::PackageManager::writeLockfile(path, lock);
+        return path;
+    }());
+    CHECK(parsed.packages.size() == 2);
+    CHECK(std::any_of(parsed.packages.begin(), parsed.packages.end(),
+                      [](const ice::LockedPackage &package) { return package.pdkId == "example.pdk"; }));
     std::filesystem::remove_all(repositoryRoot);
 }
 

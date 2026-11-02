@@ -52,8 +52,9 @@ void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &i
         return;
     const auto packages = installedPackages(installDirectory);
     for (const auto &pdkName : pdkNames) {
-        const auto package = std::find_if(packages.begin(), packages.end(),
-                                          [&](const auto &entry) { return entry.spec.name == pdkName; });
+        const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
+            return ice::packageMatchesPdk(entry.spec, pdkName);
+        });
         if (package != packages.end() && package->spec.pdk)
             addPdkLayers(project, *package->spec.pdk);
     }

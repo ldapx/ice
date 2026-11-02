@@ -7,7 +7,9 @@ capability-oriented content such as `pdk/`, `symbols/`, `models/`, `layout/`,
 `ice-pkg resolve <repository> <ice-version> name=constraint ...` selects the
 highest matching local package version, resolves transitive dependencies, and
 writes a deterministic `ice.lock`. The lockfile records exact versions,
-sources, trust declarations, capabilities, and SHA-256 content hashes.
+sources, trust declarations, capabilities, canonical `pdk_id`, and SHA-256
+content hashes. The content hash covers the package model files, so a PDK
+package version plus hash pins the simulation stack.
 
 Package code is untrusted by default. A package's `[trust] trusted = true`
 metadata is recorded for policy decisions but does not grant execution

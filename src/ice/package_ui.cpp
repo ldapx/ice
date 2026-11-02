@@ -317,7 +317,20 @@ bool installMissingPackages(QWidget *parent, const std::vector<std::string> &pac
     std::map<std::string, ice::PackageIndexEntry> entries;
     for (auto &entry : ice::PackageManager::scanPackageIndex(indexDirectory))
         entries.emplace(entry.spec.name, std::move(entry));
-    MissingPackagesDialog dialog(packageNames, std::move(entries), installDirectory, parent);
+    // Project dependencies may store canonical PDK ids instead of package names.
+    // Translate them to the package names used by the index dialog.
+    std::vector<std::string> resolvedNames;
+    for (const auto &name : packageNames) {
+        std::string resolved = name;
+        for (const auto &[packageName, entry] : entries) {
+            if (ice::packageMatchesPdk(entry.spec, name)) {
+                resolved = packageName;
+                break;
+            }
+        }
+        resolvedNames.push_back(std::move(resolved));
+    }
+    MissingPackagesDialog dialog(resolvedNames, std::move(entries), installDirectory, parent);
     return dialog.exec() == QDialog::Accepted;
 }
 
@@ -349,7 +362,8 @@ CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &instal
         if (displayName != packageName)
             label += QStringLiteral("  (%1)").arg(packageName);
         label += QStringLiteral("  %1").arg(QString::fromStdString(entry.spec.version));
-        pdk_->addItem(label, packageName);
+        pdk_->addItem(label, QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
+                                                                                                  : entry.spec.name));
         auto detail = QStringLiteral("Package PDK. Generic and package symbols are available.");
         if (!entry.spec.description.empty())
             detail = QString::fromStdString(entry.spec.description) + QStringLiteral("  ") + detail;
