@@ -396,13 +396,13 @@ std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
     }
 }
 
-ObjectId addLayer(Project &project, std::string name, int number) {
+ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
     if (number < 0)
         throw ProjectError("layout.layer", "Layer number must not be negative");
     ObjectId id = project.nextId();
-    project.layers.emplace(id, Layer{id, std::move(name), number});
+    project.layers.emplace(id, Layer{id, std::move(name), number, true, layout, std::move(pdk)});
     return id;
 }
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,

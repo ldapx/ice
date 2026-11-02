@@ -158,7 +158,6 @@ std::vector<Diagnostic> Project::validate() const {
             result.push_back({Diagnostic::Severity::error, "project.packages.duplicate",
                               "Package dependency is listed more than once: " + dependency, std::nullopt});
     }
-    auto onGrid = [this](Coordinate value) { return grid > 0 && value % grid == 0; };
     for (const auto &[cellId, cell] : schematicCells) {
         if (cell.pdk.empty() || cell.pdk.find_first_of("/\\") != std::string::npos)
             result.push_back({Diagnostic::Severity::error, "schematic.pdk", "Schematic PDK is invalid", cellId});
@@ -166,9 +165,6 @@ std::vector<Diagnostic> Project::validate() const {
             if (!cell.symbols.contains(instance.symbol))
                 result.push_back({Diagnostic::Severity::error, "schematic.instance.symbol",
                                   "Instance references a missing symbol", instanceId});
-            if (!onGrid(instance.x) || !onGrid(instance.y))
-                result.push_back({Diagnostic::Severity::error, "schematic.instance.grid",
-                                  "Instance position is off-grid", instanceId});
         }
         for (const auto &[netId, net] : cell.nets) {
             std::unordered_set<ObjectId> pinIds;
@@ -193,10 +189,6 @@ std::vector<Diagnostic> Project::validate() const {
                 (shape.polygon.empty() && !shape.rectangle.valid()))
                 result.push_back({Diagnostic::Severity::error, "layout.shape.geometry",
                                   "Shape rectangle must have positive dimensions", shapeId});
-            if (shape.polygon.empty() && (!onGrid(shape.rectangle.x) || !onGrid(shape.rectangle.y) ||
-                                          !onGrid(shape.rectangle.width) || !onGrid(shape.rectangle.height)))
-                result.push_back(
-                    {Diagnostic::Severity::error, "layout.shape.grid", "Shape geometry is off-grid", shapeId});
             if (!shape.text.empty() && !shape.centerline.empty())
                 result.push_back({Diagnostic::Severity::error, "layout.text.geometry",
                                   "Text cannot also be a routed path", shapeId});
@@ -210,13 +202,6 @@ std::vector<Diagnostic> Project::validate() const {
                 if (!shape.pointVias.empty() && shape.pointVias.size() != shape.centerline.size())
                     result.push_back({Diagnostic::Severity::error, "layout.path.vias",
                                       "Path via count does not match its points", shapeId});
-                for (const auto &point : shape.centerline) {
-                    if (!onGrid(point.x) || !onGrid(point.y)) {
-                        result.push_back(
-                            {Diagnostic::Severity::error, "layout.path.grid", "Path point is off-grid", shapeId});
-                        break;
-                    }
-                }
                 for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
                     if (!layers.contains(shape.layerForSegment(index))) {
                         result.push_back({Diagnostic::Severity::error, "layout.path.layer",
@@ -247,10 +232,6 @@ std::vector<Diagnostic> Project::validate() const {
             if (!port.rectangle.valid())
                 result.push_back({Diagnostic::Severity::error, "layout.port.geometry",
                                   "Port rectangle must have positive dimensions", portId});
-            if (!onGrid(port.rectangle.x) || !onGrid(port.rectangle.y) || !onGrid(port.rectangle.width) ||
-                !onGrid(port.rectangle.height))
-                result.push_back(
-                    {Diagnostic::Severity::error, "layout.port.grid", "Port geometry is off-grid", portId});
         }
         for (const auto &[deviceId, device] : cell.plannedDevices) {
             if (device.width <= 0 || device.height <= 0)
@@ -368,7 +349,12 @@ std::string Project::serialize() const {
     }
     j["layers"] = json::array();
     for (const auto &[id, layer] : layers)
-        j["layers"].push_back({{"id", id}, {"name", layer.name}, {"number", layer.number}, {"visible", layer.visible}});
+        j["layers"].push_back({{"id", id},
+                                {"name", layer.name},
+                                {"number", layer.number},
+                                {"visible", layer.visible},
+                                {"layout", layer.layout},
+                                {"pdk", layer.pdk}});
     j["layout_cells"] = json::array();
     for (const auto &[id, cell] : layoutCells) {
         json c = {{"id", id},
@@ -589,7 +575,12 @@ Project Project::deserialize(const std::string &text) {
             p.schematicCells.emplace(cell.id, std::move(cell));
         }
         for (const auto &l : j.at("layers"))
-            p.layers.emplace(l.at("id"), Layer{l.at("id"), l.at("name"), l.at("number"), l.value("visible", true)});
+            p.layers.emplace(l.at("id"), Layer{l.at("id"),
+                                                l.at("name"),
+                                                l.at("number"),
+                                                l.value("visible", true),
+                                                l.value("layout", ObjectId{0}),
+                                                l.value("pdk", std::string{})});
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
             cell.pdk = c.value("pdk", std::string{genericPdkId});

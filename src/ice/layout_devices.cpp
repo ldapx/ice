@@ -31,12 +31,22 @@
 #include <set>
 #include <utility>
 
-void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk) {
+void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
+    const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
     for (const auto &layer : pdk.layers) {
-        const auto exists = std::any_of(project.layers.begin(), project.layers.end(),
-                                        [&](const auto &entry) { return entry.second.name == layer.name; });
-        if (!exists)
-            ice::addLayer(project, layer.name, layer.number);
+        const auto exists = std::find_if(project.layers.begin(), project.layers.end(),
+                                         [&](const auto &entry) {
+                                             const auto &existing = entry.second;
+                                             return existing.name == layer.name && existing.layout == 0 &&
+                                                    (existing.pdk.empty() || existing.pdk == technology);
+                                         });
+        if (exists == project.layers.end()) {
+            ice::addLayer(project, layer.name, layer.number, 0, technology);
+        } else if (exists->second.pdk.empty()) {
+            // Tag legacy technology layers when opening an older project so
+            // they do not leak into layouts using another PDK.
+            exists->second.pdk = technology;
+        }
     }
 }
 
@@ -56,7 +66,7 @@ void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &i
             return ice::packageMatchesPdk(entry.spec, pdkName);
         });
         if (package != packages.end() && package->spec.pdk)
-            addPdkLayers(project, *package->spec.pdk);
+            addPdkLayers(project, *package->spec.pdk, pdkName);
     }
 }
 

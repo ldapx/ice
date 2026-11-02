@@ -115,6 +115,10 @@ struct Layer {
     std::string name;
     int number = 0;
     bool visible = true;
+    // Zero means this is a legacy/project-wide layer. Non-zero custom layers
+    // belong only to that layout cell; pdk layers are shared by matching PDKs.
+    ObjectId layout = 0;
+    std::string pdk;
 };
 
 struct Rect {

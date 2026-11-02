@@ -118,6 +118,26 @@
 
 namespace {
 
+bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId, const ice::Layer &layer) {
+    if (layoutId == 0 || (layer.layout == 0 && layer.pdk.empty()))
+        return true;
+    const auto cell = project.layoutCells.find(layoutId);
+    if (cell == project.layoutCells.end())
+        return false;
+    if (layer.layout != 0)
+        return layer.layout == layoutId;
+    return !layer.pdk.empty() && layer.pdk == cell->second.pdk;
+}
+
+std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Project &project,
+                                                                    ice::ObjectId layoutId) {
+    std::vector<std::reference_wrapper<const ice::Layer>> result;
+    for (const auto &[_, layer] : project.layers)
+        if (layerAvailableForLayout(project, layoutId, layer))
+            result.emplace_back(layer);
+    return result;
+}
+
 QPainterPath layoutShapeScenePath(const ice::Shape &shape) {
     if (shape.isText())
         return {};
@@ -1666,7 +1686,7 @@ class DocumentWindow : public QMainWindow {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk);
+                    addPdkLayers(project, *selectedPdk, pdk);
                 activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
@@ -1726,7 +1746,7 @@ class DocumentWindow : public QMainWindow {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk);
+                    addPdkLayers(project, *selectedPdk, pdk);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
                                                            ice::defaultProceduralLayoutScript());
                 generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
@@ -2165,10 +2185,13 @@ class DocumentWindow : public QMainWindow {
     void updateLayoutPathConfig() {
         if (!project_ || !layoutCanvas_)
             return;
-        const auto &layers = project_->project().layers;
+        const auto &project = project_->project();
+        const auto layers = layoutLayers(project, activeLayoutId_);
         const auto findLayer = [&](const char *name) -> ice::ObjectId {
             const auto wanted = QString::fromLatin1(name);
-            for (const auto &[id, layer] : layers) {
+            for (const auto &[id, layer] : project.layers) {
+                if (!layerAvailableForLayout(project, activeLayoutId_, layer))
+                    continue;
                 if (QString::fromStdString(layer.name).compare(wanted, Qt::CaseInsensitive) == 0)
                     return id;
             }
@@ -2194,8 +2217,10 @@ class DocumentWindow : public QMainWindow {
             config.layers.push_back({layerId, viaId, metal});
         }
         if (config.layers.empty() && !layers.empty()) {
-            const auto &[id, layer] = *layers.begin();
-            config.layers.push_back({id, 0, layer.name});
+            for (const auto &layerRef : layers) {
+                const auto &layer = layerRef.get();
+                config.layers.push_back({layer.id, 0, layer.name});
+            }
         }
         layoutCanvas_->setPathConfig(config);
     }
@@ -2331,7 +2356,9 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
-            !project_->project().layers.contains(layerId))
+            !project_->project().layers.contains(layerId) ||
+            !layerAvailableForLayout(project_->project(), activeLayoutId_,
+                                     project_->project().layers.at(layerId)))
             return;
         const auto toModelPoint = [](QPointF point) {
             return ice::LayoutPoint{static_cast<ice::Coordinate>(std::lround(point.x())),
@@ -2353,7 +2380,8 @@ class DocumentWindow : public QMainWindow {
                     path.segmentLayers = {layerId};
                     path.pointVias = {{}, {}};
                     for (const auto viaLayer : viaLayers) {
-                        if (viaLayer != 0 && project.layers.contains(viaLayer))
+                        if (viaLayer != 0 && project.layers.contains(viaLayer) &&
+                            layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
                             path.pointVias.front().push_back(viaLayer);
                     }
                     path.width = width;
@@ -2369,7 +2397,8 @@ class DocumentWindow : public QMainWindow {
                     if (path.pointVias.size() != path.centerline.size())
                         path.pointVias.resize(path.centerline.size());
                     for (const auto viaLayer : viaLayers) {
-                        if (viaLayer == 0 || !project.layers.contains(viaLayer))
+                        if (viaLayer == 0 || !project.layers.contains(viaLayer) ||
+                            !layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
                             continue;
                         auto &vias = path.pointVias.back();
                         if (std::find(vias.begin(), vias.end(), viaLayer) == vias.end())
@@ -3015,18 +3044,19 @@ class DocumentWindow : public QMainWindow {
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
             return;
-        if (project_->project().layers.empty()) {
+        const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
+        if (availableLayers.empty()) {
             QMessageBox::information(this, QStringLiteral("Create Polygon"),
                                      QStringLiteral("Create a layer before drawing polygons."));
             return;
         }
-        if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+        if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
             QMessageBox::information(this, QStringLiteral("Create Polygon"),
                                      QStringLiteral("Select a layer before drawing polygons."));
             return;
         }
         const auto layerId =
-            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
+            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
         std::vector<ice::LayoutPoint> modelPoints;
         modelPoints.reserve(points.size());
         for (const auto &point : points)
@@ -3052,18 +3082,19 @@ class DocumentWindow : public QMainWindow {
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
             return;
-        if (project_->project().layers.empty()) {
+        const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
+        if (availableLayers.empty()) {
             QMessageBox::information(this, QStringLiteral("Draw Text"),
                                      QStringLiteral("Create a layer before drawing text."));
             return;
         }
-        if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+        if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
             QMessageBox::information(this, QStringLiteral("Draw Text"),
                                      QStringLiteral("Select a layer before drawing text."));
             return;
         }
         const auto layerId =
-            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
+            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
         bool accepted = false;
         const auto text = QInputDialog::getText(this, QStringLiteral("Draw Text"), QStringLiteral("Text:"),
                                                 QLineEdit::Normal, QString(), &accepted);
@@ -3351,8 +3382,9 @@ class DocumentWindow : public QMainWindow {
         int number = 1;
         const auto existingLayers = project_->project().layers.size();
         number = static_cast<int>(existingLayers) + 1;
-        project_->execute("create layer",
-                          [&](ice::Project &project) { ice::addLayer(project, name.trimmed().toStdString(), number); });
+        project_->execute("create layer", [&](ice::Project &project) {
+            ice::addLayer(project, name.trimmed().toStdString(), number, activeLayoutId_);
+        });
         project_->setLastHistoryLabel("Created layer " + name.trimmed().toStdString());
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Layer created"));
@@ -3387,12 +3419,17 @@ class DocumentWindow : public QMainWindow {
                 project.packageDependencies.end())
                 project.packageDependencies.push_back(spec.name);
             if (spec.pdk) {
+                const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
                 for (const auto &layer : spec.pdk->layers) {
                     const auto exists =
                         std::find_if(project.layers.begin(), project.layers.end(),
-                                     [&](const auto &entry) { return entry.second.name == layer.name; });
+                                     [&](const auto &entry) {
+                                             const auto &existing = entry.second;
+                                             return existing.name == layer.name && existing.layout == 0 &&
+                                                (existing.pdk.empty() || existing.pdk == technology);
+                                     });
                     if (exists == project.layers.end())
-                        ice::addLayer(project, layer.name, layer.number);
+                        ice::addLayer(project, layer.name, layer.number, 0, technology);
                 }
             }
             if (project.schematicCells.empty()) {
@@ -3427,6 +3464,8 @@ class DocumentWindow : public QMainWindow {
         }
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
+        if (layersPanel_)
+            layersPanel_->setProject(project, activeLayoutId_);
         const bool readOnly = cellIt->second.library;
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
@@ -3434,12 +3473,13 @@ class DocumentWindow : public QMainWindow {
             layoutMoveTool_->setEnabled(!readOnly);
         if (layoutRectangleTool_)
             layoutRectangleTool_->setEnabled(!readOnly);
+        const auto availableLayers = layoutLayers(project, activeLayoutId_);
         if (layoutPathTool_)
-            layoutPathTool_->setEnabled(!readOnly && !project.layers.empty());
+            layoutPathTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutPolygonTool_)
-            layoutPolygonTool_->setEnabled(!readOnly && !project.layers.empty());
+            layoutPolygonTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutTextTool_)
-            layoutTextTool_->setEnabled(!readOnly && !project.layers.empty());
+            layoutTextTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutDeleteTool_)
             layoutDeleteTool_->setEnabled(!readOnly);
         if (layoutCanvas_) {
@@ -3454,9 +3494,10 @@ class DocumentWindow : public QMainWindow {
             updateLayoutPathConfig();
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
-        if (project.layers.size() == 1)
-            activeLayoutLayerId_ = project.layers.begin()->first;
-        else if (!project.layers.contains(activeLayoutLayerId_))
+        if (availableLayers.size() == 1)
+            activeLayoutLayerId_ = availableLayers.front().get().id;
+        else if (!project.layers.contains(activeLayoutLayerId_) ||
+                 !layerAvailableForLayout(project, activeLayoutId_, project.layers.at(activeLayoutLayerId_)))
             activeLayoutLayerId_ = 0;
         if (activeLayoutLayerId_ != 0 && styles.contains(activeLayoutLayerId_))
             layoutCanvas_->setRectangleStyle(styles.at(activeLayoutLayerId_));
@@ -6423,7 +6464,7 @@ class DocumentWindow : public QMainWindow {
         if (layoutHierarchy_)
             layoutHierarchy_->setProject(project);
         if (layersPanel_)
-            layersPanel_->setProject(project);
+            layersPanel_->setProject(project, activeLayoutId_);
         if (schematicCellTabs_) {
             const auto selected = activeSchematicId_;
             schematicCellTabs_->clear();
@@ -6870,7 +6911,7 @@ class DocumentWindow : public QMainWindow {
         refreshSchematic();
         refreshLayout();
         if (layersPanel_ && project_)
-            layersPanel_->setProject(project_->project());
+            layersPanel_->setProject(project_->project(), activeLayoutId_);
         if (schematicPropertiesPanel_)
             schematicPropertiesPanel_->refreshAppearance();
         if (startupView_)
@@ -7424,7 +7465,8 @@ class DocumentWindow : public QMainWindow {
                 return;
             project_->execute("toggle layer visibility", [&](ice::Project &project) {
                 const auto layer = project.layers.find(layerId);
-                if (layer == project.layers.end() || layer->second.visible == visible)
+                if (layer == project.layers.end() || !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
+                    layer->second.visible == visible)
                     return;
                 layer->second.visible = visible;
             });
@@ -7436,6 +7478,8 @@ class DocumentWindow : public QMainWindow {
             bool changed = false;
             project_->execute(visible ? "show all layers" : "hide all layers", [&](ice::Project &project) {
                 for (auto &[_, layer] : project.layers) {
+                    if (!layerAvailableForLayout(project, activeLayoutId_, layer))
+                        continue;
                     if (layer.visible == visible)
                         continue;
                     layer.visible = visible;
@@ -7444,7 +7488,7 @@ class DocumentWindow : public QMainWindow {
             });
             if (!changed)
                 return;
-            layersPanel_->setProject(project_->project());
+            layersPanel_->setProject(project_->project(), activeLayoutId_);
             refreshLayout();
         });
         layoutRightTabs->addTab(layersPanel_, QStringLiteral("Layers"));
@@ -8130,12 +8174,12 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setShapeActivatedCallback([this](ice::ObjectId id) { highlightLayoutNet(id); });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
-                    if (!project_ || project_->project().layers.empty()) {
+                    if (!project_ || layoutLayers(project_->project(), activeLayoutId_).empty()) {
                         QMessageBox::information(this, QStringLiteral("Create Shape"),
                                                  QStringLiteral("Create a layer before drawing shapes."));
                         return;
                     }
-                    if (project_->project().layers.size() > 1 && activeLayoutLayerId_ == 0) {
+                    if (layoutLayers(project_->project(), activeLayoutId_).size() > 1 && activeLayoutLayerId_ == 0) {
                         QMessageBox::information(this, QStringLiteral("Create Shape"),
                                                  QStringLiteral("Select a layer before drawing shapes."));
                         return;
@@ -8153,8 +8197,10 @@ class DocumentWindow : public QMainWindow {
                     if (project_->project().layoutCells.at(cellId).library)
                         return;
                     const auto rectangle = QRectF(first, second).normalized();
-                    const auto layerId =
-                        activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : project_->project().layers.begin()->first;
+                    const auto available = layoutLayers(project_->project(), activeLayoutId_);
+                    const auto layerId = activeLayoutLayerId_ != 0
+                                             ? activeLayoutLayerId_
+                                             : available.front().get().id;
                     project_->execute("create layout rectangle", [&](ice::Project &project) {
                         ice::addRectangle(project, cellId, layerId,
                                           {static_cast<ice::Coordinate>(rectangle.left()),
@@ -8377,7 +8423,7 @@ class DocumentWindow : public QMainWindow {
                     layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
                 refreshLayoutProperties(true);
                 statusBar()->showMessage(
-                    QStringLiteral("Path: %1 · %2 nm · Shift = right angles · hold left + wheel = layer · "
+                    QStringLiteral("Path: %1 · %2 nm · Shift = right angles · wheel = layer · Ctrl+wheel = zoom · "
                                    "Escape/Space = finish")
                         .arg(QString::fromStdString(layoutCanvas_->pathLayerName()))
                         .arg(layoutCanvas_->pathWidth()));

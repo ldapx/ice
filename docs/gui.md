@@ -202,7 +202,7 @@ left layout tool column to open the parent layout or the selected child
 instance.
 
 With nothing selected in the layout, **Properties** shows a fitted preview of
-the layout geometry and a **Grid** section with the snap spacing in nanometers.
+the layout geometry and a **Grid** section with the Layout-only snap spacing in nanometers.
 The layout toolbar keeps the grid visibility and snap toggles. The layout cell
 parameter table is hidden while nothing is selected. Selecting a rectangle
 shows its name, type, layer, and editable width and height in database units;
@@ -280,11 +280,13 @@ the path start and click again to commit each segment. Escape or Space finishes
 the current path and leaves the tool. Holding Shift
 constrains the active segment to horizontal or vertical so all turns are right
 angles. While the Path tool is active, **Properties** shows the current path
-layer and an editable `width (nm)` value (200 nm by default). Hold the left
-mouse button while scrolling the wheel to move the next segment up or down one
-metal layer; ICE inserts the corresponding via at the connection point
-automatically. For the IHP stack, for example, scrolling from Metal2 down to
-Metal1 adds a Via1 at the junction. A routed path is stored as one path shape
+layer and an editable `width (nm)` value (200 nm by default). After the first
+path click, scroll the wheel to move the next segment up or down one metal
+layer; ICE inserts the corresponding via at the connection point automatically.
+For the IHP stack, for example, scrolling from Metal2 down to Metal1 adds a
+Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
+Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
+stored as one path shape
 with an editable centerline, width, and cached outline; it moves as a single
 object rather than as independent segment rectangles. Select a path to show its
 point handles. Drag a handle to move a point, double-click a segment to insert a

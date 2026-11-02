@@ -116,7 +116,7 @@ class SimulationPanel : public QWidget {
 class LayersPanel : public QWidget {
   public:
     explicit LayersPanel(QWidget *parent = nullptr);
-    void setProject(const ice::Project &project);
+    void setProject(const ice::Project &project, ice::ObjectId layoutId = 0);
     void setOnCreateLayer(std::function<void()> callback);
     void setOnLayerSelected(std::function<void(ice::ObjectId)> callback);
     void setSelectedLayer(ice::ObjectId layerId);
