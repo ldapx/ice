@@ -403,15 +403,11 @@ class DocumentWindow : public QMainWindow {
         clearProjectWatcher();
         flattenedLayouts_->clear();
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
-        for (auto &[_, cell] : project.layoutCells) {
-            if (!cell.library && cell.pdk == "ihp.sg13g2" && cell.name.starts_with("IHP "))
-                cell.library = true;
-        }
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->resetDevices();
             const auto &library = layoutDevicesPanel_->library();
             for (auto &[_, cell] : project.layoutCells) {
-                if (!cell.library || cell.pdk != "ihp.sg13g2" || !cell.name.starts_with("IHP "))
+                if (!cell.library || !layoutPdkIdsMatch(cell.pdk, library.pdk))
                     continue;
                 if (cell.device.empty()) {
                     if (const auto *device = findLayoutDeviceForCellName(library, cell.name))
@@ -438,8 +434,10 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 const auto source = project.layoutCells.at(childId);
                 for (std::size_t index = 1; index < childReferences.size(); ++index) {
+                    const auto prefix =
+                        layoutPdkIdsMatch(source.pdk, library.pdk) ? layoutDeviceCellPrefix(library) : std::string{};
                     const auto cloneId =
-                        cloneLibraryDeviceCell(project, source, uniqueDeviceCellName(project, source.device));
+                        cloneLibraryDeviceCell(project, source, uniqueDeviceCellName(project, source.device, prefix));
                     project.layoutCells.at(childReferences[index].parent)
                         .instances.at(childReferences[index].instance)
                         .cell = cloneId;
@@ -2047,7 +2045,8 @@ class DocumentWindow : public QMainWindow {
 
     ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
                                                  const ice::LayoutDeviceLibrary &library) const {
-        const auto cellId = ice::createLayoutCell(project, uniqueDeviceCellName(project, device.name), library.pdk);
+        const auto cellId = ice::createLayoutCell(
+            project, uniqueDeviceCellName(project, device.name, layoutDeviceCellPrefix(library)), library.pdk);
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
         cell.device = device.name;

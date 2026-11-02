@@ -25,6 +25,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -95,8 +96,13 @@ QString icepyPythonPath() {
     const auto appDir = QCoreApplication::applicationDirPath();
     paths << appDir;
     paths << appDir + QStringLiteral("/python");
+    // Installed layout: <prefix>/bin/ice, <prefix>/lib/icepy.so and
+    // <prefix>/share/ice/python/icepy_pcells.py.
+    paths << appDir + QStringLiteral("/../lib");
+    paths << appDir + QStringLiteral("/../share/ice/python");
 #ifdef ICE_SOURCE_DIR
     paths << QString::fromStdString((std::filesystem::path(ICE_SOURCE_DIR) / "python").string());
+    paths << QString::fromStdString((std::filesystem::path(ICE_SOURCE_DIR) / "build").string());
 #endif
     const auto inherited = qEnvironmentVariable("PYTHONPATH");
     if (!inherited.isEmpty())
@@ -104,11 +110,32 @@ QString icepyPythonPath() {
     return paths.join(QDir::listSeparator());
 }
 
-std::filesystem::path layoutDeviceLibraryPath() {
+std::filesystem::path layoutDeviceLibraryPath(const std::string &pdk) {
+    // Installed PDK packages own their device libraries. Keeping the library
+    // inside the package lets the package version pin the PCell definitions,
+    // defaults, and geometry together with the simulation models.
+    if (!pdk.empty() && pdk != ice::genericPdkId) {
+        const auto packageRoot = pdkPackageRoot(pdk);
+        if (!packageRoot.empty()) {
+            const std::vector<std::filesystem::path> packageCandidates = {
+                packageRoot / "layout" / "devices.json",
+                packageRoot / "layout" / "library.json",
+                packageRoot / "layout" / (pdk + ".json"),
+            };
+            for (const auto &candidate : packageCandidates) {
+                if (regularFile(candidate))
+                    return candidate;
+            }
+        }
+    }
+
+    // Source-tree and system fallbacks keep the bundled IHP library available
+    // for old projects and for running ICE without an installed package.
     const auto appDir = QCoreApplication::applicationDirPath().toStdString();
     const std::vector<std::filesystem::path> candidates = {
         std::filesystem::path(appDir) / "assets" / "layout" / "ihp.sg13g2.json",
         std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "layout" / "ihp.sg13g2.json",
+        std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "layout" / "ihp.sg13g2.json",
 #ifdef ICE_SOURCE_DIR
         std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json",
 #endif
@@ -116,11 +143,37 @@ std::filesystem::path layoutDeviceLibraryPath() {
         std::filesystem::path("/usr/share/ice/assets/layout/ihp.sg13g2.json"),
     };
     for (const auto &candidate : candidates) {
-        std::error_code status;
-        if (std::filesystem::is_regular_file(candidate, status) && !status)
+        if (regularFile(candidate))
             return candidate;
     }
     return {};
+}
+
+std::string layoutDeviceCellPrefix(const ice::LayoutDeviceLibrary &library) {
+    if (!library.cellPrefix.empty())
+        return library.cellPrefix;
+    // The original bundled IHP library predates the cell_prefix field.
+    if (library.pdk == "ihp.sg13g2" || library.pdk == "ihp-sg13g2")
+        return "IHP ";
+    return {};
+}
+
+std::string stripLayoutDevicePrefix(const ice::LayoutDeviceLibrary &library, const std::string &cellName) {
+    const auto prefix = layoutDeviceCellPrefix(library);
+    if (!prefix.empty() && cellName.starts_with(prefix))
+        return cellName.substr(prefix.size());
+    return cellName;
+}
+
+bool layoutPdkIdsMatch(const std::string &left, const std::string &right) {
+    const auto normalize = [](std::string value) {
+        for (auto &character : value)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        std::replace(value.begin(), value.end(), '.', '-');
+        std::replace(value.begin(), value.end(), '_', '-');
+        return value;
+    };
+    return normalize(left) == normalize(right);
 }
 
 std::map<std::string, std::string> parameterValues(const std::vector<ice::LayoutDeviceParameter> &parameters) {
@@ -148,7 +201,7 @@ void syncLayoutDeviceParameters(ice::Project &project, ice::LayoutCell &cell, co
 }
 
 const ice::LayoutDeviceCell *findLayoutDevice(const ice::LayoutDeviceLibrary &library, const std::string &cellName) {
-    const auto name = cellName.starts_with("IHP ") ? cellName.substr(4) : cellName;
+    const auto name = stripLayoutDevicePrefix(library, cellName);
     const auto it = std::find_if(library.cells.begin(), library.cells.end(),
                                  [&](const auto &candidate) { return candidate.name == name; });
     return it == library.cells.end() ? nullptr : &*it;
@@ -170,7 +223,7 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibr
 
 const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
                                                          const std::string &cellName) {
-    const auto name = cellName.starts_with("IHP ") ? cellName.substr(4) : cellName;
+    const auto name = stripLayoutDevicePrefix(library, cellName);
     const auto exact = std::find_if(library.cells.begin(), library.cells.end(),
                                     [&](const auto &candidate) { return candidate.name == name; });
     if (exact != library.cells.end())
@@ -186,8 +239,9 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDevice
     return best;
 }
 
-std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName) {
-    const auto base = "IHP " + deviceName;
+std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName,
+                                 const std::string &prefix) {
+    const auto base = prefix + deviceName;
     for (int index = 1;; ++index) {
         const auto candidate = base + "_" + std::to_string(index);
         const bool exists = std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
@@ -423,12 +477,6 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
                          .arg(QString::fromStdString(pdk));
         return std::nullopt;
     }
-    const auto ihpRoot = ihpSourceRoot();
-    if (ihpRoot.empty()) {
-        if (error)
-            *error = QStringLiteral("The IHP source tree was not found. Set ICE_IHP_ROOT to its location.");
-        return std::nullopt;
-    }
     const auto python = pythonExecutable();
     if (python.isEmpty()) {
         if (error)
@@ -458,8 +506,8 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
     }
 
     QStringList arguments{QString::fromStdString(script.string()),
-                          QStringLiteral("--ihp-root"),
-                          QString::fromStdString(ihpRoot.string()),
+                          QStringLiteral("--pdk-root"),
+                          QString::fromStdString(packageRoot.string()),
                           QStringLiteral("--module"),
                           QString::fromStdString(device.generator->module),
                           QStringLiteral("--class"),
@@ -471,28 +519,28 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
     QProcess process;
     process.setProgram(python);
     process.setArguments(arguments);
-    process.setWorkingDirectory(QString::fromStdString(ihpRoot.string()));
+    process.setWorkingDirectory(QString::fromStdString(packageRoot.string()));
     auto environment = QProcessEnvironment::systemEnvironment();
     environment.insert(QStringLiteral("PYTHONPATH"), icepyPythonPath());
     process.setProcessEnvironment(environment);
     process.start();
     if (!process.waitForStarted(5000)) {
         if (error)
-            *error = QStringLiteral("Unable to start the IHP PCell generator: %1").arg(process.errorString());
+            *error = QStringLiteral("Unable to start the PCell generator: %1").arg(process.errorString());
         return std::nullopt;
     }
     if (!process.waitForFinished(60000)) {
         process.kill();
         process.waitForFinished(2000);
         if (error)
-            *error = QStringLiteral("The IHP PCell generator timed out.");
+            *error = QStringLiteral("The PCell generator timed out.");
         return std::nullopt;
     }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
         if (error) {
             auto message = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
             if (message.isEmpty())
-                message = QStringLiteral("The IHP PCell generator exited with code %1.").arg(process.exitCode());
+                message = QStringLiteral("The PCell generator exited with code %1.").arg(process.exitCode());
             if (message.size() > 4000)
                 message = message.right(4000);
             *error = message;
@@ -502,7 +550,7 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
     QFile outputFile(outputPath);
     if (!outputFile.open(QIODevice::ReadOnly)) {
         if (error)
-            *error = QStringLiteral("The IHP PCell generator did not produce geometry.");
+            *error = QStringLiteral("The PCell generator did not produce geometry.");
         return std::nullopt;
     }
     try {
@@ -582,11 +630,11 @@ LayoutDevicesPanel::LayoutDevicesPanel(QWidget *parent) : QWidget(parent) {
     list_->setAccessibleName(QStringLiteral("Available layout devices"));
     layout->addWidget(list_, 1);
 
-    const auto libraryPath = layoutDeviceLibraryPath();
+    libraryPath_ = layoutDeviceLibraryPath();
     try {
-        if (libraryPath.empty())
+        if (libraryPath_.empty())
             throw ice::ProjectError("layout.library", "Layout device library is not available");
-        library_ = ice::LayoutDeviceLibrary::load(libraryPath);
+        library_ = ice::LayoutDeviceLibrary::load(libraryPath_);
     } catch (const ice::ProjectError &error) {
         loadError_ = QString::fromStdString(error.what());
     }
@@ -624,9 +672,32 @@ void LayoutDevicesPanel::clearDeviceSelection() {
 }
 
 void LayoutDevicesPanel::setPdk(const std::string &pdk) {
-    if (activePdk_ && *activePdk_ == pdk)
+    if (activePdk_ && layoutPdkIdsMatch(*activePdk_, pdk))
         return;
     activePdk_ = pdk;
+
+    if (!pdk.empty() && pdk != ice::genericPdkId) {
+        const auto path = layoutDeviceLibraryPath(pdk);
+        if (!path.empty() && path != libraryPath_) {
+            try {
+                auto library = ice::LayoutDeviceLibrary::load(path);
+                library_ = std::move(library);
+                libraryPath_ = path;
+                loadError_.clear();
+                defaultParameters_.clear();
+                defaultGeometry_.clear();
+                for (const auto &cell : library_.cells) {
+                    defaultParameters_[cell.name] = cell.parameters;
+                    defaultGeometry_[cell.name] = ice::LayoutDeviceGeometry{cell.bounds, cell.shapes};
+                }
+            } catch (const ice::ProjectError &error) {
+                loadError_ = QString::fromStdString(error.what());
+            }
+        } else if (path.empty()) {
+            loadError_ = QStringLiteral("No layout device library is installed for this PDK.");
+        }
+    }
+
     clearDeviceSelection();
     rebuildCategories();
     rebuildList();
@@ -693,7 +764,7 @@ void LayoutDevicesPanel::rebuildCategories() {
     category_->clear();
     category_->addItem(QStringLiteral("All categories"), QString());
     QStringList categories;
-    if (activePdk_ && *activePdk_ == library_.pdk) {
+    if (activePdk_ && layoutPdkIdsMatch(*activePdk_, library_.pdk)) {
         for (const auto &cell : library_.cells) {
             const auto category = QString::fromStdString(cell.category);
             if (!category.isEmpty() && !categories.contains(category))
@@ -721,7 +792,7 @@ void LayoutDevicesPanel::rebuildList(const QString &keepSelected) {
     list_->clear();
     int selectedRow = -1;
     int row = 0;
-    if (!activePdk_ || *activePdk_ != library_.pdk) {
+    if (!activePdk_ || !layoutPdkIdsMatch(*activePdk_, library_.pdk)) {
         notifySelection();
         return;
     }
