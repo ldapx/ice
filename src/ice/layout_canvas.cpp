@@ -1012,12 +1012,19 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setPathConfig(const LayoutPathConfig &config) override {
         const bool cellChanged = pathCell_ != config.cell;
-        if (pathActive_ && pathCell_ != 0 && config.cell != 0 && cellChanged)
-            finishPath();
+        if (cellChanged) {
+            // Layout switching must never carry a partial route into another
+            // cell. Reset even when pathCell_ was not initialized yet.
+            if (pathActive_)
+                finishPath();
+            pathAnchor_ = {};
+            pathEnd_ = {};
+            pathHasCommitted_ = false;
+            pathAnchorLayerIndex_ = 0;
+            pathLayerIndex_ = 0;
+        }
         pathConfig_ = config;
         pathCell_ = config.cell;
-        if (cellChanged)
-            pathLayerIndex_ = 0;
         pathWidth_ = std::max(1, config.width);
         if (pathConfig_.layers.empty())
             pathLayerIndex_ = 0;
@@ -2118,11 +2125,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
         const auto layerId = pathConfig_.layers[pathLayerIndex_].layer;
         const auto vias =
             pathHasCommitted_ ? pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_) : std::vector<ice::ObjectId>{};
-        if (pathSegmentCreated_)
-            pathSegmentCreated_(pathAnchor_, pathEnd_, pathWidth_, layerId, vias);
-        pathAnchor_ = pathEnd_;
+        // Advance the rubber-band anchor before notifying the application.
+        // The callback refreshes the project and may re-enter setPathConfig();
+        // updating the anchor afterwards would restore the previous point and
+        // make the next preview start from the wrong end of the segment.
+        const auto start = pathAnchor_;
+        const auto end = pathEnd_;
+        pathAnchor_ = end;
         pathAnchorLayerIndex_ = pathLayerIndex_;
         pathHasCommitted_ = true;
+        if (pathSegmentCreated_)
+            pathSegmentCreated_(start, end, pathWidth_, layerId, vias);
     }
 
     void finishPath() {

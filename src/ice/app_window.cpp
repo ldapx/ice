@@ -450,6 +450,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
         activeLayoutPathId_ = 0;
+        activeLayoutPathCellId_ = 0;
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
@@ -1392,6 +1393,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
         activeLayoutPathId_ = 0;
+        activeLayoutPathCellId_ = 0;
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
@@ -2359,8 +2361,10 @@ class DocumentWindow : public QMainWindow {
                     rebuildLayoutPathGeometry(path);
                     cell.shapes.emplace(shapeId, std::move(path));
                     activeLayoutPathId_ = shapeId;
+                    activeLayoutPathCellId_ = activeLayoutId_;
                     activeLayoutPathWidth_ = width;
                 } else {
+                    activeLayoutPathCellId_ = activeLayoutId_;
                     auto &path = shape->second;
                     if (path.segmentLayers.empty())
                         path.segmentLayers.assign(path.centerline.size() > 0 ? path.centerline.size() - 1 : 0,
@@ -3423,6 +3427,10 @@ class DocumentWindow : public QMainWindow {
             }
             cellIt = project.layoutCells.begin();
             activeLayoutId_ = cellIt->first;
+        }
+        if (activeLayoutPathCellId_ != activeLayoutId_) {
+            finishActiveLayoutPath();
+            activeLayoutPathCellId_ = activeLayoutId_;
         }
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
@@ -8639,6 +8647,7 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
     ice::ObjectId activeLayoutPathId_ = 0;
+    ice::ObjectId activeLayoutPathCellId_ = 0;
     int activeLayoutPathWidth_ = 0;
     std::set<ice::ObjectId> openSchematicTabs_;
     std::set<ice::ObjectId> openLayoutTabs_;
