@@ -6,6 +6,7 @@
 #include "icelib/layout_library.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/routing.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
@@ -319,6 +320,7 @@ class DocumentWindow : public QMainWindow {
   public:
     explicit DocumentWindow(ice::AppearanceMode appearanceMode = ice::AppearanceMode::System)
         : appearanceMode_(appearanceMode) {
+        ice::setPdkPackageRoots({configuredPackageInstallDirectory()});
         setWindowTitle(QStringLiteral("ICE"));
         if (const auto logo = ice::appLogo(); !logo.isNull())
             setWindowIcon(QIcon(logo));
@@ -357,7 +359,9 @@ class DocumentWindow : public QMainWindow {
     std::vector<SymbolDefinition> symbolLibraryForPdk(const std::string &pdk) const {
         auto symbols = genericSymbolLibrary();
         if (pdk != ice::genericPdkId) {
-            const auto symbolDirectory = configuredPackageInstallDirectory() / pdk / "symbols";
+            const auto packageRoot = installedPdkPackageRoot(pdk);
+            const auto symbolDirectory =
+                packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols" : packageRoot / "symbols";
             if (directoryHasSymbols(symbolDirectory)) {
                 const auto pdkSymbols = packageSymbolLibrary(symbolDirectory);
                 symbols.insert(symbols.end(), pdkSymbols.begin(), pdkSymbols.end());
@@ -519,7 +523,7 @@ class DocumentWindow : public QMainWindow {
         auto installed = installedPackages(installDirectory);
         const auto isInstalled = [&](const std::string &name) {
             return std::any_of(installed.begin(), installed.end(),
-                               [&](const auto &entry) { return entry.spec.name == name; });
+                               [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, name); });
         };
         std::vector<std::string> missing;
         for (const auto &dependency : project.packageDependencies)
@@ -1458,8 +1462,8 @@ class DocumentWindow : public QMainWindow {
             return true;
         const auto installDirectory = configuredPackageInstallDirectory();
         const auto packages = installedPackages(installDirectory);
-        const auto package =
-            std::find_if(packages.begin(), packages.end(), [&](const auto &entry) { return entry.spec.name == pdk; });
+        const auto package = std::find_if(packages.begin(), packages.end(),
+                                          [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, pdk); });
         if (package == packages.end()) {
             QMessageBox::critical(
                 this, QStringLiteral("Create Schematic"),
@@ -1603,8 +1607,8 @@ class DocumentWindow : public QMainWindow {
             return true;
         const auto installDirectory = configuredPackageInstallDirectory();
         const auto packages = installedPackages(installDirectory);
-        const auto package =
-            std::find_if(packages.begin(), packages.end(), [&](const auto &entry) { return entry.spec.name == pdk; });
+        const auto package = std::find_if(packages.begin(), packages.end(),
+                                          [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, pdk); });
         if (package == packages.end()) {
             QMessageBox::critical(
                 this, QStringLiteral("Create Layout Cell"),
@@ -5581,6 +5585,8 @@ class DocumentWindow : public QMainWindow {
             std::vector<std::string> notes;
             const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
             request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
+            const auto &cell = project.schematicCells.at(cellId);
+            ice::applyPdkSimulationSetup(cell.pdk, request);
             for (const auto &noteText : notes)
                 netlistNotes << QString::fromStdString(noteText);
         }

@@ -30,13 +30,54 @@ ice-pkg install <repository> <name> <version> <git-url> [revision]
 
 The installer clones the source and writes an ICE wrapper manifest when the
 repository does not already provide one. It does not execute package scripts.
-Each standalone PDK package points to its upstream Apache-2.0 repository; the
-upstream installation guides and preview status still apply.
+The IHP, Sky130, and GF180 packages now vendor their simulation model subsets
+and declare a `[pdk.simulation]` contract; an upstream Volare/CIEL installation
+is not needed for simulation.
 
 ## PDK metadata
 
-A package that provides a PDK can declare its display name, default schematic,
-and layout layer stack in `package.toml`:
+Simulation PDKs come from ICE packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
+and system PDK roots are not runtime fallbacks.
+
+A package that provides a PDK should declare a canonical ID, aliases, and a
+simulation contract in `package.toml`:
+
+```toml
+[pdk]
+id = "ihp-sg13g2"
+aliases = ["ihp.sg13g2"]
+display_name = "IHP SG13G2"
+
+[pdk.simulation]
+engine = "ngspice"
+root = "libs.tech/ngspice"
+model_file = "models/cornerMOSlv.lib"
+section = "mos_tt"
+requires_osdi = true
+verilog_a = "pdk/verilog-a"
+
+[pdk.simulation.devices]
+nmos = "sg13_lv_nmos"
+pmos = "sg13_lv_pmos"
+```
+
+Package simulation paths are relative to the package root. OSDI packages
+declare each Verilog-A source and output:
+
+```toml
+[[pdk.simulation.osdi]]
+source = "pdk/verilog-a/psp103/psp103.va"
+output = "psp103.osdi"
+```
+
+Build the OSDI cache once with:
+
+```sh
+ice-pkg pdk-build ihp.sg13g2
+```
+
+A package may also declare its display name, default schematic, and layout
+layer stack:
 
 ```toml
 [pdk]

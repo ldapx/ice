@@ -5,6 +5,7 @@
 #include "ui_helpers.hpp"
 
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 
 #include <QAction>
 #include <QComboBox>
@@ -1168,7 +1169,9 @@ QString SchematicNetlistPanel::buildNetlistText(const ice::Project &project, con
         return {};
     std::vector<std::string> notes;
     try {
-        const auto lines = ice::buildSimulationNetlist(project, cell->id, &notes);
+        auto lines = ice::buildSimulationNetlist(project, cell->id, &notes);
+        const auto setup = ice::pdkSimulationSetupFor(cell->pdk);
+        lines.insert(lines.begin(), setup.netlistLines.begin(), setup.netlistLines.end());
         QString text;
         for (const auto &line : lines)
             text += QString::fromStdString(line) + QLatin1Char('\n');

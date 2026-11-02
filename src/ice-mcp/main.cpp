@@ -1,5 +1,7 @@
 #include "icelib/core.hpp"
+#include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -20,11 +22,17 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -165,6 +173,15 @@ template <typename Map> ice::ObjectId lookupByIdOrName(const Map &map, const jso
     }
     if (value.is_string()) {
         const auto name = value.get<std::string>();
+        if (!name.empty() &&
+            std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            try {
+                const auto id = static_cast<ice::ObjectId>(std::stoull(name));
+                if (map.contains(id))
+                    return id;
+            } catch (const std::exception &) {
+            }
+        }
         for (const auto &[id, entry] : map) {
             if (entry.name == name)
                 return id;
@@ -176,6 +193,305 @@ template <typename Map> ice::ObjectId lookupByIdOrName(const Map &map, const jso
 
 ice::ObjectId resolveSchematic(const ice::Project &project, const json &arguments, const char *key = "cell") {
     return lookupByIdOrName(project.schematicCells, requiredValue(arguments, key), "schematic");
+}
+
+ice::ObjectId resolveSchematicArgument(const ice::Project &project, const json &arguments,
+                                       std::initializer_list<const char *> keys) {
+    for (const auto *key : keys) {
+        const auto value = arguments.find(key);
+        if (value != arguments.end() && !value->is_null())
+            return lookupByIdOrName(project.schematicCells, *value, "schematic");
+    }
+    throw ToolError("Missing required argument: schematic (or cell)");
+}
+
+const char *pinDirectionName(ice::PinDirection direction) {
+    switch (direction) {
+    case ice::PinDirection::left:
+        return "left";
+    case ice::PinDirection::right:
+        return "right";
+    case ice::PinDirection::up:
+        return "up";
+    case ice::PinDirection::down:
+        return "down";
+    }
+    return "right";
+}
+
+ice::PinDirection parsePinDirection(const std::string &text) {
+    static const std::map<std::string, ice::PinDirection> values = {
+        {"left", ice::PinDirection::left},
+        {"right", ice::PinDirection::right},
+        {"up", ice::PinDirection::up},
+        {"down", ice::PinDirection::down},
+    };
+    const auto it = values.find(text);
+    return it == values.end() ? ice::PinDirection::right : it->second;
+}
+
+ice::ObjectId resolveSymbol(const ice::SchematicCell &cell, const json &value) {
+    return lookupByIdOrName(cell.symbols, value, "symbol");
+}
+
+const ice::Pin *findPinInSymbol(const ice::Symbol &symbol, const std::string &name) {
+    for (const auto &pin : symbol.pins) {
+        if (pin.name == name)
+            return &pin;
+    }
+    return nullptr;
+}
+
+ice::ObjectId resolvePin(const ice::SchematicCell &cell, const json &value) {
+    if (value.is_number_integer()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::int64_t>());
+        for (const auto &[_, symbol] : cell.symbols)
+            for (const auto &pin : symbol.pins)
+                if (pin.id == id)
+                    return id;
+        throw ToolError("Unknown pin id: " + std::to_string(id));
+    }
+    if (value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        for (const auto &[_, symbol] : cell.symbols)
+            for (const auto &pin : symbol.pins)
+                if (pin.id == id)
+                    return id;
+        throw ToolError("Unknown pin id: " + std::to_string(id));
+    }
+    if (!value.is_string())
+        throw ToolError("Each pin must be a pin id or a name.");
+
+    const auto text = value.get<std::string>();
+    if (!text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        try {
+            const auto id = static_cast<ice::ObjectId>(std::stoull(text));
+            for (const auto &[_, symbol] : cell.symbols)
+                for (const auto &pin : symbol.pins)
+                    if (pin.id == id)
+                        return id;
+        } catch (const std::exception &) {
+        }
+    }
+
+    const auto dot = text.find('.');
+    if (dot != std::string::npos) {
+        const auto left = text.substr(0, dot);
+        const auto right = text.substr(dot + 1);
+        // Prefer instance.pin, then symbol.pin.
+        for (const auto &[_, instance] : cell.instances) {
+            if (instance.name != left)
+                continue;
+            const auto symbol = cell.symbols.find(instance.symbol);
+            if (symbol != cell.symbols.end()) {
+                if (const auto *pin = findPinInSymbol(symbol->second, right); pin)
+                    return pin->id;
+            }
+        }
+        for (const auto &[_, symbol] : cell.symbols) {
+            if (symbol.name != left)
+                continue;
+            if (const auto *pin = findPinInSymbol(symbol, right); pin)
+                return pin->id;
+        }
+    }
+
+    std::vector<ice::ObjectId> matches;
+    for (const auto &[_, symbol] : cell.symbols) {
+        if (const auto *pin = findPinInSymbol(symbol, text); pin)
+            matches.push_back(pin->id);
+    }
+    if (matches.size() == 1)
+        return matches.front();
+    if (matches.size() > 1)
+        throw ToolError("Pin name is ambiguous; use <instance>.<pin> or <symbol>.<pin>: " + text);
+    throw ToolError("Unknown pin: " + text);
+}
+
+json symbolJson(const ice::Symbol &symbol) {
+    json pins = json::array();
+    for (const auto &pin : symbol.pins) {
+        pins.push_back({{"id", pin.id},
+                        {"name", pin.name},
+                        {"x", pin.x},
+                        {"y", pin.y},
+                        {"direction", pinDirectionName(pin.direction)}});
+    }
+    return {{"id", symbol.id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}};
+}
+
+json schematicJson(const ice::SchematicCell &cell) {
+    json result = {{"id", cell.id},
+                   {"name", cell.name},
+                   {"pdk", cell.pdk},
+                   {"text", cell.textSchematic},
+                   {"source", cell.spiceText},
+                   {"symbols", json::array()},
+                   {"instances", json::array()},
+                   {"nets", json::array()}};
+    for (const auto &[_, symbol] : cell.symbols)
+        result["symbols"].push_back(symbolJson(symbol));
+    for (const auto &[id, instance] : cell.instances) {
+        json parameters = json::array();
+        for (const auto &parameter : instance.parameters)
+            parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+        result["instances"].push_back({{"id", id},
+                                       {"name", instance.name},
+                                       {"symbol", instance.symbol},
+                                       {"x", instance.x},
+                                       {"y", instance.y},
+                                       {"orientation", ice::orientationName(instance.orientation)},
+                                       {"parameters", std::move(parameters)}});
+    }
+    for (const auto &[id, net] : cell.nets)
+        result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+    return result;
+}
+
+json resultJson(const ice::SimulationResult &result) {
+    json traces = json::array();
+    for (const auto &trace : result.traces) {
+        const auto stats = ice::traceStatistics(trace);
+        traces.push_back({{"name", trace.name},
+                          {"points", stats.points},
+                          {"min", stats.min},
+                          {"max", stats.max},
+                          {"amplitude", stats.amplitude()},
+                          {"mean", stats.mean},
+                          {"rms", stats.rms},
+                          {"first", stats.first},
+                          {"last", stats.last}});
+    }
+    json available = json::array();
+    for (const auto &trace : result.traces)
+        available.push_back(trace.name);
+    return {{"state", ice::jobStateName(result.state)},
+            {"analysis", result.analysis},
+            {"simulator", result.simulator},
+            {"simulator_version", result.simulator_version},
+            {"error", result.error},
+            {"warnings", result.warnings},
+            {"time_points", result.time.size()},
+            {"trace_count", result.traces.size()},
+            {"trace_details", std::move(traces)},
+            {"available_signals", std::move(available)}};
+}
+
+json buildJson(const std::filesystem::path &executablePath) {
+    const auto info = ice::buildInfo();
+    return {{"version", info.version},
+            {"commit", info.commit},
+            {"build_time", info.buildTime},
+            {"build_type", info.buildType},
+            {"executable", executablePath.string()},
+            {"features", info.features}};
+}
+
+json measurementJson(const ice::SignalMeasurement &measurement) {
+    json result = {{"name", measurement.name},
+                   {"points", measurement.statistics.points},
+                   {"min", measurement.statistics.min},
+                   {"max", measurement.statistics.max},
+                   {"amplitude", measurement.statistics.amplitude()},
+                   {"mean", measurement.statistics.mean},
+                   {"rms", measurement.statistics.rms},
+                   {"first", measurement.statistics.first},
+                   {"last", measurement.statistics.last},
+                   {"threshold", measurement.threshold},
+                   {"zero_crossings", measurement.zeroCrossings},
+                   {"rising_crossings", measurement.risingCrossings}};
+    if (measurement.period)
+        result["period"] = *measurement.period;
+    if (measurement.frequency)
+        result["frequency"] = *measurement.frequency;
+    if (measurement.settlingTime)
+        result["settling_time"] = *measurement.settlingTime;
+    return result;
+}
+
+json doctorJson(const std::filesystem::path &executablePath) {
+    const auto python = ice::reportPythonExecutable();
+    const auto runner = ice::reportRunnerScriptPath(executablePath);
+    const auto pythonAvailable = !python.empty() && std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
+    const auto ngspiceAvailable = std::system("ngspice --version >/dev/null 2>&1") == 0;
+    bool ngspiceLibrary = false;
+    for (const auto *candidate :
+         {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0", "/usr/lib/x86_64-linux-gnu/libngspice.so.0"}) {
+        std::error_code status;
+        if (std::filesystem::exists(candidate, status) && !status) {
+            ngspiceLibrary = true;
+            break;
+        }
+    }
+
+    const auto roots = ice::defaultPdkRoots();
+    const auto pdks = ice::discoverPdks(roots);
+    json pdkArray = json::array();
+    json simulationLibraries = json::array();
+    json readyPdks = json::array();
+    bool pdksReady = false;
+    bool allPdksReady = !pdks.empty();
+    for (const auto &pdk : pdks) {
+        pdkArray.push_back(ice::pdkInfoJson(pdk, false));
+        pdksReady = pdksReady || pdk.simulationReady;
+        allPdksReady = allPdksReady && pdk.simulationReady;
+        if (pdk.simulationReady)
+            readyPdks.push_back(pdk.id);
+        for (const auto &file : pdk.modelFiles) {
+            simulationLibraries.push_back(
+                {{"pdk", pdk.id}, {"version", pdk.version}, {"path", file.path.string()}, {"sections", file.sections}});
+        }
+    }
+
+    // Keep the old top-level list for compatibility, but make it a list of
+    // simulation models. Liberty timing libraries live in their own field.
+    std::vector<std::string> simulationPaths;
+    for (const auto &entry : simulationLibraries)
+        simulationPaths.push_back(entry.at("path").get<std::string>());
+
+    std::vector<std::string> timingLibraries;
+    for (const auto &root : roots) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(root, status) || status)
+            continue;
+        for (std::filesystem::recursive_directory_iterator it(root, status), end; !status && it != end;
+             it.increment(status)) {
+            if (it.depth() > 8) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (!it->is_regular_file() || it->path().extension() != ".lib")
+                continue;
+            if (it->path().string().find("/libs.ref/") == std::string::npos)
+                continue;
+            timingLibraries.push_back(it->path().string());
+            if (timingLibraries.size() >= 50)
+                break;
+        }
+        if (timingLibraries.size() >= 50)
+            break;
+    }
+
+    std::vector<std::string> rootStrings;
+    for (const auto &root : roots)
+        rootStrings.push_back(root.string());
+
+    return {{"build", buildJson(executablePath)},
+            {"python", python},
+            {"python_available", pythonAvailable},
+            {"report_runner", runner.string()},
+            {"report_runner_available", !runner.empty()},
+            {"ngspice_executable_available", ngspiceAvailable},
+            {"ngspice_library_available", ngspiceLibrary},
+            {"pdk_roots", std::move(rootStrings)},
+            {"pdks", std::move(pdkArray)},
+            {"pdks_ready", pdksReady},
+            {"all_pdks_ready", allPdksReady},
+            {"ready_pdks", std::move(readyPdks)},
+            {"simulation_model_libraries", std::move(simulationLibraries)},
+            {"timing_libraries", std::move(timingLibraries)},
+            {"model_libraries", std::move(simulationPaths)},
+            {"ok", pythonAvailable && !runner.empty() && (ngspiceAvailable || ngspiceLibrary)}};
 }
 
 ice::ObjectId resolveLayoutCell(const ice::Project &project, const json &arguments, const char *key = "cell") {
@@ -338,13 +654,31 @@ agentsdk::mcp::tool_result jsonResult(const json &value, bool isError = false) {
 
 class IceMcpServer {
   public:
-    IceMcpServer(std::optional<std::filesystem::path> projectPath, std::filesystem::path executablePath)
+    IceMcpServer(std::optional<std::filesystem::path> projectPath, std::filesystem::path executablePath,
+                 bool recover = false)
         : executablePath_(std::move(executablePath)) {
-        if (projectPath) {
-            auto project = ice::Project::load(*projectPath);
+        if (!projectPath)
+            return;
+        projectPath_ = std::move(*projectPath);
+        ice::ProjectLoadOptions options;
+        options.recover = recover;
+        try {
+            ice::ProjectLoadReport report;
+            auto project = ice::Project::load(projectPath_, options, &report);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
-            projectPath_ = std::move(*projectPath);
             projectStamp_ = projectStateStamp(projectPath_);
+            if (!report.warnings.empty()) {
+                for (const auto &warning : report.warnings) {
+                    if (!startupWarning_.empty())
+                        startupWarning_ += "\n";
+                    startupWarning_ += warning;
+                }
+            }
+        } catch (const ice::ProjectError &error) {
+            // Keep the server alive in a degraded state so the client can call
+            // project_open(recover=true) or project_repair. Exiting here would
+            // make the recovery tools unreachable when a project is corrupt.
+            startupWarning_ = std::string(error.code()) + ": " + error.what();
         }
     }
 
@@ -353,10 +687,11 @@ class IceMcpServer {
         auto logger = spdlog::stderr_color_mt("ice-mcp");
         spdlog::set_default_logger(std::move(logger));
 
+        const auto build = ice::buildInfo();
         agentsdk::mcp::implementation_info info;
         info.name = "ice-mcp";
         info.title = "ICE MCP Server";
-        info.version = ice::version();
+        info.version = build.version + "+" + build.commit;
 
         agentsdk::mcp::server_capabilities capabilities;
         capabilities.tools = agentsdk::mcp::tools_capability{false};
@@ -364,11 +699,17 @@ class IceMcpServer {
         capabilities.logging = true;
 
         agentsdk::mcp::mcp_server server(std::move(info), std::move(capabilities));
-        server.set_instructions(
+        std::string instructions =
             "ICE is an integrated-circuit design environment. Open or create a project first, then use the "
             "project, schematic, layout, simulation graph, and simulation script tools. Successful project "
             "mutations are saved to disk automatically so the GUI and ice-cli can see them immediately. "
-            "Simulation script source files are written under scripts/.");
+            "Simulation script source files are written under scripts/. Build " +
+            build.version + " (" + build.commit + ", " + build.buildTime +
+            "). Call ice_version and confirm required features before relying on them; restart the MCP client "
+            "after installing a new build.";
+        if (!startupWarning_.empty())
+            instructions += "\nStartup project warning: " + startupWarning_;
+        server.set_instructions(std::move(instructions));
         server.set_list_tools_handler([this](const std::optional<std::string> &) {
             return agentsdk::mcp::tools_list_result{listTools(), std::nullopt};
         });
@@ -483,8 +824,139 @@ class IceMcpServer {
         return result;
     }
 
+    json doctorWithChecks(const json &arguments) const {
+        auto result = doctorJson(executablePath_);
+        if (!startupWarning_.empty())
+            result["startup_warning"] = startupWarning_;
+        if (!session_)
+            return result;
+
+        const auto &project = session_->project();
+        ice::ObjectId schematicId = 0;
+        if (const auto value = arguments.find("schematic"); value != arguments.end() && !value->is_null()) {
+            schematicId = lookupByIdOrName(project.schematicCells, *value, "schematic");
+        } else if (const auto value = arguments.find("simulation"); value != arguments.end() && !value->is_null()) {
+            const auto simulation = resolveSimulation(project, *value);
+            schematicId = project.simulations.at(simulation).schematic;
+        }
+
+        std::set<std::string> pdkIds;
+        const auto collectPdk = [&](const std::string &pdk) {
+            if (!pdk.empty() && pdk != ice::genericPdkId && pdk != "generic")
+                pdkIds.insert(pdk);
+        };
+        for (const auto &[_, cell] : project.schematicCells)
+            collectPdk(cell.pdk);
+        for (const auto &[_, cell] : project.layoutCells)
+            collectPdk(cell.pdk);
+        for (const auto &[_, procedural] : project.proceduralLayouts)
+            collectPdk(procedural.pdk);
+
+        if (schematicId != 0) {
+            const auto &cell = project.schematicCells.at(schematicId);
+            collectPdk(cell.pdk);
+            std::vector<std::string> notes;
+            const auto netlist = ice::buildSimulationNetlist(project, schematicId, &notes);
+            json checks = json::array();
+            bool allPresent = true;
+            for (const auto &line : netlist) {
+                auto trimmed = line;
+                const auto first = trimmed.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos)
+                    continue;
+                trimmed = trimmed.substr(first);
+                const auto lower = [&] {
+                    std::string value = trimmed;
+                    for (auto &character : value)
+                        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                    return value;
+                }();
+                if (!(lower.starts_with(".include ") || lower.starts_with(".inc ") || lower.starts_with(".lib ")))
+                    continue;
+                const auto quote = trimmed.find_first_of("\"'");
+                if (quote == std::string::npos)
+                    continue;
+                const auto endQuote = trimmed.find(trimmed[quote], quote + 1);
+                if (endQuote == std::string::npos)
+                    continue;
+                const auto pathText = trimmed.substr(quote + 1, endQuote - quote - 1);
+                std::filesystem::path path(pathText);
+                std::error_code status;
+                if (path.is_relative()) {
+                    const auto candidate = projectRootPath() / path;
+                    if (std::filesystem::exists(candidate, status) && !status)
+                        path = candidate;
+                }
+                const bool exists = std::filesystem::exists(path, status) && !status;
+                allPresent = allPresent && exists;
+                checks.push_back({{"line", trimmed}, {"path", path.string()}, {"exists", exists}});
+            }
+            result["schematic"] = cell.name;
+            result["model_checks"] = std::move(checks);
+            result["model_paths_ok"] = allPresent;
+            result["netlist_notes"] = notes;
+            if (!allPresent)
+                result["ok"] = false;
+        }
+
+        if (!pdkIds.empty()) {
+            const bool probe = optionalBoolean(arguments, "probe", false);
+            json checks = json::array();
+            bool allReady = true;
+            std::string missingSummary;
+            for (const auto &id : pdkIds) {
+                const auto matches = ice::findPdks(id);
+                if (matches.empty()) {
+                    allReady = false;
+                    if (!missingSummary.empty())
+                        missingSummary += "; ";
+                    missingSummary += id + ": ICE PDK package is not installed";
+                    checks.push_back(
+                        {{"id", id}, {"simulation_ready", false}, {"missing", {"PDK package not installed"}}});
+                    continue;
+                }
+                for (const auto &pdk : matches) {
+                    auto item = ice::pdkInfoJson(pdk, false);
+                    allReady = allReady && pdk.simulationReady;
+                    if (probe) {
+                        const auto probeResult = ice::probePdk(pdk);
+                        item["probe"] = {{"attempted", probeResult.attempted},
+                                         {"ok", probeResult.ok},
+                                         {"summary", probeResult.summary},
+                                         {"log", probeResult.log}};
+                        allReady = allReady && probeResult.ok;
+                        if (!probeResult.ok && !probeResult.summary.empty()) {
+                            if (!missingSummary.empty())
+                                missingSummary += "; ";
+                            missingSummary += id + ": " + probeResult.summary;
+                        }
+                    }
+                    if (!pdk.simulationReady) {
+                        for (const auto &missing : pdk.missing) {
+                            if (!missingSummary.empty())
+                                missingSummary += "; ";
+                            missingSummary += id + ": " + missing;
+                        }
+                    }
+                    checks.push_back(std::move(item));
+                }
+            }
+            result["pdk_checks"] = std::move(checks);
+            result["pdk_ready"] = allReady;
+            if (!allReady) {
+                result["ok"] = false;
+                result["pdk_hint"] = "The project PDK is not simulation-ready: " + missingSummary +
+                                     ". Run pdk_info with probe=true after installing the missing package.";
+            }
+        }
+        return result;
+
+        return result;
+    }
+
     json call(const std::string &name, const json &arguments) {
-        if (session_ && !projectPath_.empty() && name != "project_open" && name != "project_create") {
+        if (session_ && !projectPath_.empty() && name != "project_open" && name != "project_create" &&
+            name != "project_repair" && name != "project_reload" && name != "ice_doctor") {
             const auto currentStamp = projectStateStamp(projectPath_);
             if (currentStamp != projectStamp_) {
                 if (session_->dirty())
@@ -517,8 +989,61 @@ class IceMcpServer {
                 toolArguments.erase("script");
             }
         }
-        if (name == "ice_version")
-            return {{"version", ice::version()}};
+        if (name == "ice_version") {
+            auto result = buildJson(executablePath_);
+            result["features"].push_back("mcp");
+            result["features"].push_back("schematic_create_text");
+            result["features"].push_back("schematic_add_text");
+            result["features"].push_back("simulation_measure");
+            result["features"].push_back("pdk_info");
+            if (!startupWarning_.empty())
+                result["startup_warning"] = startupWarning_;
+            return result;
+        }
+
+        if (name == "pdk_info") {
+            const auto requested = optionalString(arguments, "pdk");
+            auto pdks = requested.empty() ? ice::discoverPdks() : ice::findPdks(requested);
+            if (requested.empty() && pdks.empty())
+                return {{"pdks", json::array()}};
+            if (pdks.empty()) {
+                std::string available;
+                for (const auto &candidate : ice::discoverPdks()) {
+                    if (!available.empty())
+                        available += ", ";
+                    available += candidate.id;
+                }
+                throw ToolError("Unknown PDK '" + requested +
+                                "'. Available PDKs: " + (available.empty() ? "none" : available));
+            }
+            json result = {{"pdks", json::array()}};
+            const bool probe = optionalBoolean(arguments, "probe", false);
+            for (const auto &pdk : pdks) {
+                auto item = ice::pdkInfoJson(pdk, true);
+                if (probe) {
+                    const auto probeResult = ice::probePdk(pdk);
+                    item["probe"] = {{"attempted", probeResult.attempted},
+                                     {"ok", probeResult.ok},
+                                     {"summary", probeResult.summary},
+                                     {"log", probeResult.log}};
+                }
+                result["pdks"].push_back(std::move(item));
+            }
+            return result;
+        }
+
+        if (name == "pdk_build") {
+            const auto requested = requiredString(arguments, "pdk");
+            const auto pdks = ice::findPdks(requested);
+            if (pdks.empty())
+                throw ToolError("Unknown ICE PDK package: " + requested);
+            const auto result = ice::buildPdkOsdi(pdks.front());
+            return {{"ok", result.ok},
+                    {"summary", result.summary},
+                    {"compiler", result.compiler},
+                    {"osdi_dir", result.osdiDir.string()},
+                    {"log", result.log}};
+        }
 
         if (name == "project_create") {
             const auto path = std::filesystem::path(requiredString(arguments, "path"));
@@ -532,27 +1057,107 @@ class IceMcpServer {
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = path;
             projectStamp_ = projectStateStamp(projectPath_);
+            startupWarning_.clear();
             return summary();
         }
 
         if (name == "project_open") {
             const auto path = std::filesystem::path(requiredString(arguments, "path"));
-            auto project = ice::Project::load(path);
+            ice::ProjectLoadOptions options;
+            options.recover = optionalBoolean(arguments, "recover", false);
+            ice::ProjectLoadReport report;
+            auto project = ice::Project::load(path, options, &report);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = path;
             projectStamp_ = projectStateStamp(projectPath_);
-            return summary();
+            startupWarning_.clear();
+            auto result = summary();
+            if (!report.warnings.empty())
+                result["warnings"] = report.warnings;
+            if (!report.quarantinedFiles.empty())
+                result["quarantined_files"] = report.quarantinedFiles;
+            return result;
+        }
+        if (name == "project_repair") {
+            auto path = projectPath_;
+            if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null())
+                path = std::filesystem::path(requiredString(arguments, "path"));
+            if (path.empty())
+                throw ToolError("Missing required argument: path (project is not open).");
+            ice::ProjectLoadOptions options;
+            options.recover = true;
+            ice::ProjectLoadReport report;
+            auto project = ice::Project::load(path, options, &report);
+            session_ = std::make_unique<ice::ProjectSession>(std::move(project));
+            projectPath_ = path;
+            projectStamp_ = projectStateStamp(projectPath_);
+            session_->save(projectPath_);
+            startupWarning_.clear();
+            auto result = summary();
+            result["repaired"] = true;
+            result["warnings"] = report.warnings;
+            result["quarantined_files"] = report.quarantinedFiles;
+            return result;
+        }
+        if (name == "project_migrate") {
+            auto path = projectPath_;
+            if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null())
+                path = std::filesystem::path(requiredString(arguments, "path"));
+            if (path.empty())
+                throw ToolError("Missing required argument: path (project is not open).");
+            auto root = path;
+            std::error_code status;
+            if (!std::filesystem::is_directory(root, status) || status) {
+                if (root.extension() == ".icepro" || root.filename() == "project.icepro")
+                    root = root.parent_path();
+            }
+            const auto agentsPath = root / "AGENTS.md";
+            const auto readAgents = [&] {
+                std::ifstream input(agentsPath, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(input)), {});
+            };
+            const auto before = readAgents();
+            auto project = ice::Project::load(path);
+            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
+            ice::ProjectSession migration(std::move(project));
+            migration.save(path);
+            const auto after = readAgents();
+            session_ = std::make_unique<ice::ProjectSession>(ice::Project::load(path));
+            projectPath_ = path;
+            projectStamp_ = projectStateStamp(projectPath_);
+            startupWarning_.clear();
+            auto result = summary();
+            result["migrated"] = true;
+            result["agents_updated"] = before != after;
+            result["pdk_ids_updated"] = pdkIdsUpdated;
+            result["guidance_version"] = 2;
+            return result;
         }
         if (name == "project_summary")
             return summary();
+        if (name == "ice_doctor")
+            return doctorWithChecks(arguments);
 
         if (name == "project_reload") {
             requireSession();
             if (session_->dirty())
                 throw ToolError("Cannot reload a project with unsaved local changes.");
-            session_->replaceProject(ice::Project::load(projectPath_));
+            const bool recover = optionalBoolean(arguments, "recover", false);
+            ice::ProjectLoadOptions options;
+            options.recover = recover;
+            ice::ProjectLoadReport report;
+            session_->replaceProject(ice::Project::load(projectPath_, options, &report));
             projectStamp_ = projectStateStamp(projectPath_);
-            return summary();
+            if (recover) {
+                session_->save(projectPath_);
+                startupWarning_.clear();
+            }
+            auto result = summary();
+            if (!report.warnings.empty())
+                result["warnings"] = report.warnings;
+            if (!report.quarantinedFiles.empty())
+                result["quarantined_files"] = report.quarantinedFiles;
+            return result;
         }
 
         auto &session = requireSession();
@@ -646,6 +1251,7 @@ class IceMcpServer {
             request.simulator = simulation.simulator;
             request.use_initial_conditions = simulation.use_initial_conditions;
             request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
+            ice::applyPdkSimulationSetup(schematic->second.pdk, request);
             request.probeSignals = splitCommaList(simulation.captureSignals);
             const auto timeout = std::chrono::milliseconds(
                 std::max<std::int64_t>(1, optionalInteger(arguments, "timeout_ms").value_or(60000)));
@@ -662,13 +1268,73 @@ class IceMcpServer {
             context.request = request;
             context.graphs = simulation.graphs;
             const auto artifact = ice::writeSimulationRun(context, result);
-            return {{"state", ice::jobStateName(result.state)},
-                    {"run_id", artifact.runId},
-                    {"stored", artifact.path.string()},
-                    {"time_points", result.time.size()},
-                    {"traces", result.traces.size()},
-                    {"warnings", result.warnings},
-                    {"error", result.error}};
+            auto summary = resultJson(result);
+            summary["run_id"] = artifact.runId;
+            summary["stored"] = artifact.path.string();
+            summary["simulation"] = simulation.name;
+            summary["schematic"] = schematic->second.name;
+            summary["traces"] = result.traces.size();
+            summary["requested_signals"] = request.probeSignals;
+            summary["netlist"] = request.netlist;
+            summary["netlist_lines"] = request.netlist.size();
+            if (!request.netlist.empty())
+                summary["netlist_title"] = request.netlist.front();
+            if (result.state != ice::JobState::succeeded)
+                summary["hint"] =
+                    "Inspect netlist, trace_details, and available_signals; run ice_doctor to check ngspice/PDK paths.";
+            return summary;
+        }
+        if (name == "simulation_result" || name == "simulation_signals") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto stored = ice::latestSimulationRun(projectRootPath(), id);
+            if (!stored)
+                throw ToolError("No stored simulation run was found for this simulation.");
+            auto summary = resultJson(stored->result);
+            summary["simulation"] = stored->simulationName;
+            summary["schematic"] = stored->schematicName;
+            summary["run_id"] = stored->runId;
+            summary["stored"] = stored->path.string();
+            summary["created_at"] = stored->createdAt;
+            if (name == "simulation_signals") {
+                return {{"simulation", stored->simulationName},
+                        {"schematic", stored->schematicName},
+                        {"time_points", summary["time_points"]},
+                        {"available_signals", summary["available_signals"]},
+                        {"trace_details", summary["trace_details"]}};
+            }
+            return summary;
+        }
+        if (name == "simulation_measure") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto stored = ice::latestSimulationRun(projectRootPath(), id);
+            if (!stored)
+                throw ToolError("No stored simulation run was found for this simulation.");
+            if (stored->result.time.empty() || stored->result.traces.empty())
+                throw ToolError("The stored simulation has no time vector or traces to measure.");
+            double threshold = std::numeric_limits<double>::quiet_NaN();
+            if (const auto value = arguments.find("threshold"); value != arguments.end() && !value->is_null())
+                threshold = numberValue(*value, "threshold");
+            double start = 0.0;
+            if (const auto value = arguments.find("start"); value != arguments.end() && !value->is_null())
+                start = numberValue(*value, "start");
+            double settleTolerance = 0.02;
+            if (const auto value = arguments.find("settle_tolerance"); value != arguments.end() && !value->is_null())
+                settleTolerance = numberValue(*value, "settle_tolerance");
+            const auto selected = optionalString(arguments, "signal");
+            json measurements = json::array();
+            for (const auto &trace : stored->result.traces) {
+                if (!selected.empty() && trace.name != selected)
+                    continue;
+                measurements.push_back(
+                    measurementJson(ice::measureSignal(trace, stored->result.time, threshold, start, settleTolerance)));
+            }
+            if (measurements.empty())
+                throw ToolError("No captured signal matched '" + selected + "'.");
+            return {{"simulation", stored->simulationName},
+                    {"schematic", stored->schematicName},
+                    {"run_id", stored->runId},
+                    {"time_points", stored->result.time.size()},
+                    {"measurements", std::move(measurements)}};
         }
         if (name == "simulation_graph_create") {
             const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -887,11 +1553,23 @@ class IceMcpServer {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto cellName = requiredString(arguments, "name");
+            const auto kind = optionalString(arguments, "kind", "drawn");
+            auto text = optionalString(arguments, "text");
+            if (kind != "drawn" && kind != "text")
+                throw ToolError("schematic_create kind must be 'drawn' or 'text'");
+            if (kind == "text" || !text.empty()) {
+                if (text.empty())
+                    text = "* SPICE schematic: " + cellName + "\n.title " + cellName + "\n.end\n";
+                session.execute("mcp schematic-create-text", [&](ice::Project &project) {
+                    id = ice::createTextSchematicCell(project, cellName, pdk, text);
+                });
+                return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "text"}, {"text", text}};
+            }
             session.execute("mcp schematic-create",
                             [&](ice::Project &project) { id = ice::createSchematicCell(project, cellName, pdk); });
-            return {{"id", id}, {"name", cellName}, {"pdk", pdk}};
+            return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "drawn"}};
         }
-        if (name == "schematic_create_text") {
+        if (name == "schematic_create_text" || name == "schematic_add_text") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto cellName = requiredString(arguments, "name");
@@ -901,43 +1579,193 @@ class IceMcpServer {
             session.execute("mcp schematic-create-text", [&](ice::Project &project) {
                 id = ice::createTextSchematicCell(project, cellName, pdk, text);
             });
-            return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"text", text}};
+            return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "text"}, {"text", text}};
         }
         if (name == "schematic_set_text") {
-            const auto id = resolveSchematic(session.project(), arguments);
+            const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
             auto &cell = session.project().schematicCells.at(id);
-            if (!cell.textSchematic)
-                throw ToolError("Schematic is not a text schematic: " + cell.name);
+            const bool wasText = cell.textSchematic;
+            const bool convert = optionalBoolean(arguments, "convert", false);
+            if (!cell.textSchematic) {
+                const bool empty =
+                    cell.symbols.empty() && cell.instances.empty() && cell.nets.empty() && cell.parameters.empty();
+                if (!convert || !empty) {
+                    throw ToolError("Schematic '" + cell.name +
+                                    "' is a drawn schematic, not a text SPICE cell. Use schematic_create with "
+                                    "kind='text' or schematic_create_text for a text cell. To convert an empty "
+                                    "drawn cell, pass convert=true. Do not edit sch/*.icesch by hand.");
+                }
+            }
             const auto text = requiredStringAllowEmpty(arguments, "text");
-            session.execute("mcp schematic-set-text",
-                            [&](ice::Project &project) { project.schematicCells.at(id).spiceText = text; });
-            return {{"id", id}, {"name", cell.name}, {"text", text}};
+            session.execute("mcp schematic-set-text", [&](ice::Project &project) {
+                auto &target = project.schematicCells.at(id);
+                target.textSchematic = true;
+                target.spiceText = text;
+            });
+            return {{"id", id}, {"name", cell.name}, {"text", text}, {"converted", !wasText}};
+        }
+        if (name == "schematic_list") {
+            json result = json::array();
+            for (const auto &[id, cell] : session.project().schematicCells) {
+                result.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"text", cell.textSchematic},
+                                  {"symbols", cell.symbols.size()},
+                                  {"instances", cell.instances.size()},
+                                  {"nets", cell.nets.size()}});
+            }
+            return result;
+        }
+        if (name == "schematic_info") {
+            const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
+            return schematicJson(session.project().schematicCells.at(id));
         }
         if (name == "schematic_add_symbol") {
             ice::ObjectId id = 0;
-            const auto cell = resolveSchematic(session.project(), arguments);
+            const auto cell = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
             const auto symbolName = requiredString(arguments, "name");
             const auto artwork = optionalString(arguments, "artwork");
             ice::ObjectId sourceCell = 0;
             const auto source = arguments.find("source_cell");
             if (source != arguments.end() && !source->is_null())
                 sourceCell = lookupByIdOrName(session.project().schematicCells, *source, "schematic");
+            const auto &cellRef = session.project().schematicCells.at(cell);
+            for (const auto &[existingId, existing] : cellRef.symbols) {
+                if (existing.name == symbolName) {
+                    throw ToolError("Symbol '" + symbolName + "' already exists with id " + std::to_string(existingId) +
+                                    "; reuse it instead of adding a duplicate");
+                }
+            }
+
+            struct PinInput {
+                std::string name;
+                ice::Coordinate x = 0;
+                ice::Coordinate y = 0;
+                ice::PinDirection direction = ice::PinDirection::right;
+            };
+            std::vector<PinInput> pinInputs;
+            const auto pinsValue = arguments.find("pins");
+            if (pinsValue != arguments.end() && !pinsValue->is_null()) {
+                if (!pinsValue->is_array())
+                    throw ToolError("Argument 'pins' must be an array.");
+                std::set<std::string> pinNames;
+                for (const auto &pin : *pinsValue) {
+                    if (!pin.is_object())
+                        throw ToolError("Each pin must be an object.");
+                    PinInput input;
+                    input.name = requiredString(pin, "name");
+                    if (!pinNames.insert(input.name).second)
+                        throw ToolError("Duplicate pin name: " + input.name);
+                    if (pin.contains("x"))
+                        input.x = coordinateValue(pin.at("x"), "pin x");
+                    if (pin.contains("y"))
+                        input.y = coordinateValue(pin.at("y"), "pin y");
+                    input.direction = parsePinDirection(optionalString(pin, "direction", "right"));
+                    pinInputs.push_back(std::move(input));
+                }
+            }
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
                 id = ice::addSymbol(project, cell, symbolName, artwork, sourceCell);
+                auto &symbol = project.schematicCells.at(cell).symbols.at(id);
+                for (auto &input : pinInputs) {
+                    const auto pinId = project.nextId();
+                    symbol.pins.push_back({pinId, input.name, input.x, input.y, input.direction});
+                }
             });
-            return {{"id", id}, {"cell", cell}, {"name", symbolName}};
+            auto result = symbolJson(session.project().schematicCells.at(cell).symbols.at(id));
+            result["cell"] = cell;
+            return result;
+        }
+        if (name == "schematic_add_pin") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto &cell = session.project().schematicCells.at(cellId);
+            ice::ObjectId symbolId = 0;
+            if (const auto symbolValue = arguments.find("symbol_id");
+                symbolValue != arguments.end() && !symbolValue->is_null()) {
+                symbolId = resolveSymbol(cell, *symbolValue);
+            } else if (const auto symbolValue = arguments.find("symbol");
+                       symbolValue != arguments.end() && !symbolValue->is_null()) {
+                symbolId = resolveSymbol(cell, *symbolValue);
+            } else {
+                throw ToolError("Missing required argument: symbol or symbol_id");
+            }
+            const auto pinName = requiredString(arguments, "name");
+            const auto x = optionalInteger(arguments, "x").value_or(0);
+            const auto y = optionalInteger(arguments, "y").value_or(0);
+            const auto direction = parsePinDirection(optionalString(arguments, "direction", "right"));
+            const auto &symbol = cell.symbols.at(symbolId);
+            if (findPinInSymbol(symbol, pinName))
+                throw ToolError("Pin '" + pinName + "' already exists on symbol " + symbol.name);
+            ice::ObjectId pinId = 0;
+            session.execute("mcp schematic-add-pin", [&](ice::Project &project) {
+                pinId = project.nextId();
+                project.schematicCells.at(cellId).symbols.at(symbolId).pins.push_back(
+                    {pinId, pinName, x, y, direction});
+            });
+            return {{"id", pinId},
+                    {"cell", cellId},
+                    {"symbol", symbolId},
+                    {"symbol_name", symbol.name},
+                    {"name", pinName},
+                    {"x", x},
+                    {"y", y},
+                    {"direction", pinDirectionName(direction)}};
+        }
+        if (name == "schematic_add_net") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto &cell = session.project().schematicCells.at(cellId);
+            const auto &pinsValue = requiredValue(arguments, "pins");
+            if (!pinsValue.is_array() || pinsValue.size() < 2)
+                throw ToolError("Argument 'pins' must be an array with at least two pin ids or names.");
+            std::vector<ice::ObjectId> pins;
+            pins.reserve(pinsValue.size());
+            for (const auto &pin : pinsValue)
+                pins.push_back(resolvePin(cell, pin));
+            const auto netName = optionalString(arguments, "name");
+            const auto x = optionalInteger(arguments, "x").value_or(0);
+            const auto y = optionalInteger(arguments, "y").value_or(0);
+            ice::ObjectId netId = 0;
+            session.execute("mcp schematic-add-net",
+                            [&](ice::Project &project) { netId = ice::addNet(project, cellId, netName, pins, x, y); });
+            const auto &net = session.project().schematicCells.at(cellId).nets.at(netId);
+            return {{"id", net.id},     {"cell", cellId}, {"name", net.name},
+                    {"pins", net.pins}, {"x", net.x},     {"y", net.y}};
+        }
+        if (name == "schematic_netlist") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            std::vector<std::string> notes;
+            const auto netlist = ice::buildSimulationNetlist(session.project(), cellId, &notes);
+            return {{"id", cellId},
+                    {"name", session.project().schematicCells.at(cellId).name},
+                    {"netlist", netlist},
+                    {"notes", notes}};
         }
         if (name == "schematic_add_instance") {
             ice::ObjectId id = 0;
-            const auto cell = resolveSchematic(session.project(), arguments);
-            const auto symbol = static_cast<ice::ObjectId>(requiredInteger(arguments, "symbol_id"));
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto &cell = session.project().schematicCells.at(cellId);
+            ice::ObjectId symbolId = 0;
+            if (const auto symbolValue = arguments.find("symbol_id");
+                symbolValue != arguments.end() && !symbolValue->is_null()) {
+                symbolId = resolveSymbol(cell, *symbolValue);
+            } else if (const auto symbolValue = arguments.find("symbol");
+                       symbolValue != arguments.end() && !symbolValue->is_null()) {
+                symbolId = resolveSymbol(cell, *symbolValue);
+            } else {
+                throw ToolError("Missing required argument: symbol or symbol_id");
+            }
             const auto instanceName = requiredString(arguments, "name");
             const auto x = requiredInteger(arguments, "x");
             const auto y = requiredInteger(arguments, "y");
             session.execute("mcp schematic-add-instance", [&](ice::Project &project) {
-                id = ice::addSchematicInstance(project, cell, symbol, instanceName, x, y);
+                id = ice::addSchematicInstance(project, cellId, symbolId, instanceName, x, y);
             });
-            return {{"id", id}, {"cell", cell}, {"name", instanceName}};
+            return {{"id", id},
+                    {"cell", cellId},
+                    {"name", instanceName},
+                    {"symbol", symbolId},
+                    {"symbol_name", cell.symbols.at(symbolId).name}};
         }
         if (name == "layout_delete") {
             const auto id = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
@@ -1055,7 +1883,18 @@ class IceMcpServer {
     std::vector<agentsdk::mcp::tool> listTools() const {
         using agentsdk::mcp::tool_builder;
         std::vector<agentsdk::mcp::tool> tools;
-        tools.push_back(tool_builder("ice_version").with_description("Return the ICE version.").build());
+        tools.push_back(tool_builder("ice_version")
+                            .with_description("Return the ICE build fingerprint and feature flags.")
+                            .build());
+        tools.push_back(tool_builder("pdk_info")
+                            .with_description("Inspect ICE PDK packages, ngspice models, OSDI setup, and sections.")
+                            .with_string_param("pdk", "Optional PDK id or path; omit to list all", false)
+                            .with_boolean_param("probe", "Run a minimal transistor probe", false)
+                            .build());
+        tools.push_back(tool_builder("pdk_build")
+                            .with_description("Build an ICE PDK package's Verilog-A sources into the OSDI cache.")
+                            .with_string_param("pdk", "PDK id, package name, or package path")
+                            .build());
         tools.push_back(tool_builder("project_create")
                             .with_description("Create and open a new ICE project.")
                             .with_string_param("path", "Project folder or project.icepro path")
@@ -1064,15 +1903,36 @@ class IceMcpServer {
         tools.push_back(tool_builder("project_open")
                             .with_description("Open an existing ICE project.")
                             .with_string_param("path", "Project folder or project.icepro path")
+                            .with_boolean_param("recover", "Quarantine invalid sidecar files and open the rest", false)
+                            .build());
+        tools.push_back(tool_builder("project_repair")
+                            .with_description("Recover a project by quarantining invalid sidecar files and saving it.")
+                            .with_string_param("path", "Optional project folder or project.icepro path", false)
+                            .build());
+        tools.push_back(tool_builder("project_migrate")
+                            .with_description("Refresh the generated AGENTS.md guidance while preserving user text.")
+                            .with_string_param("path", "Optional project folder or project.icepro path", false)
                             .build());
         tools.push_back(
             tool_builder("project_summary").with_description("Summarize the open project and its cells.").build());
         tools.push_back(tool_builder("project_validate")
                             .with_description("Validate the open project and return diagnostics.")
                             .build());
-        tools.push_back(tool_builder("project_reload").with_description("Reload the open project from disk.").build());
+        tools.push_back(
+            tool_builder("project_reload")
+                .with_description("Reload the open project from disk.")
+                .with_boolean_param("recover", "Quarantine invalid sidecar files and reload the rest", false)
+                .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
+        tools.push_back(
+            tool_builder("ice_doctor")
+                .with_description("Inspect ngspice, Python, report-runner, PDK readiness/model libraries, "
+                                  "and optional schematic/simulation includes.")
+                .with_string_param("schematic", "Optional schematic to validate includes", false)
+                .with_string_param("simulation", "Optional simulation whose schematic includes to validate", false)
+                .with_boolean_param("probe", "Run a minimal transistor load check for the project PDK", false)
+                .build());
         tools.push_back(tool_builder("simulation_create")
                             .with_description("Create a simulation and its first graph.")
                             .with_string_param("name", "Simulation name")
@@ -1095,6 +1955,22 @@ class IceMcpServer {
                             .with_description("Run a simulation and store a compact run artifact.")
                             .with_string_param("simulation", "Simulation name or id")
                             .with_integer_param("timeout_ms", "Timeout in milliseconds", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_result")
+                            .with_description("Read the latest stored run for a simulation with trace statistics.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .build());
+        tools.push_back(tool_builder("simulation_measure")
+                            .with_description("Measure zero crossings, frequency, amplitude, and settling time.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("signal", "Optional captured signal name", false)
+                            .with_number_param("threshold", "Optional crossing threshold", false)
+                            .with_number_param("start", "Optional start time for frequency measurements", false)
+                            .with_number_param("settle_tolerance", "Relative settling tolerance (default 0.02)", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_signals")
+                            .with_description("List available signals and trace sizes from the latest stored run.")
+                            .with_string_param("simulation", "Simulation name or id")
                             .build());
         tools.push_back(tool_builder("simulation_graph_create")
                             .with_description("Add a graph definition to a simulation.")
@@ -1164,10 +2040,19 @@ class IceMcpServer {
                             .with_string_param("script", "Simulation script name or id")
                             .with_boolean_param("purge", "Also remove the Python source file", false)
                             .build());
+        tools.push_back(tool_builder("schematic_list")
+                            .with_description("List schematic cells with symbol, instance, and net counts.")
+                            .build());
+        tools.push_back(tool_builder("schematic_info")
+                            .with_description("Return symbols, pins, instances, and nets for a schematic.")
+                            .with_string_param("schematic", "Schematic name or id")
+                            .build());
         tools.push_back(tool_builder("schematic_create")
-                            .with_description("Create a drawn schematic cell.")
+                            .with_description("Create a schematic cell; kind='text' creates a SPICE text cell.")
                             .with_string_param("name", "Schematic name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("kind", "drawn or text (default drawn)", false)
+                            .with_string_param("text", "Optional SPICE source for kind=text", false)
                             .build());
         tools.push_back(tool_builder("schematic_create_text")
                             .with_description("Create a text SPICE schematic cell.")
@@ -1175,27 +2060,67 @@ class IceMcpServer {
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("text", "Optional SPICE source", false)
                             .build());
-        tools.push_back(tool_builder("schematic_set_text")
-                            .with_description("Replace the source of an existing text SPICE schematic.")
-                            .with_string_param("schematic", "Schematic name or id")
-                            .with_string_param("text", "SPICE source")
+        tools.push_back(tool_builder("schematic_add_text")
+                            .with_description("Alias for schematic_create_text; creates a text SPICE cell.")
+                            .with_string_param("name", "Schematic name")
+                            .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("text", "Optional SPICE source", false)
                             .build());
+        agentsdk::mcp::tool setTextTool;
+        setTextTool.name = "schematic_set_text";
+        setTextTool.description =
+            "Replace the source of an existing text SPICE schematic, or convert an empty drawn cell.";
+        setTextTool.input_schema =
+            R"({"type":"object","properties":{"schematic":{"type":["string","integer"],)"
+            R"("description":"Schematic name or id"},"cell":{"type":["string","integer"],)"
+            R"("description":"Legacy alias for schematic"},"text":{"type":"string","description":"SPICE source"},)"
+            R"("convert":{"type":"boolean","description":"Convert an empty drawn cell to a text cell"}},)"
+            R"("anyOf":[{"required":["schematic"]},{"required":["cell"]}],"required":["text"]})";
+        tools.push_back(std::move(setTextTool));
         tools.push_back(
             tool_builder("schematic_delete")
                 .with_description("Delete a schematic; blocked when simulations or hierarchical symbols use it.")
                 .with_string_param("schematic", "Schematic name or id")
                 .build());
-        tools.push_back(tool_builder("schematic_add_symbol")
-                            .with_description("Add a symbol definition to a schematic cell.")
+        agentsdk::mcp::tool symbolTool;
+        symbolTool.name = "schematic_add_symbol";
+        symbolTool.description = "Add a symbol definition, optionally with its pins, to a schematic cell.";
+        symbolTool.input_schema =
+            R"({"type":"object","properties":{"cell":{"type":"string","description":"Schematic name or id"},)"
+            R"("name":{"type":"string","description":"Symbol name"},"artwork":{"type":"string"},)"
+            R"("source_cell":{"type":"string"},"pins":{"type":"array","items":{"type":"object","properties":{)"
+            R"("name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},)"
+            R"("direction":{"type":"string","enum":["left","right","up","down"]}},"required":["name"]}}},)"
+            R"("required":["cell","name"]})";
+        tools.push_back(std::move(symbolTool));
+        tools.push_back(tool_builder("schematic_add_pin")
+                            .with_description("Add one pin to an existing schematic symbol.")
                             .with_string_param("cell", "Schematic name or id")
-                            .with_string_param("name", "Symbol name")
-                            .with_string_param("artwork", "Optional SVG artwork", false)
-                            .with_string_param("source_cell", "Optional source schematic name or id", false)
+                            .with_string_param("symbol", "Symbol id or name", false)
+                            .with_integer_param("symbol_id", "Symbol id", false)
+                            .with_string_param("name", "Pin name")
+                            .with_integer_param("x", "X coordinate", false)
+                            .with_integer_param("y", "Y coordinate", false)
+                            .with_string_param("direction", "Optional left/right/up/down", false)
+                            .build());
+        agentsdk::mcp::tool netTool;
+        netTool.name = "schematic_add_net";
+        netTool.description = "Connect two or more pins into a named schematic net.";
+        netTool.input_schema =
+            R"({"type":"object","properties":{"cell":{"type":"string","description":"Schematic name or id"},)"
+            R"("name":{"type":"string"},"pins":{"type":"array","minItems":2,"items":{"oneOf":)"
+            R"([{"type":"string","description":"Pin id or instance.pin/symbol.pin name"},{"type":"integer"}]}},)"
+            R"("x":{"type":"integer"},"y":{"type":"integer"}},"required":["cell","pins"]})";
+        tools.push_back(std::move(netTool));
+        tools.push_back(tool_builder("schematic_netlist")
+                            .with_description("Return the SPICE netlist generated from a schematic cell.")
+                            .with_string_param("schematic", "Schematic name or id")
                             .build());
         tools.push_back(tool_builder("schematic_add_instance")
                             .with_description("Place a symbol instance in a schematic.")
                             .with_string_param("cell", "Schematic name or id")
-                            .with_integer_param("symbol_id", "Symbol id")
+                            .with_integer_param("symbol_id", "Symbol id", false)
+                            .with_string_param("symbol", "Symbol id or name", false)
                             .with_string_param("name", "Instance name")
                             .with_integer_param("x", "X coordinate")
                             .with_integer_param("y", "Y coordinate")
@@ -1246,6 +2171,15 @@ class IceMcpServer {
                             .with_integer_param("y", "Y coordinate")
                             .with_integer_param("width", "Width")
                             .with_integer_param("height", "Height")
+                            .build());
+        tools.push_back(tool_builder("layout_add_instance")
+                            .with_description("Place a layout cell instance.")
+                            .with_string_param("parent", "Parent layout name or id")
+                            .with_string_param("child", "Child layout name or id")
+                            .with_string_param("name", "Instance name")
+                            .with_integer_param("x", "X coordinate")
+                            .with_integer_param("y", "Y coordinate")
+                            .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
                             .build());
         tools.push_back(
             tool_builder("lvs_run")
@@ -1331,6 +2265,7 @@ class IceMcpServer {
     std::unique_ptr<ice::ProjectSession> session_;
     std::filesystem::path projectPath_;
     std::filesystem::path executablePath_;
+    std::string startupWarning_;
     std::filesystem::file_time_type projectStamp_ = std::filesystem::file_time_type::min();
 };
 
@@ -1338,21 +2273,34 @@ class IceMcpServer {
 
 int main(int argc, char **argv) {
     std::optional<std::filesystem::path> projectPath;
+    bool recover = false;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--version" || argument == "version") {
-            std::cout << ice::version() << "\n";
+            auto executablePath = ice::currentExecutablePath();
+            if (executablePath.empty())
+                executablePath = std::filesystem::absolute(argv[0]);
+            auto version = buildJson(executablePath);
+            for (const auto *feature :
+                 {"mcp", "schematic_create_text", "schematic_add_text", "simulation_measure", "pdk_info"})
+                version["features"].push_back(feature);
+            std::cout << version.dump(2) << "\n";
             return 0;
         }
         if (argument == "--help" || argument == "-h") {
             std::cout << "ice-mcp " << ice::version() << "\n"
-                      << "Usage: ice-mcp [--project <path>] [--version]\n"
+                      << "Usage: ice-mcp [--project <path>] [--recover] [--version]\n"
                       << "\n"
-                      << "Runs an MCP server over stdio. Optionally opens a project at startup.\n";
+                      << "Runs an MCP server over stdio. Optionally opens a project at startup.\n"
+                      << "Use --recover to quarantine malformed sidecars while opening the project.\n";
             return 0;
         }
         if (argument == "--project" && index + 1 < argc) {
             projectPath = std::filesystem::path(argv[++index]);
+            continue;
+        }
+        if (argument == "--recover") {
+            recover = true;
             continue;
         }
         std::cerr << "Unknown argument: " << argument << "\n";
@@ -1364,7 +2312,7 @@ int main(int argc, char **argv) {
         auto executablePath = ice::currentExecutablePath();
         if (executablePath.empty())
             executablePath = std::filesystem::absolute(argv[0]);
-        IceMcpServer server(std::move(projectPath), std::move(executablePath));
+        IceMcpServer server(std::move(projectPath), std::move(executablePath), recover);
         return server.run();
     } catch (const ice::ProjectError &error) {
         std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";

@@ -1,6 +1,8 @@
 #include "icelib/core.hpp"
 #include "icelib/interchange.hpp"
+#include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -17,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -193,6 +196,33 @@ ice::Orientation parseOrientation(const std::string &text) {
     if (it == values.end())
         argumentError("Unsupported orientation: " + text);
     return it->second;
+}
+
+ice::PinDirection parsePinDirection(const std::string &text) {
+    static const std::map<std::string, ice::PinDirection> values = {
+        {"left", ice::PinDirection::left},
+        {"right", ice::PinDirection::right},
+        {"up", ice::PinDirection::up},
+        {"down", ice::PinDirection::down},
+    };
+    const auto it = values.find(text);
+    if (it == values.end())
+        argumentError("Unsupported pin direction: " + text);
+    return it->second;
+}
+
+const char *pinDirectionName(ice::PinDirection direction) {
+    switch (direction) {
+    case ice::PinDirection::left:
+        return "left";
+    case ice::PinDirection::right:
+        return "right";
+    case ice::PinDirection::up:
+        return "up";
+    case ice::PinDirection::down:
+        return "down";
+    }
+    return "right";
 }
 
 std::vector<ice::LayoutPoint> parsePoints(const std::vector<std::string> &args, std::size_t begin) {
@@ -421,7 +451,11 @@ json schematicInfo(const ice::SchematicCell &cell) {
     for (const auto &[id, symbol] : cell.symbols) {
         json pins = json::array();
         for (const auto &pin : symbol.pins)
-            pins.push_back({{"id", pin.id}, {"name", pin.name}, {"x", pin.x}, {"y", pin.y}});
+            pins.push_back({{"id", pin.id},
+                            {"name", pin.name},
+                            {"x", pin.x},
+                            {"y", pin.y},
+                            {"direction", pinDirectionName(pin.direction)}});
         result["symbols"].push_back(
             {{"id", id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}});
     }
@@ -514,6 +548,179 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
     return result;
 }
 
+json buildJson(const std::filesystem::path &executablePath) {
+    const auto info = ice::buildInfo();
+    return {{"version", info.version},
+            {"commit", info.commit},
+            {"build_time", info.buildTime},
+            {"build_type", info.buildType},
+            {"executable", executablePath.string()},
+            {"features", info.features}};
+}
+
+json measurementJson(const ice::SignalMeasurement &measurement) {
+    json result = {{"name", measurement.name},
+                   {"points", measurement.statistics.points},
+                   {"min", measurement.statistics.min},
+                   {"max", measurement.statistics.max},
+                   {"amplitude", measurement.statistics.amplitude()},
+                   {"mean", measurement.statistics.mean},
+                   {"rms", measurement.statistics.rms},
+                   {"first", measurement.statistics.first},
+                   {"last", measurement.statistics.last},
+                   {"threshold", measurement.threshold},
+                   {"zero_crossings", measurement.zeroCrossings},
+                   {"rising_crossings", measurement.risingCrossings}};
+    if (measurement.period)
+        result["period"] = *measurement.period;
+    if (measurement.frequency)
+        result["frequency"] = *measurement.frequency;
+    if (measurement.settlingTime)
+        result["settling_time"] = *measurement.settlingTime;
+    return result;
+}
+
+json doctorJson(const std::filesystem::path &executablePath, const std::optional<std::filesystem::path> &projectPath,
+                bool probe = false) {
+    const auto runner = ice::reportRunnerScriptPath(executablePath);
+    const auto python = ice::reportPythonExecutable();
+    const bool pythonAvailable = !python.empty() && std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
+    bool ngspiceLibrary = false;
+    for (const auto *candidate :
+         {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0", "/usr/lib/x86_64-linux-gnu/libngspice.so.0"}) {
+        std::error_code status;
+        if (std::filesystem::exists(candidate, status) && !status) {
+            ngspiceLibrary = true;
+            break;
+        }
+    }
+    const bool ngspiceExecutable = std::system("ngspice --version >/dev/null 2>&1") == 0;
+
+    const auto roots = ice::defaultPdkRoots();
+    const auto pdks = ice::discoverPdks(roots);
+    json pdkArray = json::array();
+    json simulationLibraries = json::array();
+    json readyPdks = json::array();
+    std::vector<std::string> simulationPaths;
+    bool pdksReady = false;
+    bool allPdksReady = !pdks.empty();
+    for (const auto &pdk : pdks) {
+        pdkArray.push_back(ice::pdkInfoJson(pdk, false));
+        pdksReady = pdksReady || pdk.simulationReady;
+        allPdksReady = allPdksReady && pdk.simulationReady;
+        if (pdk.simulationReady)
+            readyPdks.push_back(pdk.id);
+        for (const auto &file : pdk.modelFiles) {
+            simulationLibraries.push_back(
+                {{"pdk", pdk.id}, {"version", pdk.version}, {"path", file.path.string()}, {"sections", file.sections}});
+            simulationPaths.push_back(file.path.string());
+        }
+    }
+
+    std::vector<std::string> timingLibraries;
+    for (const auto &root : roots) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(root, status) || status)
+            continue;
+        for (std::filesystem::recursive_directory_iterator it(root, status), end; !status && it != end;
+             it.increment(status)) {
+            if (it.depth() > 8) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (!it->is_regular_file() || it->path().extension() != ".lib")
+                continue;
+            if (it->path().string().find("/libs.ref/") == std::string::npos)
+                continue;
+            timingLibraries.push_back(it->path().string());
+            if (timingLibraries.size() >= 50)
+                break;
+        }
+        if (timingLibraries.size() >= 50)
+            break;
+    }
+
+    json result = {{"build", buildJson(executablePath)},
+                   {"report_runner", runner.empty() ? json(nullptr) : json(runner.string())},
+                   {"python", python},
+                   {"python_available", pythonAvailable},
+                   {"ngspice_executable_available", ngspiceExecutable},
+                   {"ngspice_library_available", ngspiceLibrary},
+                   {"pdk_roots", json::array()},
+                   {"pdks", std::move(pdkArray)},
+                   {"pdks_ready", pdksReady},
+                   {"all_pdks_ready", allPdksReady},
+                   {"ready_pdks", std::move(readyPdks)},
+                   {"simulation_model_libraries", std::move(simulationLibraries)},
+                   {"timing_libraries", std::move(timingLibraries)},
+                   {"model_libraries", std::move(simulationPaths)}};
+    for (const auto &root : roots)
+        result["pdk_roots"].push_back(root.string());
+
+    bool ok = !runner.empty() && pythonAvailable && (ngspiceExecutable || ngspiceLibrary);
+    if (projectPath) {
+        const auto project = ice::Project::load(*projectPath);
+        std::set<std::string> ids;
+        for (const auto &[_, cell] : project.schematicCells)
+            if (!cell.pdk.empty() && cell.pdk != ice::genericPdkId)
+                ids.insert(cell.pdk);
+        for (const auto &[_, cell] : project.layoutCells)
+            if (!cell.pdk.empty() && cell.pdk != ice::genericPdkId)
+                ids.insert(cell.pdk);
+        for (const auto &[_, cell] : project.proceduralLayouts)
+            if (!cell.pdk.empty() && cell.pdk != ice::genericPdkId)
+                ids.insert(cell.pdk);
+        json checks = json::array();
+        bool projectReady = true;
+        std::string missingSummary;
+        for (const auto &id : ids) {
+            const auto matches = ice::findPdks(id);
+            if (matches.empty()) {
+                projectReady = false;
+                checks.push_back({{"id", id}, {"simulation_ready", false}, {"missing", {"PDK package not installed"}}});
+                if (!missingSummary.empty())
+                    missingSummary += "; ";
+                missingSummary += id + ": PDK package not installed";
+                continue;
+            }
+            for (const auto &pdk : matches) {
+                auto item = ice::pdkInfoJson(pdk, false);
+                projectReady = projectReady && pdk.simulationReady;
+                if (probe) {
+                    const auto probeResult = ice::probePdk(pdk);
+                    item["probe"] = {{"attempted", probeResult.attempted},
+                                     {"ok", probeResult.ok},
+                                     {"summary", probeResult.summary},
+                                     {"log", probeResult.log}};
+                    projectReady = projectReady && probeResult.ok;
+                    if (!probeResult.ok && !probeResult.summary.empty()) {
+                        if (!missingSummary.empty())
+                            missingSummary += "; ";
+                        missingSummary += id + ": " + probeResult.summary;
+                    }
+                }
+                if (!pdk.simulationReady) {
+                    for (const auto &missing : pdk.missing) {
+                        if (!missingSummary.empty())
+                            missingSummary += "; ";
+                        missingSummary += id + ": " + missing;
+                    }
+                }
+                checks.push_back(std::move(item));
+            }
+        }
+        result["project"] = projectPath->string();
+        result["pdk_checks"] = std::move(checks);
+        result["pdk_ready"] = projectReady;
+        if (!projectReady) {
+            ok = false;
+            result["pdk_hint"] = "The project PDK is not simulation-ready: " + missingSummary;
+        }
+    }
+    result["ok"] = ok;
+    return result;
+}
+
 void printJson(const json &value) { std::cout << value.dump(2) << "\n"; }
 
 void printHelp() {
@@ -523,14 +730,20 @@ void printHelp() {
               << "  project-create <folder|project.icepro> [name]\n"
               << "  project-info <folder|project.icepro>\n"
               << "  project-validate <folder|project.icepro>\n"
-              << "  doctor\n\n"
+              << "  project-repair <folder|project.icepro>\n"
+              << "  project-migrate <folder|project.icepro>\n"
+              << "  doctor [project] [--probe]\n"
+              << "  pdk-info [pdk] [--probe]\n"
+              << "  pdk-build <pdk-or-package>\n\n"
               << "Schematic:\n"
               << "  schematic-add-cell <project> <name> [pdk]\n"
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
+              << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
               << "  schematic-remove <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
+              << "  schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]\n"
               << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
               << "  schematic-netlist <project> <cell>\n\n"
@@ -552,10 +765,12 @@ void printHelp() {
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n\n"
               << "Simulation:\n"
-              << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]\n"
+              << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
+                 "[signals...]\n"
               << "  simulation-list <project>\n"
               << "  simulation-remove <project> <simulation>\n"
               << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
+              << "  simulation-measure <project> <simulation> [signal] [threshold]\n"
               << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
               << "  simulation-graph-list <project> <simulation>\n"
               << "  simulation-graph-info <project> <simulation> <graph>\n"
@@ -600,24 +815,84 @@ int main(int argc, char **argv) {
         executablePath = std::filesystem::absolute(argv[0]);
 
     if (command == "--version" || command == "version") {
-        std::cout << ice::version() << "\n";
+        auto version = buildJson(executablePath);
+        for (const auto *feature : {"simulation_measure", "pdk_info"})
+            version["features"].push_back(feature);
+        printJson(version);
         return 0;
     }
 
     try {
         if (command == "doctor") {
-            expectArguments(args, 1, 1, "doctor");
-            const auto runner = ice::reportRunnerScriptPath(executablePath);
-            const auto python = ice::reportPythonExecutable();
-            const bool pythonAvailable = std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
-            const bool ngspiceAvailable = std::filesystem::exists("/usr/lib/libngspice.so.0") ||
-                                          std::filesystem::exists("/usr/lib64/libngspice.so.0");
-            printJson({{"report_runner", runner.empty() ? json(nullptr) : json(runner.string())},
-                       {"python", python},
-                       {"python_available", pythonAvailable},
-                       {"ngspice_library_available", ngspiceAvailable},
-                       {"ok", !runner.empty() && pythonAvailable && ngspiceAvailable}});
+            expectArguments(args, 1, 3, "doctor [project] [--probe]");
+            std::optional<std::filesystem::path> projectPath;
+            bool probe = false;
+            for (std::size_t index = 1; index < args.size(); ++index) {
+                if (args[index] == "--probe")
+                    probe = true;
+                else if (!projectPath)
+                    projectPath = args[index];
+                else
+                    argumentError("Usage: ice-cli doctor [project] [--probe]");
+            }
+            const auto report = doctorJson(executablePath, projectPath, probe);
+            printJson(report);
+            return report.value("ok", false) ? 0 : 1;
+        }
+        if (command == "pdk-info") {
+            expectArguments(args, 1, 3, "pdk-info [pdk] [--probe]");
+            std::string requested;
+            bool probe = false;
+            for (std::size_t index = 1; index < args.size(); ++index) {
+                if (args[index] == "--probe")
+                    probe = true;
+                else if (requested.empty())
+                    requested = args[index];
+                else
+                    argumentError("Usage: ice-cli pdk-info [pdk] [--probe]");
+            }
+            auto pdks = requested.empty() ? ice::discoverPdks() : ice::findPdks(requested);
+            if (requested.empty() && pdks.empty()) {
+                printJson({{"pdks", json::array()}});
+                return 0;
+            }
+            if (pdks.empty()) {
+                std::string available;
+                for (const auto &candidate : ice::discoverPdks()) {
+                    if (!available.empty())
+                        available += ", ";
+                    available += candidate.id;
+                }
+                argumentError("Unknown PDK '" + requested +
+                              "'. Available PDKs: " + (available.empty() ? "none" : available));
+            }
+            json result = {{"pdks", json::array()}};
+            for (const auto &pdk : pdks) {
+                auto item = ice::pdkInfoJson(pdk, true);
+                if (probe) {
+                    const auto probeResult = ice::probePdk(pdk);
+                    item["probe"] = {{"attempted", probeResult.attempted},
+                                     {"ok", probeResult.ok},
+                                     {"summary", probeResult.summary},
+                                     {"log", probeResult.log}};
+                }
+                result["pdks"].push_back(std::move(item));
+            }
+            printJson(result);
             return 0;
+        }
+        if (command == "pdk-build") {
+            expectArguments(args, 2, 2, "pdk-build <pdk-or-package>");
+            const auto pdks = ice::findPdks(args[1]);
+            if (pdks.empty())
+                argumentError("Unknown ICE PDK package: " + args[1]);
+            const auto result = ice::buildPdkOsdi(pdks.front());
+            printJson({{"ok", result.ok},
+                       {"summary", result.summary},
+                       {"compiler", result.compiler},
+                       {"osdi_dir", result.osdiDir.string()},
+                       {"log", result.log}});
+            return result.ok ? 0 : 1;
         }
         if (command == "project-create") {
             expectArguments(args, 2, 3, "project-create <folder|project.icepro> [name]");
@@ -673,6 +948,41 @@ int main(int argc, char **argv) {
             return report.matched() ? 0 : 1;
         }
 
+        if (command == "project-repair") {
+            expectArguments(args, 2, 2, "project-repair <folder|project.icepro>");
+            ice::ProjectLoadOptions options;
+            options.recover = true;
+            ice::ProjectLoadReport loadReport;
+            auto project = ice::Project::load(args[1], options, &loadReport);
+            ice::ProjectSession session(std::move(project));
+            session.save(args[1]);
+            printJson({{"repaired", true},
+                       {"warnings", loadReport.warnings},
+                       {"quarantined_files", loadReport.quarantinedFiles}});
+            return 0;
+        }
+
+        if (command == "project-migrate") {
+            expectArguments(args, 2, 2, "project-migrate <folder|project.icepro>");
+            const auto root = projectRootForCli(args[1]);
+            const auto agentsPath = root / "AGENTS.md";
+            const auto readAgents = [&] {
+                std::ifstream input(agentsPath, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(input)), {});
+            };
+            const auto before = readAgents();
+            auto project = ice::Project::load(args[1]);
+            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
+            ice::ProjectSession session(std::move(project));
+            session.save(args[1]);
+            const auto after = readAgents();
+            printJson({{"migrated", true},
+                       {"agents_updated", before != after},
+                       {"pdk_ids_updated", pdkIdsUpdated},
+                       {"guidance_version", 2}});
+            return 0;
+        }
+
         if (command == "schematic-add-cell") {
             expectArguments(args, 3, 4, "schematic-add-cell <project> <name> [pdk]");
             ice::ProjectSession session(ice::Project::load(args[1]));
@@ -686,17 +996,56 @@ int main(int argc, char **argv) {
         }
 
         if (command == "schematic-add-text") {
-            expectArguments(args, 3, 5, "schematic-add-text <project> <name> [pdk] [spice-file]");
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "schematic-add-text <project> <name> [pdk] [spice-file] "
+                            "or --pdk <pdk> --file <spice-file>");
+            auto pdk = std::string(ice::genericPdkId);
+            std::string spiceFile;
+            bool pdkSpecified = false;
+            if (args.size() > 3 && std::string_view(args[3]).starts_with("--")) {
+                for (std::size_t index = 3; index < args.size(); ++index) {
+                    if (args[index] == "--pdk" && index + 1 < args.size()) {
+                        pdk = args[++index];
+                        pdkSpecified = true;
+                    } else if (args[index] == "--file" && index + 1 < args.size()) {
+                        spiceFile = args[++index];
+                    } else {
+                        argumentError("Expected --pdk <pdk> or --file <spice-file>");
+                    }
+                }
+            } else if (args.size() == 4) {
+                std::error_code status;
+                if (std::filesystem::is_regular_file(args[3], status) && !status) {
+                    spiceFile = args[3];
+                } else if (args[3].find('/') != std::string::npos ||
+                           std::filesystem::path(args[3]).extension() == ".sp") {
+                    argumentError("'" + args[3] +
+                                  "' was interpreted as a PDK because no --pdk was given. "
+                                  "Use --pdk <pdk> --file <spice-file> or pass the PDK before the file.");
+                } else {
+                    pdk = args[3];
+                    pdkSpecified = true;
+                }
+            } else if (args.size() == 5) {
+                pdk = args[3];
+                spiceFile = args[4];
+                pdkSpecified = true;
+            } else if (args.size() > 5) {
+                argumentError("Too many positional arguments; use --pdk <pdk> --file <spice-file>");
+            }
             ice::ProjectSession session(ice::Project::load(args[1]));
-            const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
-            auto text = args.size() == 5 ? readTextFile(args[4])
-                                         : "* SPICE schematic: " + args[2] + "\n.title " + args[2] + "\n.end\n";
+            auto text = spiceFile.empty() ? "* SPICE schematic: " + args[2] + "\n.title " + args[2] + "\n.end\n"
+                                          : readTextFile(spiceFile);
             ice::ObjectId id = 0;
             session.execute("schematic-add-text", [&](ice::Project &project) {
                 id = ice::createTextSchematicCell(project, args[2], pdk, text);
             });
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"text", text}});
+            json result = {{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"text", text}};
+            if (!pdkSpecified)
+                result["warning"] = "No PDK was specified; the text schematic was stored with the generic PDK. "
+                                    "Pass --pdk <pdk> if this cell belongs to a PDK-specific design.";
+            printJson(result);
             return 0;
         }
 
@@ -748,6 +1097,31 @@ int main(int argc, char **argv) {
                             [&](ice::Project &p) { id = ice::addSymbol(p, cell, args[3], {}, source); });
             session.save(args[1]);
             printJson({{"id", id}, {"cell", cell}, {"name", args[3]}});
+            return 0;
+        }
+
+        if (command == "schematic-add-pin") {
+            expectArguments(args, 5, 8, "schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]");
+            auto project = ice::Project::load(args[1]);
+            const auto cellId = resolveSchematic(project, args[2]);
+            auto &cell = project.schematicCells.at(cellId);
+            const auto symbolId = resolveSymbol(cell, args[3]);
+            auto &symbol = cell.symbols.at(symbolId);
+            for (const auto &pin : symbol.pins) {
+                if (pin.name == args[4])
+                    throw ice::ProjectError("schematic.pin", "Pin already exists: " + args[4]);
+            }
+            const auto x = args.size() > 5 ? parseInteger(args[5], "x") : ice::Coordinate{0};
+            const auto y = args.size() > 6 ? parseInteger(args[6], "y") : ice::Coordinate{0};
+            const auto direction = args.size() > 7 ? parsePinDirection(args[7]) : ice::PinDirection::right;
+            ice::ProjectSession session(project);
+            ice::ObjectId pinId = 0;
+            session.execute("schematic-add-pin", [&](ice::Project &p) {
+                pinId = p.nextId();
+                p.schematicCells.at(cellId).symbols.at(symbolId).pins.push_back({pinId, args[4], x, y, direction});
+            });
+            session.save(args[1]);
+            printJson({{"id", pinId}, {"cell", cellId}, {"symbol", symbolId}, {"name", args[4]}, {"x", x}, {"y", y}});
             return 0;
         }
 
@@ -1003,8 +1377,9 @@ int main(int argc, char **argv) {
         }
 
         if (command == "simulation-add") {
-            expectArguments(args, 4, 8,
-                            "simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]");
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
+                            "[signals (comma-separated or multiple arguments)]");
             const auto project = ice::Project::load(args[1]);
             const auto schematic = resolveSchematic(project, args[3]);
             ice::SimulationItem simulation;
@@ -1016,8 +1391,15 @@ int main(int argc, char **argv) {
                 simulation.stop = parseDouble(args[5], "stop time");
             if (args.size() >= 7)
                 simulation.step = parseDouble(args[6], "step time");
-            if (args.size() >= 8)
-                simulation.captureSignals = args[7];
+            if (args.size() >= 8) {
+                std::string signals;
+                for (std::size_t index = 7; index < args.size(); ++index) {
+                    if (!signals.empty())
+                        signals += ",";
+                    signals += args[index];
+                }
+                simulation.captureSignals = std::move(signals);
+            }
             ice::ProjectSession session(project);
             ice::ObjectId graphId = 0;
             session.execute("simulation-add", [&](ice::Project &p) {
@@ -1087,6 +1469,7 @@ int main(int argc, char **argv) {
             request.use_initial_conditions = simulation.use_initial_conditions;
             std::vector<std::string> notes;
             request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
+            ice::applyPdkSimulationSetup(schematic->second.pdk, request);
             std::istringstream directives(simulation.directives);
             std::string directive;
             while (std::getline(directives, directive)) {
@@ -1139,6 +1522,35 @@ int main(int argc, char **argv) {
             printJson(summary);
             if (result.state != ice::JobState::succeeded)
                 throw ice::ProjectError("simulation." + ice::jobStateName(result.state), result.error);
+            return 0;
+        }
+
+        if (command == "simulation-measure") {
+            expectArguments(args, 3, 5, "simulation-measure <project> <simulation> [signal] [threshold]");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto stored = ice::latestSimulationRun(projectRootForCli(args[1]), simulationId);
+            if (!stored)
+                throw ice::ProjectError("simulation.result", "No stored run was found for this simulation");
+            if (stored->result.time.empty() || stored->result.traces.empty())
+                throw ice::ProjectError("simulation.result", "The stored run has no time vector or traces");
+            double threshold = std::numeric_limits<double>::quiet_NaN();
+            if (args.size() >= 5)
+                threshold = parseDouble(args[4], "threshold");
+            const std::string selected = args.size() >= 4 ? args[3] : std::string{};
+            json measurements = json::array();
+            for (const auto &trace : stored->result.traces) {
+                if (!selected.empty() && trace.name != selected)
+                    continue;
+                measurements.push_back(measurementJson(ice::measureSignal(trace, stored->result.time, threshold)));
+            }
+            if (measurements.empty())
+                argumentError("No captured signal matched '" + selected + "'");
+            printJson({{"simulation", stored->simulationName},
+                       {"schematic", stored->schematicName},
+                       {"run_id", stored->runId},
+                       {"time_points", stored->result.time.size()},
+                       {"measurements", measurements}});
             return 0;
         }
 
@@ -1427,6 +1839,7 @@ int main(int argc, char **argv) {
                 const auto schematicId = resolveSchematic(project, args[2]);
                 const auto &schematic = project.schematicCells.at(schematicId);
                 request.netlist = ice::buildSimulationNetlist(project, schematicId);
+                ice::applyPdkSimulationSetup(schematic.pdk, request);
                 context.projectRoot = args[1];
                 context.projectIdentity = project.identity;
                 context.projectName = project.name;

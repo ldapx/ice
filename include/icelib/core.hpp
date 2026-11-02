@@ -274,6 +274,17 @@ struct ProjectReport {
     std::string path;
 };
 
+struct ProjectLoadOptions {
+    // When true, malformed sidecar files are moved under build/recovery/ and
+    // the remaining project is loaded. Strict loading remains the default.
+    bool recover = false;
+};
+
+struct ProjectLoadReport {
+    std::vector<std::string> warnings;
+    std::vector<std::string> quarantinedFiles;
+};
+
 class Project {
   public:
     static constexpr int schemaVersion = 1;
@@ -300,6 +311,16 @@ class Project {
     // schematics, layouts, and simulations are stored in sch/, lay/, and sim/.
     void save(const std::filesystem::path &path) const;
     static Project load(const std::filesystem::path &path);
+    static Project load(const std::filesystem::path &path, const ProjectLoadOptions &options,
+                        ProjectLoadReport *report = nullptr);
+
+    // Revision of the split files as they existed when this project was loaded
+    // or last saved. Empty for a project that has never been loaded or saved.
+    const std::string &sourceRevision() const noexcept { return sourceRevision_; }
+
+  private:
+    mutable std::filesystem::path sourceRoot_;
+    mutable std::string sourceRevision_;
 };
 
 class SelectionModel {
@@ -351,7 +372,17 @@ class ProjectSession {
     void notify();
 };
 
+struct BuildInfo {
+    std::string version;
+    std::string commit;
+    std::string buildTime;
+    std::string buildType;
+    // Stable feature names that agents can probe before relying on a workflow.
+    std::vector<std::string> features;
+};
+
 std::string version();
+BuildInfo buildInfo();
 std::string orientationName(Orientation orientation);
 
 } // namespace ice

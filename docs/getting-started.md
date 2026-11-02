@@ -37,6 +37,34 @@ Python scientific stack.
 xmake build doctest ice-cli ice-pkg ice-mcp
 ```
 
+For a reproducible build fingerprint, configure with the git revision and an
+explicit timestamp:
+
+```sh
+ICE_BUILD_COMMIT="$(git rev-parse --short HEAD)" \
+ICE_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+xmake f -m release -y
+```
+
+After installing a new build, restart any long-lived `ice-mcp` process. The
+server keeps the code it loaded at process start. `ice-cli --version` and the
+MCP `ice_version` tool print the commit, build time, executable path, and
+feature flags.
+
+Simulation PDKs are provided by ICE packages under `~/.ice/packages` (or
+`ICE_PACKAGE_ROOT`); Volare, CIEL, `PDK_ROOT`, and `PDK` are not used.
+OSDI-based packages need a one-time local build:
+
+```sh
+ice-cli pdk-build ihp-sg13g2
+```
+
+Verify the package before simulating with:
+
+```sh
+ice-cli pdk-info ihp-sg13g2 --probe
+```
+
 Build the desktop app (requires Qt 6):
 
 ```sh

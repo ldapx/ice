@@ -66,7 +66,7 @@ std::filesystem::path pdkPackageRoot(const std::string &pdk) {
         return {};
     const auto packages = installedPackages(configuredPackageInstallDirectory());
     for (const auto &package : packages) {
-        if (package.spec.name == pdk)
+        if (ice::packageMatchesPdk(package.spec, pdk))
             return package.spec.root;
     }
     return {};

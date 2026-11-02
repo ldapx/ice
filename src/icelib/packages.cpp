@@ -22,6 +22,28 @@ std::string readString(const toml::table &table, std::string_view key, std::stri
     return fallback;
 }
 
+std::vector<std::string> readStringArray(const toml::table &table, std::string_view key) {
+    std::vector<std::string> result;
+    if (const auto *array = table[key].as_array()) {
+        for (const auto &item : *array) {
+            if (auto value = item.value<std::string>())
+                result.push_back(*value);
+        }
+    }
+    return result;
+}
+
+std::filesystem::path readRelativePath(const toml::table &table, std::string_view key, std::string_view fieldName) {
+    const auto text = readString(table, key);
+    if (text.empty())
+        return {};
+    const std::filesystem::path path(text);
+    if (path.is_absolute() || text.find("..") != std::string::npos)
+        throw ProjectError("package.manifest",
+                           std::string(fieldName) + " must be a relative path inside the package: " + text);
+    return path.lexically_normal();
+}
+
 std::vector<int> parseVersionParts(const std::string &version) {
     std::vector<int> parts;
     std::string current;
@@ -261,6 +283,8 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
         }
         if (const auto *pdk = table["pdk"].as_table()) {
             PackagePdk pdkSpec;
+            pdkSpec.id = readString(*pdk, "id", spec.name);
+            pdkSpec.aliases = readStringArray(*pdk, "aliases");
             pdkSpec.displayName = readString(*pdk, "display_name", spec.name);
             pdkSpec.defaultSchematic = readString(*pdk, "default_schematic");
             if (const auto *layers = (*pdk)["layer"].as_array()) {
@@ -278,6 +302,47 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                         throw ProjectError("package.manifest", "Duplicate PDK layer name: " + entry.name);
                     pdkSpec.layers.push_back(std::move(entry));
                 }
+            }
+            if (const auto *simulation = (*pdk)["simulation"].as_table()) {
+                PackagePdkSimulation sim;
+                sim.engine = readString(*simulation, "engine", "ngspice");
+                sim.root = readRelativePath(*simulation, "root", "pdk.simulation.root");
+                sim.modelFile = readRelativePath(*simulation, "model_file", "pdk.simulation.model_file");
+                sim.section = readString(*simulation, "section");
+                for (const auto &include : readStringArray(*simulation, "includes")) {
+                    const std::filesystem::path path(include);
+                    if (path.is_absolute() || include.find("..") != std::string::npos)
+                        throw ProjectError("package.manifest",
+                                           "pdk.simulation.includes must stay inside the model root: " + include);
+                    sim.includes.push_back(path.lexically_normal());
+                }
+                sim.options = readStringArray(*simulation, "options");
+                sim.requiresOsdi = (*simulation)["requires_osdi"].value_or(false);
+                sim.verilogA = readRelativePath(*simulation, "verilog_a", "pdk.simulation.verilog_a");
+                sim.spiceinit = readRelativePath(*simulation, "spiceinit", "pdk.simulation.spiceinit");
+                sim.compilerFlags = readStringArray(*simulation, "compiler_flags");
+                if (const auto *devices = (*simulation)["devices"].as_table()) {
+                    for (const auto &[key, value] : *devices) {
+                        if (auto text = value.value<std::string>())
+                            sim.devices.emplace(std::string(key), *text);
+                    }
+                }
+                if (const auto *sources = (*simulation)["osdi"].as_array()) {
+                    for (const auto &item : *sources) {
+                        const auto *source = item.as_table();
+                        if (!source)
+                            throw ProjectError("package.manifest", "pdk.simulation.osdi entries must be tables");
+                        PackagePdkOsdiSource osdi;
+                        osdi.source = readRelativePath(*source, "source", "pdk.simulation.osdi.source");
+                        osdi.output = readString(*source, "output");
+                        if (osdi.source.empty() || osdi.output.empty())
+                            throw ProjectError("package.manifest", "pdk.simulation.osdi requires source and output");
+                        sim.osdiSources.push_back(std::move(osdi));
+                    }
+                }
+                if (sim.root.empty() || sim.modelFile.empty())
+                    throw ProjectError("package.manifest", "pdk.simulation requires root and model_file");
+                pdkSpec.simulation = std::move(sim);
             }
             spec.pdk = std::move(pdkSpec);
         }
@@ -678,4 +743,25 @@ std::vector<ProvenanceDiagnostic> PackageManager::provenance(const Lockfile &loc
     }
     return result;
 }
+bool packageMatchesPdk(const PackageSpec &package, const std::string &pdkId) {
+    const auto normalize = [](std::string value) {
+        for (auto &character : value)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        std::replace(value.begin(), value.end(), '.', '-');
+        std::replace(value.begin(), value.end(), '_', '-');
+        return value;
+    };
+    const auto wanted = normalize(pdkId);
+    if (normalize(package.name) == wanted)
+        return true;
+    if (!package.pdk)
+        return false;
+    if (normalize(package.pdk->id) == wanted)
+        return true;
+    for (const auto &alias : package.pdk->aliases)
+        if (normalize(alias) == wanted)
+            return true;
+    return false;
+}
+
 } // namespace ice

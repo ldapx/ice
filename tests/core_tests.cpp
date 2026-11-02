@@ -2,8 +2,10 @@
 #include "icelib/geometry.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
+#include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/plugins.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
@@ -11,6 +13,8 @@
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <algorithm>
+#include <cmath>
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <fstream>
@@ -189,6 +193,16 @@ TEST_CASE("projects save as split directory files") {
     CHECK(agentsText.find("useful circuit metrics") != std::string::npos);
     CHECK(agentsText.find("array of simulations") != std::string::npos);
     CHECK(agentsText.find("normal simulation for simplicity") != std::string::npos);
+    CHECK(agentsText.find("ice_doctor") != std::string::npos);
+    CHECK(agentsText.find("schematic_add_net") != std::string::npos);
+    CHECK(agentsText.find("available signals") != std::string::npos);
+    CHECK(agentsText.find("Do not guess an absolute PDK") != std::string::npos);
+    CHECK(agentsText.find("ask the user before drawing") != std::string::npos);
+    CHECK(agentsText.find("schematic specifications") != std::string::npos);
+    CHECK(agentsText.find("Never write or edit") != std::string::npos);
+    CHECK(agentsText.find("project_repair") != std::string::npos);
+    CHECK(agentsText.find("behavioral or RC approximation") != std::string::npos);
+    CHECK(agentsText.find("zero crossings") != std::string::npos);
 
     std::ifstream projectStream(root / "project.icepro");
     const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
@@ -392,6 +406,20 @@ TEST_CASE("ngspice simulation reports missing netlists explicitly") {
     CHECK(rejected.state == ice::JobState::failed);
     CHECK(rejected.error.find("unsupported") != std::string::npos);
     CHECK(!rejected.input_fingerprint.empty());
+}
+
+TEST_CASE("ngspice initialization errors include simulator diagnostics") {
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.step = 1e-9;
+    request.stop = 10e-9;
+    request.netlist = {"* missing model include", ".include \"/tmp/ice-does-not-exist-model-12345.lib\"", "V1 in 0 1",
+                       "R1 in out 1k", "C1 out 0 1p"};
+    ice::SimulationRunner runner;
+    const auto result = runner.run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::failed);
+    CHECK(result.error.find("include") != std::string::npos ||
+          result.error.find("ice-does-not-exist") != std::string::npos);
 }
 
 TEST_CASE("ngspice fetches the vectors named by the request signals") {
@@ -1053,6 +1081,171 @@ TEST_CASE("layout shape boolean operations reject mixed layers and empty results
     CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {second, third}, ice::BooleanOperation::intersection),
                     ice::ProjectError);
     CHECK(project.layoutCells.at(cellId).shapes.size() == 3);
+}
+
+TEST_CASE("project loading can quarantine invalid sidecar files") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-project-recovery-test";
+    std::filesystem::remove_all(root);
+    ice::Project project;
+    project.identity = "recovery-demo";
+    project.name = "recovery-demo";
+    ice::addLayer(project, "Metal1", 1);
+    ice::createSchematicCell(project, "good");
+    project.save(root);
+
+    const auto badFile = root / "sch" / "bad.icesch";
+    std::ofstream(badFile) << R"({"type":"text","pdk":"generic","text":"* hand-written"})";
+
+    bool strictFailed = false;
+    try {
+        (void)ice::Project::load(root);
+    } catch (const ice::ProjectError &error) {
+        strictFailed = true;
+        CHECK(std::string(error.what()).find("bad.icesch") != std::string::npos);
+        CHECK(std::string(error.what()).find("project-repair") != std::string::npos);
+    }
+    CHECK(strictFailed);
+
+    ice::ProjectLoadReport report;
+    const auto recovered = ice::Project::load(root, ice::ProjectLoadOptions{true}, &report);
+    CHECK(recovered.schematicCells.size() == 1);
+    CHECK(recovered.schematicCells.begin()->second.name == "good");
+    CHECK(report.quarantinedFiles.size() == 1);
+    CHECK(std::filesystem::exists(report.quarantinedFiles.front()));
+    CHECK(!std::filesystem::exists(badFile));
+    CHECK(!report.warnings.empty());
+
+    const auto loadedAgain = ice::Project::load(root);
+    CHECK(loadedAgain.schematicCells.size() == 1);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("build info exposes a feature fingerprint") {
+    const auto info = ice::buildInfo();
+    CHECK(info.version == ice::version());
+    CHECK(!info.commit.empty());
+    CHECK(!info.buildTime.empty());
+    CHECK(std::find(info.features.begin(), info.features.end(), "project_repair") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "simulation_metrics") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "pdk_status") != info.features.end());
+}
+
+TEST_CASE("generated AGENTS guidance is versioned and stable") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-agents-migration-test";
+    std::filesystem::remove_all(root);
+    ice::Project project;
+    project.identity = "agents-migration";
+    project.name = "agents-migration";
+    project.save(root);
+
+    const auto path = root / "AGENTS.md";
+    auto read = [&] {
+        std::ifstream input(path);
+        return std::string((std::istreambuf_iterator<char>(input)), {});
+    };
+    const auto first = read();
+    CHECK(first.find("ICE generated guidance: begin") != std::string::npos);
+    CHECK(first.find("simulation_measure") != std::string::npos);
+    CHECK(first.find("pdk_info") != std::string::npos);
+    CHECK(first.find("project_migrate") != std::string::npos);
+    CHECK(first.find("zero crossings") != std::string::npos);
+
+    project.save(root);
+    CHECK(read() == first);
+
+    std::ofstream(path) << "# Old project\n\nOld guidance.\n\nUser note.\n";
+    project.save(root);
+    const auto migrated = read();
+    CHECK(migrated.find("Old guidance.") != std::string::npos);
+    CHECK(migrated.find("User note.") != std::string::npos);
+    CHECK(migrated.find("ICE generated guidance: begin") != std::string::npos);
+    CHECK(migrated.find("simulation_measure") != std::string::npos);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("project saves reject stale revisions") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-revision-test";
+    std::filesystem::remove_all(root);
+    ice::Project project;
+    project.identity = "revision-test";
+    project.name = "revision-test";
+    project.save(root);
+
+    auto first = ice::Project::load(root);
+    auto second = ice::Project::load(root);
+    first.name = "first";
+    first.save(root);
+    second.name = "second";
+    CHECK_THROWS_AS(second.save(root), ice::ProjectError);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("PDK discovery reports missing OSDI models and a usable lib line") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-pdk-package-test";
+    std::filesystem::remove_all(root);
+    const auto models = root / "libs.tech" / "ngspice" / "models";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "cornerMOSlv.lib") << ".LIB mos_tt\n.model sg13_lv_nmos psp103va\n.ENDL mos_tt\n";
+    std::ofstream(models / "sg13g2_moslv_parm.lib") << ".model sg13g2_lv_nmos_psp psp103va\n";
+    std::ofstream(root / "package.toml") << R"([package]
+schema_version = 1
+name = "test.ihp"
+version = "1.0.0"
+license = "Apache-2.0"
+
+[pdk]
+id = "ihp-sg13g2"
+display_name = "Test IHP"
+
+[pdk.simulation]
+engine = "ngspice"
+root = "libs.tech/ngspice"
+model_file = "models/cornerMOSlv.lib"
+section = "mos_tt"
+requires_osdi = true
+verilog_a = "verilog-a"
+
+[pdk.simulation.devices]
+nmos = "sg13_lv_nmos"
+pmos = "sg13_lv_pmos"
+)";
+
+    const auto pdks = ice::discoverPdks({root});
+    CHECK(pdks.size() == 1);
+    if (pdks.size() == 1) {
+        CHECK(pdks.front().id == "ihp-sg13g2");
+        CHECK(pdks.front().packageName == "test.ihp");
+        CHECK(pdks.front().packageVersion == "1.0.0");
+        CHECK(pdks.front().needsOsdi);
+        CHECK(!pdks.front().simulationReady);
+        CHECK(std::find(pdks.front().sections.begin(), pdks.front().sections.end(), "mos_tt") !=
+              pdks.front().sections.end());
+        CHECK(pdks.front().recommendedLibLine.find("cornerMOSlv.lib") != std::string::npos);
+        CHECK(pdks.front().recommendedLibLine.find("mos_tt") != std::string::npos);
+        CHECK(std::any_of(pdks.front().missing.begin(), pdks.front().missing.end(),
+                          [](const std::string &value) { return value.find("OSDI") != std::string::npos; }));
+        const auto json = ice::pdkInfoJson(pdks.front(), false);
+        CHECK(json.at("simulation_ready") == false);
+        CHECK(json.at("source") == "ice-package");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("simulation measurements count crossings and frequency") {
+    const ice::SimulationTrace trace{"out", {0.0, 1.0, 0.0, 1.0, 0.0}};
+    const std::vector<double> time{0.0, 1.0, 2.0, 3.0, 4.0};
+    const auto measurement = ice::measureSignal(trace, time, 0.5);
+    CHECK(measurement.statistics.points == 5);
+    CHECK(measurement.statistics.min == 0.0);
+    CHECK(measurement.statistics.max == 1.0);
+    CHECK(measurement.zeroCrossings == 4);
+    CHECK(measurement.risingCrossings == 2);
+    CHECK(measurement.period.has_value());
+    if (measurement.period)
+        CHECK(std::abs(*measurement.period - 2.0) < 1e-12);
+    CHECK(measurement.frequency.has_value());
+    if (measurement.frequency)
+        CHECK(std::abs(*measurement.frequency - 0.5) < 1e-12);
 }
 
 TEST_CASE("layout polygons ports and instances use core operations") {

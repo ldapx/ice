@@ -13,10 +13,38 @@ struct PackageLayer {
     int number = 0;
 };
 
+struct PackagePdkOsdiSource {
+    std::filesystem::path source;
+    std::string output;
+};
+
+struct PackagePdkSimulation {
+    std::string engine = "ngspice";
+    // Model directory relative to the package root.
+    std::filesystem::path root;
+    // Model file and includes relative to `root`.
+    std::filesystem::path modelFile;
+    std::string section;
+    std::vector<std::filesystem::path> includes;
+    std::vector<std::string> options;
+    bool requiresOsdi = false;
+    // Verilog-A root and spiceinit are relative to the package root.
+    std::filesystem::path verilogA;
+    std::filesystem::path spiceinit;
+    std::vector<std::string> compilerFlags;
+    std::vector<PackagePdkOsdiSource> osdiSources;
+    std::map<std::string, std::string> devices;
+};
+
 struct PackagePdk {
+    // Canonical PDK id. Package names are separate because a package may be
+    // named `ihp.sg13g2` while schematics store `ihp-sg13g2`.
+    std::string id;
+    std::vector<std::string> aliases;
     std::string displayName;
     std::string defaultSchematic;
     std::vector<PackageLayer> layers;
+    std::optional<PackagePdkSimulation> simulation;
 };
 
 struct PackageSpec {
@@ -89,5 +117,8 @@ class PackageManager {
 };
 
 std::string serializeLockfile(const Lockfile &lockfile);
+
+// True when the package exposes the requested PDK id, name, or alias.
+bool packageMatchesPdk(const PackageSpec &package, const std::string &pdkId);
 
 } // namespace ice

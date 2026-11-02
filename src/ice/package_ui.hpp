@@ -39,6 +39,7 @@ std::vector<ice::PackageIndexEntry> installedPackages(const std::filesystem::pat
 std::vector<ice::PackageIndexEntry> installedPdkPackages(const std::filesystem::path &installDirectory);
 bool packageProvidesPdk(const ice::PackageSpec &package);
 QString packagePdkDisplayName(const ice::PackageSpec &package);
+std::filesystem::path installedPdkPackageRoot(const std::string &pdkId);
 
 // Shows the project dependency prompt for missing packages and installs the
 // selected packages from the index. Returns true when every missing package is

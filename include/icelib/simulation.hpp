@@ -34,6 +34,9 @@ struct SimulationRequest {
     // Named `probeSignals` (not `signals`) because Qt defines `signals` as a
     // macro and this struct is read from Qt translation units.
     std::vector<std::string> probeSignals;
+    // Package-provided simulator commands applied before the circuit is loaded.
+    // OSDI PDKs use this for `osdi '<path>'`; no global ~/.spiceinit is needed.
+    std::vector<std::string> initCommands;
 };
 
 struct SimulationTrace {

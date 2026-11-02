@@ -386,7 +386,7 @@ NB_MODULE(icepy, module) {
         .def("serialize", &Project::serialize)
         .def("save", &Project::save)
         .def_static("deserialize", &Project::deserialize)
-        .def_static("load", &Project::load);
+        .def_static("load", [](const std::string &path) { return Project::load(path); });
 
     nb::enum_<VerificationSeverity>(module, "VerificationSeverity")
         .value("info", VerificationSeverity::info)

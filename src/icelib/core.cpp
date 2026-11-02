@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdint>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -9,6 +11,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 namespace ice {
 using json = nlohmann::ordered_json;
@@ -763,6 +771,103 @@ std::filesystem::path projectRoot(const std::filesystem::path &path) {
     return path;
 }
 
+std::string normalizedRoot(const std::filesystem::path &path) {
+    std::error_code status;
+    const auto canonical = std::filesystem::weakly_canonical(path, status);
+    return (status ? path.lexically_normal() : canonical).string();
+}
+
+std::string projectRevision(const std::filesystem::path &root) {
+    std::vector<std::filesystem::path> files;
+    const auto addDirectory = [&](const std::filesystem::path &directory, const std::string &extension) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(directory, status) || status)
+            return;
+        for (std::filesystem::directory_iterator it(directory, status), end; !status && it != end;
+             it.increment(status)) {
+            if (it->is_regular_file() && it->path().extension() == extension)
+                files.push_back(it->path());
+        }
+    };
+    files.push_back(root / "project.icepro");
+    addDirectory(root / "sch", ".icesch");
+    addDirectory(root / "lay", ".icelay");
+    addDirectory(root / "sim", ".icesim");
+    std::sort(files.begin(), files.end());
+
+    constexpr std::uint64_t offset = 1469598103934665603ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    std::uint64_t hash = offset;
+    const auto mix = [&](const std::string &text) {
+        for (const unsigned char character : text) {
+            hash ^= character;
+            hash *= prime;
+        }
+        hash ^= 0xff;
+        hash *= prime;
+    };
+    std::error_code status;
+    for (const auto &file : files) {
+        mix(file.lexically_relative(root).generic_string());
+        const auto size = std::filesystem::file_size(file, status);
+        mix(status ? std::string("missing") : std::to_string(size));
+        const auto modified = std::filesystem::last_write_time(file, status);
+        mix(status ? std::string("missing") : std::to_string(modified.time_since_epoch().count()));
+    }
+    std::ostringstream text;
+    text << std::hex << hash;
+    return text.str();
+}
+
+class ProjectLock {
+  public:
+    ProjectLock(const std::filesystem::path &root, int operation) {
+#ifndef _WIN32
+        std::error_code status;
+        std::filesystem::create_directories(root / "build", status);
+        const auto path = root / "build" / ".ice-save.lock";
+        descriptor_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
+        if (descriptor_ >= 0) {
+            while (::flock(descriptor_, operation) != 0 && errno == EINTR) {
+            }
+        }
+#else
+        (void)root;
+        (void)operation;
+#endif
+    }
+    ~ProjectLock() {
+#ifndef _WIN32
+        if (descriptor_ >= 0) {
+            ::flock(descriptor_, LOCK_UN);
+            ::close(descriptor_);
+        }
+#endif
+    }
+    ProjectLock(const ProjectLock &) = delete;
+    ProjectLock &operator=(const ProjectLock &) = delete;
+
+  private:
+#ifndef _WIN32
+    int descriptor_ = -1;
+#endif
+};
+
+class ProjectSaveLock : public ProjectLock {
+  public:
+    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_EX) {}
+};
+
+class ProjectReadLock : public ProjectLock {
+  public:
+    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_SH) {}
+};
+
+std::string recoveryHint() {
+    return " Open with recovery=true or run 'ice-cli project-repair <project>' to quarantine the invalid file "
+           "instead of deleting it.";
+}
+
 std::string safeFileStem(const std::string &name) {
     std::string stem;
     stem.reserve(name.size());
@@ -791,12 +896,31 @@ json readJsonFile(const std::filesystem::path &path) {
 }
 
 void writeJsonFile(const std::filesystem::path &path, const json &value) {
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    // Write to a sibling temporary file and rename it into place. Readers then
+    // see either the previous complete file or the new complete file, never a
+    // truncated one while another process is saving.
+    auto temporary = path;
+    temporary += ".tmp";
+    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream)
         throw ProjectError("project.save", "Unable to open file for writing: " + path.string());
     stream << value.dump(2) << "\n";
+    stream.close();
     if (!stream)
         throw ProjectError("project.save", "Unable to write file: " + path.string());
+    std::error_code status;
+    std::filesystem::rename(temporary, path, status);
+    if (status) {
+        // Windows does not replace an existing target with std::filesystem::rename.
+        status.clear();
+        std::filesystem::remove(path, status);
+        status.clear();
+        std::filesystem::rename(temporary, path, status);
+    }
+    if (status) {
+        std::filesystem::remove(temporary, status);
+        throw ProjectError("project.save", "Unable to replace file atomically: " + path.string());
+    }
 }
 
 void prepareDirectory(const std::filesystem::path &path, const std::string &extension) {
@@ -848,15 +972,9 @@ void ensureGitignore(const std::filesystem::path &root) {
     output << text;
 }
 
-void ensureAgentsFile(const std::filesystem::path &root, const std::string &projectName) {
-    const auto path = root / "AGENTS.md";
-    std::error_code status;
-    if (std::filesystem::exists(path, status) && !status)
-        return;
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output)
-        throw ProjectError("project.save", "Unable to write AGENTS.md");
-    output << "# " << projectName << "\n\n"
+std::string generatedAgentsGuidance() {
+    std::ostringstream output;
+    output << "<!-- ICE generated guidance: begin (version 2) -->\n"
            << "This directory is an ICE project.\n\n"
            << "- `project.icepro` contains project metadata.\n"
            << "- `sch/*.icesch` contains schematic cells.\n"
@@ -864,16 +982,47 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
            << "- `sim/*.icesim` contains simulations.\n"
            << "- `scripts/*.py` contains project-level simulation scripts.\n"
            << "- `build/` contains generated simulation results.\n\n"
+           << "Never write or edit the split project files (`sch/*.icesch`, `lay/*.icelay`, "
+              "`sim/*.icesim`) by hand. Use the ICE MCP, CLI, or GUI tools. If a project fails to "
+              "load, use `project_repair` or `project_open` with recovery instead of deleting files "
+              "with the shell.\n\n"
+           << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
+              "that the features you need are present. If `project_repair`, `project_migrate`, "
+              "`simulation_measure`, or text-schematic support is missing, stop and ask the user to "
+              "rebuild and restart ICE instead of working around the missing tools. Restart a "
+              "long-lived MCP server after installing a new build.\n\n"
            << "When the user asks you to make a schematic or circuit, use this typical workflow:\n\n"
-           << "1. Clarify the expectations (waveforms, gain, bandwidth, settling, power, etc.).\n"
-           << "2. Prefer a drawn canvas schematic over a text SPICE schematic. Use `schematic-add-cell` "
-              "(or the GUI canvas) with symbols and nets unless the user explicitly asks for text or "
-              "provides an existing SPICE netlist. Canvas schematics keep connectivity, layout, LVS, "
-              "and simulation workflows available.\n"
-           << "3. Create the simulation and choose the signals to capture.\n"
-           << "4. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
+           << "1. Clarify the expectations (waveforms, gain, bandwidth, settling, power, etc.). If "
+              "important or large schematic specifications are unclear, ask the user before drawing. "
+              "Examples include supply/voltage levels, topology, device types and sizes, performance "
+              "targets, external loads, constraints, and required simulations.\n"
+           << "2. Before drawing, open or create the project and inspect the available PDKs, model "
+              "libraries, ngspice, and Python with `project_summary`, `ice_doctor`, and `pdk_info` "
+              "(or `ice-cli doctor` / `ice-cli pdk-info`). Do not guess an absolute PDK `.lib` "
+              "path; `pdk_info` returns the package setup. Simulation PDKs come only from ICE "
+              "packages; do not use `~/.volare`, `~/.ciel`, `PDK_ROOT`, or `PDK`. If a package is "
+              "missing, install it with `ice-pkg`; if its OSDI models are missing, run "
+              "`ice-cli pdk-build <pdk>`. Confirm that the project's PDK reports "
+              "`simulation_ready: true` and prefer a ready PDK when the project does not already "
+              "select one. If no installed PDK is ready, you may still create the requested "
+              "schematic and report the blocker, or ask the user whether to install/build a PDK or "
+              "use an explicitly labeled behavioral model. If the user asked for transistor-level "
+              "simulation, do not silently replace it with a behavioral model.\n"
+           << "3. Prefer a drawn canvas schematic over a text SPICE schematic. In MCP use "
+              "`schematic_create`, `schematic_add_symbol` with pins, `schematic_add_instance`, and "
+              "`schematic_add_net`; inspect the result with `schematic_info`. In the CLI use the equivalent "
+              "`schematic-add-*` and `schematic-info` commands. `schematic_create` creates a drawn cell; "
+              "`schematic_create(kind=\"text\")`, `schematic_create_text`, and `schematic_add_text` "
+              "create a text SPICE cell. Use text SPICE only when the user explicitly asks for text, "
+              "provides an existing SPICE netlist, or the canvas tools are unavailable; state the "
+              "reason. Canvas schematics keep connectivity, layout, LVS, and simulation workflows "
+              "available.\n"
+           << "4. Create the simulation and choose the signals to capture. Use `simulation_measure` "
+              "(or `ice-cli simulation-measure`) for numerical checks; `simulation_result` and "
+              "`simulation_signals` expose trace statistics and available signals.\n"
+           << "5. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
               "response, transfer curves, settling, or other views needed to judge the expectations.\n"
-           << "5. Choose the simplest simulation style that fits the task:\n"
+           << "6. Choose the simplest simulation style that fits the task:\n"
            << "   - Use a normal simulation (`simulation-add` + `simulation-run`) for a single "
               "straightforward run when a few standard graphs are enough.\n"
            << "   - Prefer a simulation script (`script-add` / `script-write` / `script-run`) when "
@@ -882,13 +1031,69 @@ void ensureAgentsFile(const std::filesystem::path &root, const std::string &proj
               "parameter sweeps or corners. Scripts can compute metrics, compare results with the "
               "expectations, and generate GUI graphs.\n"
            << "   - Otherwise use a normal simulation for simplicity.\n"
-           << "6. Run the simulation or script, compare the results with the expectations, and tweak "
-              "the schematic if needed. Continue the loop until the expectations are met.\n\n"
+           << "7. Run the simulation or script and inspect its diagnostics before editing blindly: "
+              "`simulation_run` returns state, error, netlist context, trace details, and available "
+              "signals. Use `simulation_result`/`simulation_signals` for stored runs. If ngspice or the "
+              "PDK fails to initialize, return to `ice_doctor` (with the schematic or simulation name) and "
+              "fix the environment first. Compare the results with the expectations and tweak the "
+              "schematic if needed. Continue the loop until the expectations are met.\n"
+           << "8. If you substitute a behavioral or RC approximation for a transistor-level circuit, say "
+              "so explicitly and ask whether that is acceptable. A successful transient run is not proof "
+              "of oscillation: use `simulation_measure` and report zero crossings, frequency or period, "
+              "amplitude, and startup behavior before claiming the circuit works.\n\n"
+           << "Use `project_migrate` after upgrading ICE to refresh this generated guidance. Existing "
+              "user text outside the generated markers is preserved.\n\n"
            << "For scripted work, use `ice-cli` or `ice-mcp`. Successful `ice-mcp` project mutations "
               "are saved to disk automatically.\n"
            << "Run stored simulations with `ice-cli simulation-run <project> <simulation>`; "
               "its run is written under `build/` and loaded by the GUI graph tabs.\n\n"
-           << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n";
+           << "Use the ICE GUI, `ice-cli`, `icepy`, or `ice-mcp` to inspect and edit the project.\n"
+           << "<!-- ICE generated guidance: end -->\n";
+    return output.str();
+}
+
+bool ensureAgentsFile(const std::filesystem::path &root, const std::string &projectName) {
+    const auto path = root / "AGENTS.md";
+    const auto guidance = generatedAgentsGuidance();
+    const std::string beginMarker = "<!-- ICE generated guidance: begin";
+    const std::string endMarker = "<!-- ICE generated guidance: end -->";
+
+    std::string text;
+    std::error_code status;
+    if (std::filesystem::exists(path, status) && !status) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input)
+            throw ProjectError("project.save", "Unable to read AGENTS.md");
+        text.assign(std::istreambuf_iterator<char>(input), {});
+    } else {
+        text = "# " + projectName + "\n\n";
+    }
+
+    const auto begin = text.find(beginMarker);
+    const auto end = text.find(endMarker);
+    if (begin != std::string::npos && end != std::string::npos && end > begin) {
+        auto replaceEnd = end + endMarker.size();
+        if (replaceEnd < text.size() && text[replaceEnd] == '\n')
+            ++replaceEnd;
+        text.replace(begin, replaceEnd - begin, guidance);
+    } else {
+        if (!text.empty() && text.back() != '\n')
+            text.push_back('\n');
+        if (!text.empty())
+            text.push_back('\n');
+        text += guidance;
+    }
+
+    std::ifstream existing(path, std::ios::binary);
+    const std::string previous((std::istreambuf_iterator<char>(existing)), {});
+    if (existing && previous == text)
+        return false;
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw ProjectError("project.save", "Unable to write AGENTS.md");
+    output << text;
+    return true;
 }
 
 std::string uniqueStem(const std::string &name, ObjectId id, std::set<std::string> &used) {
@@ -912,6 +1117,15 @@ void Project::save(const std::filesystem::path &path) const {
         throw ProjectError(diagnostics.front().code, diagnostics.front().message);
 
     const auto root = projectRoot(path);
+    ProjectSaveLock saveLock(root);
+    if (!sourceRevision_.empty() && normalizedRoot(sourceRoot_) == normalizedRoot(root)) {
+        const auto currentRevision = projectRevision(root);
+        if (currentRevision != sourceRevision_)
+            throw ProjectError("project.changed",
+                               "Project files changed on disk since this project was loaded (another ICE process "
+                               "may have saved). Reload the project before saving, or open it again with recovery "
+                               "if repair is needed.");
+    }
     const auto full = json::parse(serialize());
     json projectJson = full;
     const auto schematicCells = full.at("schematic_cells");
@@ -966,18 +1180,57 @@ void Project::save(const std::filesystem::path &path) const {
         writeJsonFile(simulationDir / (stem + ".icesim"),
                       json{{"format", "ice-simulation"}, {"schema_version", 1}, {"simulation", simulation}});
     }
+    sourceRoot_ = root;
+    sourceRevision_ = projectRevision(root);
     spdlog::info("Saved project {}", (root / "project.icepro").string());
 }
 
-Project Project::load(const std::filesystem::path &path) {
+Project Project::load(const std::filesystem::path &path) { return load(path, {}, nullptr); }
+
+Project Project::load(const std::filesystem::path &path, const ProjectLoadOptions &options, ProjectLoadReport *report) {
     const auto root = projectRoot(path);
-    auto full = readJsonFile(root / "project.icepro");
+    ProjectReadLock readLock(root);
+    const auto metadataPath = root / "project.icepro";
+    json full;
+    try {
+        full = readJsonFile(metadataPath);
+    } catch (const std::exception &error) {
+        throw ProjectError("project.format", "Unable to load project metadata '" + metadataPath.string() +
+                                                 "': " + error.what() + recoveryHint());
+    }
     if (full.value("format", std::string{}) != "ice-project")
-        throw ProjectError("project.format", "Unsupported project format");
+        throw ProjectError("project.format", "Invalid project metadata '" + metadataPath.string() +
+                                                 "': expected format 'ice-project'" + recoveryHint());
     full["schematic_cells"] = json::array();
     full["layout_cells"] = json::array();
     full["procedural_layouts"] = json::array();
     full["simulations"] = json::array();
+
+    const auto quarantine = [&](const std::filesystem::path &file, const std::string &message) {
+        auto relative = file.lexically_relative(root);
+        if (relative.empty() || relative.string().starts_with(".."))
+            relative = file.filename();
+        auto directory = root / "build" / "recovery" / relative.parent_path();
+        std::error_code status;
+        std::filesystem::create_directories(directory, status);
+        auto target = directory / relative.filename();
+        for (int suffix = 1; std::filesystem::exists(target, status) && !status; ++suffix) {
+            target = directory / (file.stem().string() + "." + std::to_string(suffix) + file.extension().string());
+        }
+        status.clear();
+        std::filesystem::rename(file, target, status);
+        if (status) {
+            status.clear();
+            std::filesystem::copy_file(file, target, std::filesystem::copy_options::overwrite_existing, status);
+            if (!status)
+                std::filesystem::remove(file, status);
+        }
+        if (report) {
+            report->quarantinedFiles.push_back(target.string());
+            report->warnings.push_back(message + (status ? " (quarantine failed: " + status.message() + ")"
+                                                         : " (quarantined to " + target.string() + ")"));
+        }
+    };
 
     const auto readDirectory = [&](const std::filesystem::path &directory, const std::string &extension,
                                    const auto &consume) {
@@ -991,32 +1244,48 @@ Project Project::load(const std::filesystem::path &path) {
             }
         }
         std::sort(files.begin(), files.end());
-        for (const auto &file : files)
-            consume(readJsonFile(file));
+        for (const auto &file : files) {
+            try {
+                consume(readJsonFile(file));
+            } catch (const std::exception &error) {
+                const auto relative = file.lexically_relative(root).string();
+                const auto message = "Invalid project file '" + relative + "': " + error.what();
+                if (!options.recover)
+                    throw ProjectError("project.format", message + recoveryHint());
+                quarantine(file, message);
+            }
+        }
     };
 
     readDirectory(root / "sch", ".icesch", [&](const json &document) {
         if (document.value("format", std::string{}) != "ice-schematic" || !document.contains("cell"))
-            throw ProjectError("project.format", "Invalid schematic file");
+            throw ProjectError("project.format",
+                               "Invalid schematic file: expected an 'ice-schematic' envelope with a 'cell' object");
         full["schematic_cells"].push_back(document.at("cell"));
     });
     readDirectory(root / "lay", ".icelay", [&](const json &document) {
         if (document.value("format", std::string{}) != "ice-layout")
-            throw ProjectError("project.format", "Invalid layout file");
+            throw ProjectError("project.format", "Invalid layout file: expected format 'ice-layout'");
         if (document.contains("layout"))
             full["layout_cells"].push_back(document.at("layout"));
         else if (document.contains("procedural_layout"))
             full["procedural_layouts"].push_back(document.at("procedural_layout"));
         else
-            throw ProjectError("project.format", "Invalid layout file");
+            throw ProjectError("project.format",
+                               "Invalid layout file: expected a 'layout' or 'procedural_layout' object");
     });
     readDirectory(root / "sim", ".icesim", [&](const json &document) {
         if (document.value("format", std::string{}) != "ice-simulation" || !document.contains("simulation"))
-            throw ProjectError("project.format", "Invalid simulation file");
+            throw ProjectError(
+                "project.format",
+                "Invalid simulation file: expected an 'ice-simulation' envelope with a 'simulation' object");
         full["simulations"].push_back(document.at("simulation"));
     });
 
-    return deserialize(full.dump());
+    auto project = deserialize(full.dump());
+    project.sourceRoot_ = root;
+    project.sourceRevision_ = projectRevision(root);
+    return project;
 }
 
 ProjectSession::ProjectSession(Project project) : project_(std::move(project)), historyStates_{project_} {}
@@ -1130,4 +1399,28 @@ void SelectionModel::clear() {
 std::optional<ObjectId> SelectionModel::primary() const noexcept { return primary_; }
 const std::vector<ObjectId> &SelectionModel::related() const noexcept { return related_; }
 std::string version() { return "0.1.0"; }
+
+BuildInfo buildInfo() {
+    BuildInfo info;
+    info.version = version();
+#ifdef ICE_BUILD_COMMIT
+    info.commit = ICE_BUILD_COMMIT;
+#else
+    info.commit = "unknown";
+#endif
+#ifdef ICE_BUILD_TIME
+    info.buildTime = ICE_BUILD_TIME;
+#else
+    info.buildTime = "unknown";
+#endif
+#ifdef ICE_BUILD_TYPE
+    info.buildType = ICE_BUILD_TYPE;
+#else
+    info.buildType = "unknown";
+#endif
+    info.features = {"project_repair", "project_recovery",    "project_migrate",    "schematic_add_pin",
+                     "text_schematic", "ngspice_log_capture", "simulation_metrics", "pdk_status",
+                     "pdk_build",      "save_revision_guard"};
+    return info;
+}
 } // namespace ice

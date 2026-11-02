@@ -15,9 +15,99 @@ using json = nlohmann::ordered_json;
 
 namespace {
 std::mutex ngspiceMutex;
-int discardOutput(char *, int, void *) { return 0; }
-int discardStatus(char *, int, void *) { return 0; }
-int discardExit(int, NG_BOOL, NG_BOOL, int, void *) { return 0; }
+
+struct NgspiceLog {
+    std::string text;
+    std::mutex mutex;
+
+    void append(const char *message) {
+        if (!message || !*message)
+            return;
+        std::lock_guard lock(mutex);
+        text.append(message);
+        if (!text.empty() && text.back() != '\n')
+            text.push_back('\n');
+        constexpr std::size_t limit = 32 * 1024;
+        if (text.size() > limit)
+            text.erase(0, text.size() - limit);
+    }
+};
+
+int collectOutput(char *output, int, void *userData) {
+    if (userData)
+        static_cast<NgspiceLog *>(userData)->append(output);
+    return 0;
+}
+
+int collectStatus(char *status, int, void *userData) {
+    if (userData)
+        static_cast<NgspiceLog *>(userData)->append(status);
+    return 0;
+}
+
+int collectExit(int status, NG_BOOL immediate, NG_BOOL quit, int, void *userData) {
+    if (!userData)
+        return 0;
+    std::ostringstream message;
+    message << "ngspice exit status " << status;
+    if (immediate)
+        message << " (immediate unload)";
+    if (quit)
+        message << " (requested by circuit)";
+    static_cast<NgspiceLog *>(userData)->append(message.str().c_str());
+    return 0;
+}
+
+std::string compactNgspiceLog(const NgspiceLog &log) {
+    std::string text;
+    {
+        std::lock_guard lock(const_cast<NgspiceLog &>(log).mutex);
+        text = log.text;
+    }
+    std::string compact;
+    compact.reserve(text.size());
+    for (const char character : text) {
+        if (character != '\r')
+            compact.push_back(character);
+    }
+    while (!compact.empty() && (compact.back() == '\n' || compact.back() == ' '))
+        compact.pop_back();
+    constexpr std::size_t limit = 4000;
+    if (compact.size() > limit)
+        compact = "..." + compact.substr(compact.size() - limit);
+    return compact;
+}
+
+std::string ngspiceFailureHint(const std::string &details) {
+    std::string lower = details;
+    for (auto &character : lower)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    if (lower.find("could not find a valid modelname") != std::string::npos ||
+        lower.find("unknown model") != std::string::npos)
+        return "The netlist references a model that ngspice could not load. Check the PDK OSDI/PSP setup, the "
+               ".lib section, and the device model names.";
+    if (lower.find("section definition") != std::string::npos && lower.find("not found") != std::string::npos)
+        return "The model file exists but the requested section is missing. Check the corner/section name in the "
+               ".lib directive.";
+    if (lower.find("could not find include file") != std::string::npos)
+        return "A model include path is missing. Run ice_doctor with the schematic or simulation and inspect "
+               "model_checks.";
+    if (lower.find("cannot compute substitute") != std::string::npos)
+        return "ngspice could not evaluate a model parameter. The PDK model stack may be incomplete; check the "
+               "OSDI/PSP models and the selected corner.";
+    if (lower.find("singular matrix") != std::string::npos)
+        return "The circuit has a singular operating point. Check for floating nodes, missing DC paths, or "
+               "conflicting sources.";
+    return {};
+}
+
+void appendFailureDetails(std::string &error, const std::string &details) {
+    if (!details.empty())
+        error += ": " + details;
+    const auto hint = ngspiceFailureHint(details);
+    if (!hint.empty())
+        error += "\nhint: " + hint;
+}
 
 std::string fingerprintRequest(const SimulationRequest &request) {
     // FNV-1a 64-bit over the analysis parameters and netlist for provenance.
@@ -46,6 +136,8 @@ std::string fingerprintRequest(const SimulationRequest &request) {
         mixString(line);
     for (const auto &signal : request.probeSignals)
         mixString(signal);
+    for (const auto &command : request.initCommands)
+        mixString(command);
     std::ostringstream text;
     text << std::hex << std::setw(16) << std::setfill('0') << hash;
     return "fnv1a64:" + text.str();
@@ -92,10 +184,27 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
     for (auto &line : lines)
         circuit.push_back(line.data());
     circuit.push_back(nullptr);
-    if (ngSpice_Init(discardOutput, discardStatus, discardExit, nullptr, nullptr, nullptr, nullptr) != 0 ||
-        ngSpice_Circ(circuit.data()) != 0) {
+    NgspiceLog log;
+    if (ngSpice_Init(collectOutput, collectStatus, collectExit, nullptr, nullptr, nullptr, &log) != 0) {
         result.state = JobState::failed;
-        result.error = "unable to initialize ngspice";
+        result.error = "ngspice could not initialize";
+        appendFailureDetails(result.error, compactNgspiceLog(log));
+        return result;
+    }
+    for (const auto &command : request.initCommands) {
+        std::vector<char> buffer(command.begin(), command.end());
+        buffer.push_back('\0');
+        if (ngSpice_Command(buffer.data()) != 0) {
+            result.state = JobState::failed;
+            result.error = "ngspice simulator setup command failed: " + command;
+            appendFailureDetails(result.error, compactNgspiceLog(log));
+            return result;
+        }
+    }
+    if (ngSpice_Circ(circuit.data()) != 0) {
+        result.state = JobState::failed;
+        result.error = "ngspice could not load the circuit";
+        appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
     std::ostringstream command;
@@ -111,12 +220,14 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
     if (ngSpice_Command(commandText.data()) != 0) {
         result.state = JobState::failed;
         result.error = "ngspice transient analysis failed";
+        appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
     auto *time = ngGet_Vec_Info(const_cast<char *>("time"));
     if (time == nullptr || time->v_realdata == nullptr || time->v_length <= 0) {
         result.state = JobState::failed;
         result.error = "ngspice did not produce a time vector";
+        appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
 
@@ -126,8 +237,7 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         std::string name = signal;
         for (auto &character : name)
             character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-        if ((name.rfind("v(", 0) == 0 || name.rfind("i(", 0) == 0 || name.rfind("@", 0) == 0) &&
-            name.size() >= 3)
+        if ((name.rfind("v(", 0) == 0 || name.rfind("i(", 0) == 0 || name.rfind("@", 0) == 0) && name.size() >= 3)
             return name;
         return "v(" + name + ")";
     };

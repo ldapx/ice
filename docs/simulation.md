@@ -18,6 +18,10 @@ be picked directly; the resulting `v(node)` signal is appended to the list and
 the editor returns to the Simulation tab.
 
 A simulation may point at either a drawn schematic or a text SPICE schematic.
+The schematic's ICE PDK package supplies the model preamble (`.option`,
+`.include`, `.lib`) and OSDI initialization. ICE applies these before the
+schematic netlist and loads OSDI models explicitly through libngspice; a global
+`~/.spiceinit` or `PDK_ROOT`/`PDK` environment is not used for ICE simulations.
 Text source is used directly as the circuit netlist, with analysis-control
 directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` removed because the
 simulation properties supply the analysis. For text schematics the **Build
@@ -58,6 +62,12 @@ atomically and include failed, cancelled, and timed-out terminal states.
 
 The stored format is intentionally new-only; legacy bare result JSON is not
 read by the simulation script tooling.
+
+`simulation_result`/`simulation_signals` include per-trace min/max/amplitude,
+mean, RMS, first/last values, and point counts. `simulation_measure` (MCP) and
+`ice-cli simulation-measure` add zero crossings, rising crossings, period,
+frequency, and settling time. These are the lightweight checks to use before
+claiming that an oscillator or transient has met its specification.
 
 ## Python metrics API
 

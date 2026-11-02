@@ -5,6 +5,14 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("spdlog", "nlohmann_json", "clipper2")
 
+-- Bake a small build fingerprint into icelib so MCP clients can detect a
+-- long-lived server that was started before the last install.
+-- Set ICE_BUILD_COMMIT/ICE_BUILD_TIME when configuring to embed a precise
+-- fingerprint; otherwise the binary reports "unknown"/the configure time.
+local build_commit = os.getenv("ICE_BUILD_COMMIT") or "unknown"
+local build_time = os.getenv("ICE_BUILD_TIME") or os.date("!%Y-%m-%dT%H:%M:%SZ")
+local build_type = is_mode("release") and "release" or "debug"
+
 -- Agent Client Protocol support. The normal build uses the bundled
 -- third_party/agentsdk-cpp submodule. AGENTSDK_CPP_DIR and a sibling checkout
 -- remain supported for downstream packaging.
@@ -37,7 +45,11 @@ target("icelib")
     set_kind("static")
     add_files("src/icelib/*.cpp")
     add_includedirs("include", {public = true})
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"',
+                'ICE_BUILD_COMMIT="' .. build_commit .. '"',
+                'ICE_BUILD_TIME="' .. build_time .. '"',
+                'ICE_BUILD_TYPE="' .. build_type .. '"',
+                {public = true})
     add_cxxflags("-fPIC", {public = true})
     add_cxxflags(first_party_warnings)
     add_packages("spdlog", "nlohmann_json", "clipper2")

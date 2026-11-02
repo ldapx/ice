@@ -292,6 +292,14 @@ QString packagePdkDisplayName(const ice::PackageSpec &package) {
     return QString::fromStdString(package.name);
 }
 
+std::filesystem::path installedPdkPackageRoot(const std::string &pdkId) {
+    for (const auto &entry : installedPackages(configuredPackageInstallDirectory())) {
+        if (ice::packageMatchesPdk(entry.spec, pdkId))
+            return entry.spec.root;
+    }
+    return {};
+}
+
 std::vector<ice::PackageIndexEntry> installedPdkPackages(const std::filesystem::path &installDirectory) {
     std::vector<ice::PackageIndexEntry> result;
     for (auto &entry : installedPackages(installDirectory)) {

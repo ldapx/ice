@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 #include "icelib/packages.hpp"
+#include "icelib/pdk.hpp"
 #include <filesystem>
 #include <iostream>
 int main(int argc, char **argv) {
@@ -8,7 +9,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc < 2 || std::string(argv[1]) == "--help") {
-        std::cout << "ice-pkg " << ice::version() << "\nUsage: ice-pkg <manifest|hash|install|resolve|verify> ...\n";
+        std::cout << "ice-pkg " << ice::version()
+                  << "\nUsage: ice-pkg <manifest|hash|install|resolve|verify|pdk-build> ...\n";
         return 0;
     }
     try {
@@ -19,6 +21,20 @@ int main(int argc, char **argv) {
             for (const auto &capability : ice::PackageManager::capabilities(package))
                 std::cout << "capability: " << capability << "\n";
             return 0;
+        }
+        if (command == "pdk-build" && argc == 3) {
+            const auto pdks = ice::findPdks(argv[2]);
+            if (pdks.empty())
+                throw ice::ProjectError("pdk.build", "Unknown ICE PDK package: " + std::string(argv[2]));
+            const auto result = ice::buildPdkOsdi(pdks.front());
+            std::cout << nlohmann::json{{"ok", result.ok},
+                                        {"summary", result.summary},
+                                        {"compiler", result.compiler},
+                                        {"osdi_dir", result.osdiDir.string()},
+                                        {"log", result.log}}
+                             .dump(2)
+                      << "\n";
+            return result.ok ? 0 : 1;
         }
         if (command == "hash" && argc == 3) {
             std::cout << ice::PackageManager::contentHash(argv[2]) << "\n";

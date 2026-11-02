@@ -16,6 +16,15 @@ Run without a project and open/create one through tools:
 ice-mcp
 ```
 
+After building, run the MCP tool smoke test:
+
+```sh
+python3 tests/mcp_tools_smoke.py
+```
+
+It exercises drawn-schematic creation with pins and nets, text-schematic
+editing, simulation diagnostics, and doctor/PDK discovery.
+
 The MCP server exposes `simulation_create`, `simulation_update`, and
 `simulation_run`, so a client can create, configure, and run a simulation
 without switching to `ice-cli`. `project_reload` explicitly refreshes an open
@@ -27,26 +36,54 @@ Or open a project at startup:
 
 ```sh
 ice-mcp --project design/project.icepro
+ice-mcp --project design/project.icepro --recover
 ```
+
+If the startup project has a malformed sidecar, the server starts in a degraded
+state instead of exiting, reports the warning in `ice_version`/`ice_doctor`, and
+still exposes `project_open(recover=true)` and `project_repair`. `--recover`
+quarantines the invalid file immediately.
 
 The process is silent on stdout except for JSON-RPC messages; diagnostic logs
 go to stderr.
+
+## Build fingerprint and restarting
+
+`ice_version` returns the version, git commit, build time, build type,
+executable path, and feature flags. The same fingerprint is included in the MCP
+instructions. Restart the MCP client after installing or rebuilding ICE:
+a long-lived server keeps the binary code it loaded at process start, even when
+`~/.local/bin/ice-mcp` has been replaced.
+
+At the start of a session, call `ice_version` and confirm features such as
+`project_repair`, `project_migrate`, `simulation_metrics`, and `pdk_status`.
+If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `ice_version` | Return the ICE version. |
+| `ice_version` | Return the ICE build fingerprint and feature flags. |
+| `pdk_info` | Inspect ICE PDK packages, ngspice models, OSDI setup, sections, and optional transistor probe. |
+| `pdk_build` | Build an ICE PDK package's Verilog-A sources into the OSDI cache. |
 | `project_create` | Create and open a project file. |
-| `project_open` | Open an existing project. |
+| `project_open` | Open an existing project; optional `recover` quarantines malformed sidecar files. |
 | `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
 | `project_validate` | Return validation diagnostics. |
+| `project_repair` | Recover a project and save it after quarantining invalid files. |
+| `project_migrate` | Refresh the generated `AGENTS.md` guidance while preserving user text. |
 | `project_undo` / `project_redo` | Move through project history. |
-| `schematic_create` | Create a drawn schematic cell. |
+| `ice_doctor` | Inspect Python, ngspice, PDK readiness, model libraries, and optional schematic/simulation model includes. |
+| `schematic_create` | Create a schematic cell; use `kind="text"` for a SPICE text cell. |
+| `schematic_list` | List schematic cells and their symbol/instance/net counts. |
+| `schematic_info` | Read symbols, pins, instances, parameters, and nets. |
 | `schematic_create_text` | Create a text SPICE schematic. |
 | `schematic_delete` | Delete a schematic, blocked when simulations or symbols use it. |
-| `schematic_add_symbol` | Add a symbol definition. |
-| `schematic_add_instance` | Place a symbol instance. |
+| `schematic_add_symbol` | Add a symbol definition, optionally with a `pins` array. |
+| `schematic_add_pin` | Add a pin to an existing symbol. |
+| `schematic_add_net` | Connect two or more pin ids or `<instance>.<pin>` names into a net. |
+| `schematic_netlist` | Return the SPICE netlist generated from a schematic. |
+| `schematic_add_instance` | Place a symbol instance by id or symbol name. |
 | `layout_create` | Create a static layout cell. |
 | `layout_create_from_schematic` | Generate a layout from a schematic. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
@@ -57,6 +94,9 @@ go to stderr.
 | `layout_add_port` | Add a port. |
 | `layout_add_instance` | Instance another layout cell. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report. |
+| `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
+| `simulation_signals` | List available signals and trace sizes from the latest stored run. |
+| `simulation_measure` | Measure crossings, frequency, amplitude, RMS, and settling time. |
 | `simulation_graph_create` | Add a graph definition to a simulation. |
 | `simulation_graph_list` | List graph definitions. |
 | `simulation_graph_info` | Read one graph definition. |
@@ -75,9 +115,86 @@ name or numeric id. Coordinates are integer database units. `lvs_run` accepts a
 layout name or id and an optional schematic; when the schematic is omitted, ICE
 infers it from planned-device links or matching layout/schematic names.
 
+A drawn schematic can be created and connected entirely through MCP:
+`schematic_add_symbol` can create a symbol with its pins, `schematic_add_instance`
+accepts either `symbol_id` or `symbol`, and `schematic_add_net` accepts pin ids
+or readable names such as `I1.Y` and `I2.A`. Use `schematic_info` to inspect the
+result and `schematic_netlist` to check the generated SPICE. Duplicate symbol
+names and duplicate pin names are rejected.
+
+`simulation_run` returns the state, error, netlist context, trace statistics,
+and available signal names. If ngspice or a PDK library cannot initialize, run
+`ice_doctor` with the schematic or simulation name to validate model includes
+and PDK readiness before editing the circuit. `simulation_result` and
+`simulation_signals` read the latest stored run without requiring shell access
+to `build/`. `simulation_measure` computes min/max/mean/RMS, zero crossings,
+rising crossings, period, frequency, amplitude, and settling time for one or all
+captured signals.
+
+A successful transient run is not proof of oscillation. Use
+`simulation_measure` and report the measurements before claiming that an
+oscillator works.
+
+## PDK readiness
+
+Simulation PDKs come from ICE packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
+and global `~/.spiceinit` files are not used.
+
+`ice_doctor` now includes per-PDK readiness, and `pdk_info` returns the package
+name/version, exact ngspice model directory, `.lib` sections, OSDI files,
+OpenVAF availability, ordered `recommended_setup` lines, and example devices.
+`pdks_ready` is true when at least one installed PDK package is ready;
+`all_pdks_ready` is true only when every installed package is ready. When a
+project uses a PDK that is not simulation-ready, `ice_doctor` returns `ok: false`
+with a `pdk_hint` naming the missing pieces. Pass `probe: true` to `ice_doctor`
+to run a minimal transistor load check. Do not replace a transistor-level
+request with a behavioral model silently; report the blocker and ask the user.
+
+OSDI PDKs need a one-time local build:
+
+```text
+pdk_build pdk="ihp-sg13g2"
+```
+
+This compiles the package Verilog-A sources into the ICE OSDI cache. ICE then
+loads those files explicitly for each simulation; no global `.spiceinit` is
+needed.
+
+For IHP SG13G2, the correct model entry is a top-level call such as:
+
+```spice
+.lib "<package>/libs.tech/ngspice/models/cornerMOSlv.lib" mos_tt
+```
+
+not `.include cornerMOSlv.lib`. Sky130 and GF180 use different layouts
+(`sky130.lib.spice` with `.option scale=1u`, and `design.ngspice` plus
+`sm141064.ngspice`); `pdk_info` returns the ordered `recommended_setup` lines and
+example device names. Use `pdk_info` with `probe: true` for an explicit
+transistor-level load check.
+
+## Text schematics
+
+Use `schematic_create` with `kind: "text"` (or the `schematic_create_text` /
+`schematic_add_text` aliases) when a text SPICE cell is intended. Do not create a
+drawn cell and then write its sidecar by hand. `schematic_set_text` can convert
+an empty drawn cell when called with `convert: true`; non-empty drawn cells are
+rejected.
+
+Project sidecar files are not an editing interface. Do not write
+`sch/*.icesch`, `lay/*.icelay`, or `sim/*.icesim` by hand; use the tools instead.
+If one becomes malformed, call `project_repair` or `project_open` with
+`recover: true`. The recovered file is moved under `build/recovery/`. After
+upgrading ICE, call `project_migrate` to refresh the generated `AGENTS.md`
+guidance; user text outside the generated markers is preserved.
+
 Project mutations are recorded in project history and saved automatically after
 each successful tool call, so the GUI and `ice-cli` see them immediately.
 Simulation script source files are written under `scripts/`.
+
+Sidecar and metadata writes are atomic, and saves use a project lock plus a
+revision check. If another ICE process changed the project after this server
+loaded it, the stale save fails with `project.changed` instead of overwriting
+the newer files. Reload or reopen the project and retry.
 
 `simulation_script_run` executes the script through the shared Python runner and
 returns `exit_code`, `timed_out`, `stdout`, `stderr`, and generated graph data,
