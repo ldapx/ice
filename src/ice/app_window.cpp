@@ -3998,6 +3998,28 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    void placeComment(QPointF position) {
+        if (!project_ || project_->project().schematicCells.empty())
+            return;
+        bool accepted = false;
+        const auto text = QInputDialog::getText(this, QStringLiteral("Place Comment"), QStringLiteral("Comment text:"),
+                                                QLineEdit::Normal, QString(), &accepted);
+        if (!accepted || text.trimmed().isEmpty())
+            return;
+        const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
+                                ? activeSchematicId_
+                                : project_->project().schematicCells.begin()->first;
+        project_->execute("place comment", [&](ice::Project &project) {
+            auto &cell = project.schematicCells.at(cellId);
+            const auto id = project.nextId();
+            cell.comments.emplace(id, ice::SchematicComment{id,
+                                                           text.trimmed().toStdString(),
+                                                           static_cast<ice::Coordinate>(position.x()),
+                                                           static_cast<ice::Coordinate>(-position.y())});
+        });
+        refreshProject();
+    }
+
     void placeNetLabel(QPointF position) {
         if (!project_ || project_->project().schematicCells.empty())
             return;
@@ -4164,10 +4186,10 @@ class DocumentWindow : public QMainWindow {
     // Selection is view state, but it is discussed with the domain model so the
     // status bar and properties panel always describe the selected instance.
     void updateSelectionStatus() {
-        const auto instanceId = schematicCanvas_ ? schematicCanvas_->selectedInstanceId() : 0;
+        const auto selectedIds = schematicCanvas_ ? schematicCanvas_->selectedInstanceIds() : std::vector<ice::ObjectId>{};
         if (!selectionStatus_)
             return;
-        if (instanceId == 0) {
+        if (selectedIds.empty()) {
             selectionStatus_->setText(QStringLiteral("Selection: none"));
             if (!schematicPropertiesPanel_)
                 return;
@@ -4186,11 +4208,25 @@ class DocumentWindow : public QMainWindow {
             schematicPropertiesPanel_->setSchematic(cell->second, generatedSchematicSymbol(cell->second).svg);
             return;
         }
+        if (selectedIds.size() > 1) {
+            selectionStatus_->setText(QStringLiteral("Selection: %1 items").arg(selectedIds.size()));
+            if (schematicPropertiesPanel_)
+                schematicPropertiesPanel_->clearSelection();
+            return;
+        }
+        const auto instanceId = selectedIds.front();
         if (!project_ || !schematicPropertiesPanel_) {
             selectionStatus_->setText(QStringLiteral("Selection: none"));
             return;
         }
         for (const auto &[_, cell] : project_->project().schematicCells) {
+            const auto comm = cell.comments.find(instanceId);
+            if (comm != cell.comments.end()) {
+                selectionStatus_->setText(
+                    QStringLiteral("Selection: Comment \"%1\"").arg(QString::fromStdString(comm->second.text)));
+                schematicPropertiesPanel_->clearSelection();
+                return;
+            }
             const auto instance = cell.instances.find(instanceId);
             if (instance == cell.instances.end())
                 continue;
@@ -4432,6 +4468,27 @@ class DocumentWindow : public QMainWindow {
     void openSymbolProperties(ice::ObjectId instanceId) {
         if (!project_ || instanceId == 0)
             return;
+        for (const auto &[cellId, cell] : project_->project().schematicCells) {
+            const auto commIt = cell.comments.find(instanceId);
+            if (commIt != cell.comments.end()) {
+                bool accepted = false;
+                const auto newText = QInputDialog::getText(
+                    this, QStringLiteral("Edit Comment"), QStringLiteral("Comment:"),
+                    QLineEdit::Normal, QString::fromStdString(commIt->second.text), &accepted);
+                if (accepted && !newText.trimmed().isEmpty()) {
+                    project_->execute("edit comment", [&](ice::Project &project) {
+                        auto cIt = project.schematicCells.find(cellId);
+                        if (cIt != project.schematicCells.end()) {
+                            auto it = cIt->second.comments.find(instanceId);
+                            if (it != cIt->second.comments.end())
+                                it->second.text = newText.trimmed().toStdString();
+                        }
+                    });
+                    refreshProject();
+                }
+                return;
+            }
+        }
         for (const auto &[_, cell] : project_->project().schematicCells) {
             const auto instance = cell.instances.find(instanceId);
             if (instance == cell.instances.end())
@@ -6751,6 +6808,7 @@ class DocumentWindow : public QMainWindow {
                 label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
             }
             label->setData(0, QStringLiteral("symbol-label"));
+            label->setFlag(QGraphicsItem::ItemIsSelectable, false);
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
                 pinItem->setPen(QPen(ice::uiColor(ice::UiColor::Axis1)));
@@ -6774,9 +6832,39 @@ class DocumentWindow : public QMainWindow {
                 fill.setAlpha(45);
                 highlight->setBrush(fill);
                 highlight->setZValue(-1);
+                highlight->setFlag(QGraphicsItem::ItemIsSelectable, false);
                 highlight->setData(0, QStringLiteral("symbol-highlight"));
                 highlight->setVisible(false);
             }
+        }
+        for (const auto &[commentId, comment] : cell.comments) {
+            auto *group = new QGraphicsItemGroup;
+            scene->addItem(group);
+            group->setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable);
+            group->setData(0, QStringLiteral("comment"));
+            group->setData(1, QVariant::fromValue<qulonglong>(commentId));
+            group->setPos(comment.x, -comment.y);
+            group->setToolTip(QString::fromStdString(comment.text));
+
+            auto *textItem = new QGraphicsTextItem(QString::fromStdString(comment.text), group);
+            textItem->setDefaultTextColor(ice::uiColor(ice::UiColor::Text1));
+            QFont font = textItem->font();
+            font.setPointSize(11);
+            textItem->setFont(font);
+            textItem->setData(0, QStringLiteral("comment-text"));
+            textItem->setFlag(QGraphicsItem::ItemIsSelectable, false);
+
+            const auto textBounds = textItem->boundingRect();
+            const auto highlightBounds = textBounds.adjusted(-4, -4, 4, 4);
+            auto *highlight = new QGraphicsRectItem(highlightBounds, group);
+            highlight->setPen(QPen(ice::uiColor(ice::UiColor::Accent4), 2));
+            QColor fill(ice::uiColor(ice::UiColor::Accent4));
+            fill.setAlpha(45);
+            highlight->setBrush(fill);
+            highlight->setZValue(-1);
+            highlight->setFlag(QGraphicsItem::ItemIsSelectable, false);
+            highlight->setData(0, QStringLiteral("symbol-highlight"));
+            highlight->setVisible(false);
         }
         struct PinView {
             QPointF point;
@@ -7139,7 +7227,7 @@ class DocumentWindow : public QMainWindow {
             schematicSymbolsPanel_->selectSymbol(definition.name);
         if (schematicCanvas_) {
             schematicCanvas_->setPlaceSymbolPreview(definition.svg.toUtf8());
-            schematicCanvas_->setNetLabelMode(false);
+            schematicCanvas_->setCommentMode(false);
             schematicCanvas_->setPlaceSymbolMode(true);
         }
         if (toolEscapeShortcut_)
@@ -7160,7 +7248,7 @@ class DocumentWindow : public QMainWindow {
         if (schematicCanvas_) {
             schematicCanvas_->setSignalPickMode(false);
             schematicCanvas_->setPlaceSymbolMode(false);
-            schematicCanvas_->setNetLabelMode(false);
+            schematicCanvas_->setCommentMode(false);
         }
         if (schematicSymbolsPanel_)
             schematicSymbolsPanel_->clearSymbolSelection();
@@ -7928,7 +8016,7 @@ class DocumentWindow : public QMainWindow {
                         }
                     }
                     project_->execute("move symbol", [&](ice::Project &project) {
-                        for (auto &[_, cell] : project.schematicCells)
+                        for (auto &[_, cell] : project.schematicCells) {
                             if (auto it = cell.instances.find(id); it != cell.instances.end()) {
                                 moved = it->second.x != static_cast<ice::Coordinate>(position.x()) ||
                                         it->second.y != static_cast<ice::Coordinate>(-position.y());
@@ -7937,6 +8025,14 @@ class DocumentWindow : public QMainWindow {
                                 updateAutomaticNetLabelPositions(project);
                                 return;
                             }
+                            if (auto it = cell.comments.find(id); it != cell.comments.end()) {
+                                moved = it->second.x != static_cast<ice::Coordinate>(position.x()) ||
+                                        it->second.y != static_cast<ice::Coordinate>(-position.y());
+                                it->second.x = static_cast<ice::Coordinate>(position.x());
+                                it->second.y = static_cast<ice::Coordinate>(-position.y());
+                                return;
+                            }
+                        }
                     });
                     if (moved && !historyLabel.empty())
                         project_->setLastHistoryLabel(std::move(historyLabel));
@@ -7991,7 +8087,7 @@ class DocumentWindow : public QMainWindow {
                     });
                     refreshProject();
                 },
-                [this](QPointF position) { placeNetLabel(position); },
+                [this](QPointF position) { placeComment(position); },
                 [this] {
                     if (!project_)
                         return;
@@ -8109,6 +8205,8 @@ class DocumentWindow : public QMainWindow {
                             deletedNames.push_back(
                                 (symbol == cell.symbols.end() ? std::string("device") : symbol->second.name) + " " +
                                 instance->second.name);
+                        } else if (const auto comm = cell.comments.find(id); comm != cell.comments.end()) {
+                            deletedNames.push_back("comment");
                         }
                     }
                 }
@@ -8117,13 +8215,14 @@ class DocumentWindow : public QMainWindow {
                         std::vector<ice::ObjectId> removedPins;
                         for (auto id : ids) {
                             auto instance = cell.instances.find(id);
-                            if (instance == cell.instances.end())
-                                continue;
-                            auto symbol = cell.symbols.find(instance->second.symbol);
-                            if (symbol != cell.symbols.end())
-                                for (const auto &pin : symbol->second.pins)
-                                    removedPins.push_back(pin.id);
-                            cell.instances.erase(instance);
+                            if (instance != cell.instances.end()) {
+                                auto symbol = cell.symbols.find(instance->second.symbol);
+                                if (symbol != cell.symbols.end())
+                                    for (const auto &pin : symbol->second.pins)
+                                        removedPins.push_back(pin.id);
+                                cell.instances.erase(instance);
+                            }
+                            cell.comments.erase(id);
                         }
                         for (auto &[_, net] : cell.nets)
                             net.pins.erase(std::remove_if(net.pins.begin(), net.pins.end(),
@@ -8444,19 +8543,22 @@ class DocumentWindow : public QMainWindow {
         auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Device"));
         placeSymbolTool->setCheckable(true);
         schematicPlaceSymbolTool_ = placeSymbolTool;
-        auto *placeLabelTool = addTool(QStringLiteral("tag"), QStringLiteral("Place Label"));
-        placeLabelTool->setCheckable(true);
+        auto *placeCommentTool = addTool(QStringLiteral("message-square"), QStringLiteral("Comment"));
+        placeCommentTool->setToolTip(QStringLiteral("Comment"));
+        placeCommentTool->setStatusTip(QStringLiteral("Comment"));
+        placeCommentTool->setCheckable(true);
+        schematicPlaceCommentTool_ = placeCommentTool;
         auto *toolGroup = new QActionGroup(toolbar);
         toolGroup->setExclusive(true);
-        for (auto *action : {selectTool, placeSymbolTool, placeLabelTool})
+        for (auto *action : {selectTool, placeSymbolTool, placeCommentTool})
             toolGroup->addAction(action);
         selectTool->setChecked(true);
-        const auto ensureToolChecked = [this, selectTool, placeSymbolTool, placeLabelTool] {
-            if (!selectTool->isChecked() && !placeSymbolTool->isChecked() && !placeLabelTool->isChecked()) {
+        const auto ensureToolChecked = [this, selectTool, placeSymbolTool, placeCommentTool] {
+            if (!selectTool->isChecked() && !placeSymbolTool->isChecked() && !placeCommentTool->isChecked()) {
                 selectTool->setChecked(true);
                 if (schematicCanvas_) {
                     schematicCanvas_->setPlaceSymbolMode(false);
-                    schematicCanvas_->setNetLabelMode(false);
+                    schematicCanvas_->setCommentMode(false);
                 }
                 if (schematicSymbolsPanel_)
                     schematicSymbolsPanel_->clearSymbolSelection();
@@ -8464,14 +8566,14 @@ class DocumentWindow : public QMainWindow {
                     toolEscapeShortcut_->setEnabled(false);
             }
         };
-        for (auto *action : {selectTool, placeSymbolTool, placeLabelTool})
+        for (auto *action : {selectTool, placeSymbolTool, placeCommentTool})
             connect(action, &QAction::toggled, this, [ensureToolChecked](bool) { ensureToolChecked(); });
         connect(selectTool, &QAction::triggered, this, [this, selectTool] {
             if (!selectTool->isChecked())
                 return;
             if (schematicCanvas_) {
                 schematicCanvas_->setPlaceSymbolMode(false);
-                schematicCanvas_->setNetLabelMode(false);
+                schematicCanvas_->setCommentMode(false);
             }
             if (schematicSymbolsPanel_)
                 schematicSymbolsPanel_->clearSymbolSelection();
@@ -8485,19 +8587,19 @@ class DocumentWindow : public QMainWindow {
             if (schematicCanvas_)
                 schematicCanvas_->setFocus();
         });
-        connect(placeLabelTool, &QAction::triggered, this, [this, placeLabelTool] {
-            if (!placeLabelTool->isChecked())
+        connect(placeCommentTool, &QAction::triggered, this, [this, placeCommentTool] {
+            if (!placeCommentTool->isChecked())
                 return;
             if (schematicCanvas_) {
                 schematicCanvas_->setPlaceSymbolMode(false);
-                schematicCanvas_->setNetLabelMode(true);
+                schematicCanvas_->setCommentMode(true);
                 schematicCanvas_->setFocus();
             }
             if (schematicSymbolsPanel_)
                 schematicSymbolsPanel_->clearSymbolSelection();
             if (toolEscapeShortcut_)
                 toolEscapeShortcut_->setEnabled(true);
-            statusBar()->showMessage(QStringLiteral("Click in the schematic to place a net label"));
+            statusBar()->showMessage(QStringLiteral("Click in the schematic to place a comment"));
         });
 
         toolbar->addSeparator();
@@ -8796,6 +8898,7 @@ class DocumentWindow : public QMainWindow {
     QLabel *gridStatusLabel_ = nullptr;
     QAction *schematicSelectTool_ = nullptr;
     QAction *schematicPlaceSymbolTool_ = nullptr;
+    QAction *schematicPlaceCommentTool_ = nullptr;
     QAction *layoutSelectTool_ = nullptr;
     QAction *layoutMoveTool_ = nullptr;
     QAction *layoutPlaceDeviceTool_ = nullptr;

@@ -17,10 +17,12 @@ class SchematicCanvas : public QGraphicsView {
     virtual void setCallbacks(std::function<void(ice::ObjectId, QPointF)> moved,
                               std::function<void(ice::ObjectId)> rotated,
                               std::function<void(ice::ObjectId, ice::ObjectId)> connected,
-                              std::function<void(QPointF)> netLabelPlaced, std::function<void()> changed,
+                              std::function<void(QPointF)> commentPlaced, std::function<void()> changed,
                               std::function<void(ice::ObjectId)> symbolSelected = {},
                               std::function<void(ice::ObjectId)> symbolActivated = {}) = 0;
     virtual void setNetLabelMode(bool enabled) = 0;
+    virtual void setCommentMode(bool enabled) = 0;
+    virtual bool isCommentMode() const = 0;
     virtual void setPlaceSymbolMode(bool enabled) = 0;
     virtual bool isSignalPickMode() const = 0;
     virtual void setSignalPickMode(bool enabled) = 0;
@@ -37,6 +39,7 @@ class SchematicCanvas : public QGraphicsView {
     virtual void setPlaceSymbolPreview(const QByteArray &artwork) = 0;
     virtual void refreshPinVisibility() = 0;
     virtual ice::ObjectId selectedInstanceId() const = 0;
+    virtual std::vector<ice::ObjectId> selectedInstanceIds() const = 0;
     virtual void restoreSelection() = 0;
     virtual void clearSelection() = 0;
     virtual void deleteSelectedSymbols() = 0;

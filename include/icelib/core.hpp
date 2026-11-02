@@ -94,6 +94,13 @@ struct Net {
     Coordinate y = 0;
 };
 
+struct SchematicComment {
+    ObjectId id = 0;
+    std::string text;
+    Coordinate x = 0;
+    Coordinate y = 0;
+};
+
 struct SchematicCell {
     ObjectId id = 0;
     std::string name;
@@ -104,6 +111,7 @@ struct SchematicCell {
     std::map<ObjectId, Symbol> symbols;
     std::map<ObjectId, SchematicInstance> instances;
     std::map<ObjectId, Net> nets;
+    std::map<ObjectId, SchematicComment> comments;
     // True for a schematic authored as a raw SPICE text document rather than
     // as a drawn symbol-and-net canvas.
     bool textSchematic = false;

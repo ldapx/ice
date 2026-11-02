@@ -1837,3 +1837,26 @@ TEST_CASE("simulation graph metadata is editable through core helpers") {
     CHECK(!ice::removeSimulationGraph(project, simulation.id, graphId));
     CHECK_THROWS_AS(ice::addSimulationGraph(project, 9999, graph), ice::ProjectError);
 }
+
+TEST_CASE("schematic comments survive serialization") {
+    ice::Project project;
+    project.identity = "comment-test";
+    project.name = "comment-test";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto commentId = ice::addSchematicComment(project, cellId, "Test schematic note", 120, -80);
+
+    const auto json = project.serialize();
+    const auto loaded = ice::Project::deserialize(json);
+    const auto &cell = loaded.schematicCells.at(cellId);
+    CHECK(cell.comments.size() == 1);
+    const auto it = cell.comments.find(commentId);
+    CHECK(it != cell.comments.end());
+    if (it != cell.comments.end()) {
+        CHECK(it->second.text == "Test schematic note");
+        CHECK(it->second.x == 120);
+        CHECK(it->second.y == -80);
+    }
+
+    ice::removeSchematicComment(project, cellId, commentId);
+    CHECK(project.schematicCells.at(cellId).comments.empty());
+}

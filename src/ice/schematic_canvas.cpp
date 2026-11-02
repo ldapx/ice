@@ -29,18 +29,32 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 SchematicCanvas::SchematicCanvas(QWidget *parent) : QGraphicsView(parent) {}
 SchematicCanvas::~SchematicCanvas() = default;
 
-QGraphicsItem *symbolOwner(QGraphicsItem *item) {
+bool isSelectableSchematicItem(const QGraphicsItem *item) {
+    if (!item)
+        return false;
+    const auto kind = item->data(0).toString();
+    return kind == QStringLiteral("symbol") || kind == QStringLiteral("comment");
+}
+
+QGraphicsItem *schematicItemOwner(QGraphicsItem *item) {
     for (auto *cursor = item; cursor; cursor = cursor->parentItem())
-        if (cursor->data(0).toString() == QStringLiteral("symbol"))
+        if (isSelectableSchematicItem(cursor))
             return cursor;
     return nullptr;
 }
 
+QGraphicsItem *symbolOwner(QGraphicsItem *item) {
+    return schematicItemOwner(item);
+}
+
 QGraphicsItem *symbolChild(QGraphicsItem *symbol, const QString &kind) {
+    if (!symbol)
+        return nullptr;
     for (auto *child : symbol->childItems())
         if (child->data(0).toString() == kind)
             return child;
@@ -58,12 +72,16 @@ QGraphicsColorizeEffect *symbolArtworkEffect(QGraphicsItem *symbol) {
 void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
     if (!symbol)
         return;
-    symbol->setSelected(selected);
+    if (symbol->isSelected() != selected)
+        symbol->setSelected(selected);
     if (auto *highlight = symbolChild(symbol, QStringLiteral("symbol-highlight")))
         highlight->setVisible(selected);
     if (auto *label = symbolChild(symbol, QStringLiteral("symbol-label")))
         static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
                                                                               : ice::uiColor(ice::UiColor::Axis1));
+    if (auto *commentText = symbolChild(symbol, QStringLiteral("comment-text")))
+        static_cast<QGraphicsTextItem *>(commentText)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
+                                                                                    : ice::uiColor(ice::UiColor::Text1));
     if (auto *effect = symbolArtworkEffect(symbol)) {
         effect->setColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1));
         effect->setEnabled(true);
@@ -77,6 +95,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
         setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
         setRenderHint(QPainter::Antialiasing);
         setDragMode(QGraphicsView::RubberBandDrag);
+        setRubberBandSelectionMode(Qt::IntersectsItemBoundingRect);
         setMouseTracking(true);
         viewport()->setMouseTracking(true);
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
@@ -89,13 +108,13 @@ class SchematicCanvasImpl : public SchematicCanvas {
 
     void setCallbacks(std::function<void(ice::ObjectId, QPointF)> moved, std::function<void(ice::ObjectId)> rotated,
                       std::function<void(ice::ObjectId, ice::ObjectId)> connected,
-                      std::function<void(QPointF)> netLabelPlaced, std::function<void()> changed,
+                      std::function<void(QPointF)> commentPlaced, std::function<void()> changed,
                       std::function<void(ice::ObjectId)> symbolSelected = {},
-                      std::function<void(ice::ObjectId)> symbolActivated = {}) {
+                      std::function<void(ice::ObjectId)> symbolActivated = {}) override {
         moved_ = std::move(moved);
         rotated_ = std::move(rotated);
         connected_ = std::move(connected);
-        netLabelPlaced_ = std::move(netLabelPlaced);
+        commentPlaced_ = std::move(commentPlaced);
         changed_ = std::move(changed);
         symbolSelected_ = std::move(symbolSelected);
         symbolActivated_ = std::move(symbolActivated);
@@ -113,9 +132,14 @@ class SchematicCanvasImpl : public SchematicCanvas {
         netLabelMoved_ = std::move(callback);
     }
 
-    void setNetLabelMode(bool enabled) {
-        netLabelMode_ = enabled;
+    void setNetLabelMode(bool enabled) override { setCommentMode(enabled); }
+
+    bool isCommentMode() const override { return commentMode_; }
+
+    void setCommentMode(bool enabled) override {
+        commentMode_ = enabled;
         if (enabled) {
+            placeSymbolMode_ = false;
             signalPickMode_ = false;
             setCursor(Qt::CrossCursor);
         } else if (!placeSymbolMode_ && !signalPickMode_) {
@@ -124,97 +148,130 @@ class SchematicCanvasImpl : public SchematicCanvas {
         updatePinVisibility();
     }
 
-    void setPlaceSymbolMode(bool enabled) {
+    void setPlaceSymbolMode(bool enabled) override {
         placeSymbolMode_ = enabled;
         if (enabled) {
+            commentMode_ = false;
             signalPickMode_ = false;
             setCursor(Qt::CrossCursor);
-        } else if (!netLabelMode_ && !signalPickMode_) {
+        } else if (!commentMode_ && !signalPickMode_) {
             unsetCursor();
         }
         updatePinVisibility();
     }
 
-    bool isSignalPickMode() const { return signalPickMode_; }
+    bool isSignalPickMode() const override { return signalPickMode_; }
 
-    void setSignalPickMode(bool enabled) {
+    void setSignalPickMode(bool enabled) override {
         signalPickMode_ = enabled;
-        if (enabled)
+        if (enabled) {
+            commentMode_ = false;
+            placeSymbolMode_ = false;
             setCursor(Qt::CrossCursor);
-        else if (!placeSymbolMode_ && !netLabelMode_)
+        } else if (!placeSymbolMode_ && !commentMode_) {
             unsetCursor();
+        }
         updatePinVisibility();
     }
 
-    void setSignalPickedCallback(std::function<void(ice::ObjectId)> callback) { signalPicked_ = std::move(callback); }
+    void setSignalPickedCallback(std::function<void(ice::ObjectId)> callback) override {
+        signalPicked_ = std::move(callback);
+    }
 
-    void setSignalPickCancelledCallback(std::function<void()> callback) { signalPickCancelled_ = std::move(callback); }
+    void setSignalPickCancelledCallback(std::function<void()> callback) override {
+        signalPickCancelled_ = std::move(callback);
+    }
 
-    void setFlipCallback(std::function<void(ice::ObjectId)> callback) { flipped_ = std::move(callback); }
+    void setFlipCallback(std::function<void(ice::ObjectId)> callback) override { flipped_ = std::move(callback); }
 
-    void setGridVisible(bool visible) {
+    void setGridVisible(bool visible) override {
         gridVisible_ = visible;
         viewport()->update();
     }
 
-    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; }
+    void setSnapToGrid(bool enabled) override { snapToGrid_ = enabled; }
 
-    void setSymbolPlacementCallback(std::function<void(QPointF)> callback) {
+    void setSymbolPlacementCallback(std::function<void(QPointF)> callback) override {
         symbolPlacementRequested_ = std::move(callback);
     }
 
-    void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
+    void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
 
-    void setPlaceSymbolPreview(const QByteArray &artwork) {
+    void setPlaceSymbolPreview(const QByteArray &artwork) override {
         placeSymbolArtwork_ = artwork;
         viewport()->update();
     }
 
-    void refreshPinVisibility() { updatePinVisibility(); }
+    void refreshPinVisibility() override { updatePinVisibility(); }
 
-    ice::ObjectId selectedInstanceId() const { return selectedInstance_; }
-
-    // Re-applies the selection highlight after the scene has been rebuilt.
-    void restoreSelection() {
-        if (selectedInstance_ != 0 && !sceneContains(selectedInstance_))
-            selectedInstance_ = 0;
-        applySelection(selectedInstance_);
+    ice::ObjectId selectedInstanceId() const override {
+        return selectedInstances_.size() == 1 ? *selectedInstances_.begin() : 0;
     }
 
-    void clearSelection() {
-        selectedInstance_ = 0;
-        applySelection(0);
+    std::vector<ice::ObjectId> selectedInstanceIds() const override {
+        return std::vector<ice::ObjectId>(selectedInstances_.begin(), selectedInstances_.end());
+    }
+
+    void restoreSelection() override {
+        for (auto it = selectedInstances_.begin(); it != selectedInstances_.end();) {
+            if (!sceneContains(*it))
+                it = selectedInstances_.erase(it);
+            else
+                ++it;
+        }
+        applySelection(selectedInstances_);
+        if (symbolSelected_)
+            symbolSelected_(selectedInstanceId());
+    }
+
+    void clearSelection() override {
+        selectedInstances_.clear();
+        applySelection({});
         if (symbolSelected_)
             symbolSelected_(0);
     }
 
-    void deleteSelectedSymbols() {
+    void deleteSelectedSymbols() override {
         std::vector<ice::ObjectId> ids;
         for (auto *item : scene()->selectedItems())
-            if (item->data(0).toString() == QStringLiteral("symbol"))
+            if (isSelectableSchematicItem(item))
                 ids.push_back(item->data(1).toULongLong());
+        if (ids.empty()) {
+            for (auto id : selectedInstances_)
+                ids.push_back(id);
+        }
         if (!ids.empty() && deleteSelected_)
             deleteSelected_(ids);
     }
 
-    void rotateSelectedSymbols() {
+    void rotateSelectedSymbols() override {
         if (!scene() || !rotated_)
             return;
         std::vector<ice::ObjectId> ids;
         for (auto *item : scene()->selectedItems())
             if (item->data(0).toString() == QStringLiteral("symbol"))
                 ids.push_back(item->data(1).toULongLong());
+        if (ids.empty()) {
+            for (auto id : selectedInstances_)
+                if (auto *item = itemById(id); item && item->data(0).toString() == QStringLiteral("symbol"))
+                    ids.push_back(id);
+        }
         for (const auto id : ids)
             rotated_(id);
     }
 
-    void flipSelectedSymbols() {
+    void flipSelectedSymbols() override {
         if (!scene() || !flipped_)
             return;
         std::vector<ice::ObjectId> ids;
         for (auto *item : scene()->selectedItems())
             if (item->data(0).toString() == QStringLiteral("symbol"))
                 ids.push_back(item->data(1).toULongLong());
+        if (ids.empty()) {
+            for (auto id : selectedInstances_)
+                if (auto *item = itemById(id); item && item->data(0).toString() == QStringLiteral("symbol"))
+                    ids.push_back(id);
+        }
         for (const auto id : ids)
             flipped_(id);
     }
@@ -351,9 +408,9 @@ class SchematicCanvasImpl : public SchematicCanvas {
         if (event->button() == Qt::LeftButton) {
             auto *item = itemAt(event->pos());
             const auto kind = item ? item->data(0).toString() : QString();
-            if (netLabelMode_ && kind != QStringLiteral("pin") && kind != QStringLiteral("net-label")) {
-                if (netLabelPlaced_)
-                    netLabelPlaced_(snapScenePosition(mapToScene(event->pos())));
+            if (commentMode_ && kind != QStringLiteral("pin") && kind != QStringLiteral("net-label")) {
+                if (commentPlaced_)
+                    commentPlaced_(snapScenePosition(mapToScene(event->pos())));
                 event->accept();
                 return;
             }
@@ -372,26 +429,35 @@ class SchematicCanvasImpl : public SchematicCanvas {
                 event->accept();
                 return;
             }
-            if (auto *symbol = symbolOwner(item)) {
-                selectSymbol(symbol, event->modifiers().testFlag(Qt::ControlModifier));
-                if (symbol->isSelected()) {
-                    // The drag is tracked by the stable domain id, so a scene
-                    // rebuild during the interaction cannot leave a stale
-                    // graphics item behind.
-                    dragInstance_ = symbol->data(1).toULongLong();
+            if (auto *target = schematicItemOwner(item)) {
+                const auto targetId = target->data(1).toULongLong();
+                const bool additive = event->modifiers().testFlag(Qt::ControlModifier) ||
+                                      event->modifiers().testFlag(Qt::ShiftModifier);
+                if (additive) {
+                    selectSymbol(target, true);
+                } else if (!selectedInstances_.contains(targetId)) {
+                    selectSymbol(target, false);
+                }
+                if (selectedInstances_.contains(targetId)) {
                     dragOriginScene_ = mapToScene(event->pos());
-                    dragOriginPosition_ = symbol->pos();
+                    dragOriginPositions_.clear();
+                    for (auto id : selectedInstances_) {
+                        if (auto *selItem = itemById(id))
+                            dragOriginPositions_[id] = selItem->pos();
+                    }
                     dragged_ = false;
                 }
                 event->accept();
                 return;
             }
-            // A press on empty background clears the selection and still
-            // starts a rubber-band drag for the view.
-            if (selectedInstance_ != 0)
-                clearSelection();
+            // A press on empty background clears the selection and starts a rubber-band drag
+            if (!event->modifiers().testFlag(Qt::ControlModifier) && !event->modifiers().testFlag(Qt::ShiftModifier)) {
+                if (!selectedInstances_.empty())
+                    clearSelection();
+            }
         }
-        dragInstance_ = 0;
+        dragOriginPositions_.clear();
+        dragged_ = false;
         QGraphicsView::mousePressEvent(event);
     }
 
@@ -423,17 +489,16 @@ class SchematicCanvasImpl : public SchematicCanvas {
                 return;
             }
         }
-        // A drag follows the symbol item that currently projects the pressed
-        // instance; the scene may be rebuilt while dragging.
-        QGraphicsItem *dragged = dragInstance_ != 0 ? symbolById(dragInstance_) : nullptr;
-        if (dragInstance_ != 0 && !dragged) {
-            dragInstance_ = 0;
-        } else if (dragged) {
+        if (!dragOriginPositions_.empty()) {
             const auto delta = mapToScene(event->pos()) - dragOriginScene_;
             if (!dragged_ && (std::abs(delta.x()) > 2.0 || std::abs(delta.y()) > 2.0))
                 dragged_ = true;
-            if (dragged_)
-                dragged->setPos(snapScenePosition(dragOriginPosition_ + delta));
+            if (dragged_) {
+                for (const auto &[id, originPos] : dragOriginPositions_) {
+                    if (auto *draggedItem = itemById(id))
+                        draggedItem->setPos(snapScenePosition(originPos + delta));
+                }
+            }
             event->accept();
             return;
         }
@@ -442,9 +507,9 @@ class SchematicCanvasImpl : public SchematicCanvas {
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
         if (event->button() == Qt::LeftButton) {
-            if (auto *symbol = symbolOwner(itemAt(event->pos()))) {
+            if (auto *item = schematicItemOwner(itemAt(event->pos()))) {
                 if (symbolActivated_)
-                    symbolActivated_(symbol->data(1).toULongLong());
+                    symbolActivated_(item->data(1).toULongLong());
                 event->accept();
                 return;
             }
@@ -487,7 +552,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     void mouseReleaseEvent(QMouseEvent *event) override {
         if (panning_ && event->button() == Qt::MiddleButton) {
             panning_ = false;
-            if (placeSymbolMode_)
+            if (placeSymbolMode_ || commentMode_)
                 setCursor(Qt::CrossCursor);
             else
                 unsetCursor();
@@ -519,21 +584,40 @@ class SchematicCanvasImpl : public SchematicCanvas {
             event->accept();
             return;
         }
-        // The drag ends on any release so the canvas never keeps drag state
-        // across interactions that rebuild the scene.
-        dragInstance_ = 0;
-        QGraphicsView::mouseReleaseEvent(event);
-        if (moved_ && scene()) {
-            std::vector<std::pair<ice::ObjectId, QPointF>> movedItems;
-            for (auto *item : scene()->items()) {
-                if (item->data(0).toString() == QStringLiteral("symbol"))
-                    movedItems.emplace_back(item->data(1).toULongLong(), item->pos());
+        if (!dragOriginPositions_.empty()) {
+            if (dragged_) {
+                std::vector<std::pair<ice::ObjectId, QPointF>> movedItems;
+                for (const auto &[id, originPos] : dragOriginPositions_) {
+                    if (auto *draggedItem = itemById(id)) {
+                        if (draggedItem->pos() != originPos)
+                            movedItems.emplace_back(id, draggedItem->pos());
+                    }
+                }
+                for (const auto &[id, position] : movedItems) {
+                    if (moved_)
+                        moved_(id, position);
+                }
+                if (!movedItems.empty() && changed_)
+                    changed_();
+            } else if (event->button() == Qt::LeftButton) {
+                if (!event->modifiers().testFlag(Qt::ControlModifier) &&
+                    !event->modifiers().testFlag(Qt::ShiftModifier)) {
+                    if (auto *clicked = schematicItemOwner(itemAt(event->pos()))) {
+                        const auto clickedId = clicked->data(1).toULongLong();
+                        if (selectedInstances_.size() > 1 && selectedInstances_.contains(clickedId))
+                            selectSymbol(clicked, false);
+                    }
+                }
             }
-            for (const auto &[id, position] : movedItems)
-                moved_(id, position);
+            dragOriginPositions_.clear();
+            dragged_ = false;
+            event->accept();
+            return;
         }
-        if (changed_)
-            changed_();
+
+        // Complete any rubber band drag
+        QGraphicsView::mouseReleaseEvent(event);
+        syncSelectionFromScene();
     }
 
     void keyPressEvent(QKeyEvent *event) override {
@@ -544,27 +628,24 @@ class SchematicCanvasImpl : public SchematicCanvas {
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_Escape && (placeSymbolMode_ || netLabelMode_)) {
+        if (event->key() == Qt::Key_Escape && (placeSymbolMode_ || commentMode_)) {
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
             event->accept();
             return;
         }
+        if (event->key() == Qt::Key_Escape && !selectedInstances_.empty()) {
+            clearSelection();
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_R && scene()) {
-            for (auto *item : scene()->selectedItems())
-                if (item->data(0).toString() == QStringLiteral("symbol") && rotated_)
-                    rotated_(item->data(1).toULongLong());
+            rotateSelectedSymbols();
             event->accept();
             return;
         }
         if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) && scene()) {
-            std::vector<ice::ObjectId> ids;
-            for (auto *item : scene()->selectedItems()) {
-                if (item->data(0).toString() == QStringLiteral("symbol"))
-                    ids.push_back(item->data(1).toULongLong());
-            }
-            if (!ids.empty() && deleteSelected_)
-                deleteSelected_(ids);
+            deleteSelectedSymbols();
             event->accept();
             return;
         }
@@ -617,43 +698,75 @@ class SchematicCanvasImpl : public SchematicCanvas {
 
     bool sceneContains(ice::ObjectId instanceId) const {
         for (auto *item : scene()->items())
-            if (item->data(0).toString() == QStringLiteral("symbol") && item->data(1).toULongLong() == instanceId)
+            if (isSelectableSchematicItem(item) && item->data(1).toULongLong() == instanceId)
                 return true;
         return false;
     }
 
-    QGraphicsItem *symbolById(ice::ObjectId instanceId) {
+    QGraphicsItem *itemById(ice::ObjectId instanceId) {
         for (auto *item : scene()->items())
-            if (item->data(0).toString() == QStringLiteral("symbol") && item->data(1).toULongLong() == instanceId)
+            if (isSelectableSchematicItem(item) && item->data(1).toULongLong() == instanceId)
                 return item;
         return nullptr;
+    }
+
+    QGraphicsItem *symbolById(ice::ObjectId instanceId) {
+        return itemById(instanceId);
     }
 
     // Selection is view state expressed over stable domain ids, so it survives
     // a scene rebuild and can be mirrored by the properties panel.
     void selectSymbol(QGraphicsItem *symbol, bool additive) {
-        if (additive && symbol->isSelected()) {
-            applySymbolSelectedStyle(symbol, false);
-            selectedInstance_ = 0;
-            if (symbolSelected_)
-                symbolSelected_(0);
+        if (!symbol)
             return;
+        const auto id = symbol->data(1).toULongLong();
+        if (additive) {
+            if (selectedInstances_.contains(id)) {
+                selectedInstances_.erase(id);
+                applySymbolSelectedStyle(symbol, false);
+            } else {
+                selectedInstances_.insert(id);
+                applySymbolSelectedStyle(symbol, true);
+            }
+        } else {
+            selectedInstances_.clear();
+            selectedInstances_.insert(id);
+            for (auto *item : scene()->items()) {
+                if (isSelectableSchematicItem(item))
+                    applySymbolSelectedStyle(item, item == symbol);
+            }
         }
-        if (!additive) {
-            for (auto *item : scene()->items())
-                if (item != symbol && item->data(0).toString() == QStringLiteral("symbol"))
-                    applySymbolSelectedStyle(item, false);
-        }
-        applySymbolSelectedStyle(symbol, true);
-        selectedInstance_ = symbol->data(1).toULongLong();
         if (symbolSelected_)
-            symbolSelected_(selectedInstance_);
+            symbolSelected_(selectedInstanceId());
     }
 
-    void applySelection(ice::ObjectId instanceId) {
-        for (auto *item : scene()->items())
-            if (item->data(0).toString() == QStringLiteral("symbol"))
-                applySymbolSelectedStyle(item, item->data(1).toULongLong() == instanceId);
+    void applySelection(const std::set<ice::ObjectId> &instances) {
+        updatingSelection_ = true;
+        for (auto *item : scene()->items()) {
+            if (isSelectableSchematicItem(item)) {
+                const auto id = item->data(1).toULongLong();
+                applySymbolSelectedStyle(item, instances.contains(id));
+            }
+        }
+        updatingSelection_ = false;
+    }
+
+    void syncSelectionFromScene() {
+        if (updatingSelection_ || !scene())
+            return;
+        updatingSelection_ = true;
+        selectedInstances_.clear();
+        for (auto *item : scene()->items()) {
+            if (isSelectableSchematicItem(item)) {
+                const bool sel = item->isSelected();
+                applySymbolSelectedStyle(item, sel);
+                if (sel)
+                    selectedInstances_.insert(item->data(1).toULongLong());
+            }
+        }
+        if (symbolSelected_)
+            symbolSelected_(selectedInstanceId());
+        updatingSelection_ = false;
     }
 
     // Graphics items are rebuilt whenever the scene is refreshed, so every
@@ -753,7 +866,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     void updatePinVisibility() {
-        const bool selectTool = !placeSymbolMode_ && !netLabelMode_;
+        const bool selectTool = !placeSymbolMode_ && !commentMode_;
         const bool showAll = selectTool && (wireStart_ != nullptr || signalPickMode_);
         const bool cursorOver = viewport()->underMouse();
         const qreal radius = 12.0 / std::max(zoom_, qreal(0.0001));
@@ -775,9 +888,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
     ice::ObjectId netLabelDragNetId_ = 0;
     QPointF netLabelDragOriginScene_;
     QPointF netLabelDragOriginPosition_;
-    ice::ObjectId dragInstance_ = 0;
+    std::map<ice::ObjectId, QPointF> dragOriginPositions_;
     QPointF dragOriginScene_;
-    QPointF dragOriginPosition_;
     bool dragged_ = false;
     std::function<void(ice::ObjectId, QPointF)> moved_;
     std::function<void(ice::ObjectId)> rotated_;
@@ -785,13 +897,13 @@ class SchematicCanvasImpl : public SchematicCanvas {
     std::function<void(ice::ObjectId, ice::ObjectId)> connected_;
     std::function<void(ice::ObjectId)> disconnected_;
     std::function<void(ice::ObjectId, QPointF)> netLabelMoved_;
-    std::function<void(QPointF)> netLabelPlaced_;
+    std::function<void(QPointF)> commentPlaced_;
     std::function<void()> changed_;
     std::function<void(ice::ObjectId)> symbolSelected_;
     std::function<void(ice::ObjectId)> symbolActivated_;
     std::function<void(ice::ObjectId)> signalPicked_;
     std::function<void()> signalPickCancelled_;
-    bool netLabelMode_ = false;
+    bool commentMode_ = false;
     bool placeSymbolMode_ = false;
     bool signalPickMode_ = false;
     bool gridVisible_ = true;
@@ -800,7 +912,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
     QPointF cursorScenePosition_;
     std::function<void(QPointF)> symbolPlacementRequested_;
     std::function<void()> toolEscapeRequested_;
-    ice::ObjectId selectedInstance_ = 0;
+    std::set<ice::ObjectId> selectedInstances_;
+    bool updatingSelection_ = false;
     bool viewInitialized_ = false;
     qreal zoom_ = 1.0;
     QPointF centerScene_;

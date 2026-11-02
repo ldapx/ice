@@ -234,6 +234,18 @@ ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector
     cell.nets.emplace(id, Net{id, std::move(name), std::move(pins), x, y});
     return id;
 }
+
+ObjectId addSchematicComment(Project &project, ObjectId cellId, std::string text, Coordinate x, Coordinate y) {
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    const auto id = project.nextId();
+    cell.comments.emplace(id, SchematicComment{id, std::move(text), x, y});
+    return id;
+}
+
+void removeSchematicComment(Project &project, ObjectId cellId, ObjectId commentId) {
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    cell.comments.erase(commentId);
+}
 std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
                                   const std::vector<Parameter> &defaults) {
     std::size_t added = 0;
