@@ -7,10 +7,38 @@ add_requires("spdlog", "nlohmann_json", "clipper2")
 
 -- Bake a small build fingerprint into icelib so MCP clients can detect a
 -- long-lived server that was started before the last install.
--- Set ICE_BUILD_COMMIT/ICE_BUILD_TIME when configuring to embed a precise
--- fingerprint; otherwise the binary reports "unknown"/the configure time.
+--
+-- The fingerprint must be stable across no-op xmake invocations. Deriving the
+-- timestamp from the clock here makes every `xmake run/build` look like a
+-- configuration change, invalidating all cached objects. Use the newest
+-- first-party source timestamp instead, and fall back to the clock only when
+-- no source files are available.
+-- Set ICE_BUILD_COMMIT/ICE_BUILD_TIME explicitly for reproducible packaging.
 local build_commit = os.getenv("ICE_BUILD_COMMIT") or "unknown"
-local build_time = os.getenv("ICE_BUILD_TIME") or os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+local build_time = os.getenv("ICE_BUILD_TIME")
+if not build_time then
+    local latest_mtime = 0
+    local fingerprint_files = {
+        "xmake.lua",
+        "src/**.cpp",
+        "src/**.hpp",
+        "include/**.hpp",
+        "tests/**.cpp",
+    }
+    for _, pattern in ipairs(fingerprint_files) do
+        for _, file in ipairs(os.files(pattern)) do
+            local mtime = os.mtime(file)
+            if mtime and mtime > latest_mtime then
+                latest_mtime = mtime
+            end
+        end
+    end
+    if latest_mtime == 0 then
+        latest_mtime = os.time()
+    end
+    build_time = os.date("!%Y-%m-%dT%H:%M:%SZ", latest_mtime)
+end
 local build_type = is_mode("release") and "release" or "debug"
 
 -- Agent Client Protocol support. The normal build uses the bundled
