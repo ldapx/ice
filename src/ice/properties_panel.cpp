@@ -16,6 +16,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -26,23 +27,33 @@
 PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(heading(QStringLiteral("Properties")));
+    auto *splitter = new QSplitter(Qt::Vertical);
+    splitter->setObjectName(QStringLiteral("propertiesPreviewSplitter"));
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(6);
     previewFrame_ = new QFrame;
     previewFrame_->setObjectName(QStringLiteral("propertiesSymbolPreview"));
-    previewFrame_->setFixedHeight(180);
+    previewFrame_->setMinimumHeight(80);
+    previewFrame_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto *previewLayout = new QVBoxLayout(previewFrame_);
     previewStack_ = new QStackedWidget;
     symbolPreview_ = new SymbolPreview;
-    symbolPreview_->setMinimumSize(160, 120);
+    symbolPreview_->setMinimumSize(160, 80);
     symbolPreview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     layoutDevicePreview_ = new LayoutDevicePreview;
     previewStack_->addWidget(symbolPreview_);
     previewStack_->addWidget(layoutDevicePreview_);
     previewLayout->addWidget(previewStack_);
     previewFrame_->setVisible(false);
-    layout->addWidget(previewFrame_);
+    splitter->addWidget(previewFrame_);
+
+    auto *details = new QWidget;
+    auto *detailsLayout = new QVBoxLayout(details);
+    detailsLayout->setContentsMargins(0, 0, 0, 0);
+    detailsLayout->setSpacing(layout->spacing());
     auto *form = new QFormLayout;
     selection_ = addRow(form, QStringLiteral("Selection"));
-    layout->addLayout(form);
+    detailsLayout->addLayout(form);
 
     gridOptions_ = new QGroupBox(QStringLiteral("Grid"));
     auto *gridForm = new QFormLayout(gridOptions_);
@@ -52,7 +63,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     gridSpacingSpin_->setKeyboardTracking(false);
     gridForm->addRow(QStringLiteral("Spacing"), gridSpacingSpin_);
     gridOptions_->setVisible(false);
-    layout->addWidget(gridOptions_);
+    detailsLayout->addWidget(gridOptions_);
 
     parametersHeader_ = new QWidget;
     auto *parametersHeaderLayout = new QHBoxLayout(parametersHeader_);
@@ -71,7 +82,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     setLucideIcon(removeParameterButton_, QStringLiteral("trash"), 14);
     parametersHeaderLayout->addWidget(addParameterButton_);
     parametersHeaderLayout->addWidget(removeParameterButton_);
-    layout->addWidget(parametersHeader_);
+    detailsLayout->addWidget(parametersHeader_);
     parameters_ = new QTableWidget(0, 2);
     parameters_->setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Value")});
     parameters_->setAccessibleName(QStringLiteral("Parameters"));
@@ -79,15 +90,20 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     parameters_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     parameters_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     parameters_->verticalHeader()->setVisible(false);
-    layout->addWidget(parameters_, 1);
+    detailsLayout->addWidget(parameters_, 1);
     if (showDisplay) {
-        layout->addWidget(heading(QStringLiteral("Display")));
+        detailsLayout->addWidget(heading(QStringLiteral("Display")));
         auto *layerSelector = new QComboBox;
         layerSelector->addItem(QStringLiteral("All layers"));
         layerSelector->addItem(QStringLiteral("Visible layers"));
-        layout->addWidget(layerSelector);
+        detailsLayout->addWidget(layerSelector);
     }
-    layout->addStretch();
+    detailsLayout->addStretch();
+    splitter->addWidget(details);
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({180, 420});
+    layout->addWidget(splitter, 1);
     connect(parameters_, &QTableWidget::itemChanged, this,
             [this](QTableWidgetItem *item) { handleParameterEdit(item); });
     connect(parameters_, &QTableWidget::itemSelectionChanged, this, [this] { updateParameterButtons(); });
