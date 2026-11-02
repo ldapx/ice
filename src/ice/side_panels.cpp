@@ -972,11 +972,18 @@ void LayersPanel::showContextMenu(const QPoint &pos) {
         onAllLayersVisibilityChanged_(showAllAction->isChecked());
 }
 
-void LayersPanel::setProject(const ice::Project &project) {
+void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId) {
     QSignalBlocker blocker(tree_);
     tree_->clear();
     const auto styles = layerStylesFor(project);
     for (const auto &[id, layer] : project.layers) {
+        if (layoutId != 0 && layer.layout != 0 && layer.layout != layoutId)
+            continue;
+        if (layoutId != 0 && layer.layout == 0 && !layer.pdk.empty()) {
+            const auto cell = project.layoutCells.find(layoutId);
+            if (cell == project.layoutCells.end() || cell->second.pdk != layer.pdk)
+                continue;
+        }
         const auto style =
             styles.contains(id) ? styles.at(id) : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
         auto *item = new QTreeWidgetItem(

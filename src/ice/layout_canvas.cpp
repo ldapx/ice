@@ -1163,10 +1163,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
         painter.drawLine(pathAnchor_, pathEnd_);
 
         const auto viaLayers = pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_);
-        if (pathHasCommitted_ && !viaLayers.empty()) {
+        if (pathHasCommitted_ && pathAnchorLayerIndex_ != pathLayerIndex_ && pathLayerIndex_ >= 0 &&
+            pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size())) {
             const qreal half = pathWidth_ * 0.5;
             const QRectF viaRect(pathAnchor_.x() - half, pathAnchor_.y() - half, pathWidth_, pathWidth_);
-            for (const auto layerId : viaLayers) {
+            const auto drawVia = [&](ice::ObjectId layerId) {
                 QColor viaColor = ice::uiColor(ice::UiColor::Accent3);
                 const auto style = layerStyles_.find(layerId);
                 if (style != layerStyles_.end())
@@ -1176,7 +1177,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 painter.setPen(QPen(viaColor, 1.0));
                 painter.setBrush(viaFill);
                 painter.drawRect(viaRect);
-            }
+            };
+            if (viaLayers.empty())
+                drawVia(pathConfig_.layers[pathLayerIndex_].layer);
+            else
+                for (const auto layerId : viaLayers)
+                    drawVia(layerId);
         }
         painter.restore();
     }
@@ -1697,7 +1703,22 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->ignore();
             return;
         }
-        if (tool_ == Tool::path && pathDragging_) {
+        // Ctrl+wheel always zooms, including while a path is active. Plain
+        // wheel input changes the active path layer only while drawing.
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            const auto scenePosition = mapToScene(event->position().toPoint());
+            const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+            zoom_ = std::clamp(zoom_ * factor, qreal(1.0e-6), qreal(1.0e6));
+            const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
+            const auto cursor = event->position();
+            centerScene_ = scenePosition -
+                           QPointF((cursor.x() - viewportCenter.x()) / zoom_,
+                                   (cursor.y() - viewportCenter.y()) / zoom_);
+            applyNavigationTransform();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && pathActive_) {
             const int next = pathLayerIndex_ + (event->angleDelta().y() > 0 ? 1 : -1);
             if (next >= 0 && next < static_cast<int>(pathConfig_.layers.size())) {
                 pathLayerIndex_ = next;
@@ -1711,6 +1732,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        // No active path and no Ctrl modifier: the Layout wheel zooms.
         const auto scenePosition = mapToScene(event->position().toPoint());
         const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
         zoom_ = std::clamp(zoom_ * factor, qreal(1.0e-6), qreal(1.0e6));

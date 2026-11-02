@@ -1316,6 +1316,38 @@ TEST_CASE("layout polygons ports and instances use core operations") {
     CHECK(ice::Project::deserialize(serialized).serialize() == serialized);
 }
 
+TEST_CASE("layout spacing changes do not reject off-grid layout or schematic data") {
+    ice::Project project;
+    project.identity = "layout-spacing-test";
+    project.name = "layout-spacing-test";
+    project.grid = 10;
+
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto layout = ice::createLayoutCell(project, "top");
+    ice::addPolygon(project, layout, layer, {{0, 0}, {13, 0}, {5, 17}});
+
+    const auto schematic = ice::createSchematicCell(project, "top", "example.pdk");
+    const auto symbolId = project.nextId();
+    ice::Symbol symbol;
+    symbol.id = symbolId;
+    symbol.name = "device";
+    symbol.artwork = "device";
+    project.schematicCells.at(schematic).symbols.emplace(symbolId, symbol);
+    const auto instanceId = project.nextId();
+    project.schematicCells.at(schematic).instances.emplace(
+        instanceId, ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
+
+    ice::ProjectSession session(project);
+    bool changed = true;
+    try {
+        session.execute("change layout spacing", [](ice::Project &value) { value.grid = 7; });
+    } catch (...) {
+        changed = false;
+    }
+    CHECK(changed);
+    CHECK(session.project().grid == 7);
+}
+
 TEST_CASE("planned devices are projected from a schematic") {
     ice::Project project;
     project.identity = "planned";

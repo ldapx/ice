@@ -41,7 +41,7 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
 // schematic name and is made unique when that name is already in use. Returns
 // the new layout cell id.
 ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {});
-ObjectId addLayer(Project &project, std::string name, int number);
+ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout = 0, std::string pdk = {});
 std::string nextShapeName(const LayoutCell &cell, const std::string &type);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);
