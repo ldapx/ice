@@ -130,7 +130,7 @@ bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId
 }
 
 std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Project &project,
-                                                                    ice::ObjectId layoutId) {
+                                                                   ice::ObjectId layoutId) {
     std::vector<std::reference_wrapper<const ice::Layer>> result;
     for (const auto &[_, layer] : project.layers)
         if (layerAvailableForLayout(project, layoutId, layer))
@@ -2239,18 +2239,13 @@ class DocumentWindow : public QMainWindow {
     }
 
     static void rebuildLayoutPathGeometry(ice::Shape &shape) {
-        if (!shape.isPath())
+        if (!shape.isPath() || shape.centerline.size() < 2)
             return;
-        QPainterPath centerline;
-        centerline.moveTo(shape.centerline.front().x, -shape.centerline.front().y);
-        for (std::size_t index = 1; index < shape.centerline.size(); ++index)
-            centerline.lineTo(shape.centerline[index].x, -shape.centerline[index].y);
-        QPainterPathStroker stroker;
-        stroker.setWidth(shape.width);
-        stroker.setCapStyle(Qt::FlatCap);
-        stroker.setJoinStyle(Qt::MiterJoin);
-        const auto outline = stroker.createStroke(centerline);
-        const auto polygon = outline.toFillPolygon();
+        std::vector<QPointF> centerline;
+        centerline.reserve(shape.centerline.size());
+        for (const auto &point : shape.centerline)
+            centerline.emplace_back(point.x, -point.y);
+        const auto polygon = layoutPathOutline(centerline, shape.width);
         shape.polygon.clear();
         shape.polygon.reserve(static_cast<std::size_t>(polygon.size()));
         ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
@@ -2358,8 +2353,7 @@ class DocumentWindow : public QMainWindow {
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
             !project_->project().layers.contains(layerId) ||
-            !layerAvailableForLayout(project_->project(), activeLayoutId_,
-                                     project_->project().layers.at(layerId)))
+            !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layerId)))
             return;
         const auto toModelPoint = [](QPointF point) {
             return ice::LayoutPoint{static_cast<ice::Coordinate>(std::lround(point.x())),
@@ -3058,8 +3052,7 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Select a layer before drawing polygons."));
             return;
         }
-        const auto layerId =
-            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
+        const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
         std::vector<ice::LayoutPoint> modelPoints;
         modelPoints.reserve(points.size());
         for (const auto &point : points)
@@ -3096,8 +3089,7 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Select a layer before drawing text."));
             return;
         }
-        const auto layerId =
-            activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
+        const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
         bool accepted = false;
         const auto text = QInputDialog::getText(this, QStringLiteral("Draw Text"), QStringLiteral("Text:"),
                                                 QLineEdit::Normal, QString(), &accepted);
@@ -3425,12 +3417,11 @@ class DocumentWindow : public QMainWindow {
                 const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
                 for (const auto &layer : spec.pdk->layers) {
                     const auto exists =
-                        std::find_if(project.layers.begin(), project.layers.end(),
-                                     [&](const auto &entry) {
-                                             const auto &existing = entry.second;
-                                             return existing.name == layer.name && existing.layout == 0 &&
-                                                (existing.pdk.empty() || existing.pdk == technology);
-                                     });
+                        std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+                            const auto &existing = entry.second;
+                            return existing.name == layer.name && existing.layout == 0 &&
+                                   (existing.pdk.empty() || existing.pdk == technology);
+                        });
                     if (exists == project.layers.end())
                         ice::addLayer(project, layer.name, layer.number, 0, technology);
                 }
@@ -7487,7 +7478,8 @@ class DocumentWindow : public QMainWindow {
                 return;
             project_->execute("toggle layer visibility", [&](ice::Project &project) {
                 const auto layer = project.layers.find(layerId);
-                if (layer == project.layers.end() || !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
+                if (layer == project.layers.end() ||
+                    !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
                     layer->second.visible == visible)
                     return;
                 layer->second.visible = visible;
@@ -8220,9 +8212,7 @@ class DocumentWindow : public QMainWindow {
                         return;
                     const auto rectangle = QRectF(first, second).normalized();
                     const auto available = layoutLayers(project_->project(), activeLayoutId_);
-                    const auto layerId = activeLayoutLayerId_ != 0
-                                             ? activeLayoutLayerId_
-                                             : available.front().get().id;
+                    const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : available.front().get().id;
                     project_->execute("create layout rectangle", [&](ice::Project &project) {
                         ice::addRectangle(project, cellId, layerId,
                                           {static_cast<ice::Coordinate>(rectangle.left()),

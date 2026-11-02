@@ -19,7 +19,6 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPainterPathStroker>
 #include <QPen>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -190,19 +189,14 @@ class LayoutPathItem : public QGraphicsItem {
                 QColor halo = color;
                 halo.setAlpha(70);
                 QPen haloPen(halo);
-                haloPen.setWidthF(width_ + 6.0);
-                haloPen.setCapStyle(Qt::FlatCap);
-                haloPen.setJoinStyle(Qt::MiterJoin);
+                haloPen.setWidthF(6.0);
+                haloPen.setJoinStyle(Qt::RoundJoin);
                 painter->setPen(haloPen);
                 painter->setBrush(Qt::NoBrush);
                 painter->drawPath(path);
             }
-            QPen pen(color);
-            pen.setWidthF(width_);
-            pen.setCapStyle(Qt::FlatCap);
-            pen.setJoinStyle(Qt::MiterJoin);
-            painter->setPen(pen);
-            painter->setBrush(Qt::NoBrush);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(color);
             painter->drawPath(path);
             start = end;
         }
@@ -377,25 +371,26 @@ class LayoutPathItem : public QGraphicsItem {
             return path;
         // Extend runs that touch a via so the copper reaches the far edge of
         // the via square instead of stopping at its center.
+        std::vector<QPointF> run;
+        run.reserve(end - start + 1);
+        for (std::size_t index = start; index <= end; ++index)
+            run.push_back(points_[index]);
         const auto extension = width_ * 0.5;
-        auto first = points_[start];
-        auto last = points_[end];
         if (hasVia(start)) {
-            const auto delta = points_[start + 1] - points_[start];
+            const auto delta = run[1] - run[0];
             const auto length = std::hypot(delta.x(), delta.y());
             if (length > 0.0)
-                first -= delta * (extension / length);
+                run.front() -= delta * (extension / length);
         }
         if (hasVia(end)) {
-            const auto delta = points_[end] - points_[end - 1];
+            const auto delta = run.back() - run[run.size() - 2];
             const auto length = std::hypot(delta.x(), delta.y());
             if (length > 0.0)
-                last += delta * (extension / length);
+                run.back() += delta * (extension / length);
         }
-        path.moveTo(first);
-        for (std::size_t index = start + 1; index < end; ++index)
-            path.lineTo(points_[index]);
-        path.lineTo(last);
+        const auto outline = layoutPathOutline(run, width_);
+        if (!outline.isEmpty())
+            path.addPolygon(outline);
         return path;
     }
 
@@ -412,11 +407,7 @@ class LayoutPathItem : public QGraphicsItem {
             std::size_t end = start + 1;
             while (end + 1 < points_.size() && colorForSegment(end) == color)
                 ++end;
-            QPainterPathStroker stroker;
-            stroker.setWidth(width_ + 2.0);
-            stroker.setCapStyle(Qt::FlatCap);
-            stroker.setJoinStyle(Qt::MiterJoin);
-            result.addPath(stroker.createStroke(runPath(start, end)));
+            result.addPath(runPath(start, end));
             start = end;
         }
         return result;
@@ -668,7 +659,111 @@ class LayoutRulerItem : public QGraphicsItem {
 
     QLineF line_;
 };
+
+qreal pathCross(const QPointF &a, const QPointF &b) { return a.x() * b.y() - a.y() * b.x(); }
+
+QPointF pathUnit(const QPointF &vector) {
+    const auto length = std::hypot(vector.x(), vector.y());
+    if (length <= 1.0e-12)
+        return {};
+    return vector / length;
+}
+
+void appendPathJoin(std::vector<QPointF> &side, const QPointF &previous, const QPointF &corner, const QPointF &next,
+                    qreal halfWidth, qreal sideSign) {
+    const auto incoming = pathUnit(corner - previous);
+    const auto outgoing = pathUnit(next - corner);
+    if (incoming.isNull() || outgoing.isNull()) {
+        side.push_back(corner);
+        return;
+    }
+    const QPointF incomingNormal(-incoming.y() * halfWidth * sideSign, incoming.x() * halfWidth * sideSign);
+    const QPointF outgoingNormal(-outgoing.y() * halfWidth * sideSign, outgoing.x() * halfWidth * sideSign);
+    const auto determinant = pathCross(incoming, outgoing);
+    if (std::abs(determinant) <= 1.0e-12) {
+        if (QPointF::dotProduct(incoming, outgoing) > 0.0) {
+            side.push_back(corner + incomingNormal);
+        } else {
+            // A 180-degree reversal has no single-side intersection.
+            side.push_back(corner + incomingNormal);
+            side.push_back(corner + outgoingNormal);
+        }
+        return;
+    }
+
+    // Intersect the two offset lines. KLayout limits the miter to half the
+    // path width on either side; sharper corners become a two-point cut-off,
+    // which avoids long elbows on acute angles.
+    const auto shift = outgoingNormal - incomingNormal;
+    const auto l1 = pathCross(shift, outgoing) / determinant;
+    const auto l2 = pathCross(incomingNormal - outgoingNormal, incoming) / determinant;
+    const auto l1min = -QLineF(previous, corner).length() - halfWidth;
+    const auto l2min = -QLineF(corner, next).length() - halfWidth;
+    constexpr qreal epsilon = 1.0e-9;
+    if (l1 < l1min - epsilon || l2 < l2min - epsilon) {
+        // The segments are too short to intersect cleanly. Keep the outline
+        // confined by walking through the corner point.
+        side.push_back(corner + incomingNormal);
+        side.push_back(corner);
+        side.push_back(corner + outgoingNormal);
+    } else if (l1 <= halfWidth + epsilon && l2 <= halfWidth + epsilon) {
+        side.push_back(corner + incomingNormal + incoming * l1);
+    } else {
+        side.push_back(corner + incomingNormal + incoming * std::min(halfWidth, l1));
+        side.push_back(corner + outgoingNormal - outgoing * std::min(halfWidth, l2));
+    }
+}
 } // namespace
+
+QPolygonF layoutPathOutline(const std::vector<QPointF> &input, qreal width) {
+    std::vector<QPointF> points;
+    points.reserve(input.size());
+    for (const auto &point : input) {
+        if (points.empty() || point != points.back())
+            points.push_back(point);
+    }
+    if (points.size() < 2 || width <= 0.0)
+        return {};
+
+    // Match KLayout's real_points(): drop collinear interior points so the
+    // join calculation only sees actual corners.
+    std::vector<QPointF> corners;
+    corners.reserve(points.size());
+    for (std::size_t index = 0; index < points.size(); ++index) {
+        if (index == 0 || index + 1 == points.size() ||
+            std::abs(pathCross(points[index] - points[index - 1], points[index + 1] - points[index])) > 1.0e-12)
+            corners.push_back(points[index]);
+    }
+    if (corners.size() < 2)
+        return {};
+
+    const auto halfWidth = width * 0.5;
+    std::vector<QPointF> left;
+    std::vector<QPointF> right;
+    left.reserve(corners.size() + 2);
+    right.reserve(corners.size() + 2);
+
+    const auto firstDirection = pathUnit(corners[1] - corners[0]);
+    const QPointF firstNormal(-firstDirection.y() * halfWidth, firstDirection.x() * halfWidth);
+    left.push_back(corners.front() + firstNormal);
+    right.push_back(corners.front() - firstNormal);
+    for (std::size_t index = 1; index + 1 < corners.size(); ++index) {
+        appendPathJoin(left, corners[index - 1], corners[index], corners[index + 1], halfWidth, 1.0);
+        appendPathJoin(right, corners[index - 1], corners[index], corners[index + 1], halfWidth, -1.0);
+    }
+    const auto lastDirection = pathUnit(corners.back() - corners[corners.size() - 2]);
+    const QPointF lastNormal(-lastDirection.y() * halfWidth, lastDirection.x() * halfWidth);
+    left.push_back(corners.back() + lastNormal);
+    right.push_back(corners.back() - lastNormal);
+
+    QPolygonF outline;
+    outline.reserve(static_cast<int>(left.size() + right.size()));
+    for (const auto &point : left)
+        outline << point;
+    for (auto it = right.rbegin(); it != right.rend(); ++it)
+        outline << *it;
+    return outline;
+}
 
 QPointF layoutResizeHandlePosition(const QRectF &rect, int handle) {
     switch (handle) {
@@ -1711,9 +1806,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             zoom_ = std::clamp(zoom_ * factor, qreal(1.0e-6), qreal(1.0e6));
             const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
             const auto cursor = event->position();
-            centerScene_ = scenePosition -
-                           QPointF((cursor.x() - viewportCenter.x()) / zoom_,
-                                   (cursor.y() - viewportCenter.y()) / zoom_);
+            centerScene_ = scenePosition - QPointF((cursor.x() - viewportCenter.x()) / zoom_,
+                                                   (cursor.y() - viewportCenter.y()) / zoom_);
             applyNavigationTransform();
             event->accept();
             return;

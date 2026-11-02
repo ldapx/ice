@@ -99,6 +99,12 @@ class LayoutCanvas : public QGraphicsView {
 // scene coordinates (positive Y downwards).
 QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
 
+// Builds the outline of an open polyline using KLayout-style corner joins.
+// The miter is used only while both offset-line intersections stay within
+// width/2 of the corner; sharper corners are cut off at width/2 instead of
+// producing long elbows. Points are in scene coordinates.
+QPolygonF layoutPathOutline(const std::vector<QPointF> &points, qreal width);
+
 // Creates the single selectable item used for a routed path. Points are in
 // scene coordinates. Handles become visible while selected; dragging a handle
 // calls pointMoved, double-clicking a segment calls pointInserted, and
