@@ -29,6 +29,12 @@ Netlist** button and the schematic signal-picker button are hidden; **Run
 Simulation** is available immediately. Drawn schematics keep the build-then-run
 flow and the signal picker.
 
+A drawn schematic that instances another drawn schematic emits a hierarchical
+SPICE netlist. Each referenced schematic appears once as a `.subckt`, with its
+Input and Output instances defining the port order, and the parent instance is
+emitted as `X<name> <connected nodes...> <subckt name>`. Nested subcircuits are
+emitted recursively before the parent body.
+
 Graphs are presentation-only views over a result. Each graph selects a captured
 signal or the `time` variable for its X axis and one or more captured signals
 (or `time`) for its Y axis. It can also define optional axis limits; blank

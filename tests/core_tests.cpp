@@ -544,6 +544,63 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     CHECK(joined.find(".end") == std::string::npos);
 }
 
+TEST_CASE("hierarchical schematic instances become subcircuits") {
+    ice::Project project;
+    project.identity = "hierarchy";
+    project.name = "hierarchy";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    const auto childId = ice::createSchematicCell(project, "filter");
+    const auto inputId = addSymbol(childId, "Input", {"A"});
+    const auto outputId = addSymbol(childId, "Output", {"Y"});
+    const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
+    const auto childInput = ice::addSchematicInstance(project, childId, inputId, "A", 0, 0);
+    const auto childOutput = ice::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
+    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    project.schematicCells.at(childId)
+        .instances.at(childResistor)
+        .parameters.push_back({project.nextId(), "resistance", "2k"});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0)});
+    ice::addNet(project, childId, "", {pinIdOf(childId, outputId, 0), pinIdOf(childId, resistorId, 1)});
+    CHECK(childInput != 0);
+    CHECK(childOutput != 0);
+
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockId = addSymbol(parentId, "filter", {"A", "Y"});
+    project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
+    const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
+    const auto block = ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "value", "1"});
+    ice::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
+    ice::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
+    CHECK(block != 0);
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find(".subckt filter A Y") != std::string::npos);
+    CHECK(joined.find("R1 A Y 2k") != std::string::npos);
+    CHECK(joined.find(".ends filter") != std::string::npos);
+    CHECK(joined.find("X1 in out filter") != std::string::npos);
+    CHECK(joined.find("V1 in out 1") != std::string::npos);
+    CHECK(notes.empty());
+}
+
 TEST_CASE("waveform and current source symbols generate SPICE source expressions") {
     ice::Project project;
     project.identity = "sources";
@@ -1334,8 +1391,8 @@ TEST_CASE("layout spacing changes do not reject off-grid layout or schematic dat
     symbol.artwork = "device";
     project.schematicCells.at(schematic).symbols.emplace(symbolId, symbol);
     const auto instanceId = project.nextId();
-    project.schematicCells.at(schematic).instances.emplace(
-        instanceId, ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
+    project.schematicCells.at(schematic).instances.emplace(instanceId,
+                                                           ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
 
     ice::ProjectSession session(project);
     bool changed = true;

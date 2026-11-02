@@ -84,6 +84,12 @@ bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
 //   resistor -> R, capacitor -> C, inductor -> L, diode -> D,
 //   voltage source -> V, current source -> I,
 //   ground -> reference node (0). Anything else is emitted as a comment.
+//
+// Symbols backed by another schematic (Symbol::sourceCell) are hierarchical:
+// each referenced drawn schematic is emitted once as a .subckt whose ports
+// come from its Input and Output instances, and the parent instance becomes
+// X<name> <connected nodes...> <subckt name>. Subcircuits are emitted before
+// the parent body and recursively for nested hierarchy.
 // A raw "value" parameter is emitted verbatim. Otherwise voltage/current
 // sources support structured waveform parameters: pulse sources produce
 // PULSE(v1 v2 td tr tf pw per ncycles), where ncycles 0 means continuous,
