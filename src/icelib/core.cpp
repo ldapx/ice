@@ -93,6 +93,8 @@ ObjectId Project::nextId() {
         }
         for (const auto &[netId, net] : cell.nets)
             update(netId);
+        for (const auto &[commentId, _] : cell.comments)
+            update(commentId);
     }
     for (const auto &[id, _] : layers)
         highest = std::max(highest, id);
@@ -392,6 +394,9 @@ std::string Project::serialize() const {
         }
         for (const auto &[nid, net] : cell.nets)
             c["nets"].push_back({{"id", nid}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+        c["comments"] = json::array();
+        for (const auto &[cid, comment] : cell.comments)
+            c["comments"].push_back({{"id", cid}, {"text", comment.text}, {"x", comment.x}, {"y", comment.y}});
         j["schematic_cells"].push_back(c);
     }
     j["layers"] = json::array();
@@ -687,6 +692,11 @@ Project Project::deserialize(const std::string &text) {
             for (const auto &n : c.at("nets"))
                 cell.nets.emplace(n.at("id"), Net{n.at("id"), n.at("name"), n.at("pins").get<std::vector<ObjectId>>(),
                                                   n.value("x", 0), n.value("y", 0)});
+            if (c.contains("comments") && c.at("comments").is_array()) {
+                for (const auto &cm : c.at("comments"))
+                    cell.comments.emplace(cm.at("id"), SchematicComment{cm.at("id"), cm.at("text"),
+                                                                        cm.value("x", 0), cm.value("y", 0)});
+            }
             p.schematicCells.emplace(cell.id, std::move(cell));
         }
         for (const auto &l : j.at("layers"))
