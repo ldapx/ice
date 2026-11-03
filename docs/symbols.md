@@ -92,6 +92,25 @@ declare default `model`/size parameters, so newly placed instances start with
 editable values such as `model`, `w`, `l`, and `m`. There are no built-in IHP,
 Sky130, or GF180MCU symbol definitions in ICE.
 
+## Semiconductor symbols
+
+Drawn transistor, diode, and subcircuit symbols participate in netlisting:
+
+- **NMOS/PMOS** — `M<name> <drain> <gate> <source> <bulk> <model> [W=.. L=.. M=..]`
+  on the Generic PDK. When the schematic uses a package PDK and the instance
+  has a `model` parameter, ICE emits an `X` subcircuit call instead because
+  IHP, Sky130, and GF180MCU provide MOS devices as SPICE subcircuits.
+- **NPN/PNP/BJT** — `Q<name> <collector> <base> <emitter> [<substrate>] <model>
+  [M=..]`. Package-PDK BJTs use `X` subcircuit calls; a missing substrate pin
+  is tied to node `0`.
+- **Diode** — `D<name> <anode> <cathode> <model> [AREA=..]`.
+- **Op Amp** — `X<name> <+> <-> <out> <model>`.
+
+Device pin order is read from the pin names (`D/G/S/B`, `C/B/E`, `A/K`,
+`+/-/OUT`) rather than the symbol's visual pin order. If a model parameter is
+missing, ICE emits a commented note and a sensible fallback model name
+(`NMOS`, `PMOS`, `NPN`, `PNP`, `Dmodel`, or `OPAMP`).
+
 ## Source symbols
 
 The source symbols share the same two-pin vertical layout and are distinguished

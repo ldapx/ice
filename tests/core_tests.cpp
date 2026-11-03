@@ -544,6 +544,145 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     CHECK(joined.find(".end") == std::string::npos);
 }
 
+TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
+    ice::Project project;
+    project.identity = "active-netlist";
+    project.name = "active-netlist";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto makeSymbol = [&](const std::string &name, std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        for (const auto *pinName : pins)
+            cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinId = [&](ice::ObjectId symbolId, const std::string &name) {
+        for (const auto &pin : cell.symbols.at(symbolId).pins)
+            if (pin.name == name)
+                return pin.id;
+        return ice::ObjectId{0};
+    };
+    const auto makeNet = [&](const std::string &name, ice::ObjectId pin) {
+        const auto netId = project.nextId();
+        cell.nets.emplace(netId, ice::Net{netId, name, {pin}});
+        return netId;
+    };
+    const auto parameter = [&](ice::ObjectId instanceId, const std::string &name, const std::string &value) {
+        cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
+    };
+
+    const auto nmosSymbol = makeSymbol("IHP NMOS 1.2V", {"G", "D", "S", "B"});
+    const auto nmos = ice::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
+    makeNet("d", pinId(nmosSymbol, "D"));
+    makeNet("g", pinId(nmosSymbol, "G"));
+    makeNet("s", pinId(nmosSymbol, "S"));
+    makeNet("b", pinId(nmosSymbol, "B"));
+    parameter(nmos, "model", "sg13_lv_nmos");
+    parameter(nmos, "w", "0.2u");
+    parameter(nmos, "l", "0.13u");
+    parameter(nmos, "m", "1");
+
+    const auto bjtSymbol = makeSymbol("IHP NPN HBT", {"B", "C", "E"});
+    const auto bjt = ice::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
+    makeNet("c", pinId(bjtSymbol, "C"));
+    makeNet("base", pinId(bjtSymbol, "B"));
+    makeNet("e", pinId(bjtSymbol, "E"));
+    parameter(bjt, "model", "npn13G2");
+    parameter(bjt, "m", "2");
+
+    const auto diodeSymbol = makeSymbol("SKY130 Diode 5.5V", {"A", "K"});
+    const auto diode = ice::addSchematicInstance(project, cellId, diodeSymbol, "D1", 0, 0);
+    makeNet("anode", pinId(diodeSymbol, "A"));
+    makeNet("cathode", pinId(diodeSymbol, "K"));
+    parameter(diode, "model", "sky130_fd_pr__diode_pw2nd_05v5");
+
+    const auto opampSymbol = makeSymbol("Op Amp", {"+", "-", "OUT"});
+    const auto opamp = ice::addSchematicInstance(project, cellId, opampSymbol, "X1", 0, 0);
+    makeNet("plus", pinId(opampSymbol, "+"));
+    makeNet("minus", pinId(opampSymbol, "-"));
+    makeNet("out", pinId(opampSymbol, "OUT"));
+    parameter(opamp, "model", "OPAMP");
+
+    const auto genericSymbol = makeSymbol("NMOS", {"G", "D", "S", "B"});
+    const auto generic = ice::addSchematicInstance(project, cellId, genericSymbol, "M2", 0, 0);
+    CHECK(generic != 0);
+    makeNet("d2", pinId(genericSymbol, "D"));
+    makeNet("g2", pinId(genericSymbol, "G"));
+    makeNet("s2", pinId(genericSymbol, "S"));
+    makeNet("b2", pinId(genericSymbol, "B"));
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find("M1 d g s b sg13_lv_nmos W=0.2u L=0.13u M=1") != std::string::npos);
+    CHECK(joined.find("Q1 c base e npn13G2 M=2") != std::string::npos);
+    CHECK(joined.find("D1 anode cathode sky130_fd_pr__diode_pw2nd_05v5") != std::string::npos);
+    CHECK(joined.find("X1 plus minus out OPAMP") != std::string::npos);
+    CHECK(joined.find("M2 d2 g2 s2 b2 NMOS") != std::string::npos);
+    bool reportedModelFallback = false;
+    for (const auto &noteText : notes)
+        if (noteText.find("missing model parameter for M2") != std::string::npos)
+            reportedModelFallback = true;
+    CHECK(reportedModelFallback);
+}
+
+TEST_CASE("PDK transistor netlist uses subcircuit calls") {
+    ice::Project project;
+    project.identity = "pdk-active-netlist";
+    project.name = "pdk-active-netlist";
+    const auto cellId = ice::createSchematicCell(project, "top", "ihp-sg13g2");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto makeSymbol = [&](const std::string &name, std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        for (const auto *pinName : pins)
+            cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinId = [&](ice::ObjectId symbolId, const std::string &name) {
+        for (const auto &pin : cell.symbols.at(symbolId).pins)
+            if (pin.name == name)
+                return pin.id;
+        return ice::ObjectId{0};
+    };
+    const auto makeNet = [&](const std::string &name, ice::ObjectId pin) {
+        const auto netId = project.nextId();
+        cell.nets.emplace(netId, ice::Net{netId, name, {pin}});
+    };
+    const auto parameter = [&](ice::ObjectId instanceId, const std::string &name, const std::string &value) {
+        cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
+    };
+
+    const auto nmosSymbol = makeSymbol("IHP NMOS 1.2V", {"G", "D", "S", "B"});
+    const auto nmos = ice::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
+    makeNet("d", pinId(nmosSymbol, "D"));
+    makeNet("g", pinId(nmosSymbol, "G"));
+    makeNet("s", pinId(nmosSymbol, "S"));
+    makeNet("b", pinId(nmosSymbol, "B"));
+    parameter(nmos, "model", "sg13_lv_nmos");
+    parameter(nmos, "w", "0.2u");
+    parameter(nmos, "l", "0.13u");
+
+    const auto bjtSymbol = makeSymbol("IHP NPN HBT", {"B", "C", "E"});
+    const auto bjt = ice::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
+    makeNet("c", pinId(bjtSymbol, "C"));
+    makeNet("base", pinId(bjtSymbol, "B"));
+    makeNet("e", pinId(bjtSymbol, "E"));
+    parameter(bjt, "model", "npn13G2");
+
+    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find("XM1 d g s b sg13_lv_nmos W=0.2u L=0.13u") != std::string::npos);
+    CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
+}
+
 TEST_CASE("hierarchical schematic instances become subcircuits") {
     ice::Project project;
     project.identity = "hierarchy";
@@ -729,7 +868,10 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
     CHECK(ice::spiceElementForSymbol("Current Source") == 'I');
     CHECK(ice::spiceElementForSymbol("Pulse Voltage Source") == 'V');
     CHECK(ice::spiceElementForSymbol("Sine Voltage Source") == 'V');
-    CHECK(ice::spiceElementForSymbol("IHP NMOS 1.2V") == 0);
+    CHECK(ice::spiceElementForSymbol("IHP NMOS 1.2V") == 'M');
+    CHECK(ice::spiceElementForSymbol("SKY130 PMOS 1.8V") == 'M');
+    CHECK(ice::spiceElementForSymbol("IHP NPN HBT") == 'Q');
+    CHECK(ice::spiceElementForSymbol("Op Amp") == 'X');
 }
 
 TEST_CASE("generated source expressions are accepted by ngspice") {

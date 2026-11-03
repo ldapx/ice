@@ -134,6 +134,15 @@ std::string sourceExpression(const SchematicInstance &instance, const std::strin
 
 char spiceElementForSymbol(const std::string &symbolName) {
     const auto name = lower(symbolName);
+    if (name.find("nmos") != std::string::npos || name.find("pmos") != std::string::npos ||
+        name.find("mosfet") != std::string::npos)
+        return 'M';
+    if (name.find("npn") != std::string::npos || name.find("pnp") != std::string::npos ||
+        name.find("bjt") != std::string::npos)
+        return 'Q';
+    if (name.find("op amp") != std::string::npos || name.find("opamp") != std::string::npos ||
+        name.find("operational amplifier") != std::string::npos)
+        return 'X';
     if (name.find("resistor") != std::string::npos)
         return 'R';
     if (name.find("capacitor") != std::string::npos)
@@ -171,6 +180,12 @@ char spiceElementForSymbol(const std::string &symbolName) {
                 return 'V';
             case 'g':
                 return 'G';
+            case 'm':
+                return 'M';
+            case 'q':
+                return 'Q';
+            case 'x':
+                return 'X';
             default:
                 break;
             }
@@ -991,14 +1006,130 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 }
             }
 
-            // Ordered node list follows the symbol's pin order.
+            const auto pinNameToNode = [&] {
+                std::map<std::string, std::string> result;
+                for (const auto &pin : symbol->second.pins) {
+                    const auto node = pinToNode.find(pin.id);
+                    if (node != pinToNode.end())
+                        result[lower(pin.name)] = node->second;
+                }
+                return result;
+            }();
+            const auto nodesForNames =
+                [&](std::initializer_list<std::string_view> names) -> std::optional<std::vector<std::string>> {
+                std::vector<std::string> result;
+                result.reserve(names.size());
+                for (const auto name : names) {
+                    const auto node = pinNameToNode.find(lower(std::string(name)));
+                    if (node == pinNameToNode.end())
+                        return std::nullopt;
+                    result.push_back(node->second);
+                }
+                return result;
+            };
+            const auto symbolNodes = [&] {
+                std::vector<std::string> result;
+                result.reserve(symbol->second.pins.size());
+                for (const auto &pin : symbol->second.pins) {
+                    const auto node = pinToNode.find(pin.id);
+                    result.push_back(node != pinToNode.end() ? node->second : "0");
+                }
+                return result;
+            };
+
+            // PDK packages expose MOS and BJT devices as SPICE subcircuits,
+            // while generic symbols use primitive M/Q elements. A configured
+            // model is what distinguishes the two cases.
+            const auto configuredModel = parameterNamed(instance, {"model", "spice_model", "subckt"});
+            const bool pdkSubcircuit = !cell.pdk.empty() && cell.pdk != genericPdkId && !configuredModel.empty() &&
+                                       (element == 'M' || element == 'Q');
+            const char lineElement = pdkSubcircuit ? 'X' : element;
+
+            // Transistors and subcircuits need a fixed SPICE pin order which
+            // differs from the symbol's visual pin order.
             std::vector<std::string> nodes;
-            for (const auto &pin : symbol->second.pins) {
-                const auto node = pinToNode.find(pin.id);
-                nodes.push_back(node != pinToNode.end() ? node->second : "0");
+            if (element == 'M') {
+                const auto ordered = nodesForNames({"D", "G", "S", "B"});
+                if (!ordered) {
+                    note("MOS symbol missing D/G/S/B pins: " + symbol->second.name + " (" + instance.name + ")");
+                    body << "* missing MOS pins: " << instance.name << " " << symbol->second.name << "\n";
+                    continue;
+                }
+                nodes = *ordered;
+            } else if (element == 'Q') {
+                const auto ordered = nodesForNames({"C", "B", "E"});
+                if (!ordered) {
+                    note("BJT symbol missing C/B/E pins: " + symbol->second.name + " (" + instance.name + ")");
+                    body << "* missing BJT pins: " << instance.name << " " << symbol->second.name << "\n";
+                    continue;
+                }
+                nodes = *ordered;
+                if (lineElement == 'X') {
+                    const auto substrate = nodesForNames({"S", "SUB", "BN"});
+                    nodes.push_back(substrate ? substrate->front() : "0");
+                }
+            } else if (element == 'X') {
+                const auto ordered = nodesForNames({"+", "-", "OUT"});
+                nodes = ordered ? *ordered : symbolNodes();
+            } else if (element == 'D') {
+                const auto ordered = nodesForNames({"A", "K"});
+                nodes = ordered ? *ordered : symbolNodes();
+            } else {
+                nodes = symbolNodes();
             }
             if (nodes.empty()) {
                 note("instance has no connected pins: " + instance.name);
+                continue;
+            }
+
+            // Instance names commonly already carry the element letter (V1, R1);
+            // only prepend it when they do not, so we never emit "VV1".
+            std::string designator = instance.name;
+            const auto prefix = static_cast<char>(std::toupper(static_cast<unsigned char>(lineElement)));
+            if (designator.empty() ||
+                static_cast<char>(std::toupper(static_cast<unsigned char>(designator.front()))) != prefix)
+                designator.insert(designator.begin(), prefix);
+
+            const auto appendAttribute = [&](std::string_view label, std::initializer_list<std::string_view> names) {
+                const auto value = parameterNamed(instance, names);
+                if (!value.empty())
+                    body << " " << label << "=" << value;
+            };
+
+            if (element == 'M' || element == 'Q' || element == 'X' || element == 'D') {
+                const auto defaultModel = [&] {
+                    const auto symbolName = lower(symbol->second.name);
+                    if (element == 'M')
+                        return symbolName.find("pmos") != std::string::npos ||
+                                       symbolName.find("pfet") != std::string::npos
+                                   ? std::string("PMOS")
+                                   : std::string("NMOS");
+                    if (element == 'Q')
+                        return symbolName.find("pnp") != std::string::npos ? std::string("PNP") : std::string("NPN");
+                    if (element == 'X')
+                        return std::string("OPAMP");
+                    return std::string("Dmodel");
+                }();
+                auto model = configuredModel;
+                if (model.empty()) {
+                    model = defaultModel;
+                    note("missing model parameter for " + instance.name + ", using " + model);
+                }
+                body << designator << " ";
+                for (const auto &node : nodes)
+                    body << node << " ";
+                body << spiceIdentifier(model);
+                if (element == 'M') {
+                    appendAttribute("W", {"w", "width"});
+                    appendAttribute("L", {"l", "length"});
+                    appendAttribute("M", {"m", "multiplier"});
+                } else if (element == 'Q' && lineElement == 'Q') {
+                    appendAttribute("M", {"m", "multiplier"});
+                    appendAttribute("AREA", {"area"});
+                } else if (element == 'D') {
+                    appendAttribute("AREA", {"area"});
+                }
+                body << "\n";
                 continue;
             }
 
@@ -1022,27 +1153,15 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 resolved = element == 'R'   ? "1k"
                            : element == 'C' ? "1n"
                            : element == 'L' ? "1u"
-                           : element == 'D' ? "Dmodel"
                            : element == 'I' ? "1m"
                                             : "1";
                 note("missing value parameter for " + instance.name + ", using " + resolved);
             }
 
-            // Instance names commonly already carry the element letter (V1, R1);
-            // only prepend it when they do not, so we never emit "VV1".
-            std::string designator = instance.name;
-            const auto prefix = static_cast<char>(std::toupper(static_cast<unsigned char>(element)));
-            if (designator.empty() ||
-                static_cast<char>(std::toupper(static_cast<unsigned char>(designator.front()))) != prefix)
-                designator.insert(designator.begin(), prefix);
             body << designator << " ";
-            if (element == 'D')
-                body << resolved << " "; // diode: D<name> <node+> <node-> <model>
             for (const auto &node : nodes)
                 body << node << " ";
-            if (element != 'D')
-                body << resolved << " ";
-            body << "\n";
+            body << resolved << "\n";
         }
         return body.str();
     };

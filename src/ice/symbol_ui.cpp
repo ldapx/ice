@@ -14,9 +14,9 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QImage>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QKeyEvent>
 #include <QListWidget>
 #include <QPaintEvent>
 #include <QPainter>
@@ -27,8 +27,8 @@
 #include <QStringList>
 #include <QSvgRenderer>
 #include <QSvgWidget>
-#include <QTabWidget>
 #include <QTabBar>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
@@ -117,6 +117,10 @@ std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &
     } else {
         char elementPrefix = ice::spiceElementForSymbol(symbolName);
         if (elementPrefix == 0)
+            elementPrefix = 'X';
+        // PDK transistor/BJT models are SPICE subcircuits, so their
+        // designators must begin with X rather than M or Q.
+        if (!cell.pdk.empty() && cell.pdk != ice::genericPdkId && (elementPrefix == 'M' || elementPrefix == 'Q'))
             elementPrefix = 'X';
         prefix = std::string(1, elementPrefix);
     }
