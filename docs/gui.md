@@ -185,11 +185,19 @@ The layout editor should initially provide:
 - undo/redo.
 
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
-column contains **Properties** and **Layers**. Layout entries use a notebook-pen
-icon. Each layout node lists its child layout/device instances, planned
-devices, rectangles, polygons, paths, and texts directly, with a distinct icon
-for each entry type. Right-click an entry and choose **Rename…** to rename a
-layout, script, instance, planned device, or shape. Right-click a layout entry
+column contains **Properties** and **Layers**. Creating a layout with a packaged
+PDK adds that package's complete device-library layer set up front; placing
+devices reuses those layers instead of adding new ones. The **Layers** panel
+groups GDS purpose variants under their base layer number: for example
+`Metal1.pin` and `Metal1.nofill` appear under `Metal1`. Pin, mask,
+fill-blocking, and marker layers that use non-zero datatypes or marker base
+names start hidden; enable them with the child checkbox or the parent group
+checkbox. Creating a custom layer opens a form with the layer name, assigned
+GDS number, color picker, fill pattern, and a live style preview. Layout entries
+use a notebook-pen icon. Each layout node lists its child layout/device
+instances, planned devices, rectangles, polygons, paths, and texts directly,
+with a distinct icon for each entry type. Right-click an entry and choose
+**Rename…** to rename a layout, script, instance, planned device, or shape. Right-click a layout entry
 and toggle **Flatten Layout for DRC** to control whether **Run DRC** exports the
 flattened instance geometry instead of only the layout cell's own shapes.
 Right-clicking a schematic in the Schematic **Hierarchy** tab offers **Make
@@ -253,6 +261,11 @@ with the `icepy` layout builder. ICE uses `python3` unless `ICE_PYTHON` points
 to another interpreter. If the package generator or Python module is
 unavailable, ICE reports the error and leaves the existing geometry unchanged.
 
+Device placement ghosts and the Properties layout preview use the same layer
+color resolution and flattened geometry renderer as the canvas, including
+paths, text, pins, and planned devices. Layer colors are keyed by GDS layer
+number, so they remain stable when layers are added or removed.
+
 The layout toolbar separates **Select** from **Move**. **Select** supports
 rubber-band selection and handle editing: drag path points, polygon vertices,
 and rectangle corner or edge handles, but it does not move whole objects.
@@ -264,8 +277,9 @@ highlight its net in the layout. Tracing follows touching conductive shapes and
 crosses layers through via shapes, using a connectivity stack inferred from the
 project's `Metal*`, `TopMetal*`, `Via*`, `TopVia*`, and `Contact` layer names.
 For example, `Metal1` connects to `Metal2` only through `Via1`. `Contact` links
-`Activ` and `Poly2` to `Metal1` when those layers exist. Shapes on layers that do
-not belong to the stack are reported in the status bar instead of being traced.
+`Activ` and `GatPoly` (or the older `Poly2` name) to `Metal1` when those layers
+exist. Shapes on layers that do not belong to the stack are reported in the
+status bar instead of being traced.
 
 Net labels are taken from shape `net` assignments or text shapes placed on the
 traced geometry; otherwise the trace is shown as **Traced net**. Related planned

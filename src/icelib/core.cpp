@@ -38,6 +38,20 @@ std::string joinedSignalList(const std::vector<std::string> &signalNames) {
     }
     return text;
 }
+
+int legacyLayerDatatype(const std::string &name) {
+    // Schema-2 projects written before Layer stored its datatype encoded the
+    // value in the generated name, for example "Metal1 (dt 2)".
+    const auto marker = name.rfind("(dt ");
+    if (marker == std::string::npos || name.empty() || name.back() != ')')
+        return 0;
+    try {
+        const auto value = std::stoi(name.substr(marker + 4, name.size() - marker - 5));
+        return value >= 0 && value <= 65535 ? value : 0;
+    } catch (const std::exception &) {
+        return 0;
+    }
+}
 } // namespace
 
 ProjectError::ProjectError(std::string code, std::string message)
@@ -404,6 +418,9 @@ std::string Project::serialize() const {
         j["layers"].push_back({{"id", id},
                                {"name", layer.name},
                                {"number", layer.number},
+                               {"datatype", layer.datatype},
+                               {"color", layer.color},
+                               {"pattern", layer.pattern},
                                {"visible", layer.visible},
                                {"layout", layer.layout},
                                {"pdk", layer.pdk}});
@@ -704,9 +721,14 @@ Project Project::deserialize(const std::string &text) {
             }
             p.schematicCells.emplace(cell.id, std::move(cell));
         }
-        for (const auto &l : j.at("layers"))
-            p.layers.emplace(l.at("id"), Layer{l.at("id"), l.at("name"), l.at("number"), l.value("visible", true),
-                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{})});
+        for (const auto &l : j.at("layers")) {
+            const auto name = l.at("name").get<std::string>();
+            const auto datatype = l.contains("datatype") ? l.value("datatype", 0) : legacyLayerDatatype(name);
+            p.layers.emplace(l.at("id"),
+                             Layer{l.at("id"), name, l.at("number"), l.value("visible", true),
+                                   l.value("layout", ObjectId{0}), l.value("pdk", std::string{}), datatype,
+                                   l.value("color", std::string{}), l.value("pattern", -1)});
+        }
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
             cell.pdk = c.value("pdk", std::string{genericPdkId});

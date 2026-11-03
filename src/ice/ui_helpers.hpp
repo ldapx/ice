@@ -48,7 +48,19 @@ struct LayerStyle {
     Qt::BrushStyle pattern = Qt::SolidPattern;
 };
 
+struct LayerPatternOption {
+    QString name;
+    Qt::BrushStyle pattern = Qt::SolidPattern;
+};
+
 const std::vector<QColor> &layerPalette();
+const std::vector<LayerPatternOption> &layerPatternOptions();
+// Stable style for a GDS layer number. Both the canvas and previews use this
+// so the same layer keeps the same color regardless of object-id ordering.
+LayerStyle layerStyleForNumber(int number);
+// Applies explicit layer color/pattern overrides, falling back to the stable
+// per-number style.
+LayerStyle layerStyleFor(const ice::Layer &layer);
 std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project);
 QPixmap layerPreviewIcon(const LayerStyle &style);
 void drawCanvasAxes(QPainter &painter, const QRectF &exposed);

@@ -797,8 +797,13 @@ class IceMcpServer {
                                             {"nets", cell.nets.size()}});
         }
         for (const auto &[id, layer] : project.layers)
-            result["layers"].push_back(
-                {{"id", id}, {"name", layer.name}, {"number", layer.number}, {"visible", layer.visible}});
+            result["layers"].push_back({{"id", id},
+                                         {"name", layer.name},
+                                         {"number", layer.number},
+                                         {"datatype", layer.datatype},
+                                         {"color", layer.color},
+                                         {"pattern", layer.pattern},
+                                         {"visible", layer.visible}});
         for (const auto &[id, cell] : project.layoutCells) {
             result["layouts"].push_back({{"id", id},
                                          {"name", cell.name},
@@ -1820,9 +1825,11 @@ class IceMcpServer {
             ice::ObjectId id = 0;
             const auto layerName = requiredString(arguments, "name");
             const auto number = static_cast<int>(requiredInteger(arguments, "number"));
-            session.execute("mcp layout-add-layer",
-                            [&](ice::Project &project) { id = ice::addLayer(project, layerName, number); });
-            return {{"id", id}, {"name", layerName}, {"number", number}};
+            const auto datatype = static_cast<int>(optionalInteger(arguments, "datatype").value_or(0));
+            session.execute("mcp layout-add-layer", [&](ice::Project &project) {
+                id = ice::addLayer(project, layerName, number, 0, {}, datatype);
+            });
+            return {{"id", id}, {"name", layerName}, {"number", number}, {"datatype", datatype}};
         }
         if (name == "layout_add_rectangle") {
             ice::ObjectId id = 0;
@@ -2341,6 +2348,7 @@ class IceMcpServer {
                             .with_description("Add a layout layer.")
                             .with_string_param("name", "Layer name")
                             .with_integer_param("number", "Layer number")
+                            .with_integer_param("datatype", "GDS datatype/purpose", false)
                             .build());
         tools.push_back(tool_builder("layout_add_rectangle")
                             .with_description("Add a rectangle to a layout cell.")

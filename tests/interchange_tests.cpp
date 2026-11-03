@@ -86,6 +86,22 @@ TEST_CASE("LEF export and import round-trip pin metadata") {
     CHECK(imported.layers.at(input->layer).name == "Metal1");
 }
 
+TEST_CASE("LEF exports purpose-layer pins on the base layer") {
+    ice::Project project;
+    project.identity = "lef-purpose";
+    project.name = "lef-purpose";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    ice::addPort(project, cell, "A", layer, {0, 0, 1000, 1000}, ice::PortDirection::input, ice::PortSide::left);
+
+    const auto path = temporaryPath("purpose.lef");
+    ice::LayoutInterchange::exportLef(project, cell, path);
+    const auto text = readFile(path);
+    std::filesystem::remove(path);
+    CHECK(text.find("LAYER Metal1 ;") != std::string::npos);
+    CHECK(text.find("Metal1.pin") == std::string::npos);
+}
+
 TEST_CASE("DEF export and import round-trip pins and nets") {
     auto fixture = makeFixture();
     const auto path = temporaryPath("pins.def");
@@ -121,6 +137,30 @@ TEST_CASE("DEF export and import round-trip pins and nets") {
     CHECK(input->rectangle.height == 500);
     CHECK(output->rectangle.x == 2000);
     CHECK(output->rectangle.height == 1000);
+}
+
+TEST_CASE("GDS export and import preserve layer datatypes") {
+    ice::Project project;
+    project.identity = "gds-datatype";
+    project.name = "gds-datatype";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    ice::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
+
+    const auto path = temporaryPath("datatype.gds");
+    ice::LayoutInterchange::exportGds(project, cell, path);
+    const auto imported = ice::LayoutInterchange::importGds(path);
+    std::filesystem::remove(path);
+
+    CHECK(imported.layoutCells.size() == 1);
+    CHECK(imported.layers.size() == 1);
+    if (imported.layers.size() != 1)
+        return;
+    const auto &restored = imported.layers.begin()->second;
+    CHECK(restored.number == 8);
+    CHECK(restored.datatype == 2);
+    CHECK(restored.name == "GDS layer 8 (dt 2)");
+    CHECK(imported.layoutCells.begin()->second.shapes.size() == 1);
 }
 
 TEST_CASE("GDS import recovers pin labels when a label layer is configured") {

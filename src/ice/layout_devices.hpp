@@ -2,6 +2,7 @@
 
 #include "icelib/core.hpp"
 #include "icelib/layout_library.hpp"
+#include "layout_render.hpp"
 #include "icelib/packages.hpp"
 
 #include <QString>
@@ -24,12 +25,17 @@ class LayoutDevicePreview : public QWidget {
   public:
     explicit LayoutDevicePreview(QWidget *parent = nullptr);
     void setCell(const ice::LayoutDeviceCell *cell);
+    void setModel(const ice::LayoutPreviewModel &model);
+    void setStyles(const ice::LayoutRenderer::LayerStyleMap &styles,
+                   const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
 
   protected:
     void paintEvent(QPaintEvent *event) override;
 
   private:
-    const ice::LayoutDeviceCell *cell_ = nullptr;
+    ice::LayoutPreviewModel model_;
+    ice::LayoutRenderer::LayerStyleMap styles_;
+    ice::LayoutRenderer::DeviceStyleMap deviceStyles_;
 };
 
 class LayoutDevicesPanel : public QWidget {
@@ -96,8 +102,6 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
 // Backfills pins on an existing library cell without regenerating geometry.
 void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                             const std::vector<ice::LayoutDevicePort> &sourcePorts);
-std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &project, const ice::LayoutCell &cell,
-                                                           const ice::LayoutDeviceLibrary &library);
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
                                                                       const std::map<std::string, std::string> &values,
                                                                       QString *error, const std::string &pdk = {});

@@ -218,7 +218,14 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     updateParameterButtons();
 }
 
-void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell) {
+void PropertiesPanel::setLayoutPreviewStyles(const ice::LayoutRenderer::LayerStyleMap &styles,
+                                             const ice::LayoutRenderer::DeviceStyleMap &deviceStyles) {
+    layoutPreviewStyles_ = styles;
+    layoutPreviewDeviceStyles_ = deviceStyles;
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
+}
+
+void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model) {
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = cell.id;
@@ -237,14 +244,10 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     if (cell.library)
         text += QStringLiteral(" · Read-only geometry");
     selection_->setText(text);
-    if (previewCell && !previewCell->shapes.empty()) {
-        layoutCellPreview_ = *previewCell;
-        layoutDevicePreview_->setCell(&layoutCellPreview_);
-        previewStack_->setCurrentWidget(layoutDevicePreview_);
-        previewFrame_->setVisible(true);
-    } else {
-        previewFrame_->setVisible(false);
-    }
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
+    layoutDevicePreview_->setModel(model);
+    previewStack_->setCurrentWidget(layoutDevicePreview_);
+    previewFrame_->setVisible(!model.empty());
     populateParameters(cell.parameters);
     updateParameterButtons();
 }
@@ -270,6 +273,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     }
     layoutDeviceName_ = cell->name;
     selection_->setText(QStringLiteral("%1 (Device)").arg(QString::fromStdString(cell->name)));
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
     layoutDevicePreview_->setCell(cell);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
     previewFrame_->setVisible(true);
@@ -416,7 +420,7 @@ void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &la
     updateParameterButtons();
 }
 
-void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell,
+void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model,
                                         int spacing) {
     instanceId_ = 0;
     cellId_ = 0;
@@ -427,10 +431,10 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     portMode_ = false;
     layoutShapeId_ = 0;
     setParametersVisible(false);
-    layoutCellPreview_ = previewCell ? *previewCell : ice::LayoutDeviceCell{};
-    layoutDevicePreview_->setCell(previewCell && !previewCell->shapes.empty() ? &layoutCellPreview_ : nullptr);
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
+    layoutDevicePreview_->setModel(model);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
-    previewFrame_->setVisible(true);
+    previewFrame_->setVisible(!model.empty());
     const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                        : QString::fromStdString(cell.pdk);
     selection_->setText(QStringLiteral("%1 (Layout · %2)").arg(QString::fromStdString(cell.name), pdk));

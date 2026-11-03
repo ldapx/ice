@@ -1,5 +1,7 @@
 #include "layout_canvas.hpp"
 
+#include "layout_render.hpp"
+
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
@@ -29,6 +31,43 @@
 #include <cmath>
 #include <limits>
 #include <set>
+
+namespace {
+class LayoutPreviewGraphicsItem : public QGraphicsItem {
+  public:
+    LayoutPreviewGraphicsItem(ice::LayoutPreviewModel model, ice::LayoutRenderer::LayerStyleMap styles,
+                              ice::LayoutRenderer::DeviceStyleMap deviceStyles)
+        : model_(std::move(model)), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)) {
+        if (model_.bounds.isValid()) {
+            bounds_ = QRectF(model_.bounds.x(), -(model_.bounds.y() + model_.bounds.height()), model_.bounds.width(),
+                             model_.bounds.height());
+        }
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    QRectF boundingRect() const override { return bounds_; }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        ice::LayoutRenderer::PaintOptions options;
+        options.showPorts = false;
+        options.showPlannedDevices = false;
+        options.showLabels = false;
+        ice::LayoutRenderer::paintAtOrigin(*painter, model_, styles_, deviceStyles_, QPointF(0.0, 0.0), options);
+    }
+
+  private:
+    ice::LayoutPreviewModel model_;
+    ice::LayoutRenderer::LayerStyleMap styles_;
+    ice::LayoutRenderer::DeviceStyleMap deviceStyles_;
+    QRectF bounds_;
+};
+} // namespace
+
+QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel &model,
+                                       const ice::LayoutRenderer::LayerStyleMap &styles,
+                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles) {
+    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles);
+}
 
 LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}
 LayoutCanvas::~LayoutCanvas() = default;
@@ -889,6 +928,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setDevicePreview(const ice::LayoutDeviceCell *cell) {
         devicePreview_ = cell;
+        devicePreviewModel_ = cell ? ice::buildLayoutDevicePreviewModel(*cell) : ice::LayoutPreviewModel{};
+        viewport()->update();
+    }
+
+    void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) override {
+        deviceLayerStyles_ = styles;
         viewport()->update();
     }
 
@@ -1200,29 +1245,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void drawForeground(QPainter *painter, const QRectF &rect) override {
-        if (tool_ == Tool::placeDevice && devicePreview_ && viewport()->underMouse()) {
+        if (tool_ == Tool::placeDevice && devicePreview_ && !devicePreviewModel_.empty() && viewport()->underMouse()) {
             painter->save();
             painter->setClipRect(rect);
-            painter->setRenderHint(QPainter::Antialiasing);
-            const auto &colors = layerPalette();
-            const auto bounds = devicePreview_->bounds;
-            const qreal centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
-            const qreal centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
-            for (const auto &shape : devicePreview_->shapes) {
-                QPolygonF polygon;
-                polygon.reserve(static_cast<int>(shape.polygon.size()));
-                for (const auto &point : shape.polygon) {
-                    polygon << QPointF(cursorScenePosition_.x() + point.x - centerX,
-                                       cursorScenePosition_.y() - point.y + centerY);
-                }
-                auto color = colors[(static_cast<std::size_t>(shape.layer) * 31 + shape.datatype) % colors.size()];
-                QPen pen(color);
-                pen.setCosmetic(true);
-                painter->setPen(pen);
-                color.setAlpha(55);
-                painter->setBrush(color);
-                painter->drawPolygon(polygon);
-            }
+            ice::LayoutRenderer::PaintOptions options;
+            options.shapeAlpha = 55;
+            options.portAlpha = 30;
+            options.showPatterns = true;
+            options.showLabels = false;
+            ice::LayoutRenderer::paintAt(*painter, devicePreviewModel_, layerStyles_, deviceLayerStyles_,
+                                         cursorScenePosition_, options);
             painter->restore();
         }
         if (tool_ == Tool::path && pathActive_)
@@ -2348,6 +2380,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     std::function<void(ice::ObjectId)> shapeActivated_;
     ice::ObjectId notifiedLayoutInstance_ = 0;
     const ice::LayoutDeviceCell *devicePreview_ = nullptr;
+    ice::LayoutPreviewModel devicePreviewModel_;
+    std::map<std::pair<int, int>, LayerStyle> deviceLayerStyles_;
     QPointF cursorScenePosition_;
     QLineEdit *scaleEditor_ = nullptr;
     std::map<ice::ObjectId, LayerStyle> layerStyles_;

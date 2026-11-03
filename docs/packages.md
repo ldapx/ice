@@ -97,8 +97,12 @@ number = 65
 
 Activating the package adds these layers to the Layout editor, records the
 package as a project dependency, and creates the default schematic when the
-project has no schematics yet. Layer GDS numbers are currently stored as single
-integers; non-zero GDS datatypes are not represented by the layout model.
+project has no schematics yet. Layout layers store both the GDS number and
+datatype. Creating a layout adds the package's full device-library layer set,
+so placing devices only reuses existing layers. Device libraries use
+purpose-qualified names such as `GatPoly.pin` and `Metal1.nofill`; non-zero
+datatypes and marker layers start hidden, and the Layers panel groups them
+under their base layer number.
 
 ## Package indexes
 

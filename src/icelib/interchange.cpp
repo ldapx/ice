@@ -91,6 +91,12 @@ std::int32_t checkedI32(Coordinate value, const char *field) {
     return static_cast<std::int32_t>(value);
 }
 
+std::pair<int, int> layerStream(const Project &project, ObjectId layerId) {
+    if (const auto layer = project.layers.find(layerId); layer != project.layers.end())
+        return {layer->second.number, layer->second.datatype};
+    return {0, 0};
+}
+
 void writeXyRecord(std::ostream &output, Coordinate x, Coordinate y) {
     const auto px = static_cast<std::uint32_t>(checkedI32(x, "x"));
     const auto py = static_cast<std::uint32_t>(checkedI32(y, "y"));
@@ -137,15 +143,20 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
                 {0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0, 0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54});
     writeRecord(output, kBgnStr, 0x02, timestampRecord());
     writeStringRecord(output, kStrName, "TOP");
-    const auto writeBoundary = [&](int layerNumber, std::vector<LayoutPoint> polygon) {
+    const auto writeBoundary = [&](int layerNumber, int datatype, std::vector<LayoutPoint> polygon) {
         if (layerNumber < 0 || layerNumber > 65535)
             throw ProjectError("interchange.export", "Layer number out of GDSII range");
+        if (datatype < 0 || datatype > 65535)
+            throw ProjectError("interchange.export", "Layer datatype out of GDSII range");
         const auto layerValue = static_cast<std::uint32_t>(layerNumber);
+        const auto datatypeValue = static_cast<std::uint32_t>(datatype);
         std::vector<unsigned char> layer{static_cast<unsigned char>((layerValue >> 8) & 0xff),
                                          static_cast<unsigned char>(layerValue & 0xff)};
+        std::vector<unsigned char> layerDatatype{static_cast<unsigned char>((datatypeValue >> 8) & 0xff),
+                                                 static_cast<unsigned char>(datatypeValue & 0xff)};
         writeEmptyRecord(output, kBoundary);
         writeRecord(output, kLayer, 0x02, layer);
-        writeRecord(output, kDataType, 0x02, {0, 0});
+        writeRecord(output, kDataType, 0x02, layerDatatype);
         if (polygon.empty())
             return;
         if (polygon.front().x != polygon.back().x || polygon.front().y != polygon.back().y)
@@ -167,17 +178,20 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
 
     for (const auto &[_, shape] : cell.shapes) {
         if (shape.isText()) {
-            int layerNumber = 0;
-            if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
-                layerNumber = layerIt->second.number;
+            const auto [layerNumber, datatype] = layerStream(project, shape.layer);
             if (layerNumber < 0 || layerNumber > 65535)
                 throw ProjectError("interchange.export", "Layer number out of GDSII range");
+            if (datatype < 0 || datatype > 65535)
+                throw ProjectError("interchange.export", "Layer datatype out of GDSII range");
             const auto layerValue = static_cast<std::uint32_t>(layerNumber);
+            const auto datatypeValue = static_cast<std::uint32_t>(datatype);
             writeEmptyRecord(output, kText);
             writeRecord(
                 output, kLayer, 0x02,
                 {static_cast<unsigned char>((layerValue >> 8) & 0xff), static_cast<unsigned char>(layerValue & 0xff)});
-            writeRecord(output, kTextType, 0x02, {0, 0});
+            writeRecord(output, kTextType, 0x02,
+                        {static_cast<unsigned char>((datatypeValue >> 8) & 0xff),
+                         static_cast<unsigned char>(datatypeValue & 0xff)});
             // The nominal text box uses a lower-left origin; GDS text uses the
             // top-left with the default presentation.
             writeXyRecord(output, shape.rectangle.x, shape.rectangle.y + shape.rectangle.height);
@@ -192,31 +206,26 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
             };
             for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
                 const auto layerId = shape.layerForSegment(index);
-                int layerNumber = 0;
-                if (const auto layerIt = project.layers.find(layerId); layerIt != project.layers.end())
-                    layerNumber = layerIt->second.number;
+                const auto [layerNumber, datatype] = layerStream(project, layerId);
                 const auto startExtension = hasVia(index) ? half : 0;
                 const auto endExtension = hasVia(index + 1) ? half : 0;
-                writeBoundary(layerNumber, pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1],
-                                                              shape.width, startExtension, endExtension));
+                writeBoundary(layerNumber, datatype,
+                              pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1], shape.width,
+                                                 startExtension, endExtension));
             }
             for (std::size_t index = 0; index < shape.pointVias.size() && index < shape.centerline.size(); ++index) {
                 const auto &point = shape.centerline[index];
                 for (const auto viaLayer : shape.pointVias[index]) {
-                    int layerNumber = 0;
-                    if (const auto layerIt = project.layers.find(viaLayer); layerIt != project.layers.end())
-                        layerNumber = layerIt->second.number;
-                    writeBoundary(layerNumber, {{point.x - half, point.y - half},
-                                                {point.x + half, point.y - half},
-                                                {point.x + half, point.y + half},
-                                                {point.x - half, point.y + half}});
+                    const auto [layerNumber, datatype] = layerStream(project, viaLayer);
+                    writeBoundary(layerNumber, datatype, {{point.x - half, point.y - half},
+                                                          {point.x + half, point.y - half},
+                                                          {point.x + half, point.y + half},
+                                                          {point.x - half, point.y + half}});
                 }
             }
             continue;
         }
-        int layerNumber = 0;
-        if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end())
-            layerNumber = layerIt->second.number;
+        const auto [layerNumber, datatype] = layerStream(project, shape.layer);
         std::vector<LayoutPoint> polygon = shape.polygon;
         if (polygon.empty()) {
             const auto x = shape.rectangle.x;
@@ -225,27 +234,30 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
             const auto top = shape.rectangle.y + shape.rectangle.height;
             polygon = {{x, y}, {right, y}, {right, top}, {x, top}, {x, y}};
         }
-        writeBoundary(layerNumber, std::move(polygon));
+        writeBoundary(layerNumber, datatype, std::move(polygon));
     }
     for (const auto &[_, port] : cell.ports) {
         if (!port.visible)
             continue;
-        int layerNumber = 0;
-        if (const auto layerIt = project.layers.find(port.layer); layerIt != project.layers.end())
-            layerNumber = layerIt->second.number;
+        const auto [layerNumber, datatype] = layerStream(project, port.layer);
         if (layerNumber < 0 || layerNumber > 65535)
             throw ProjectError("interchange.export", "Layer number out of GDSII range");
+        if (datatype < 0 || datatype > 65535)
+            throw ProjectError("interchange.export", "Layer datatype out of GDSII range");
         const auto &rect = port.rectangle;
-        writeBoundary(layerNumber, {{rect.x, rect.y},
-                                    {rect.x + rect.width, rect.y},
-                                    {rect.x + rect.width, rect.y + rect.height},
-                                    {rect.x, rect.y + rect.height}});
+        writeBoundary(layerNumber, datatype, {{rect.x, rect.y},
+                                              {rect.x + rect.width, rect.y},
+                                              {rect.x + rect.width, rect.y + rect.height},
+                                              {rect.x, rect.y + rect.height}});
         const auto layerValue = static_cast<std::uint32_t>(layerNumber);
+        const auto datatypeValue = static_cast<std::uint32_t>(datatype);
         writeEmptyRecord(output, kText);
         writeRecord(
             output, kLayer, 0x02,
             {static_cast<unsigned char>((layerValue >> 8) & 0xff), static_cast<unsigned char>(layerValue & 0xff)});
-        writeRecord(output, kTextType, 0x02, {0, 0});
+        writeRecord(output, kTextType, 0x02,
+                    {static_cast<unsigned char>((datatypeValue >> 8) & 0xff),
+                     static_cast<unsigned char>(datatypeValue & 0xff)});
         writeXyRecord(output, rect.x + rect.width / 2, rect.y + rect.height / 2);
         writeStringRecord(output, kString, port.label.empty() ? port.name : port.label);
         writeEmptyRecord(output, kEndEl);
@@ -405,7 +417,16 @@ std::string lefUse(PortDirection direction) {
 
 std::string layerNameFor(const Project &project, ObjectId layerId) {
     const auto layer = project.layers.find(layerId);
-    return layer == project.layers.end() ? "M1" : layer->second.name;
+    if (layer == project.layers.end())
+        return "M1";
+    // LEF/DEF have no datatype field. Pins placed on a purpose layer such as
+    // Metal1.pin belong to the base Metal1 layer there.
+    auto name = layer->second.name;
+    if (const auto dot = name.find('.'); dot != std::string::npos)
+        name.erase(dot);
+    if (const auto datatype = name.find(" (dt "); datatype != std::string::npos)
+        name.erase(datatype);
+    return name;
 }
 } // namespace
 
@@ -843,8 +864,22 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
     const auto cellId = project.nextId();
     project.layoutCells.emplace(cellId, LayoutCell{cellId, project.name});
     auto &layout = project.layoutCells.at(cellId);
-    std::map<std::uint16_t, ObjectId> layers;
+    std::map<std::pair<std::uint16_t, std::uint16_t>, ObjectId> layers;
     std::uint16_t currentLayer = 0;
+    std::uint16_t currentDatatype = 0;
+    const auto currentLayerId = [&]() {
+        const auto key = std::make_pair(currentLayer, currentDatatype);
+        if (const auto existing = layers.find(key); existing != layers.end())
+            return existing->second;
+        std::string name = "GDS layer " + std::to_string(currentLayer);
+        if (currentDatatype != 0)
+            name += " (dt " + std::to_string(currentDatatype) + ")";
+        const auto id = project.nextId();
+        project.layers.emplace(id, Layer{id, name, static_cast<int>(currentLayer), true, 0, std::string{},
+                                         static_cast<int>(currentDatatype)});
+        layers.emplace(key, id);
+        return id;
+    };
     std::vector<std::pair<std::int32_t, std::int32_t>> points;
     bool inBoundary = false;
     bool inText = false;
@@ -864,11 +899,16 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
         if (type == kLayer && dataType == 0x02 && data.size() >= 2)
             currentLayer = static_cast<std::uint16_t>((static_cast<std::uint32_t>(data[0]) << 8) |
                                                       static_cast<std::uint32_t>(data[1]));
+        else if ((type == kDataType || type == kTextType) && dataType == 0x02 && data.size() >= 2)
+            currentDatatype = static_cast<std::uint16_t>((static_cast<std::uint32_t>(data[0]) << 8) |
+                                                         static_cast<std::uint32_t>(data[1]));
         else if (type == kBoundary) {
             inBoundary = true;
+            currentDatatype = 0;
             points.clear();
         } else if (type == kText) {
             inText = true;
+            currentDatatype = 0;
             hasTextOrigin = false;
             textValue.clear();
         } else if (type == kXy && dataType == 0x03 && inText && data.size() >= 8) {
@@ -883,20 +923,14 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
                 points.emplace_back(readI32(data.data() + i), readI32(data.data() + i + 4));
         } else if (type == kEndEl && inText) {
             if (hasTextOrigin && !textValue.empty()) {
-                auto layer = layers.find(currentLayer);
-                if (layer == layers.end()) {
-                    const auto id = project.nextId();
-                    project.layers.emplace(
-                        id, Layer{id, "GDS layer " + std::to_string(currentLayer), static_cast<int>(currentLayer)});
-                    layer = layers.emplace(currentLayer, id).first;
-                }
+                const auto layerId = currentLayerId();
                 constexpr Coordinate height = 1000;
                 const auto width =
                     std::max<Coordinate>(1, static_cast<Coordinate>(std::llround(static_cast<double>(textValue.size()) *
                                                                                  static_cast<double>(height) * 0.6)));
                 const auto shapeId = project.nextId();
                 Shape shape{shapeId,
-                            layer->second,
+                            layerId,
                             std::nullopt,
                             {textOrigin.first, textOrigin.second - height, width, height},
                             {}};
@@ -926,7 +960,7 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
                         Port port{
                             portId,
                             portName,
-                            layer->second,
+                            layerId,
                             {textOrigin.first - pinWidth / 2, textOrigin.second - pinHeight / 2, pinWidth, pinHeight}};
                         port.label = textValue;
                         layout.ports.emplace(portId, std::move(port));
@@ -937,13 +971,7 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
             hasTextOrigin = false;
             textValue.clear();
         } else if (type == kEndEl && inBoundary && points.size() >= 4) {
-            auto layer = layers.find(currentLayer);
-            if (layer == layers.end()) {
-                const auto id = project.nextId();
-                project.layers.emplace(
-                    id, Layer{id, "GDS layer " + std::to_string(currentLayer), static_cast<int>(currentLayer)});
-                layer = layers.emplace(currentLayer, id).first;
-            }
+            const auto layerId = currentLayerId();
             Coordinate minX = std::numeric_limits<Coordinate>::max();
             Coordinate minY = std::numeric_limits<Coordinate>::max();
             Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
@@ -964,7 +992,7 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
             layout.shapes.emplace(
                 shapeId,
                 Shape{
-                    shapeId, layer->second, std::nullopt, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+                    shapeId, layerId, std::nullopt, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
             inBoundary = false;
         }
     }

@@ -154,23 +154,49 @@ const std::vector<QColor> &layerPalette() {
     return palette;
 }
 
-std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project) {
-    static const std::vector<Qt::BrushStyle> patterns = {
-        Qt::SolidPattern, Qt::BDiagPattern, Qt::FDiagPattern,  Qt::DiagCrossPattern, Qt::HorPattern,
-        Qt::VerPattern,   Qt::CrossPattern, Qt::Dense4Pattern, Qt::Dense5Pattern,
+const std::vector<LayerPatternOption> &layerPatternOptions() {
+    static const std::vector<LayerPatternOption> options = {
+        {QStringLiteral("Solid"), Qt::SolidPattern},
+        {QStringLiteral("Diagonal /"), Qt::BDiagPattern},
+        {QStringLiteral("Diagonal \\"), Qt::FDiagPattern},
+        {QStringLiteral("Cross hatch"), Qt::DiagCrossPattern},
+        {QStringLiteral("Horizontal"), Qt::HorPattern},
+        {QStringLiteral("Vertical"), Qt::VerPattern},
+        {QStringLiteral("Grid"), Qt::CrossPattern},
+        {QStringLiteral("Dense dots"), Qt::Dense4Pattern},
+        {QStringLiteral("Sparse dots"), Qt::Dense5Pattern},
     };
+    return options;
+}
+
+LayerStyle layerStyleForNumber(int number) {
+    const auto &palette = layerPalette();
+    const auto &patterns = layerPatternOptions();
+    const auto index = static_cast<std::size_t>(std::max(0, number));
+    const QColor color = palette[index % palette.size()];
+    const Qt::BrushStyle pattern = patterns[(index / palette.size()) % patterns.size()].pattern;
+    return LayerStyle{color, pattern};
+}
+
+LayerStyle layerStyleFor(const ice::Layer &layer) {
+    auto style = layerStyleForNumber(layer.number);
+    if (!layer.color.empty()) {
+        const QColor color(QString::fromStdString(layer.color));
+        if (color.isValid())
+            style.color = color;
+    }
+    if (layer.pattern >= 0 && layer.pattern < static_cast<int>(layerPatternOptions().size()))
+        style.pattern = layerPatternOptions()[static_cast<std::size_t>(layer.pattern)].pattern;
+    return style;
+}
+
+std::map<ice::ObjectId, LayerStyle> layerStylesFor(const ice::Project &project) {
     std::map<ice::ObjectId, LayerStyle> styles;
-    std::size_t index = 0;
     for (const auto &[id, layer] : project.layers) {
-        if (!layer.visible) {
+        if (!layer.visible)
             styles.emplace(id, LayerStyle{QColor(130, 130, 130), Qt::NoBrush});
-        } else {
-            const auto &palette = layerPalette();
-            const QColor color = palette[index % palette.size()];
-            const Qt::BrushStyle pattern = patterns[(index / palette.size()) % patterns.size()];
-            styles.emplace(id, LayerStyle{color, pattern});
-        }
-        ++index;
+        else
+            styles.emplace(id, layerStyleFor(layer));
     }
     return styles;
 }

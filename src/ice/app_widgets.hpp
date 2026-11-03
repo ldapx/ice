@@ -3,6 +3,7 @@
 #include "icelib/core.hpp"
 
 #include <QAction>
+#include <QColor>
 #include <QDialog>
 #include <QSize>
 #include <QStackedWidget>
@@ -34,6 +35,8 @@ namespace ice {
 struct LvsReport;
 struct VerificationReport;
 } // namespace ice
+
+struct LayerStyle;
 
 class DiagnosticsPanel : public QWidget {
   public:
@@ -303,6 +306,26 @@ class CreateLayoutDialog : public QDialog {
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
     QLabel *pdkDescription_ = nullptr;
+};
+
+class CreateLayerDialog : public QDialog {
+  public:
+    explicit CreateLayerDialog(const QString &defaultName, int layerNumber, const LayerStyle &suggestedStyle,
+                               QWidget *parent = nullptr);
+    QString layerName() const;
+    QColor color() const;
+    int patternIndex() const;
+
+  private:
+    void updateColorButton();
+    void updatePreview();
+
+    QLineEdit *name_ = nullptr;
+    QPushButton *colorButton_ = nullptr;
+    QComboBox *pattern_ = nullptr;
+    QLabel *preview_ = nullptr;
+    QColor color_;
+    Qt::BrushStyle autoPattern_ = Qt::SolidPattern;
 };
 
 class WorkspaceStack : public QStackedWidget {

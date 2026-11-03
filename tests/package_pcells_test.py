@@ -85,7 +85,14 @@ def check_library(name: str, root: Path) -> None:
     assert device["bounds"][2] > device["bounds"][0]
     assert device["bounds"][3] > device["bounds"][1]
 
+    layer_names = {
+        (layer["number"], layer["datatype"]): layer["name"]
+        for layer in library["layers"]
+    }
     if name == "ice-pkg-ihp-sg13g2":
+        assert layer_names[(5, 2)] == "GatPoly.pin"
+        assert layer_names[(8, 2)] == "Metal1.pin"
+        assert layer_names[(51, 0)] == "HeatTrans"
         expected = {
             "nmos.toml": {
                 "model": "sg13_lv_nmos",

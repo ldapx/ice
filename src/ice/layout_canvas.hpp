@@ -2,6 +2,7 @@
 
 #include "icelib/core.hpp"
 #include "icelib/layout_library.hpp"
+#include "layout_render.hpp"
 #include "ui_helpers.hpp"
 
 #include <QColor>
@@ -12,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 class QGraphicsItem;
@@ -59,6 +61,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setSnapToGrid(bool enabled) = 0;
     virtual void setGridSpacing(qreal spacing) = 0;
     virtual void setDevicePreview(const ice::LayoutDeviceCell *cell) = 0;
+    virtual void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) = 0;
     virtual void restoreLayoutInstanceSelection() = 0;
     virtual void setDevicePlacementCallback(std::function<void(QPointF)> callback) = 0;
     virtual void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
@@ -131,5 +134,12 @@ QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &na
 QPointF layoutResizeHandlePosition(const QRectF &rect, int handle);
 QGraphicsItem *createLayoutResizeHandleItem(ice::ObjectId shapeId, int handle);
 QGraphicsItem *createLayoutPolygonHandleItem(ice::ObjectId shapeId, int index);
+
+// Paints a prepared preview model as a non-interactive child item. Used for
+// instance contents so the canvas and the Properties preview share one
+// renderer.
+QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel &model,
+                                       const ice::LayoutRenderer::LayerStyleMap &styles,
+                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent = nullptr);

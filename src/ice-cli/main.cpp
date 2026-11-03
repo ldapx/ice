@@ -395,8 +395,13 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                         {"nets", cell.nets.size()}});
     }
     for (const auto &[id, layer] : project.layers) {
-        result["layers"].push_back(
-            {{"id", id}, {"name", layer.name}, {"number", layer.number}, {"visible", layer.visible}});
+        result["layers"].push_back({{"id", id},
+                                    {"name", layer.name},
+                                    {"number", layer.number},
+                                    {"datatype", layer.datatype},
+                                    {"color", layer.color},
+                                    {"pattern", layer.pattern},
+                                    {"visible", layer.visible}});
     }
     for (const auto &[id, cell] : project.layoutCells) {
         result["layouts"].push_back({{"id", id},
@@ -787,7 +792,7 @@ void printHelp() {
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
               << "  layout-remove <project> <cell|procedural>\n"
-              << "  layout-add-layer <project> <name> <number>\n"
+              << "  layout-add-layer <project> <name> <number> [datatype]\n"
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
@@ -1317,14 +1322,16 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-add-layer") {
-            expectArguments(args, 4, 4, "layout-add-layer <project> <name> <number>");
+            expectArguments(args, 4, 5, "layout-add-layer <project> <name> <number> [datatype]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             const auto number = static_cast<int>(parseInteger(args[3], "layer number"));
+            const auto datatype = args.size() >= 5 ? static_cast<int>(parseInteger(args[4], "layer datatype")) : 0;
             ice::ObjectId id = 0;
-            session.execute("layout-add-layer",
-                            [&](ice::Project &project) { id = ice::addLayer(project, args[2], number); });
+            session.execute("layout-add-layer", [&](ice::Project &project) {
+                id = ice::addLayer(project, args[2], number, 0, {}, datatype);
+            });
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"number", number}});
+            printJson({{"id", id}, {"name", args[2]}, {"number", number}, {"datatype", datatype}});
             return 0;
         }
 

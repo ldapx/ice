@@ -25,6 +25,7 @@
 #include <QSize>
 #include <QStringList>
 #include <QStyledItemDelegate>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -38,6 +39,7 @@ constexpr int kItemKindRole = Qt::UserRole + 1;
 constexpr int kReportIdRole = Qt::UserRole + 2;
 constexpr int kInstanceIdRole = Qt::UserRole + 3;
 constexpr int kOwnerCellRole = Qt::UserRole + 4;
+constexpr int kLayerGroupIdsRole = Qt::UserRole + 10;
 
 enum class HierarchyItemKind : int {
     layout = 1,
@@ -129,6 +131,26 @@ QString shapeEntryDisplayName(ice::ObjectId id, const ice::Shape &shape) {
 }
 
 QIcon hierarchyIcon(const char *name) { return ice::lucideIcon(QString::fromLatin1(name), 16); }
+
+QString layerBaseName(const ice::Layer &layer) {
+    const auto name = QString::fromStdString(layer.name);
+    const auto dot = name.indexOf('.');
+    return dot > 0 ? name.left(dot) : name;
+}
+
+QString layerPurposeLabel(const ice::Layer &layer) {
+    const auto name = QString::fromStdString(layer.name);
+    const auto dot = name.indexOf('.');
+    if (dot >= 0 && dot + 1 < name.size())
+        return name.mid(dot + 1);
+    if (layer.datatype == 0)
+        return QStringLiteral("drawing");
+    return QStringLiteral("datatype");
+}
+
+QString layerVariantLabel(const ice::Layer &layer) {
+    return QStringLiteral("%1 (dt %2)").arg(layerPurposeLabel(layer)).arg(layer.datatype);
+}
 } // namespace
 
 ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutHierarchy, bool showActions,
@@ -974,11 +996,49 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
-        if (!item || column != 0 || !onLayerVisibilityChanged_)
+        if (!item || column != 0)
             return;
+        const bool visible = item->checkState(0) == Qt::Checked;
+        const auto groupIds = item->data(0, kLayerGroupIdsRole).toStringList();
+        if (!groupIds.isEmpty()) {
+            {
+                QSignalBlocker blocker(tree_);
+                for (int index = 0; index < item->childCount(); ++index)
+                    item->child(index)->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
+                item->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
+            }
+            std::vector<ice::ObjectId> ids;
+            ids.reserve(groupIds.size());
+            for (const auto &text : groupIds)
+                ids.push_back(static_cast<ice::ObjectId>(text.toULongLong()));
+            // The callback usually rebuilds this tree. Queue it so Qt is done
+            // with the QTreeWidgetItem before the panel is repopulated.
+            QTimer::singleShot(0, this, [this, ids = std::move(ids), visible] {
+                if (onLayerGroupVisibilityChanged_)
+                    onLayerGroupVisibilityChanged_(ids, visible);
+            });
+            return;
+        }
         const auto layerId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
-        if (layerId != 0)
-            onLayerVisibilityChanged_(layerId, item->checkState(0) == Qt::Checked);
+        if (layerId == 0 || !onLayerVisibilityChanged_)
+            return;
+        if (auto *parent = item->parent()) {
+            QSignalBlocker blocker(tree_);
+            int checked = 0;
+            int unchecked = 0;
+            for (int index = 0; index < parent->childCount(); ++index) {
+                const auto state = parent->child(index)->checkState(0);
+                checked += state == Qt::Checked ? 1 : 0;
+                unchecked += state == Qt::Unchecked ? 1 : 0;
+            }
+            parent->setCheckState(0, checked == parent->childCount()
+                                         ? Qt::Checked
+                                         : (unchecked == parent->childCount() ? Qt::Unchecked : Qt::PartiallyChecked));
+        }
+        QTimer::singleShot(0, this, [this, layerId, visible] {
+            if (onLayerVisibilityChanged_)
+                onLayerVisibilityChanged_(layerId, visible);
+        });
     });
     connect(search_, &QLineEdit::textChanged, this, [this](const QString &text) { applyFilter(text); });
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint &pos) { showContextMenu(pos); });
@@ -1012,12 +1072,25 @@ void LayersPanel::setSelectedLayer(ice::ObjectId layerId) {
             tree_->setCurrentItem(item);
             return;
         }
+        for (int childIndex = 0; childIndex < item->childCount(); ++childIndex) {
+            auto *child = item->child(childIndex);
+            if (child->data(0, Qt::UserRole).toULongLong() != layerId)
+                continue;
+            item->setExpanded(true);
+            tree_->setCurrentItem(child);
+            return;
+        }
     }
     tree_->setCurrentItem(nullptr);
 }
 
 void LayersPanel::setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback) {
     onLayerVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::setOnLayerGroupVisibilityChanged(
+    std::function<void(const std::vector<ice::ObjectId> &, bool)> callback) {
+    onLayerGroupVisibilityChanged_ = std::move(callback);
 }
 
 void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> callback) {
@@ -1027,9 +1100,24 @@ void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> call
 void LayersPanel::applyFilter(const QString &text) {
     QSignalBlocker blocker(tree_);
     const auto needle = text.trimmed();
-    for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
-        auto *item = tree_->topLevelItem(index);
-        item->setHidden(!needle.isEmpty() && !item->text(0).contains(needle, Qt::CaseInsensitive));
+    std::function<bool(QTreeWidgetItem *)> filter = [&](QTreeWidgetItem *item) {
+        bool childMatches = false;
+        for (int index = 0; index < item->childCount(); ++index)
+            childMatches |= filter(item->child(index));
+        const bool selfMatches = needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive);
+        if (selfMatches && !needle.isEmpty()) {
+            for (int index = 0; index < item->childCount(); ++index)
+                item->child(index)->setHidden(false);
+        }
+        const bool visible = selfMatches || childMatches;
+        item->setHidden(!visible);
+        return visible;
+    };
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index)
+        filter(tree_->topLevelItem(index));
+    if (!needle.isEmpty()) {
+        for (int index = 0; index < tree_->topLevelItemCount(); ++index)
+            tree_->topLevelItem(index)->setExpanded(true);
     }
 }
 
@@ -1056,6 +1144,15 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
     QSignalBlocker blocker(tree_);
     tree_->clear();
     const auto styles = layerStylesFor(project);
+    const auto styleFor = [&](ice::ObjectId id) {
+        return styles.contains(id) ? styles.at(id)
+                                   : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
+    };
+
+    // Purpose variants (pin, nofill, noqrc, mask, …) are separate stream
+    // layers because they carry different GDS datatypes. Group them under the
+    // base layer number so the panel reads like a technology stack.
+    std::map<int, std::vector<std::pair<ice::ObjectId, const ice::Layer *>>> groups;
     for (const auto &[id, layer] : project.layers) {
         if (layoutId != 0 && layer.layout != 0 && layer.layout != layoutId)
             continue;
@@ -1064,14 +1161,60 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
             if (cell == project.layoutCells.end() || cell->second.pdk != layer.pdk)
                 continue;
         }
-        const auto style =
-            styles.contains(id) ? styles.at(id) : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
-        auto *item = new QTreeWidgetItem(
-            tree_, {QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer.name)).arg(layer.number)});
-        item->setIcon(0, QIcon(layerPreviewIcon(style)));
-        item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
+        groups[layer.number].emplace_back(id, &layer);
+    }
+
+    for (auto &[number, entries] : groups) {
+        std::sort(entries.begin(), entries.end(), [](const auto &left, const auto &right) {
+            if (left.second->datatype != right.second->datatype)
+                return left.second->datatype < right.second->datatype;
+            return left.second->name < right.second->name;
+        });
+        if (entries.size() == 1) {
+            const auto &[id, layer] = entries.front();
+            auto *item = new QTreeWidgetItem(
+                tree_, {QStringLiteral("%1 (%2)").arg(QString::fromStdString(layer->name)).arg(number)});
+            item->setIcon(0, QIcon(layerPreviewIcon(styleFor(id))));
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(0, layer->visible ? Qt::Checked : Qt::Unchecked);
+            item->setToolTip(0, QStringLiteral("%1 · GDS %2/%3")
+                                    .arg(QString::fromStdString(layer->name))
+                                    .arg(number)
+                                    .arg(layer->datatype));
+            continue;
+        }
+
+        const auto *primary = entries.front().second;
+        const auto baseName = layerBaseName(*primary);
+        const auto title = baseName.isEmpty() ? QStringLiteral("Layer %1").arg(number) : baseName;
+        auto *groupItem = new QTreeWidgetItem(tree_, {QStringLiteral("%1 (%2)").arg(title).arg(number)});
+        groupItem->setIcon(0, QIcon(layerPreviewIcon(styleFor(entries.front().first))));
+        groupItem->setFlags(groupItem->flags() | Qt::ItemIsUserCheckable);
+        groupItem->setToolTip(0, QStringLiteral("GDS layer %1 · %2 purpose variants")
+                                    .arg(number)
+                                    .arg(entries.size()));
+        int visibleCount = 0;
+        QStringList groupIds;
+        for (const auto &[id, layer] : entries) {
+            auto *item = new QTreeWidgetItem(groupItem, {layerVariantLabel(*layer)});
+            item->setIcon(0, QIcon(layerPreviewIcon(styleFor(id))));
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(0, layer->visible ? Qt::Checked : Qt::Unchecked);
+            item->setToolTip(0, QStringLiteral("%1 · GDS %2/%3")
+                                    .arg(QString::fromStdString(layer->name))
+                                    .arg(number)
+                                    .arg(layer->datatype));
+            visibleCount += layer->visible ? 1 : 0;
+            groupIds << QString::number(static_cast<qulonglong>(id));
+        }
+        groupItem->setData(0, kLayerGroupIdsRole, groupIds);
+        groupItem->setCheckState(0, visibleCount == 0
+                                        ? Qt::Unchecked
+                                        : (visibleCount == static_cast<int>(entries.size()) ? Qt::Checked
+                                                                                            : Qt::PartiallyChecked));
+        groupItem->setExpanded(true);
     }
     if (search_)
         applyFilter(search_->text());

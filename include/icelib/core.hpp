@@ -127,6 +127,14 @@ struct Layer {
     // belong only to that layout cell; pdk layers are shared by matching PDKs.
     ObjectId layout = 0;
     std::string pdk;
+    // GDSII datatype/purpose. Layers with the same number but different
+    // datatypes are separate entries so geometry and pins keep their exact
+    // stream identity. The Layers panel groups them by number for display.
+    int datatype = 0;
+    // Empty color and pattern -1 mean the UI derives both from the layer
+    // number. Explicit values let users style custom layers.
+    std::string color;
+    int pattern = -1;
 };
 
 struct Rect {

@@ -32,6 +32,39 @@
 #include <set>
 #include <utility>
 
+namespace {
+// Defined below with the device-layer helpers. Declared here so PDK layer
+// activation can apply the same purpose/marker visibility rules.
+bool layerHiddenByDefault(const std::string &name, int datatype);
+
+void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk) {
+    const auto path = layoutDeviceLibraryPath(pdk);
+    if (path.empty())
+        return;
+    try {
+        const auto library = ice::LayoutDeviceLibrary::load(path);
+        for (const auto &layer : library.layers) {
+            const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+                const auto &existing = entry.second;
+                return existing.number == layer.number && existing.datatype == layer.datatype &&
+                       existing.name == layer.name && existing.layout == 0 &&
+                       (existing.pdk.empty() || existing.pdk == pdk);
+            });
+            if (exists == project.layers.end()) {
+                const auto id = ice::addLayer(project, layer.name, layer.number, 0, pdk, layer.datatype);
+                if (layerHiddenByDefault(layer.name, layer.datatype))
+                    project.layers.at(id).visible = false;
+            } else if (exists->second.pdk.empty()) {
+                exists->second.pdk = pdk;
+            }
+        }
+    } catch (const ice::ProjectError &) {
+        // A package without a loadable device library can still contribute its
+        // declared PDK layers.
+    }
+}
+} // namespace
+
 void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
     const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
     for (const auto &layer : pdk.layers) {
@@ -48,6 +81,10 @@ void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::
             exists->second.pdk = technology;
         }
     }
+    // The device library is the complete layer map for the technology. Adding
+    // it here means creating a PDK layout exposes every layer up front and
+    // placing devices only reuses existing entries.
+    addLayoutDeviceLibraryLayers(project, technology);
 }
 
 void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &installDirectory) {
@@ -323,6 +360,20 @@ QString pythonExecutable() {
 }
 
 namespace {
+bool layerHiddenByDefault(const std::string &name, int datatype) {
+    // Non-zero datatypes are purposes such as pin, nofill, noqrc, or mask.
+    // They are part of the device geometry but should not clutter the canvas
+    // unless the user explicitly enables them.
+    if (datatype != 0)
+        return true;
+    const auto dot = name.find('.');
+    const auto base = name.substr(0, dot);
+    static const std::set<std::string> markers = {
+        "HeatTrans", "HeatRes", "EdgeSeal", "EXTBlock", "NoRCX", "Recog",
+    };
+    return markers.contains(base);
+}
+
 ice::ObjectId layoutDeviceLayerId(ice::Project &project,
                                  std::map<std::pair<int, int>, std::string> &layerNames,
                                  std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype) {
@@ -339,13 +390,18 @@ ice::ObjectId layoutDeviceLayerId(ice::Project &project,
         layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
     ice::ObjectId layerId = 0;
     for (const auto &[id, layer] : project.layers) {
-        if (layer.number == number && layer.name == layerName) {
+        if (layer.number == number && layer.datatype == datatype && layer.name == layerName) {
             layerId = id;
             break;
         }
     }
-    if (layerId == 0)
-        layerId = ice::addLayer(project, layerName, number);
+    if (layerId == 0) {
+        layerId = ice::addLayer(project, layerName, number, 0, {}, datatype);
+        if (layerHiddenByDefault(layerName, datatype)) {
+            if (const auto layer = project.layers.find(layerId); layer != project.layers.end())
+                layer->second.visible = false;
+        }
+    }
     layerIds.emplace(key, layerId);
     return layerId;
 }
@@ -416,84 +472,6 @@ void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const 
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
         cell.ports.emplace(id, std::move(port));
     }
-}
-
-std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &project, const ice::LayoutCell &cell,
-                                                           const ice::LayoutDeviceLibrary &library) {
-    std::map<std::pair<int, std::string>, int> datatypes;
-    for (const auto &layer : library.layers)
-        datatypes[{layer.number, layer.name}] = layer.datatype;
-
-    ice::LayoutDeviceCell preview;
-    preview.name = cell.name;
-    preview.category = "Layout";
-    ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
-    ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
-    ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
-    ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
-    const auto addPolygon = [&](std::vector<ice::Point> points, int layerNumber, int datatype) {
-        if (points.size() < 3)
-            return;
-        for (const auto &point : points) {
-            minX = std::min(minX, point.x);
-            minY = std::min(minY, point.y);
-            maxX = std::max(maxX, point.x);
-            maxY = std::max(maxY, point.y);
-        }
-        preview.shapes.push_back(ice::LayoutDeviceShape{layerNumber, datatype, std::move(points)});
-    };
-
-    std::set<ice::ObjectId> ancestors{cell.id};
-    std::function<void(const ice::LayoutCell &, const std::function<ice::Point(ice::Point)> &)> collect;
-    collect = [&](const ice::LayoutCell &current, const std::function<ice::Point(ice::Point)> &mapper) {
-        for (const auto &[_, shape] : current.shapes) {
-            std::vector<ice::Point> points;
-            if (shape.polygon.size() >= 3) {
-                points.reserve(shape.polygon.size());
-                for (const auto &point : shape.polygon)
-                    points.push_back(mapper({point.x, point.y}));
-            } else if (shape.isPath()) {
-                continue;
-            } else {
-                const auto &rect = shape.rectangle;
-                points = {mapper({rect.x, rect.y}), mapper({rect.x + rect.width, rect.y}),
-                          mapper({rect.x + rect.width, rect.y + rect.height}), mapper({rect.x, rect.y + rect.height})};
-            }
-            int layerNumber = 0;
-            int datatype = 0;
-            if (const auto layerIt = project.layers.find(shape.layer); layerIt != project.layers.end()) {
-                layerNumber = layerIt->second.number;
-                if (const auto datatypeIt = datatypes.find({layerNumber, layerIt->second.name});
-                    datatypeIt != datatypes.end())
-                    datatype = datatypeIt->second;
-            }
-            addPolygon(std::move(points), layerNumber, datatype);
-        }
-        for (const auto &[_, device] : current.plannedDevices) {
-            std::vector<ice::Point> points = {mapper({device.x, device.y}), mapper({device.x + device.width, device.y}),
-                                              mapper({device.x + device.width, device.y + device.height}),
-                                              mapper({device.x, device.y + device.height})};
-            addPolygon(std::move(points), 0, 0);
-        }
-        for (const auto &[_, instance] : current.instances) {
-            const auto childIt = project.layoutCells.find(instance.cell);
-            if (childIt == project.layoutCells.end() || ancestors.contains(instance.cell))
-                continue;
-            const ice::Transform transform{instance.x, instance.y, instance.orientation};
-            const auto parentMapper = mapper;
-            const auto childMapper = [parentMapper, transform](ice::Point point) {
-                return parentMapper(transform.apply(point));
-            };
-            ancestors.insert(instance.cell);
-            collect(childIt->second, childMapper);
-            ancestors.erase(instance.cell);
-        }
-    };
-    collect(cell, [](ice::Point point) { return point; });
-    if (preview.shapes.empty() || maxX <= minX || maxY <= minY)
-        return std::nullopt;
-    preview.bounds = ice::Rect{minX, minY, maxX - minX, maxY - minY};
-    return preview;
 }
 
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
@@ -611,7 +589,19 @@ LayoutDevicePreview::LayoutDevicePreview(QWidget *parent) : QWidget(parent) {
 }
 
 void LayoutDevicePreview::setCell(const ice::LayoutDeviceCell *cell) {
-    cell_ = cell;
+    model_ = cell ? ice::buildLayoutDevicePreviewModel(*cell) : ice::LayoutPreviewModel{};
+    update();
+}
+
+void LayoutDevicePreview::setModel(const ice::LayoutPreviewModel &model) {
+    model_ = model;
+    update();
+}
+
+void LayoutDevicePreview::setStyles(const ice::LayoutRenderer::LayerStyleMap &styles,
+                                    const ice::LayoutRenderer::DeviceStyleMap &deviceStyles) {
+    styles_ = styles;
+    deviceStyles_ = deviceStyles;
     update();
 }
 
@@ -621,39 +611,18 @@ void LayoutDevicePreview::paintEvent(QPaintEvent *) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(QPen(ice::uiColor(ice::UiColor::Border1), 1));
     painter.drawRect(rect().adjusted(0, 0, -1, -1));
-    if (!cell_ || cell_->shapes.empty() || !cell_->bounds.valid()) {
+    if (model_.empty() || !model_.bounds.isValid()) {
         painter.setPen(ice::uiColor(ice::UiColor::Text2));
         painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("No geometry"));
         return;
     }
 
-    const auto &bounds = cell_->bounds;
-    const qreal maxY = static_cast<qreal>(bounds.y + bounds.height);
-    const QRectF area = rect().adjusted(10, 10, -10, -10);
-    const qreal width = static_cast<qreal>(bounds.width);
-    const qreal height = static_cast<qreal>(bounds.height);
-    if (width <= 0.0 || height <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0)
-        return;
-    const qreal scale = std::min(area.width() / width, area.height() / height);
-    const qreal drawWidth = width * scale;
-    const qreal drawHeight = height * scale;
-    const qreal offsetX = area.left() + (area.width() - drawWidth) / 2.0;
-    const qreal offsetY = area.top() + (area.height() - drawHeight) / 2.0;
-    const auto &colors = layerPalette();
-    painter.setClipRect(area);
-    for (const auto &shape : cell_->shapes) {
-        QPolygonF polygon;
-        polygon.reserve(static_cast<int>(shape.polygon.size()));
-        for (const auto &point : shape.polygon) {
-            polygon << QPointF(offsetX + (static_cast<qreal>(point.x) - bounds.x) * scale,
-                               offsetY + (maxY - static_cast<qreal>(point.y)) * scale);
-        }
-        auto color = colors[(static_cast<std::size_t>(shape.layer) * 31 + shape.datatype) % colors.size()];
-        painter.setPen(QPen(color, 0.6));
-        color.setAlpha(70);
-        painter.setBrush(color);
-        painter.drawPolygon(polygon);
-    }
+    ice::LayoutRenderer::PaintOptions options;
+    options.shapeAlpha = 70;
+    options.portAlpha = 30;
+    options.outlineWidth = 0.6;
+    ice::LayoutRenderer::paintFitted(painter, model_, styles_, deviceStyles_, rect().adjusted(10, 10, -10, -10),
+                                     options);
 }
 
 LayoutDevicesPanel::LayoutDevicesPanel(QWidget *parent) : QWidget(parent) {

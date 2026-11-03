@@ -10,6 +10,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -2570,5 +2571,103 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
 
 QString CreateLayoutDialog::layoutName() const { return name_->text().trimmed(); }
 std::string CreateLayoutDialog::pdkId() const { return pdk_->currentData().toString().toStdString(); }
+
+CreateLayerDialog::CreateLayerDialog(const QString &defaultName, int layerNumber,
+                                     const LayerStyle &suggestedStyle, QWidget *parent)
+    : QDialog(parent), color_(suggestedStyle.color.isValid() ? suggestedStyle.color : QColor("#3366cc")),
+      autoPattern_(suggestedStyle.pattern) {
+    setWindowTitle(QStringLiteral("Create Layer"));
+    setModal(true);
+    resize(520, 320);
+
+    auto *layout = new QVBoxLayout(this);
+    auto *description = new QLabel(
+        QStringLiteral("Create a custom layout layer. The GDS number is assigned automatically; choose its color "
+                       "and fill pattern below."));
+    description->setWordWrap(true);
+    layout->addWidget(description);
+
+    auto *form = new QFormLayout;
+    name_ = new QLineEdit(defaultName.isEmpty() ? QStringLiteral("metal1") : defaultName);
+    name_->setClearButtonEnabled(true);
+    name_->setAccessibleName(QStringLiteral("Layer name"));
+    form->addRow(QStringLiteral("Layer name"), name_);
+
+    auto *number = new QLabel(QString::number(layerNumber));
+    number->setToolTip(QStringLiteral("GDS layer number assigned to the new layer"));
+    form->addRow(QStringLiteral("GDS layer"), number);
+
+    colorButton_ = new QPushButton;
+    colorButton_->setAccessibleName(QStringLiteral("Layer color"));
+    form->addRow(QStringLiteral("Color"), colorButton_);
+
+    pattern_ = new QComboBox;
+    pattern_->setAccessibleName(QStringLiteral("Layer fill pattern"));
+    pattern_->addItem(QStringLiteral("Automatic (by layer number)"), -1);
+    for (std::size_t index = 0; index < layerPatternOptions().size(); ++index)
+        pattern_->addItem(layerPatternOptions()[index].name, static_cast<int>(index));
+    form->addRow(QStringLiteral("Pattern"), pattern_);
+
+    preview_ = new QLabel;
+    preview_->setAccessibleName(QStringLiteral("Layer style preview"));
+    preview_->setMinimumHeight(44);
+    form->addRow(QStringLiteral("Preview"), preview_);
+    layout->addLayout(form);
+    layout->addStretch();
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Create"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Cancel"));
+    layout->addWidget(buttons);
+
+    connect(colorButton_, &QPushButton::clicked, this, [this] {
+        const auto chosen = QColorDialog::getColor(color_, this, QStringLiteral("Layer Color"));
+        if (!chosen.isValid())
+            return;
+        color_ = chosen;
+        updateColorButton();
+        updatePreview();
+    });
+    connect(pattern_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updatePreview(); });
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (name_->text().trimmed().isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Create Layer"), QStringLiteral("Enter a layer name."));
+            name_->setFocus();
+            return;
+        }
+        QDialog::accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    updateColorButton();
+    updatePreview();
+    name_->selectAll();
+    name_->setFocus();
+}
+
+QString CreateLayerDialog::layerName() const { return name_->text().trimmed(); }
+
+QColor CreateLayerDialog::color() const { return color_; }
+
+int CreateLayerDialog::patternIndex() const { return pattern_->currentData().toInt(); }
+
+void CreateLayerDialog::updateColorButton() {
+    QPixmap swatch(18, 18);
+    swatch.fill(color_);
+    QPainter painter(&swatch);
+    painter.setPen(ice::uiColor(ice::UiColor::Border1));
+    painter.drawRect(0, 0, 17, 17);
+    painter.end();
+    colorButton_->setIcon(QIcon(swatch));
+    colorButton_->setText(color_.name(QColor::HexRgb).toUpper());
+}
+
+void CreateLayerDialog::updatePreview() {
+    LayerStyle style{color_, autoPattern_};
+    const auto pattern = patternIndex();
+    if (pattern >= 0 && pattern < static_cast<int>(layerPatternOptions().size()))
+        style.pattern = layerPatternOptions()[static_cast<std::size_t>(pattern)].pattern;
+    preview_->setPixmap(layerPreviewIcon(style).scaled(108, 54, Qt::KeepAspectRatio, Qt::FastTransformation));
+}
 
 QSize WorkspaceStack::minimumSizeHint() const { return QSize(QStackedWidget::minimumSizeHint().width(), 0); }

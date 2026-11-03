@@ -57,13 +57,15 @@ class PropertiesPanel : public QWidget {
     void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
                      const std::string &symbolSvg);
     void setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg);
-    void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell = nullptr);
+    void setLayoutPreviewStyles(const ice::LayoutRenderer::LayerStyleMap &styles,
+                                const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
+    void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model);
     void setLayoutDevice(const ice::LayoutDeviceCell *cell);
     void setPathTool(int width, const std::string &layerName);
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
                         const std::string &typeName);
     void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName);
-    void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell, int spacing);
+    void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model, int spacing);
 
   private:
     static QLabel *addRow(QFormLayout *form, const QString &label);
@@ -79,7 +81,8 @@ class PropertiesPanel : public QWidget {
     QStackedWidget *previewStack_ = nullptr;
     SymbolPreview *symbolPreview_ = nullptr;
     LayoutDevicePreview *layoutDevicePreview_ = nullptr;
-    ice::LayoutDeviceCell layoutCellPreview_;
+    ice::LayoutRenderer::LayerStyleMap layoutPreviewStyles_;
+    ice::LayoutRenderer::DeviceStyleMap layoutPreviewDeviceStyles_;
     QFrame *previewFrame_ = nullptr;
     QTableWidget *parameters_ = nullptr;
     QPushButton *addParameterButton_ = nullptr;

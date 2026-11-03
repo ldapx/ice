@@ -302,7 +302,7 @@ LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
     const auto contactLayer = layerFor("contact");
     if (contactLayer != 0) {
         std::set<ice::ObjectId> contactConductors;
-        for (const auto &key : {"activ", "poly2", "metal1"}) {
+        for (const auto &key : {"activ", "gatpoly", "poly2", "metal1"}) {
             if (const auto layer = layerFor(key); layer != 0)
                 contactConductors.insert(layer);
         }
@@ -3652,20 +3652,28 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
-        bool accepted = false;
-        const auto name = QInputDialog::getText(this, QStringLiteral("Create Layer"), QStringLiteral("Layer name:"),
-                                                QLineEdit::Normal, QStringLiteral("metal1"), &accepted);
-        if (!accepted || name.trimmed().isEmpty())
-            return;
         int number = 1;
-        const auto existingLayers = project_->project().layers.size();
-        number = static_cast<int>(existingLayers) + 1;
+        for (const auto &[_, layer] : project_->project().layers)
+            number = std::max(number, layer.number + 1);
+        CreateLayerDialog dialog(QStringLiteral("metal1"), number, layerStyleForNumber(number), this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto name = dialog.layerName();
+        if (name.isEmpty())
+            return;
+        const auto color = dialog.color().name(QColor::HexRgb).toStdString();
+        const auto pattern = dialog.patternIndex();
+        ice::ObjectId created = 0;
         project_->execute("create layer", [&](ice::Project &project) {
-            ice::addLayer(project, name.trimmed().toStdString(), number, activeLayoutId_);
+            created = ice::addLayer(project, name.toStdString(), number, activeLayoutId_);
+            auto &layer = project.layers.at(created);
+            layer.color = color;
+            layer.pattern = pattern;
         });
-        project_->setLastHistoryLabel("Created layer " + name.trimmed().toStdString());
+        activeLayoutLayerId_ = created;
+        project_->setLastHistoryLabel("Created layer " + name.toStdString());
         refreshProject();
-        statusBar()->showMessage(QStringLiteral("Layer created"));
+        statusBar()->showMessage(QStringLiteral("Layer '%1' created").arg(name));
     }
 
     void managePackages() {
@@ -3777,6 +3785,12 @@ class DocumentWindow : public QMainWindow {
             updateLayoutPathConfig();
         const auto styles = layerStylesFor(project);
         layoutCanvas_->setLayerStyles(styles);
+        const auto deviceStyles =
+            layoutDevicesPanel_ ? ice::LayoutRenderer::deviceStylesFor(project, layoutDevicesPanel_->library(), styles)
+                                : ice::LayoutRenderer::DeviceStyleMap{};
+        layoutCanvas_->setDeviceLayerStyles(deviceStyles);
+        if (layoutPropertiesPanel_)
+            layoutPropertiesPanel_->setLayoutPreviewStyles(styles, deviceStyles);
         if (availableLayers.size() == 1)
             activeLayoutLayerId_ = availableLayers.front().get().id;
         else if (!project.layers.contains(activeLayoutLayerId_) ||
@@ -3930,72 +3944,6 @@ class DocumentWindow : public QMainWindow {
             }
         }
 
-        const auto drawCellToGroup = [&](const ice::LayoutCell &cell,
-                                         const std::function<ice::Point(ice::Point)> &mapper,
-                                         std::vector<ice::ObjectId> &ancestors, QGraphicsItemGroup *group) {
-            std::function<void(const ice::LayoutCell &, const std::function<ice::Point(ice::Point)> &,
-                               std::vector<ice::ObjectId> &)>
-                drawCell;
-            drawCell = [&](const ice::LayoutCell &currentCell,
-                           const std::function<ice::Point(ice::Point)> &currentMapper,
-                           std::vector<ice::ObjectId> &currentAncestors) {
-                for (const auto &[_, shape] : currentCell.shapes) {
-                    if (!layerVisible(shape.layer))
-                        continue;
-                    const auto style = styles.contains(shape.layer)
-                                           ? styles.at(shape.layer)
-                                           : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
-                    const QPen pen(style.color, 1);
-                    QBrush brush(QColor(style.color.red(), style.color.green(), style.color.blue(), 110),
-                                 style.pattern);
-                    if (style.pattern == Qt::NoBrush)
-                        brush = QBrush(Qt::NoBrush);
-                    std::vector<ice::Point> points;
-                    if (shape.polygon.size() >= 3) {
-                        points.reserve(shape.polygon.size());
-                        for (const auto &point : shape.polygon)
-                            points.push_back({point.x, point.y});
-                    } else {
-                        const auto &rect = shape.rectangle;
-                        points = {{rect.x, rect.y},
-                                  {rect.x + rect.width, rect.y},
-                                  {rect.x + rect.width, rect.y + rect.height},
-                                  {rect.x, rect.y + rect.height}};
-                    }
-                    QPolygonF polygon;
-                    polygon.reserve(static_cast<int>(points.size()));
-                    for (const auto &point : points) {
-                        const auto mapped = currentMapper(point);
-                        polygon << QPointF(mapped.x, -mapped.y);
-                    }
-                    if (polygon.size() >= 3) {
-                        auto *item = new QGraphicsPolygonItem(polygon);
-                        item->setPen(pen);
-                        item->setBrush(brush);
-                        item->setAcceptedMouseButtons(Qt::NoButton);
-                        group->addToGroup(item);
-                    }
-                }
-                for (const auto &[_, child] : currentCell.instances) {
-                    const auto childIt = project.layoutCells.find(child.cell);
-                    if (childIt == project.layoutCells.end() ||
-                        std::find(currentAncestors.begin(), currentAncestors.end(), child.cell) !=
-                            currentAncestors.end())
-                        continue;
-                    const ice::Transform transform{child.x, child.y, child.orientation};
-                    const auto parentMapper = currentMapper;
-                    const auto childMapper = [parentMapper, transform](ice::Point point) {
-                        return parentMapper(transform.apply(point));
-                    };
-                    currentAncestors.push_back(child.cell);
-                    drawCell(childIt->second, childMapper, currentAncestors);
-                    currentAncestors.pop_back();
-                }
-            };
-            drawCell(cell, mapper, ancestors);
-        };
-
-        const auto identity = [](ice::Point point) { return point; };
         std::vector<ice::ObjectId> ancestors{activeLayoutId_};
         for (const auto &[_, instance] : cellIt->second.instances) {
             const auto childIt = project.layoutCells.find(instance.cell);
@@ -4010,13 +3958,14 @@ class DocumentWindow : public QMainWindow {
             group->setToolTip(QStringLiteral("Instance %1").arg(QString::fromStdString(instance.name)));
             layoutCanvas_->scene()->addItem(group);
             const ice::Transform transform{instance.x, instance.y, instance.orientation};
-            const std::function<ice::Point(ice::Point)> parentMapper = identity;
-            const std::function<ice::Point(ice::Point)> childMapper = [parentMapper, transform](ice::Point point) {
-                return parentMapper(transform.apply(point));
-            };
-            ancestors.push_back(instance.cell);
-            drawCellToGroup(childIt->second, childMapper, ancestors, group);
-            ancestors.pop_back();
+
+            auto childModel =
+                ice::buildLayoutCellPreviewModel(project, childIt->second, true, false, false, {transform});
+            std::erase_if(childModel.shapes, [&](const ice::LayoutPreviewShape &shape) {
+                return shape.layer.id != 0 && !layerVisible(shape.layer.id);
+            });
+            auto *previewItem = createLayoutPreviewItem(childModel, styles, deviceStyles);
+            group->addToGroup(previewItem);
             for (const auto &[portId, port] : childIt->second.ports) {
                 if (!port.visible || !layerVisible(port.layer))
                     continue;
@@ -4260,6 +4209,20 @@ class DocumentWindow : public QMainWindow {
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             return;
         }
+        const auto previewModelFor = [&](const ice::LayoutCell &cell) {
+            auto model = ice::buildLayoutCellPreviewModel(project_->project(), cell);
+            const auto layerVisible = [&](ice::ObjectId layerId) {
+                const auto layer = project_->project().layers.find(layerId);
+                return layer == project_->project().layers.end() || layer->second.visible;
+            };
+            std::erase_if(model.shapes, [&](const ice::LayoutPreviewShape &shape) {
+                return shape.layer.id != 0 && !layerVisible(shape.layer.id);
+            });
+            std::erase_if(model.ports, [&](const ice::LayoutPreviewPort &port) {
+                return port.layer.id != 0 && !layerVisible(port.layer.id);
+            });
+            return model;
+        };
         if (project_ && layoutCanvas_ &&
             (layoutCanvas_->currentTool() == LayoutCanvas::Tool::select ||
              layoutCanvas_->currentTool() == LayoutCanvas::Tool::move)) {
@@ -4271,11 +4234,8 @@ class DocumentWindow : public QMainWindow {
                     if (instanceIt != activeIt->second.instances.end()) {
                         const auto childIt = project_->project().layoutCells.find(instanceIt->second.cell);
                         if (childIt != project_->project().layoutCells.end()) {
-                            std::optional<ice::LayoutDeviceCell> preview;
-                            if (childIt->second.library && !childIt->second.device.empty() && layoutDevicesPanel_)
-                                preview = makeLayoutCellPreview(project_->project(), childIt->second,
-                                                                layoutDevicesPanel_->library());
-                            layoutPropertiesPanel_->setLayoutCell(childIt->second, preview ? &*preview : nullptr);
+                            layoutPropertiesPanel_->setLayoutCell(childIt->second,
+                                                                  previewModelFor(childIt->second));
                             if (bringToFront && layoutRightTabs_)
                                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
                             return;
@@ -4370,10 +4330,7 @@ class DocumentWindow : public QMainWindow {
         }
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt != project_->project().layoutCells.end()) {
-            std::optional<ice::LayoutDeviceCell> preview;
-            if (layoutDevicesPanel_)
-                preview = makeLayoutCellPreview(project_->project(), cellIt->second, layoutDevicesPanel_->library());
-            layoutPropertiesPanel_->setLayoutOverview(cellIt->second, preview ? &*preview : nullptr,
+            layoutPropertiesPanel_->setLayoutOverview(cellIt->second, previewModelFor(cellIt->second),
                                                       static_cast<int>(project_->project().grid));
             if (bringToFront && layoutRightTabs_)
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
@@ -8187,6 +8144,25 @@ class DocumentWindow : public QMainWindow {
                 layer->second.visible = visible;
             });
             refreshLayout();
+        });
+        layersPanel_->setOnLayerGroupVisibilityChanged([this](const std::vector<ice::ObjectId> &layerIds,
+                                                              bool visible) {
+            if (!project_ || layerIds.empty())
+                return;
+            bool changed = false;
+            project_->execute(visible ? "show layer group" : "hide layer group", [&](ice::Project &project) {
+                for (const auto layerId : layerIds) {
+                    const auto layer = project.layers.find(layerId);
+                    if (layer == project.layers.end() ||
+                        !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
+                        layer->second.visible == visible)
+                        continue;
+                    layer->second.visible = visible;
+                    changed = true;
+                }
+            });
+            if (changed)
+                refreshLayout();
         });
         layersPanel_->setOnAllLayersVisibilityChanged([this](bool visible) {
             if (!project_)

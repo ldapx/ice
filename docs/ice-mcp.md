@@ -87,7 +87,7 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `layout_create` | Create a static layout cell. |
 | `layout_create_from_schematic` | Generate a layout from a schematic. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
-| `layout_add_layer` | Add a layout layer. |
+| `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_text` | Add text to a layout cell on a layer. |
 | `layout_add_polygon` | Add a polygon shape. |

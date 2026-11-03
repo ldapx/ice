@@ -31,6 +31,46 @@ long double polygonArea(const ice::Polygon &polygon) {
 }
 } // namespace
 
+TEST_CASE("layout layers preserve GDS datatypes") {
+    ice::Project project;
+    project.identity = "layer-datatype";
+    project.name = "layer-datatype";
+    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    project.layers.at(layer).color = "#123456";
+    project.layers.at(layer).pattern = 3;
+    CHECK(project.layers.at(layer).number == 8);
+    CHECK(project.layers.at(layer).datatype == 2);
+    CHECK_THROWS_AS(ice::addLayer(project, "bad", 1, 0, {}, 70000), ice::ProjectError);
+
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.layers.at(layer).number == 8);
+    CHECK(roundTrip.layers.at(layer).datatype == 2);
+    CHECK(roundTrip.layers.at(layer).name == "Metal1.pin");
+    CHECK(roundTrip.layers.at(layer).color == "#123456");
+    CHECK(roundTrip.layers.at(layer).pattern == 3);
+
+    auto legacy = project.serialize();
+    const auto datatype = legacy.find("\"datatype\": 2");
+    CHECK(datatype != std::string::npos);
+    if (datatype == std::string::npos)
+        return;
+    const auto lineBegin = legacy.rfind('\n', datatype);
+    const auto lineEnd = legacy.find('\n', datatype);
+    CHECK(lineBegin != std::string::npos);
+    CHECK(lineEnd != std::string::npos);
+    if (lineBegin == std::string::npos || lineEnd == std::string::npos)
+        return;
+    legacy.erase(lineBegin, lineEnd - lineBegin + 1);
+    const auto name = legacy.find("\"name\": \"Metal1.pin\"");
+    CHECK(name != std::string::npos);
+    if (name == std::string::npos)
+        return;
+    legacy.replace(name, std::string("\"name\": \"Metal1.pin\"").size(),
+                   "\"name\": \"Metal1 (dt 2)\"");
+    const auto legacyLoaded = ice::Project::deserialize(legacy);
+    CHECK(legacyLoaded.layers.at(layer).datatype == 2);
+}
+
 TEST_CASE("project serialization and transactions are deterministic") {
     ice::Project project;
     project.identity = "demo";

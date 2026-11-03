@@ -42,6 +42,8 @@ builder = project.create_layout_cell("top", "ihp.sg13g2")
 
 builder.layer("Metal1", 8)
 builder.rectangle("Metal1", 0, 0, 4000, 600)
+# Purpose-specific layers retain their GDS datatype.
+builder.layer("Metal1.pin", 8, 2)
 builder.polygon(
     "Metal2",
     [

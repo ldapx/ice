@@ -69,11 +69,11 @@ class LayoutBuilder {
 
     std::string name() const { return cell().name; }
 
-    std::string layer(const std::string &name, int number = -1) {
+    std::string layer(const std::string &name, int number = -1, int datatype = 0) {
         if (name.empty())
             throw ProjectError("icepy.layer", "Layer name must not be empty");
         for (const auto &[_, existing] : project_->layers) {
-            if (existing.name == name)
+            if (existing.name == name && existing.datatype == datatype)
                 return name;
         }
         int layerNumber = number;
@@ -83,7 +83,7 @@ class LayoutBuilder {
                 layerNumber = std::max(layerNumber, existing.number);
             ++layerNumber;
         }
-        ice::addLayer(*project_, name, layerNumber);
+        ice::addLayer(*project_, name, layerNumber, 0, {}, datatype);
         return name;
     }
 
@@ -249,6 +249,9 @@ NB_MODULE(icepy, module) {
         .def_rw("id", &Layer::id)
         .def_rw("name", &Layer::name)
         .def_rw("number", &Layer::number)
+        .def_rw("datatype", &Layer::datatype)
+        .def_rw("color", &Layer::color)
+        .def_rw("pattern", &Layer::pattern)
         .def_rw("visible", &Layer::visible);
 
     nb::class_<Parameter>(module, "Parameter")
@@ -374,7 +377,7 @@ NB_MODULE(icepy, module) {
     nb::class_<LayoutBuilder>(module, "LayoutBuilder")
         .def_prop_ro("id", &LayoutBuilder::id)
         .def_prop_ro("name", &LayoutBuilder::name)
-        .def("layer", &LayoutBuilder::layer, nb::arg("name"), nb::arg("number") = -1)
+        .def("layer", &LayoutBuilder::layer, nb::arg("name"), nb::arg("number") = -1, nb::arg("datatype") = 0)
         .def("rectangle", &LayoutBuilder::rectangle, nb::arg("layer"), nb::arg("x"), nb::arg("y"), nb::arg("width"),
              nb::arg("height"))
         .def("polygon", &LayoutBuilder::polygon, nb::arg("layer"), nb::arg("points"))
@@ -420,14 +423,15 @@ NB_MODULE(icepy, module) {
              [](const Project &project, const std::string &name) { return findLayoutCell(project, name); })
         .def("layout_cell_by_id", [](const Project &project, ObjectId id) { return findLayoutCell(project, id); })
         .def("add_layer",
-             [](Project &project, const std::string &name, int number) {
-                 ice::addLayer(project, name, number);
+             [](Project &project, const std::string &name, int number, int datatype) {
+                 ice::addLayer(project, name, number, 0, {}, datatype);
                  for (const auto &[_, layer] : project.layers) {
-                     if (layer.name == name)
+                     if (layer.name == name && layer.datatype == datatype)
                          return layer;
                  }
                  throw ProjectError("icepy.layer", "Layer creation failed");
-             })
+             },
+             nb::arg("name"), nb::arg("number"), nb::arg("datatype") = 0)
         .def(
             "create_layout_cell",
             [](Project &project, const std::string &name, const std::string &pdk) {

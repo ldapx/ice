@@ -129,6 +129,8 @@ class LayersPanel : public QWidget {
     void setOnLayerSelected(std::function<void(ice::ObjectId)> callback);
     void setSelectedLayer(ice::ObjectId layerId);
     void setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback);
+    void setOnLayerGroupVisibilityChanged(
+        std::function<void(const std::vector<ice::ObjectId> &, bool)> callback);
     void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
 
   private:
@@ -138,6 +140,7 @@ class LayersPanel : public QWidget {
     QTreeWidget *tree_ = nullptr;
     QLineEdit *search_ = nullptr;
     std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
+    std::function<void(const std::vector<ice::ObjectId> &, bool)> onLayerGroupVisibilityChanged_;
     std::function<void(bool)> onAllLayersVisibilityChanged_;
     std::function<void()> onCreateLayer_;
     std::function<void(ice::ObjectId)> onLayerSelected_;

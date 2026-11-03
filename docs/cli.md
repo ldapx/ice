@@ -74,7 +74,7 @@ ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>
 ice-cli layout-remove <project> <cell|procedural>
-ice-cli layout-add-layer <project> <name> <number>
+ice-cli layout-add-layer <project> <name> <number> [datatype]
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
 ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
 ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...

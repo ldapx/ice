@@ -413,12 +413,12 @@ def generate_cell(
         builder.parameter(declaration.name, value_text(value))
     for polygon in _extract_pya_polygons(layout, pya_cell):
         layer = _layer_name(reverse, polygon["number"], polygon["datatype"])
-        builder.layer(layer, polygon["number"])
+        builder.layer(layer, polygon["number"], polygon["datatype"])
         points = [make_point(x, y) for x, y in polygon["points"]]
         builder.polygon(layer, points)
     for port in _extract_ihp_ports(wrapper, pya_cell, tech):
         layer = _layer_name(reverse, port["layer"], port["datatype"])
-        builder.layer(layer, port["layer"])
+        builder.layer(layer, port["layer"], port["datatype"])
         rectangle = port["rectangle"]
         builder.port(
             port["name"],
@@ -469,7 +469,9 @@ def generate_geometry(
     for shape in cell.shapes:
         layer = layers_by_id.get(shape.layer)
         name = layer.name if layer is not None else ""
-        number, datatype = stream_by_name.get(name, (layer.number if layer else 0, 0))
+        number, datatype = stream_by_name.get(
+            name, (layer.number if layer else 0, layer.datatype if layer else 0)
+        )
         points = [[point.x, point.y] for point in shape.polygon]
         if len(points) < 3:
             continue
@@ -484,7 +486,9 @@ def generate_geometry(
     for port in cell.ports:
         layer = layers_by_id.get(port.layer)
         name = layer.name if layer is not None else ""
-        number, datatype = stream_by_name.get(name, (layer.number if layer else 0, 0))
+        number, datatype = stream_by_name.get(
+            name, (layer.number if layer else 0, layer.datatype if layer else 0)
+        )
         ports.append(
             {
                 "name": port.name,
@@ -681,7 +685,7 @@ def generate_package_geometry(
         shapes.append(
             {
                 "layer": int(layer.number),
-                "datatype": 0,
+                "datatype": int(layer.datatype),
                 "points": points,
             }
         )
@@ -696,7 +700,7 @@ def generate_package_geometry(
             {
                 "name": port.name,
                 "layer": int(layer.number),
-                "datatype": 0,
+                "datatype": int(layer.datatype),
                 "rectangle": {
                     "x": port.rectangle.x,
                     "y": port.rectangle.y,

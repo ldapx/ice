@@ -431,13 +431,15 @@ std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
     }
 }
 
-ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk) {
+ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
     if (number < 0)
         throw ProjectError("layout.layer", "Layer number must not be negative");
+    if (datatype < 0 || datatype > 65535)
+        throw ProjectError("layout.layer", "Layer datatype out of GDSII range");
     ObjectId id = project.nextId();
-    project.layers.emplace(id, Layer{id, std::move(name), number, true, layout, std::move(pdk)});
+    project.layers.emplace(id, Layer{id, std::move(name), number, true, layout, std::move(pdk), datatype});
     return id;
 }
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
