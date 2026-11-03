@@ -1453,9 +1453,10 @@ TEST_CASE("generated AGENTS guidance is versioned and stable") {
         return std::string((std::istreambuf_iterator<char>(input)), {});
     };
     const auto first = read();
-    CHECK(first.find("ICE generated guidance: begin") != std::string::npos);
+    CHECK(first.find("ICE generated guidance: begin (version 3)") != std::string::npos);
     CHECK(first.find("simulation_measure") != std::string::npos);
     CHECK(first.find("pdk_info") != std::string::npos);
+    CHECK(first.find("ask the user which installed PDK to use") != std::string::npos);
     CHECK(first.find("project_migrate") != std::string::npos);
     CHECK(first.find("zero crossings") != std::string::npos);
 

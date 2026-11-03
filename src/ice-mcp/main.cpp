@@ -1152,7 +1152,7 @@ class IceMcpServer {
             result["migrated"] = true;
             result["agents_updated"] = before != after;
             result["pdk_ids_updated"] = pdkIdsUpdated;
-            result["guidance_version"] = 2;
+            result["guidance_version"] = 3;
             return result;
         }
         if (name == "project_summary")

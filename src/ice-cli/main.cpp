@@ -1023,7 +1023,7 @@ int main(int argc, char **argv) {
             printJson({{"migrated", true},
                        {"agents_updated", before != after},
                        {"pdk_ids_updated", pdkIdsUpdated},
-                       {"guidance_version", 2}});
+                       {"guidance_version", 3}});
             return 0;
         }
 

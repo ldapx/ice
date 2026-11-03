@@ -292,7 +292,7 @@ def main() -> int:
             assert "pdks" in pdk, pdk
 
             migrated = mcp.tool("project_migrate")
-            assert migrated.get("guidance_version") == 2, migrated
+            assert migrated.get("guidance_version") == 3, migrated
 
             doctor = mcp.tool("ice_doctor")
             assert "pdk_roots" in doctor

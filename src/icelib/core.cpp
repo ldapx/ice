@@ -699,8 +699,8 @@ Project Project::deserialize(const std::string &text) {
                                                   n.value("x", 0), n.value("y", 0)});
             if (c.contains("comments") && c.at("comments").is_array()) {
                 for (const auto &cm : c.at("comments"))
-                    cell.comments.emplace(cm.at("id"), SchematicComment{cm.at("id"), cm.at("text"),
-                                                                        cm.value("x", 0), cm.value("y", 0)});
+                    cell.comments.emplace(
+                        cm.at("id"), SchematicComment{cm.at("id"), cm.at("text"), cm.value("x", 0), cm.value("y", 0)});
             }
             p.schematicCells.emplace(cell.id, std::move(cell));
         }
@@ -852,8 +852,7 @@ Project Project::deserialize(const std::string &text) {
                                     legacySignals.push_back(signal);
                             }
                         }
-                        if (const auto labels = g.find("signal_labels");
-                            labels != g.end() && labels->is_object()) {
+                        if (const auto labels = g.find("signal_labels"); labels != g.end() && labels->is_object()) {
                             for (auto label = labels->begin(); label != labels->end(); ++label) {
                                 if (label.value().is_string() && !label.value().get<std::string>().empty())
                                     graph.signalLabels[label.key()] = label.value().get<std::string>();
@@ -1114,7 +1113,7 @@ void ensureGitignore(const std::filesystem::path &root) {
 
 std::string generatedAgentsGuidance() {
     std::ostringstream output;
-    output << "<!-- ICE generated guidance: begin (version 2) -->\n"
+    output << "<!-- ICE generated guidance: begin (version 3) -->\n"
            << "This directory is an ICE project.\n\n"
            << "- `project.icepro` contains project metadata.\n"
            << "- `sch/*.icesch` contains schematic cells.\n"
@@ -1138,16 +1137,19 @@ std::string generatedAgentsGuidance() {
               "targets, external loads, constraints, and required simulations.\n"
            << "2. Before drawing, open or create the project and inspect the available PDKs, model "
               "libraries, ngspice, and Python with `project_summary`, `ice_doctor`, and `pdk_info` "
-              "(or `ice-cli doctor` / `ice-cli pdk-info`). Do not guess an absolute PDK `.lib` "
-              "path; `pdk_info` returns the package setup. Simulation PDKs come only from ICE "
-              "packages; do not use `~/.volare`, `~/.ciel`, `PDK_ROOT`, or `PDK`. If a package is "
+              "(or `ice-cli doctor` / `ice-cli pdk-info`). If the user has not specified a PDK, call "
+              "`pdk_info` without arguments to list the installed PDKs and ask the user which "
+              "installed PDK to use before drawing; mention any PDK already selected by the project "
+              "as the suggested default, but do not silently choose one. Do not guess an absolute "
+              "PDK `.lib` path; `pdk_info` returns the package setup. Simulation PDKs come only from "
+              "ICE packages; do not use `~/.volare`, `~/.ciel`, `PDK_ROOT`, or `PDK`. If a package is "
               "missing, install it with `ice-pkg`; if its OSDI models are missing, run "
-              "`ice-cli pdk-build <pdk>`. Confirm that the project's PDK reports "
-              "`simulation_ready: true` and prefer a ready PDK when the project does not already "
-              "select one. If no installed PDK is ready, you may still create the requested "
-              "schematic and report the blocker, or ask the user whether to install/build a PDK or "
-              "use an explicitly labeled behavioral model. If the user asked for transistor-level "
-              "simulation, do not silently replace it with a behavioral model.\n"
+              "`ice-cli pdk-build <pdk>`. Confirm that the chosen PDK reports "
+              "`simulation_ready: true` and prefer a ready PDK. If no installed PDK is ready, you "
+              "may still create the requested schematic and report the blocker, or ask the user "
+              "whether to install/build a PDK or use an explicitly labeled behavioral model. If the "
+              "user asked for transistor-level simulation, do not silently replace it with a "
+              "behavioral model.\n"
            << "3. Prefer a drawn canvas schematic over a text SPICE schematic. In MCP use "
               "`schematic_create`, `schematic_add_symbol` with pins, `schematic_add_instance`, and "
               "`schematic_add_net`; inspect the result with `schematic_info`. In the CLI use the equivalent "
