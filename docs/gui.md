@@ -340,8 +340,10 @@ a 1 um nominal height. Text is stored in the project and exported as GDSII
 TEXT records.
 
 The **Create Pin** tool places a named layout pin on the currently selected
-layer. Pins are visible as layer-colored rectangles with labels, are
-selectable/movable/resizable, and can be locked or hidden. The Properties panel
+layer. Drag from one corner to the other to define the pin rectangle; the
+preview uses the selected layer style while dragging. Pins are visible as
+layer-colored rectangles with centered labels, are selectable/movable/resizable,
+and can be locked or hidden. The Properties panel
 edits the pin name, label, direction, physical side, net, size, visibility, and
 lock state. Pins are exported as GDSII boundary geometry plus TEXT labels.
 Layout nets are created through the pin net field or

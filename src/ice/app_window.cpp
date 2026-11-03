@@ -3272,7 +3272,7 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
-    void addLayoutPin(QPointF position) {
+    void addLayoutPin(QPointF first, QPointF second) {
         if (!project_ || activeLayoutId_ == 0)
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
@@ -3290,11 +3290,13 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
-        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
-        const auto defaultSize = std::max<ice::Coordinate>(grid, 500);
-        const auto size = ((defaultSize + grid - 1) / grid) * grid;
-        const auto x = static_cast<ice::Coordinate>(std::lround(position.x())) - size / 2;
-        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y())) - size / 2;
+        const auto rectangle = QRectF(first, second).normalized();
+        if (rectangle.width() < 1.0 || rectangle.height() < 1.0)
+            return;
+        const auto x = static_cast<ice::Coordinate>(std::lround(rectangle.left()));
+        const auto y = static_cast<ice::Coordinate>(std::lround(-rectangle.bottom()));
+        const auto width = static_cast<ice::Coordinate>(std::lround(rectangle.width()));
+        const auto height = static_cast<ice::Coordinate>(std::lround(rectangle.height()));
         std::string name = "PIN1";
         for (int index = 1;; ++index) {
             name = "PIN" + std::to_string(index);
@@ -3306,7 +3308,7 @@ class DocumentWindow : public QMainWindow {
         ice::ObjectId portId = 0;
         try {
             project_->execute("create layout pin", [&](ice::Project &project) {
-                portId = ice::addPort(project, activeLayoutId_, name, layerId, ice::Rect{x, y, size, size},
+                portId = ice::addPort(project, activeLayoutId_, name, layerId, ice::Rect{x, y, width, height},
                                       ice::PortDirection::inout, ice::PortSide::left, 0, name);
             });
         } catch (const ice::ProjectError &error) {
@@ -3929,7 +3931,9 @@ class DocumentWindow : public QMainWindow {
             font.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, rect.height() * 0.35))));
             label->setFont(font);
             label->setBrush(QBrush(style.color));
-            label->setPos(rect.left() + 2.0, rect.top() + 1.0);
+            const auto labelBounds = label->boundingRect();
+            label->setPos(rect.center().x() - labelBounds.width() / 2.0,
+                          rect.center().y() - labelBounds.height() / 2.0);
             label->setAcceptedMouseButtons(Qt::NoButton);
             item->setToolTip(QStringLiteral("Pin %1 · %2 · %3")
                                  .arg(QString::fromStdString(port.name),
@@ -3993,7 +3997,9 @@ class DocumentWindow : public QMainWindow {
                 pinFont.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, pinRect.height() * 0.3))));
                 pinLabel->setFont(pinFont);
                 pinLabel->setBrush(QBrush(style.color));
-                pinLabel->setPos(pinRect.left() + 2.0, pinRect.top() + 1.0);
+                const auto pinLabelBounds = pinLabel->boundingRect();
+                pinLabel->setPos(pinRect.center().x() - pinLabelBounds.width() / 2.0,
+                                 pinRect.center().y() - pinLabelBounds.height() / 2.0);
                 pinLabel->setAcceptedMouseButtons(Qt::NoButton);
             }
             const auto bounds = group->childrenBoundingRect();
@@ -8872,7 +8878,8 @@ class DocumentWindow : public QMainWindow {
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
-            layoutCanvas_->setPinPlacedCallback([this](QPointF position) { addLayoutPin(position); });
+            layoutCanvas_->setPinPlacedCallback(
+                [this](QPointF first, QPointF second) { addLayoutPin(first, second); });
             layoutCanvas_->setInstancePinActivatedCallback(
                 [this](ice::ObjectId instance, ice::ObjectId port) { promoteInstancePin(instance, port); });
             layoutCanvas_->setPolygonCreatedCallback(
@@ -9095,8 +9102,8 @@ class DocumentWindow : public QMainWindow {
 
             auto *pinTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Pin"));
             pinTool->setCheckable(true);
-            pinTool->setToolTip(QStringLiteral("Create pin (N)"));
-            pinTool->setStatusTip(QStringLiteral("Create pin (N)"));
+            pinTool->setToolTip(QStringLiteral("Create pin by dragging (N)"));
+            pinTool->setStatusTip(QStringLiteral("Create pin by dragging (N)"));
             layoutPinTool_ = pinTool;
             addShortcut(pinTool, QStringLiteral("layout.pin"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("N")));
@@ -9105,7 +9112,7 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::pin);
                     layoutCanvas_->setFocus();
                 }
-                statusBar()->showMessage(QStringLiteral("Pin: click to place a pin on the active layer"));
+                statusBar()->showMessage(QStringLiteral("Pin: drag to size a pin on the active layer"));
             });
             connect(textTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {

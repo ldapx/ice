@@ -213,7 +213,7 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 painter.setFont(font);
                 painter.setPen(style.color);
                 painter.setBrush(Qt::NoBrush);
-                painter.drawText(rectangle.adjusted(2, 1, -2, -1), Qt::AlignLeft | Qt::AlignTop, port.label);
+                painter.drawText(rectangle.adjusted(2, 1, -2, -1), Qt::AlignCenter, port.label);
             }
         }
     }

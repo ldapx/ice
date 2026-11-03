@@ -1512,8 +1512,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 event->accept();
                 return;
             }
-            if (pinPlaced_)
-                pinPlaced_(snapPosition(mapToScene(event->pos())));
+            pinDrawing_ = true;
+            pinDrawStart_ = snapPosition(mapToScene(event->pos()));
+            const auto previewColor = rectangleStyle_.color;
+            QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 45),
+                                rectangleStyle_.pattern);
+            if (rectangleStyle_.pattern == Qt::NoBrush)
+                previewBrush = QBrush(Qt::NoBrush);
+            QPen previewPen(previewColor, 1.0, Qt::DashLine);
+            previewPen.setCosmetic(true);
+            pinDrawPreview_ = scene()->addRect(QRectF(pinDrawStart_, pinDrawStart_), previewPen, previewBrush);
             event->accept();
             return;
         }
@@ -1825,6 +1833,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (pinDrawing_ && pinDrawPreview_) {
+            pinDrawPreview_->setRect(QRectF(pinDrawStart_, snapPosition(mapToScene(event->pos()))).normalized());
+            event->accept();
+            return;
+        }
         QGraphicsView::mouseMoveEvent(event);
         if (movingItem_) {
             if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(movingItem_)) {
@@ -1915,6 +1928,20 @@ class LayoutCanvasImpl : public LayoutCanvas {
             drawing_ = false;
             if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && rectangleCreated_)
                 rectangleCreated_(drawStart_, end);
+            event->accept();
+            return;
+        }
+        if (pinDrawing_ && event->button() == Qt::LeftButton) {
+            const auto end = snapPosition(mapToScene(event->pos()));
+            const auto rectangle = QRectF(pinDrawStart_, end).normalized();
+            if (pinDrawPreview_) {
+                scene()->removeItem(pinDrawPreview_);
+                delete pinDrawPreview_;
+                pinDrawPreview_ = nullptr;
+            }
+            pinDrawing_ = false;
+            if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && pinPlaced_)
+                pinPlaced_(pinDrawStart_, end);
             event->accept();
             return;
         }
@@ -2348,10 +2375,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF polygonCursor_;
     bool panning_ = false;
     bool drawing_ = false;
+    bool pinDrawing_ = false;
     QPoint panStartPosition_;
     QPointF panStartCenterScene_;
     QPointF drawStart_;
+    QPointF pinDrawStart_;
     QGraphicsRectItem *drawPreview_ = nullptr;
+    QGraphicsRectItem *pinDrawPreview_ = nullptr;
     QGraphicsItem *movingItem_ = nullptr;
     ice::ObjectId manualPathDragId_ = 0;
     int manualPathDragHandle_ = -1;
