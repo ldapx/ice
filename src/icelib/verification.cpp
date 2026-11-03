@@ -1,6 +1,8 @@
 #include "icelib/verification.hpp"
 
+#include <algorithm>
 #include <future>
+#include <iterator>
 #include <nlohmann/json.hpp>
 
 namespace ice {
@@ -23,16 +25,69 @@ VerificationReport LocalVerificationAdapter::run(const Project &project, std::op
     for (const auto &[cellId, layout] : project.layoutCells) {
         if (cell && *cell != cellId)
             continue;
+        Rect contentBounds;
+        bool haveContentBounds = false;
         for (const auto &[shapeId, shape] : layout.shapes) {
             if (!shape.rectangle.valid())
                 report.drc.push_back({1, VerificationSeverity::error, "min-area", "Shape has non-positive area",
                                       shapeId, shape.rectangle});
+            else if (!haveContentBounds) {
+                contentBounds = shape.rectangle;
+                haveContentBounds = true;
+            } else {
+                const auto left = std::min(contentBounds.x, shape.rectangle.x);
+                const auto bottom = std::min(contentBounds.y, shape.rectangle.y);
+                const auto right = std::max(contentBounds.x + contentBounds.width,
+                                            shape.rectangle.x + shape.rectangle.width);
+                const auto top = std::max(contentBounds.y + contentBounds.height,
+                                          shape.rectangle.y + shape.rectangle.height);
+                contentBounds = {left, bottom, right - left, top - bottom};
+            }
             if (!project.layers.contains(shape.layer))
                 report.drc.push_back({1, VerificationSeverity::error, "layer-exists",
                                       "Shape references a missing layer", shapeId, shape.rectangle});
             if (shape.rectangle.width < project.grid || shape.rectangle.height < project.grid)
                 report.drc.push_back({1, VerificationSeverity::warning, "min-width",
                                       "Shape is narrower than the project grid", shapeId, shape.rectangle});
+        }
+        for (const auto &[portId, port] : layout.ports) {
+            if (!port.rectangle.valid()) {
+                report.drc.push_back({1, VerificationSeverity::error, "pin-area",
+                                      "Pin has non-positive area", portId, port.rectangle});
+                continue;
+            }
+            if (!project.layers.contains(port.layer))
+                report.drc.push_back({1, VerificationSeverity::error, "pin-layer",
+                                      "Pin references a missing layer", portId, port.rectangle});
+            if (port.rectangle.width < project.grid || port.rectangle.height < project.grid)
+                report.drc.push_back({1, VerificationSeverity::warning, "pin-min-width",
+                                      "Pin is narrower than the project grid", portId, port.rectangle});
+            if (port.net != 0 && !layout.nets.contains(port.net))
+                report.drc.push_back({1, VerificationSeverity::error, "pin-net",
+                                      "Pin references a missing layout net", portId, port.rectangle});
+            if (haveContentBounds &&
+                (port.rectangle.x < contentBounds.x || port.rectangle.y < contentBounds.y ||
+                 port.rectangle.x + port.rectangle.width > contentBounds.x + contentBounds.width ||
+                 port.rectangle.y + port.rectangle.height > contentBounds.y + contentBounds.height))
+                report.drc.push_back({1, VerificationSeverity::warning, "pin-outside-cell",
+                                      "Pin extends outside the layout content bounds", portId, port.rectangle});
+        }
+        for (auto left = layout.ports.begin(); left != layout.ports.end(); ++left) {
+            for (auto right = std::next(left); right != layout.ports.end(); ++right) {
+                const auto &first = left->second;
+                const auto &second = right->second;
+                if (first.layer != second.layer || first.net == 0 || second.net == 0 || first.net == second.net)
+                    continue;
+                if (!first.rectangle.valid() || !second.rectangle.valid())
+                    continue;
+                const auto &a = first.rectangle;
+                const auto &b = second.rectangle;
+                if (a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height)
+                    report.drc.push_back({1, VerificationSeverity::error, "pin-short",
+                                          "Pins '" + first.name + "' and '" + second.name +
+                                              "' on the same layer overlap but belong to different nets",
+                                          right->first, b});
+            }
         }
     }
     for (const auto &[cellId, schematic] : project.schematicCells) {

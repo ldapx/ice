@@ -499,6 +499,14 @@ def package_parameter_specs(
     return [dict(spec) for spec in (specs or [])]
 
 
+def port_direction_text(direction) -> str:
+    return str(direction).split(".")[-1]
+
+
+def port_side_text(side) -> str:
+    return str(side).split(".")[-1]
+
+
 def generate_package_geometry(
     pdk_root: str | Path,
     module_name: str,
@@ -550,6 +558,27 @@ def generate_package_geometry(
         )
     if not shapes:
         raise RuntimeError(f"PCell '{class_name}' produced no geometry")
+    ports = []
+    for port in cell.ports:
+        layer = layers_by_id.get(port.layer)
+        if layer is None:
+            continue
+        ports.append(
+            {
+                "name": port.name,
+                "layer": int(layer.number),
+                "datatype": 0,
+                "rectangle": {
+                    "x": port.rectangle.x,
+                    "y": port.rectangle.y,
+                    "width": port.rectangle.width,
+                    "height": port.rectangle.height,
+                },
+                "direction": port_direction_text(port.direction),
+                "side": port_side_text(port.side),
+                "label": port.label or port.name,
+            }
+        )
     bounds = cell.bounds
     if bounds is None:
         raise RuntimeError(f"PCell '{class_name}' produced an empty bounding box")
@@ -561,6 +590,7 @@ def generate_package_geometry(
             bounds.y + bounds.height,
         ],
         "shapes": shapes,
+        "ports": ports,
     }
 
 
@@ -648,6 +678,34 @@ class PackagePcell:
         builder.layer(label, number)
         builder.polygon(
             label, [icepy.LayoutPoint(int(round(x)), int(round(y))) for x, y in points]
+        )
+
+    def port(
+        self,
+        builder,
+        name: str,
+        layer: str,
+        x,
+        y,
+        width,
+        height,
+        direction: str = "inout",
+        side: str = "left",
+        label: str | None = None,
+    ):
+        if layer not in self.layers or width <= 0 or height <= 0:
+            return
+        label_name = self.layers[layer][0]
+        builder.port(
+            name,
+            label_name,
+            int(round(x)),
+            int(round(y)),
+            int(round(width)),
+            int(round(height)),
+            direction=direction,
+            side=side,
+            label=label or name,
         )
 
     def build(self, builder):
@@ -765,6 +823,51 @@ class PackagePcell:
                     height + 6 * enclosure,
                 )
             x += length + 2 * source_drain + 500
+        height = fingers * (finger_width + gap) - gap
+        self.port(
+            builder,
+            "G",
+            "met1",
+            length // 2 - contact,
+            height + enclosure,
+            2 * contact,
+            2 * contact,
+            "input",
+            "top",
+        )
+        self.port(
+            builder,
+            "S",
+            "met1",
+            -source_drain,
+            -enclosure,
+            source_drain // 2,
+            height + 2 * enclosure,
+            "inout",
+            "left",
+        )
+        self.port(
+            builder,
+            "D",
+            "met1",
+            length + source_drain // 2,
+            -enclosure,
+            source_drain // 2,
+            height + 2 * enclosure,
+            "inout",
+            "right",
+        )
+        self.port(
+            builder,
+            "B",
+            "met1",
+            -source_drain,
+            -2 * enclosure,
+            source_drain // 2,
+            enclosure,
+            "inout",
+            "bottom",
+        )
 
     def build_resistor(self, builder):
         length = max(self.um("l", 2.0), 200)
@@ -794,6 +897,20 @@ class PackagePcell:
             self.rect(builder, "nwell", -head, -300, length + 2 * head, width + 600)
         elif self.doping == "p" and "pwell" in self.layers:
             self.rect(builder, "pwell", -head, -300, length + 2 * head, width + 600)
+        self.port(
+            builder, "1", "met1", -head, -100, head + 100, width + 200, "inout", "left"
+        )
+        self.port(
+            builder,
+            "2",
+            "met1",
+            length - 100,
+            -100,
+            head + 100,
+            width + 200,
+            "inout",
+            "right",
+        )
 
     def build_mim_cap(self, builder):
         length = max(self.um("l", self.number("w", 2.0)), 500)
@@ -820,6 +937,12 @@ class PackagePcell:
         )
         self.rect(builder, bottom, -200, width // 2 - 100, 200, 200)
         self.rect(builder, top, length, width // 2 - 100, 200, 200)
+        self.port(
+            builder, "1", bottom, -200, width // 2 - 100, 200, 200, "inout", "left"
+        )
+        self.port(
+            builder, "2", top, length, width // 2 - 100, 200, 200, "inout", "right"
+        )
 
     def build_vpp_cap(self, builder):
         length = max(self.um("l", self.number("w", 4.0)), 800)
@@ -837,13 +960,28 @@ class PackagePcell:
                 max(width - 2 * inset, 100),
             )
         self.rect(builder, "met1", -200, width // 2 - 100, 200, 200)
+        top_layer = "met5" if "met5" in self.layers else "met4"
         self.rect(
             builder,
-            "met5" if "met5" in self.layers else "met4",
+            top_layer,
             length,
             width // 2 - 100,
             200,
             200,
+        )
+        self.port(
+            builder, "1", "met1", -200, width // 2 - 100, 200, 200, "inout", "left"
+        )
+        self.port(
+            builder,
+            "2",
+            top_layer,
+            length,
+            width // 2 - 100,
+            200,
+            200,
+            "inout",
+            "right",
         )
 
     def build_var_cap(self, builder):
@@ -855,6 +993,20 @@ class PackagePcell:
         self.rect(builder, "li1", 100, width // 2 - 100, max(length - 200, 100), 200)
         self.rect(builder, "met1", -length // 2 - 100, -300, 100, width + 600)
         self.rect(builder, "met2", length // 2, -300, 100, width + 600)
+        self.port(
+            builder,
+            "1",
+            "met1",
+            -length // 2 - 100,
+            -300,
+            100,
+            width + 600,
+            "inout",
+            "left",
+        )
+        self.port(
+            builder, "2", "met2", length // 2, -300, 100, width + 600, "inout", "right"
+        )
 
     def build_diode(self, builder):
         width = max(self.um("w", 2.0), 300)
@@ -869,6 +1021,12 @@ class PackagePcell:
             self.rect(builder, "nplus", 0, 0, width // 2, height)
         if "pplus" in self.layers:
             self.rect(builder, "pplus", width // 2, 0, width // 2, height)
+        self.port(
+            builder, "A", "met1", -300, height // 2 - 150, 300, 300, "inout", "left"
+        )
+        self.port(
+            builder, "K", "met1", width, height // 2 - 150, 300, 300, "inout", "right"
+        )
 
     def build_bjt(self, builder):
         size = max(self.um("w", 2.0), self.um("l", 2.0), 500)
@@ -888,6 +1046,13 @@ class PackagePcell:
         self.rect(builder, "met1", size // 2 - 100, -200, 200, 200)
         self.rect(builder, "met1", size // 2 - 100, size, 200, 200)
         self.rect(builder, "met1", size, size // 2 - 100, 200, 200)
+        self.port(
+            builder, "B", "met1", -200, size // 2 - 100, 200, 200, "input", "left"
+        )
+        self.port(builder, "C", "met1", size // 2 - 100, size, 200, 200, "inout", "top")
+        self.port(
+            builder, "E", "met1", size // 2 - 100, -200, 200, 200, "inout", "bottom"
+        )
 
     def build_via_stack(self, builder):
         width = max(self.um("w", 1.0), 200)

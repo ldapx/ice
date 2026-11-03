@@ -1102,7 +1102,9 @@ TEST_CASE("shipped IHP layout device library loads") {
 
 TEST_CASE("generated layout device geometry parses") {
     const auto geometry = ice::parseLayoutDeviceGeometry(
-        R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}]})");
+        R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}],)"
+        R"("ports":[{"name":"G","layer":1,"datatype":0,"rectangle":{"x":0,"y":0,"width":2,"height":3},)"
+        R"("direction":"input","side":"left","label":"G"}]})");
     CHECK(geometry.bounds.x == 0);
     CHECK(geometry.bounds.y == -1);
     CHECK(geometry.bounds.width == 10);
@@ -1111,6 +1113,11 @@ TEST_CASE("generated layout device geometry parses") {
     CHECK(geometry.shapes.front().layer == 1);
     CHECK(geometry.shapes.front().datatype == 2);
     CHECK(geometry.shapes.front().polygon.size() == 4);
+    CHECK(geometry.ports.size() == 1);
+    CHECK(geometry.ports.front().name == "G");
+    CHECK(geometry.ports.front().direction == ice::PortDirection::input);
+    CHECK(geometry.ports.front().side == ice::PortSide::left);
+    CHECK(geometry.ports.front().rectangle.width == 2);
     CHECK_THROWS_AS(ice::parseLayoutDeviceGeometry(R"({"bounds":[0,0,0,0],"shapes":[]})"), ice::ProjectError);
 }
 

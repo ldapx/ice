@@ -1537,9 +1537,10 @@ BuildInfo buildInfo() {
 #else
     info.buildType = "unknown";
 #endif
-    info.features = {"project_repair", "project_recovery",    "project_migrate",    "schematic_add_pin",
-                     "text_schematic", "ngspice_log_capture", "simulation_metrics", "pdk_status",
-                     "pdk_build",      "save_revision_guard"};
+    info.features = {"project_repair",      "project_recovery",    "project_migrate",    "schematic_add_pin",
+                     "text_schematic",      "ngspice_log_capture", "simulation_metrics", "pdk_status",
+                     "pdk_build",           "save_revision_guard", "layout_pins",        "layout_pin_hierarchy",
+                     "layout_connectivity", "layout_lef_def",      "layout_pin_drc"};
     return info;
 }
 } // namespace ice

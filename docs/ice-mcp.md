@@ -98,7 +98,12 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `layout_add_net` | Create a layout net. |
 | `layout_assign_port_net` | Assign or clear a pin’s net. |
 | `layout_add_instance` | Instance another layout cell. |
-| `lvs_run` | Compare a layout against a schematic and return the LVS report. |
+| `layout_info` | Read a layout cell's pins, nets, instances, and shape count. |
+| `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
+| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels. |
+| `layout_export_lef` | Export pins as a minimal LEF macro. |
+| `layout_export_def` | Export pins and nets as a minimal DEF design. |
+| `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
 | `simulation_signals` | List available signals and trace sizes from the latest stored run. |
 | `simulation_measure` | Measure crossings, frequency, amplitude, RMS, and settling time. |

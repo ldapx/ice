@@ -148,3 +148,84 @@ TEST_CASE("LVS rejects text SPICE schematics and read-only layout cells") {
     project.layoutCells.at(layout).library = true;
     CHECK_THROWS_AS(ice::runLvs(project, drawn, layout), ice::ProjectError);
 }
+
+namespace {
+ice::ObjectId addSchematicPort(ice::Project &project, ice::ObjectId cell, const std::string &type,
+                              const std::string &name, const std::string &netName) {
+    const auto symbol = ice::addSymbol(project, cell, type);
+    auto &symbolEntry = project.schematicCells.at(cell).symbols.at(symbol);
+    const auto pin = project.nextId();
+    symbolEntry.pins.push_back({pin, "P", 0, 0});
+    ice::addSchematicInstance(project, cell, symbol, name, 0, 0);
+    for (auto &[_, net] : project.schematicCells.at(cell).nets) {
+        if (net.name == netName) {
+            net.pins.push_back(pin);
+            return pin;
+        }
+    }
+    return 0;
+}
+
+ice::ObjectId layoutNetNamed(const ice::Project &project, ice::ObjectId cell, const std::string &name) {
+    for (const auto &[id, net] : project.layoutCells.at(cell).nets) {
+        if (net.name == name)
+            return id;
+    }
+    return 0;
+}
+} // namespace
+
+TEST_CASE("LVS matches top-level schematic ports to layout pins") {
+    auto fixture = makeFixture();
+    const auto inputPin = addSchematicPort(fixture.project, fixture.schematic, "Input", "A", "in");
+    const auto outputPin = addSchematicPort(fixture.project, fixture.schematic, "Output", "B", "out");
+    CHECK(inputPin != 0);
+    CHECK(outputPin != 0);
+
+    const auto layer = ice::addLayer(fixture.project, "Metal1", 8);
+    const auto inNet = layoutNetNamed(fixture.project, fixture.layout, "in");
+    const auto outNet = layoutNetNamed(fixture.project, fixture.layout, "out");
+    CHECK(inNet != 0);
+    CHECK(outNet != 0);
+    if (inNet == 0 || outNet == 0)
+        return;
+    const auto input = ice::addPort(fixture.project, fixture.layout, "A", layer, {0, 0, 400, 400},
+                                    ice::PortDirection::input, ice::PortSide::left, inNet, "A");
+    const auto output = ice::addPort(fixture.project, fixture.layout, "B", layer, {800, 0, 400, 400},
+                                     ice::PortDirection::output, ice::PortSide::right, outNet, "B");
+    CHECK(input != 0);
+
+    auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(report.matched());
+    CHECK(report.portsMatched == 2);
+    CHECK(!hasCategory(report, "missing-port"));
+    CHECK(!hasCategory(report, "extra-port"));
+    CHECK(!hasCategory(report, "port-direction"));
+    CHECK(!hasCategory(report, "port-net"));
+    CHECK(ice::serializeLvsReport(report).find("\"ports_matched\": 2") != std::string::npos);
+
+    auto &outputPort = fixture.project.layoutCells.at(fixture.layout).ports.at(output);
+    outputPort.net = inNet;
+    report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "port-net"));
+
+    outputPort.net = outNet;
+    outputPort.direction = ice::PortDirection::input;
+    report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "port-direction"));
+
+    outputPort.direction = ice::PortDirection::output;
+    fixture.project.layoutCells.at(fixture.layout).ports.erase(output);
+    report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "missing-port"));
+
+    const auto extra = ice::addPort(fixture.project, fixture.layout, "C", layer, {0, 800, 400, 400},
+                                    ice::PortDirection::inout, ice::PortSide::top, 0, "C");
+    CHECK(extra != 0);
+    report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(hasCategory(report, "missing-port"));
+    CHECK(hasCategory(report, "extra-port"));
+}

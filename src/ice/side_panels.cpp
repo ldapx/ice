@@ -35,6 +35,7 @@ namespace {
 constexpr int kItemKindRole = Qt::UserRole + 1;
 constexpr int kReportIdRole = Qt::UserRole + 2;
 constexpr int kInstanceIdRole = Qt::UserRole + 3;
+constexpr int kOwnerCellRole = Qt::UserRole + 4;
 
 enum class HierarchyItemKind : int {
     layout = 1,
@@ -45,7 +46,8 @@ enum class HierarchyItemKind : int {
     rectangle = 7,
     polygon = 8,
     path = 9,
-    text = 10
+    text = 10,
+    pin = 11
 };
 
 enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, text = 3 };
@@ -196,11 +198,27 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
             return;
         }
         const auto kind = item->data(0, kItemKindRole).toInt();
+        if (kind == static_cast<int>(HierarchyItemKind::pin)) {
+            const auto cellId = static_cast<ice::ObjectId>(item->data(0, kOwnerCellRole).toULongLong());
+            if (onActivatePin_)
+                onActivatePin_(cellId, id);
+            return;
+        }
         if (kind != static_cast<int>(HierarchyItemKind::layout) &&
             kind != static_cast<int>(HierarchyItemKind::proceduralLayout))
             return;
         if (onActivateLayout_)
             onActivateLayout_(id);
+    });
+    connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
+        if (rebuildingTree_ || !item || column != 0)
+            return;
+        if (item->data(0, kItemKindRole).toInt() != static_cast<int>(HierarchyItemKind::pin))
+            return;
+        const auto pinId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        const auto cellId = static_cast<ice::ObjectId>(item->data(0, kOwnerCellRole).toULongLong());
+        if (pinId != 0 && cellId != 0 && onPinVisibilityChanged_)
+            onPinVisibilityChanged_(cellId, pinId, item->checkState(0) == Qt::Checked);
     });
 }
 
@@ -218,6 +236,12 @@ void ProjectPanel::setOnActivateSchematic(std::function<void(ice::ObjectId)> cal
 
 void ProjectPanel::setOnActivateLayout(std::function<void(ice::ObjectId)> callback) {
     onActivateLayout_ = std::move(callback);
+}
+
+void ProjectPanel::setOnActivatePin(PinCallback callback) { onActivatePin_ = std::move(callback); }
+
+void ProjectPanel::setOnPinVisibilityChanged(PinVisibilityCallback callback) {
+    onPinVisibilityChanged_ = std::move(callback);
 }
 
 void ProjectPanel::setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback) {
@@ -252,11 +276,14 @@ void ProjectPanel::setProject(const ice::Project &project) {
 }
 
 void ProjectPanel::rebuildTree() {
+    rebuildingTree_ = true;
     tree_->clear();
     layerList_->clear();
     packageList_->clear();
-    if (!project_)
+    if (!project_) {
+        rebuildingTree_ = false;
         return;
+    }
     const auto &project = *project_;
     if (project.packageDependencies.empty()) {
         auto *item = new QListWidgetItem(QStringLiteral("No package dependencies"), packageList_);
@@ -325,6 +352,7 @@ void ProjectPanel::rebuildTree() {
         if (search_)
             applyFilter(search_->text());
         updateRemoveButton();
+        rebuildingTree_ = false;
         return;
     }
 
@@ -380,6 +408,39 @@ void ProjectPanel::rebuildTree() {
         }
         if (layoutIt == project.layoutCells.end())
             return;
+        std::vector<std::pair<ice::ObjectId, const ice::Port *>> pinEntries;
+        pinEntries.reserve(layoutIt->second.ports.size());
+        for (const auto &[pinId, pin] : layoutIt->second.ports)
+            pinEntries.emplace_back(pinId, &pin);
+        std::sort(pinEntries.begin(), pinEntries.end(), [](const auto &left, const auto &right) {
+            if (left.second->name != right.second->name)
+                return left.second->name < right.second->name;
+            return left.first < right.first;
+        });
+        if (!pinEntries.empty()) {
+            auto *pinsItem = new QTreeWidgetItem(parentItem, {QStringLiteral("Pins")});
+            pinsItem->setIcon(0, hierarchyIcon("circle-dot"));
+            pinsItem->setToolTip(0, QStringLiteral("Layout pins"));
+            for (const auto &[pinId, pin] : pinEntries) {
+                auto *pinItem = new QTreeWidgetItem(pinsItem, {QString::fromStdString(pin->name)});
+                pinItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(pinId));
+                pinItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::pin));
+                pinItem->setData(0, kOwnerCellRole, QVariant::fromValue<qulonglong>(layoutId));
+                pinItem->setFlags(pinItem->flags() | Qt::ItemIsUserCheckable);
+                pinItem->setCheckState(0, pin->visible ? Qt::Checked : Qt::Unchecked);
+                pinItem->setIcon(0, hierarchyIcon("circle-dot"));
+                QString tooltip = QStringLiteral("%1 pin: %2 (%3, %4)")
+                                      .arg(QString::fromStdString(layoutIt->second.name),
+                                           QString::fromStdString(pin->name),
+                                           QString::fromStdString(ice::portDirectionName(pin->direction)),
+                                           QString::fromStdString(ice::portSideName(pin->side)));
+                if (pin->net != 0) {
+                    if (const auto net = layoutIt->second.nets.find(pin->net); net != layoutIt->second.nets.end())
+                        tooltip += QStringLiteral(" · net %1").arg(QString::fromStdString(net->second.name));
+                }
+                pinItem->setToolTip(0, tooltip);
+            }
+        }
         for (const auto &[deviceId, device] : layoutIt->second.plannedDevices) {
             auto *deviceItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(device.name)});
             deviceItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(deviceId));
@@ -448,6 +509,7 @@ void ProjectPanel::rebuildTree() {
     if (search_)
         applyFilter(search_->text());
     updateRemoveButton();
+    rebuildingTree_ = false;
 }
 
 void ProjectPanel::showContextMenu(const QPoint &pos) {

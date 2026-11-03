@@ -22,7 +22,7 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
         const auto document = json::parse(stream);
         if (document.value("format", std::string{}) != "ice-layout-device-library")
             throw ProjectError("layout.library", "Layout library has an unsupported format: " + path.string());
-        if (document.value("schema_version", 0) != 1)
+        if (document.value("schema_version", 0) != 2)
             throw ProjectError("layout.library", "Layout library has an unsupported schema: " + path.string());
 
         LayoutDeviceLibrary library;
@@ -61,6 +61,27 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
                 }
                 if (shape.polygon.size() >= 3)
                     cell.shapes.push_back(std::move(shape));
+            }
+            for (const auto &portJson : cellJson.at("ports")) {
+                LayoutDevicePort port;
+                port.name = portJson.at("name").get<std::string>();
+                port.layer = portJson.at("layer").get<int>();
+                port.datatype = portJson.value("datatype", 0);
+                const auto &boundsJson = portJson.at("rectangle");
+                const auto minX = coordinateAt(boundsJson.at("x"), "port X");
+                const auto minY = coordinateAt(boundsJson.at("y"), "port Y");
+                const auto width = coordinateAt(boundsJson.at("width"), "port width");
+                const auto height = coordinateAt(boundsJson.at("height"), "port height");
+                port.rectangle = Rect{minX, minY, width, height};
+                const auto direction = parsePortDirection(portJson.at("direction").get<std::string>());
+                const auto side = parsePortSide(portJson.at("side").get<std::string>());
+                if (!direction || !side)
+                    throw ProjectError("layout.library",
+                                       "Layout library port direction/side is invalid: " + cell.name + "/" + port.name);
+                port.direction = *direction;
+                port.side = *side;
+                port.label = portJson.value("label", port.name);
+                cell.ports.push_back(std::move(port));
             }
             if (cellJson.contains("parameters")) {
                 const auto &parametersJson = cellJson.at("parameters");
@@ -123,6 +144,27 @@ LayoutDeviceGeometry parseLayoutDeviceGeometry(const std::string &text) {
             if (shape.polygon.size() < 3)
                 throw ProjectError("layout.library", "Generated layout device polygon is invalid");
             geometry.shapes.push_back(std::move(shape));
+        }
+        for (const auto &portJson : document.value("ports", json::array())) {
+            LayoutDevicePort port;
+            port.name = portJson.at("name").get<std::string>();
+            port.layer = portJson.at("layer").get<int>();
+            port.datatype = portJson.value("datatype", 0);
+            const auto &boundsJson = portJson.at("rectangle");
+            port.rectangle = Rect{coordinateAt(boundsJson.at("x"), "generated port X"),
+                                  coordinateAt(boundsJson.at("y"), "generated port Y"),
+                                  coordinateAt(boundsJson.at("width"), "generated port width"),
+                                  coordinateAt(boundsJson.at("height"), "generated port height")};
+            const auto direction = parsePortDirection(portJson.at("direction").get<std::string>());
+            const auto side = parsePortSide(portJson.at("side").get<std::string>());
+            if (!direction || !side)
+                throw ProjectError("layout.library", "Generated layout port direction/side is invalid: " + port.name);
+            port.direction = *direction;
+            port.side = *side;
+            port.label = portJson.value("label", port.name);
+            if (!port.rectangle.valid())
+                throw ProjectError("layout.library", "Generated layout port geometry is invalid: " + port.name);
+            geometry.ports.push_back(std::move(port));
         }
         if (geometry.shapes.empty())
             throw ProjectError("layout.library", "Generated layout device contains no shapes");

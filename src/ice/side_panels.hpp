@@ -28,6 +28,10 @@ class ProjectPanel : public QWidget {
     void setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback);
     void setOnActivateSchematic(std::function<void(ice::ObjectId)> callback);
     void setOnActivateLayout(std::function<void(ice::ObjectId)> callback);
+    using PinCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId pinId)>;
+    using PinVisibilityCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId pinId, bool visible)>;
+    void setOnActivatePin(PinCallback callback);
+    void setOnPinVisibilityChanged(PinVisibilityCallback callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
     using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
     using RenameChildCallback = std::function<void(ice::ObjectId parentId, ice::ObjectId id, const std::string &name)>;
@@ -62,6 +66,8 @@ class ProjectPanel : public QWidget {
     std::function<void(ice::ObjectId)> onMakeLayoutFromSchematic_;
     std::function<void(ice::ObjectId)> onActivateSchematic_;
     std::function<void(ice::ObjectId)> onActivateLayout_;
+    PinCallback onActivatePin_;
+    PinVisibilityCallback onPinVisibilityChanged_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
     RenameCallback onRenameLayout_;
     RenameCallback onRenameProceduralLayout_;
@@ -69,6 +75,7 @@ class ProjectPanel : public QWidget {
     RenameChildCallback onRenamePlannedDevice_;
     RenameChildCallback onRenameShape_;
     bool showLayoutHierarchy_ = true;
+    bool rebuildingTree_ = false;
 };
 
 class SimulationPanel : public QWidget {

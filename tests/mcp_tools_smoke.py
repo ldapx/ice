@@ -116,6 +116,11 @@ def main() -> int:
                 "layout_remove_port",
                 "layout_add_net",
                 "layout_assign_port_net",
+                "layout_info",
+                "layout_connectivity",
+                "layout_export_gds",
+                "layout_export_lef",
+                "layout_export_def",
             }:
                 if required not in tools:
                     raise RuntimeError(f"Missing MCP tool: {required}")
@@ -184,6 +189,32 @@ def main() -> int:
             ports = mcp.tool("layout_list_ports", cell="pin_test")["ports"]
             assert len(ports) == 1, ports
             assert ports[0]["direction"] == "input", ports
+            info = mcp.tool("layout_info", cell="pin_test")
+            assert info["ports"][0]["name"] == "VIN", info
+            assert info["nets"][0]["name"] == "VIN", info
+            mcp.tool(
+                "layout_add_rectangle",
+                cell="pin_test",
+                layer="Metal1",
+                x=0,
+                y=0,
+                width=2000,
+                height=2000,
+            )
+            connectivity = mcp.tool("layout_connectivity", cell="pin_test")
+            assert connectivity["nets"], connectivity
+            exports = Path(temporary) / "exports"
+            exports.mkdir()
+            for tool_name, suffix, marker in (
+                ("layout_export_gds", ".gds", None),
+                ("layout_export_lef", ".lef", "PIN VIN"),
+                ("layout_export_def", ".def", "VIN"),
+            ):
+                path = exports / ("pin_test" + suffix)
+                mcp.tool(tool_name, cell="pin_test", path=str(path))
+                assert path.is_file() and path.stat().st_size > 0, path
+                if marker:
+                    assert marker in path.read_text(), (tool_name, path.read_text())
             mcp.tool(
                 "layout_update_port",
                 cell="pin_test",

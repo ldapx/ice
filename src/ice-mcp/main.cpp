@@ -1,4 +1,6 @@
+#include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
+#include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
@@ -1985,6 +1987,80 @@ class IceMcpServer {
             });
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
         }
+        if (name == "layout_info") {
+            const auto cellId = resolveLayoutCell(session.project(), arguments);
+            const auto &cell = session.project().layoutCells.at(cellId);
+            json ports = json::array();
+            for (const auto &[id, port] : cell.ports) {
+                ports.push_back({{"id", id},
+                                 {"name", port.name},
+                                 {"label", port.label},
+                                 {"layer", port.layer},
+                                 {"rectangle",
+                                  {{"x", port.rectangle.x},
+                                   {"y", port.rectangle.y},
+                                   {"width", port.rectangle.width},
+                                   {"height", port.rectangle.height}}},
+                                 {"direction", ice::portDirectionName(port.direction)},
+                                 {"side", ice::portSideName(port.side)},
+                                 {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                 {"visible", port.visible},
+                                 {"locked", port.locked},
+                                 {"source_instance", port.sourceInstance},
+                                 {"source_port", port.sourcePort}});
+            }
+            json nets = json::array();
+            for (const auto &[id, net] : cell.nets)
+                nets.push_back({{"id", id}, {"name", net.name}});
+            json instances = json::array();
+            for (const auto &[id, instance] : cell.instances) {
+                instances.push_back({{"id", id},
+                                     {"cell", instance.cell},
+                                     {"name", instance.name},
+                                     {"x", instance.x},
+                                     {"y", instance.y},
+                                     {"orientation", ice::orientationName(instance.orientation)}});
+            }
+            return {{"id", cellId},
+                    {"name", cell.name},
+                    {"pdk", cell.pdk},
+                    {"device", cell.device},
+                    {"library", cell.library},
+                    {"shapes", cell.shapes.size()},
+                    {"ports", std::move(ports)},
+                    {"nets", std::move(nets)},
+                    {"instances", std::move(instances)}};
+        }
+        if (name == "layout_connectivity") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            json nets = json::array();
+            for (const auto &group : ice::extractLayoutNets(session.project(), cell)) {
+                nets.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
+                                {"name", group.name},
+                                {"shapes", group.shapes},
+                                {"ports", group.ports},
+                                {"connections", group.connections}});
+            }
+            return {{"cell", cell}, {"nets", std::move(nets)}};
+        }
+        if (name == "layout_export_gds") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto path = requiredString(arguments, "path");
+            ice::LayoutInterchange::exportGds(session.project(), cell, path);
+            return {{"cell", cell}, {"path", path}};
+        }
+        if (name == "layout_export_lef") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto path = requiredString(arguments, "path");
+            ice::LayoutInterchange::exportLef(session.project(), cell, path);
+            return {{"cell", cell}, {"path", path}};
+        }
+        if (name == "layout_export_def") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto path = requiredString(arguments, "path");
+            ice::LayoutInterchange::exportDef(session.project(), cell, path);
+            return {{"cell", cell}, {"path", path}};
+        }
 
         if (name == "lvs_run") {
             const auto layout = resolveLayoutCell(session.project(), arguments, "layout");
@@ -2346,6 +2422,29 @@ class IceMcpServer {
                             .with_integer_param("x", "X coordinate")
                             .with_integer_param("y", "Y coordinate")
                             .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
+                            .build());
+        tools.push_back(tool_builder("layout_info")
+                            .with_description("Read a layout cell's pins, nets, instances, and shape count.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_connectivity")
+                            .with_description("Extract nets from explicit layout nets and same-layer geometry.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_export_gds")
+                            .with_description("Export a layout cell to GDSII, including pins and labels.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("path", "Output GDS path")
+                            .build());
+        tools.push_back(tool_builder("layout_export_lef")
+                            .with_description("Export layout pin metadata as a minimal LEF macro.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("path", "Output LEF path")
+                            .build());
+        tools.push_back(tool_builder("layout_export_def")
+                            .with_description("Export layout pins as a minimal DEF design.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("path", "Output DEF path")
                             .build());
         tools.push_back(
             tool_builder("lvs_run")

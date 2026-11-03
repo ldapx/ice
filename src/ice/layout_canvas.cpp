@@ -1156,6 +1156,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
     void setPinPlacedCallback(LayoutPinPlacedCallback callback) override { pinPlaced_ = std::move(callback); }
+    void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) override {
+        instancePinActivated_ = std::move(callback);
+    }
 
     void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) override {
         polygonCreated_ = std::move(callback);
@@ -1959,6 +1962,15 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
+            auto *hit = itemAt(event->pos());
+            while (hit && !hit->data(3).isValid())
+                hit = hit->parentItem();
+            if (hit && hit->data(3).toString() == QStringLiteral("instance-pin")) {
+                if (instancePinActivated_)
+                    instancePinActivated_(hit->data(4).toULongLong(), hit->data(5).toULongLong());
+                event->accept();
+                return;
+            }
             if (auto *instance = layoutInstanceOwner(itemAt(event->pos()))) {
                 draggingInstance_ = nullptr;
                 movingItem_ = nullptr;
@@ -2316,6 +2328,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     LayoutPathFinishedCallback pathFinished_;
     LayoutTextPlacedCallback textPlaced_;
     LayoutPinPlacedCallback pinPlaced_;
+    LayoutInstancePinActivatedCallback instancePinActivated_;
     LayoutPolygonCreatedCallback polygonCreated_;
     LayoutPolygonPointMovedCallback polygonPointMoved_;
     bool polygonActive_ = false;

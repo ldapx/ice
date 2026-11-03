@@ -1362,7 +1362,16 @@ class DocumentWindow : public QMainWindow {
                 throw ice::ProjectError("interchange.oasis", "Binary OASIS import is not supported yet");
             if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
                 throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
-            setProject(ice::LayoutInterchange::importGds(path.toStdString()));
+            bool accepted = false;
+            const auto pinLayer = QInputDialog::getInt(this, QStringLiteral("GDS Pin Labels"),
+                                                       QStringLiteral("Pin label GDS layer (-1 imports text only):"),
+                                                       -1, -1, 65535, 1, &accepted);
+            if (!accepted)
+                return;
+            ice::LayoutImportOptions options;
+            if (pinLayer >= 0)
+                options.pinLabelLayer = pinLayer;
+            setProject(ice::LayoutInterchange::importGds(path.toStdString(), options));
             projectPath_.clear();
             if (activityPanel_)
                 activityPanel_->setProjectPath({});
@@ -2053,7 +2062,7 @@ class DocumentWindow : public QMainWindow {
         cell.library = true;
         cell.device = device.name;
         syncLayoutDeviceParameters(project, cell, device);
-        applyLayoutDeviceShapes(project, cell, library, device.shapes);
+        applyLayoutDeviceShapes(project, cell, library, device.shapes, device.ports);
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         return cellId;
     }
@@ -2435,6 +2444,40 @@ class DocumentWindow : public QMainWindow {
             item->setSelected(true);
             break;
         }
+    }
+
+    void selectLayoutPin(ice::ObjectId cellId, ice::ObjectId pinId) {
+        if (!project_ || cellId == 0 || pinId == 0)
+            return;
+        const auto &project = project_->project();
+        const auto cell = project.layoutCells.find(cellId);
+        if (cell == project.layoutCells.end() || !cell->second.ports.contains(pinId))
+            return;
+        selectLayoutTab(cellId);
+        QTimer::singleShot(0, this, [this, pinId] { selectLayoutShapeItem(pinId); });
+    }
+
+    void setLayoutPinVisible(ice::ObjectId cellId, ice::ObjectId pinId, bool visible) {
+        if (!project_ || cellId == 0 || pinId == 0)
+            return;
+        try {
+            project_->execute("set layout pin visibility", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(cellId);
+                if (cell == project.layoutCells.end())
+                    return;
+                const auto found = cell->second.ports.find(pinId);
+                if (found == cell->second.ports.end())
+                    return;
+                auto port = found->second;
+                port.visible = visible;
+                ice::updatePort(project, cellId, port);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QString::fromStdString(error.what()), 5000);
+        }
+        // The visibility toggle originates from a tree item signal; defer the
+        // tree rebuild so Qt is not left holding a deleted item.
+        QTimer::singleShot(0, this, [this] { refreshProject(); });
     }
 
     std::vector<ice::ObjectId> selectedLayoutShapeIds() const {
@@ -3176,6 +3219,86 @@ class DocumentWindow : public QMainWindow {
                                           QString::fromStdString(project_->project().layers.at(layerId).name)));
     }
 
+    void promoteInstancePin(ice::ObjectId instanceId, ice::ObjectId childPortId) {
+        if (!project_ || activeLayoutId_ == 0 || instanceId == 0 || childPortId == 0)
+            return;
+        const auto &project = project_->project();
+        const auto parentIt = project.layoutCells.find(activeLayoutId_);
+        if (parentIt == project.layoutCells.end() || parentIt->second.library)
+            return;
+        const auto instanceIt = parentIt->second.instances.find(instanceId);
+        if (instanceIt == parentIt->second.instances.end())
+            return;
+        const auto childIt = project.layoutCells.find(instanceIt->second.cell);
+        if (childIt == project.layoutCells.end())
+            return;
+        const auto childPortIt = childIt->second.ports.find(childPortId);
+        if (childPortIt == childIt->second.ports.end())
+            return;
+        for (const auto &[_, existing] : parentIt->second.ports) {
+            if (existing.sourceInstance == instanceId && existing.sourcePort == childPortId) {
+                selectLayoutShapeItem(existing.id);
+                return;
+            }
+        }
+
+        const auto &childPort = childPortIt->second;
+        const ice::Transform transform{instanceIt->second.x, instanceIt->second.y, instanceIt->second.orientation};
+        const auto first = transform.apply({childPort.rectangle.x, childPort.rectangle.y});
+        const auto second = transform.apply(
+            {childPort.rectangle.x + childPort.rectangle.width, childPort.rectangle.y + childPort.rectangle.height});
+        const ice::Rect rectangle{std::min(first.x, second.x), std::min(first.y, second.y),
+                                  std::abs(second.x - first.x), std::abs(second.y - first.y)};
+        std::string name = childPort.name;
+        for (int suffix = 2;; ++suffix) {
+            const bool duplicate = std::any_of(parentIt->second.ports.begin(), parentIt->second.ports.end(),
+                                               [&](const auto &entry) { return entry.second.name == name; });
+            if (!duplicate)
+                break;
+            name = childPort.name + "_" + std::to_string(suffix == 2 ? 1 : suffix - 1);
+            if (suffix > 1000)
+                break;
+        }
+        ice::ObjectId netId = 0;
+        if (childPort.net != 0) {
+            const auto childNet = childIt->second.nets.find(childPort.net);
+            if (childNet != childIt->second.nets.end()) {
+                for (const auto &[id, net] : parentIt->second.nets) {
+                    if (net.name == childNet->second.name) {
+                        netId = id;
+                        break;
+                    }
+                }
+                if (netId == 0) {
+                    try {
+                        project_->execute("promote layout pin", [&](ice::Project &project) {
+                            netId = ice::createLayoutNet(project, activeLayoutId_, childNet->second.name);
+                        });
+                    } catch (const ice::ProjectError &) {
+                        netId = 0;
+                    }
+                }
+            }
+        }
+        ice::ObjectId portId = 0;
+        try {
+            project_->execute("promote layout pin", [&](ice::Project &project) {
+                portId = ice::addPort(project, activeLayoutId_, name, childPort.layer, rectangle, childPort.direction,
+                                      childPort.side, netId, childPort.label);
+                auto &port = project.layoutCells.at(activeLayoutId_).ports.at(portId);
+                port.sourceInstance = instanceId;
+                port.sourcePort = childPortId;
+                ice::updatePort(project, activeLayoutId_, port);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Promote Pin"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        if (portId != 0)
+            QTimer::singleShot(0, this, [this, portId] { selectLayoutShapeItem(portId); });
+    }
+
     void removeSchematic(ice::ObjectId cellId) {
         if (!project_ || cellId == 0)
             return;
@@ -3790,6 +3913,36 @@ class DocumentWindow : public QMainWindow {
             ancestors.push_back(instance.cell);
             drawCellToGroup(childIt->second, childMapper, ancestors, group);
             ancestors.pop_back();
+            for (const auto &[portId, port] : childIt->second.ports) {
+                if (!port.visible || !layerVisible(port.layer))
+                    continue;
+                const auto style = styles.contains(port.layer)
+                                       ? styles.at(port.layer)
+                                       : LayerStyle{ice::uiColor(ice::UiColor::Accent4), Qt::SolidPattern};
+                const auto first = transform.apply({port.rectangle.x, port.rectangle.y});
+                const auto second = transform.apply(
+                    {port.rectangle.x + port.rectangle.width, port.rectangle.y + port.rectangle.height});
+                const QRectF pinRect(QPointF(std::min(first.x, second.x), -std::max(first.y, second.y)),
+                                     QPointF(std::max(first.x, second.x), -std::min(first.y, second.y)));
+                QPen pinPen(style.color, 1.0, Qt::DashLine);
+                pinPen.setCosmetic(true);
+                QColor pinFill = style.color;
+                pinFill.setAlpha(30);
+                auto *pinItem = layoutCanvas_->scene()->addRect(pinRect.normalized(), pinPen, QBrush(pinFill));
+                pinItem->setZValue(7.0);
+                pinItem->setData(3, QStringLiteral("instance-pin"));
+                pinItem->setData(4, QVariant::fromValue<qulonglong>(instance.id));
+                pinItem->setData(5, QVariant::fromValue<qulonglong>(portId));
+                pinItem->setToolTip(QStringLiteral("Instance %1 pin %2 · double-click to promote")
+                                        .arg(QString::fromStdString(instance.name), QString::fromStdString(port.name)));
+                auto *pinLabel = new QGraphicsSimpleTextItem(QString::fromStdString(port.label), pinItem);
+                QFont pinFont = pinLabel->font();
+                pinFont.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, pinRect.height() * 0.3))));
+                pinLabel->setFont(pinFont);
+                pinLabel->setBrush(QBrush(style.color));
+                pinLabel->setPos(pinRect.left() + 2.0, pinRect.top() + 1.0);
+                pinLabel->setAcceptedMouseButtons(Qt::NoButton);
+            }
             const auto bounds = group->childrenBoundingRect();
             if (bounds.isValid() && !bounds.isNull()) {
                 auto *highlight = new QGraphicsRectItem(bounds.adjusted(-2, -2, 2, 2), group);
@@ -4495,7 +4648,8 @@ class DocumentWindow : public QMainWindow {
                         parameter.value = generated->second;
                 }
                 if (cell.library)
-                    applyLayoutDeviceShapes(project, cell, layoutDevicesPanel_->library(), geometry->shapes);
+                    applyLayoutDeviceShapes(project, cell, layoutDevicesPanel_->library(), geometry->shapes,
+                                            geometry->ports);
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Regenerate Device"), QString::fromStdString(error.what()));
@@ -7533,6 +7687,12 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_->setOnAddClicked([this] { showAddLayoutMenu(); });
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutItem(id); });
         layoutHierarchy_->setOnActivateLayout([this](ice::ObjectId id) { selectLayoutTab(id); });
+        layoutHierarchy_->setOnActivatePin([this](ice::ObjectId cellId, ice::ObjectId pinId) {
+            QTimer::singleShot(0, this, [this, cellId, pinId] { selectLayoutPin(cellId, pinId); });
+        });
+        layoutHierarchy_->setOnPinVisibilityChanged([this](ice::ObjectId cellId, ice::ObjectId pinId, bool visible) {
+            setLayoutPinVisible(cellId, pinId, visible);
+        });
         layoutHierarchy_->setOnRegenerateProceduralLayout([this](ice::ObjectId id) { regenerateProceduralLayout(id); });
         layoutHierarchy_->setOnRenameLayout(
             [this](ice::ObjectId id, const std::string &name) { renameLayoutCell(id, name); });
@@ -8343,6 +8503,8 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
             layoutCanvas_->setPinPlacedCallback([this](QPointF position) { addLayoutPin(position); });
+            layoutCanvas_->setInstancePinActivatedCallback(
+                [this](ice::ObjectId instance, ice::ObjectId port) { promoteInstancePin(instance, port); });
             layoutCanvas_->setPolygonCreatedCallback(
                 [this](const std::vector<QPointF> &points) { addLayoutPolygon(points); });
             layoutCanvas_->setPolygonPointMovedCallback(

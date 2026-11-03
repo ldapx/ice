@@ -1,3 +1,4 @@
+#include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
@@ -797,7 +798,13 @@ void printHelp() {
               << "  layout-add-net <project> <cell> <name>\n"
               << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
               << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
-              << "  layout-export-gds <project> <cell> <output.gds>\n\n"
+              << "  layout-connectivity <project> <cell>\n"
+              << "  layout-export-gds <project> <cell> <output.gds>\n"
+              << "  layout-export-lef <project> <cell> <output.lef>\n"
+              << "  layout-export-def <project> <cell> <output.def>\n"
+              << "  layout-import-gds <input.gds> <project> [pin-label-layer]\n"
+              << "  layout-import-lef <input.lef> <project>\n"
+              << "  layout-import-def <input.def> <project>\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n\n"
@@ -1555,6 +1562,82 @@ int main(int argc, char **argv) {
             const auto cell = resolveLayout(project, args[2]);
             ice::LayoutInterchange::exportGds(project, cell, args[3]);
             printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-export-lef") {
+            expectArguments(args, 4, 4, "layout-export-lef <project> <cell> <output.lef>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::LayoutInterchange::exportLef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-export-def") {
+            expectArguments(args, 4, 4, "layout-export-def <project> <cell> <output.def>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::LayoutInterchange::exportDef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-import-gds") {
+            expectArguments(args, 3, 4, "layout-import-gds <input.gds> <project> [pin-label-layer]");
+            ice::LayoutImportOptions options;
+            if (args.size() == 4)
+                options.pinLabelLayer = std::stoi(args[3]);
+            auto project = ice::LayoutInterchange::importGds(args[1], options);
+            auto name = projectNameForPath(args[2]);
+            if (project.name.empty())
+                project.name = name;
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-import-lef") {
+            expectArguments(args, 3, 3, "layout-import-lef <input.lef> <project>");
+            auto project = ice::LayoutInterchange::importLef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-import-def") {
+            expectArguments(args, 3, 3, "layout-import-def <input.def> <project>");
+            auto project = ice::LayoutInterchange::importDef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-connectivity") {
+            expectArguments(args, 3, 3, "layout-connectivity <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            json groups = json::array();
+            for (const auto &group : ice::extractLayoutNets(project, cell)) {
+                groups.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
+                                  {"name", group.name},
+                                  {"shapes", group.shapes},
+                                  {"ports", group.ports},
+                                  {"connections", group.connections}});
+            }
+            printJson({{"cell", cell}, {"nets", std::move(groups)}});
             return 0;
         }
 
