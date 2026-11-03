@@ -32,6 +32,7 @@ class SchematicCanvas : public QGraphicsView {
     virtual void setGridVisible(bool visible) = 0;
     virtual void setSnapToGrid(bool enabled) = 0;
     virtual void setSymbolPlacementCallback(std::function<void(QPointF)> callback) = 0;
+    virtual void setPlaceSymbolCycleCallback(std::function<void(int)> callback) = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
     virtual void setDeleteCallback(std::function<void(std::vector<ice::ObjectId>)> callback) = 0;
     virtual void setDisconnectCallback(std::function<void(ice::ObjectId)> callback) = 0;
@@ -41,6 +42,7 @@ class SchematicCanvas : public QGraphicsView {
     virtual ice::ObjectId selectedInstanceId() const = 0;
     virtual std::vector<ice::ObjectId> selectedInstanceIds() const = 0;
     virtual void restoreSelection() = 0;
+    virtual void selectInstance(ice::ObjectId instanceId) = 0;
     virtual void clearSelection() = 0;
     virtual void deleteSelectedSymbols() = 0;
     virtual void rotateSelectedSymbols() = 0;

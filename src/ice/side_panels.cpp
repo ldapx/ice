@@ -132,6 +132,17 @@ QString shapeEntryDisplayName(ice::ObjectId id, const ice::Shape &shape) {
 
 QIcon hierarchyIcon(const char *name) { return ice::lucideIcon(QString::fromLatin1(name), 16); }
 
+QTreeWidgetItem *findInstanceItem(QTreeWidgetItem *item, ice::ObjectId instanceId) {
+    if (!item)
+        return nullptr;
+    if (item->data(0, kInstanceIdRole).toULongLong() == static_cast<qulonglong>(instanceId))
+        return item;
+    for (int index = 0; index < item->childCount(); ++index)
+        if (auto *found = findInstanceItem(item->child(index), instanceId))
+            return found;
+    return nullptr;
+}
+
 QString layerBaseName(const ice::Layer &layer) {
     const auto name = QString::fromStdString(layer.name);
     const auto dot = name.indexOf('.');
@@ -226,8 +237,18 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
             if (cellId != 0 && onRemove_)
                 onRemove_(cellId);
         });
-    connect(tree_, &QTreeWidget::currentItemChanged, this,
-            [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateRemoveButton(); });
+    connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
+        updateRemoveButton();
+        if (rebuildingTree_ || !showLayoutHierarchy_ || !onInstanceSelected_ || !current)
+            return;
+        const auto instanceId = current->data(0, kInstanceIdRole).toULongLong();
+        if (instanceId == 0)
+            return;
+        const auto *parent = current->parent();
+        const auto ownerCellId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;
+        if (ownerCellId != 0)
+            onInstanceSelected_(static_cast<ice::ObjectId>(ownerCellId), static_cast<ice::ObjectId>(instanceId));
+    });
     connect(tree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item, int) {
         if (!item || !item->data(0, Qt::UserRole).isValid())
             return;
@@ -276,6 +297,35 @@ void ProjectPanel::setOnActivateSchematic(std::function<void(ice::ObjectId)> cal
 
 void ProjectPanel::setOnActivateLayout(std::function<void(ice::ObjectId)> callback) {
     onActivateLayout_ = std::move(callback);
+}
+
+void ProjectPanel::setOnInstanceSelected(InstanceCallback callback) { onInstanceSelected_ = std::move(callback); }
+
+void ProjectPanel::selectInstance(ice::ObjectId instanceId) {
+    if (!tree_ || rebuildingTree_)
+        return;
+    {
+        // Mirroring a canvas selection must not look like a tree click.
+        const QSignalBlocker blocker(tree_);
+        if (instanceId == 0) {
+            if (const auto *current = tree_->currentItem(); current && current->data(0, kInstanceIdRole).isValid()) {
+                tree_->setCurrentItem(nullptr);
+                tree_->clearSelection();
+            }
+        } else {
+            for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+                auto *item = findInstanceItem(tree_->topLevelItem(index), instanceId);
+                if (!item)
+                    continue;
+                for (auto *parent = item->parent(); parent; parent = parent->parent())
+                    parent->setExpanded(true);
+                tree_->setCurrentItem(item);
+                tree_->scrollToItem(item);
+                break;
+            }
+        }
+    }
+    updateRemoveButton();
 }
 
 void ProjectPanel::setOnActivatePin(PinCallback callback) { onActivatePin_ = std::move(callback); }

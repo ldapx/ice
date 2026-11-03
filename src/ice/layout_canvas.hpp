@@ -63,6 +63,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setDevicePreview(const ice::LayoutDeviceCell *cell) = 0;
     virtual void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) = 0;
     virtual void restoreLayoutInstanceSelection() = 0;
+    virtual void selectLayoutInstance(ice::ObjectId instanceId) = 0;
     virtual void setDevicePlacementCallback(std::function<void(QPointF)> callback) = 0;
     virtual void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
     virtual void setInstanceSelectionCallback(std::function<void(ice::ObjectId)> callback) = 0;

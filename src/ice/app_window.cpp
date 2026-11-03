@@ -2550,6 +2550,25 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    // Hierarchy selection of a placed instance opens the owning layout and
+    // selects the instance group on the canvas. Deferred so the tree rebuild
+    // caused by the tab switch never runs inside the tree's own signal.
+    void selectLayoutInstanceFromHierarchy(ice::ObjectId ownerCellId, ice::ObjectId instanceId) {
+        if (!project_ || ownerCellId == 0 || instanceId == 0)
+            return;
+        QTimer::singleShot(0, this, [this, ownerCellId, instanceId] {
+            if (!project_ || !layoutCanvas_)
+                return;
+            const auto cell = project_->project().layoutCells.find(ownerCellId);
+            if (cell == project_->project().layoutCells.end() || cell->second.library ||
+                !cell->second.instances.contains(instanceId))
+                return;
+            selectLayoutTab(ownerCellId);
+            layoutCanvas_->selectLayoutInstance(instanceId);
+            refreshLayoutProperties(true);
+        });
+    }
+
     void selectLayoutPin(ice::ObjectId cellId, ice::ObjectId pinId) {
         if (!project_ || cellId == 0 || pinId == 0)
             return;
@@ -4066,6 +4085,10 @@ class DocumentWindow : public QMainWindow {
             layoutViewInitialized_ = true;
         }
         refreshLayoutProperties();
+        // The hierarchy is rebuilt on project changes, which drops its current
+        // row; restore it from the canvas selection so both stay in step.
+        if (layoutHierarchy_)
+            layoutHierarchy_->selectInstance(layoutCanvas_->selectedLayoutInstance());
     }
 
     void clearLayoutDeviceSelection() {
@@ -4503,14 +4526,16 @@ class DocumentWindow : public QMainWindow {
             activateSchematicPlaceSymbolTool(*definition, true);
     }
 
-    bool placeSymbolDefinition(const SymbolDefinition &definition, QPointF position) {
+    // Returns the id of the newly placed instance, or 0 when nothing was placed.
+    ice::ObjectId placeSymbolDefinition(const SymbolDefinition &definition, QPointF position) {
         if (!project_ || !schematicCanvas_ || project_->project().schematicCells.empty())
-            return false;
+            return 0;
         try {
             const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
                                     ? activeSchematicId_
                                     : project_->project().schematicCells.begin()->first;
             std::string placedName;
+            ice::ObjectId placedInstanceId = 0;
             project_->execute("place symbol", [&](ice::Project &project) {
                 const auto symbolId = ice::addSymbol(project, cellId, definition.name.toStdString(),
                                                      definition.svg.toStdString(), definition.cell);
@@ -4534,13 +4559,14 @@ class DocumentWindow : public QMainWindow {
                 // ...) so they are editable in the properties panel right away.
                 auto &placedInstance = project.schematicCells.at(cellId).instances.at(instanceId);
                 ice::seedDefaultParameters(project, placedInstance, instanceDefaults(definition));
+                placedInstanceId = instanceId;
             });
             project_->setLastHistoryLabel("Placed " + definition.name.toStdString() + " " + placedName);
             refreshProject();
-            return true;
+            return placedInstanceId;
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Place Device"), QString::fromStdString(error.what()));
-            return false;
+            return 0;
         }
     }
 
@@ -7800,6 +7826,49 @@ class DocumentWindow : public QMainWindow {
             activateSchematicPlaceSymbolTool(*symbol);
     }
 
+    // Device-letter shortcuts pick a symbol by name out of the library that
+    // refreshSchematic caches, so pressing a key never hits the filesystem.
+    const SymbolDefinition *schematicDeviceDefinition(const QString &name) const {
+        for (const auto &definition : schematicBaseSymbols_)
+            if (definition.name == name)
+                return &definition;
+        return nullptr;
+    }
+
+    void activateSchematicDevice(const QString &name) {
+        if (!project_ || project_->project().schematicCells.empty()) {
+            statusBar()->showMessage(QStringLiteral("Create a schematic before placing %1").arg(name));
+            return;
+        }
+        const auto *definition = schematicDeviceDefinition(name);
+        if (!definition) {
+            statusBar()->showMessage(
+                QStringLiteral("%1 is not available in this schematic's symbol library").arg(name));
+            return;
+        }
+        activateSchematicPlaceSymbolTool(*definition, true);
+        if (schematicCanvas_)
+            schematicCanvas_->setFocus();
+    }
+
+    // Shift + wheel while placing scrolls through the device library.
+    void cycleSchematicPlacementDevice(int delta) {
+        if (schematicBaseSymbols_.empty())
+            return;
+        const auto count = static_cast<int>(schematicBaseSymbols_.size());
+        int index = -1;
+        if (selectedSchematicSymbol_) {
+            for (int candidate = 0; candidate < count; ++candidate) {
+                if (schematicBaseSymbols_[candidate].name == selectedSchematicSymbol_->name) {
+                    index = candidate;
+                    break;
+                }
+            }
+        }
+        index = index < 0 ? (delta > 0 ? 0 : count - 1) : (index + delta + count) % count;
+        activateSchematicPlaceSymbolTool(schematicBaseSymbols_[index], true);
+    }
+
     void selectSchematicTool() {
         if (schematicSelectTool_)
             schematicSelectTool_->setChecked(true);
@@ -8031,6 +8100,9 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_->setOnAddClicked([this] { showAddLayoutMenu(); });
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutItem(id); });
         layoutHierarchy_->setOnActivateLayout([this](ice::ObjectId id) { selectLayoutTab(id); });
+        layoutHierarchy_->setOnInstanceSelected([this](ice::ObjectId ownerId, ice::ObjectId instanceId) {
+            selectLayoutInstanceFromHierarchy(ownerId, instanceId);
+        });
         layoutHierarchy_->setOnActivatePin([this](ice::ObjectId cellId, ice::ObjectId pinId) {
             QTimer::singleShot(0, this, [this, cellId, pinId] { selectLayoutPin(cellId, pinId); });
         });
@@ -8227,7 +8299,11 @@ class DocumentWindow : public QMainWindow {
                 layoutCanvas_->setDevicePlacementCallback([this](QPointF position) { placeLayoutDevice(position); });
                 layoutCanvas_->setInstanceActivatedCallback(
                     [this](ice::ObjectId instanceId) { openLayoutInstanceCell(instanceId); });
-                layoutCanvas_->setInstanceSelectionCallback([this](ice::ObjectId) { refreshLayoutProperties(true); });
+                layoutCanvas_->setInstanceSelectionCallback([this](ice::ObjectId instanceId) {
+                    if (layoutHierarchy_)
+                        layoutHierarchy_->selectInstance(instanceId);
+                    refreshLayoutProperties(true);
+                });
                 layoutCanvas_->setToolEscapeCallback([this] {
                     if (layoutSelectTool_)
                         layoutSelectTool_->setChecked(true);
@@ -8800,9 +8876,15 @@ class DocumentWindow : public QMainWindow {
                     return;
                 }
                 const auto symbolName = selectedSchematicSymbol_->name;
-                if (placeSymbolDefinition(*selectedSchematicSymbol_, position))
+                if (const auto instanceId = placeSymbolDefinition(*selectedSchematicSymbol_, position);
+                    instanceId != 0) {
+                    // Highlight the device that was just dropped so the user
+                    // can immediately rotate or edit it.
+                    schematicCanvas_->selectInstance(instanceId);
                     statusBar()->showMessage(QStringLiteral("Placed %1").arg(symbolName));
+                }
             });
+            schematicCanvas_->setPlaceSymbolCycleCallback([this](int delta) { cycleSchematicPlacementDevice(delta); });
             schematicCanvas_->setToolEscapeCallback([this] { selectSchematicTool(); });
             schematicCanvas_->setSignalPickedCallback(
                 [this](ice::ObjectId netId) { finishSimulationSignalPick(netId); });
@@ -9218,14 +9300,43 @@ class DocumentWindow : public QMainWindow {
         schematicSelectTool_ = selectTool;
         auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Device"));
         placeSymbolTool->setCheckable(true);
+        placeSymbolTool->setToolTip(QStringLiteral("Place device (P) · R resistor · X NMOS · I input · O output · "
+                                                   "C capacitor · D diode · G ground · L inductor · S sine source"));
+        placeSymbolTool->setStatusTip(placeSymbolTool->toolTip());
         schematicPlaceSymbolTool_ = placeSymbolTool;
+        // Single-letter device shortcuts arm Place Device with one symbol;
+        // they are registered so the Keyboard Shortcuts dialog can rebind them.
+        const auto addDeviceShortcut = [this](const QString &id, const QString &label, const QString &device,
+                                              const QString &key) {
+            auto *action = new QAction(label, this);
+            shortcuts_.registerAction(action, id, label, ice::ShortcutScope::schematic, QKeySequence(key));
+            connect(action, &QAction::triggered, this, [this, device] { activateSchematicDevice(device); });
+        };
+        addDeviceShortcut(QStringLiteral("schematic.place-resistor"), QStringLiteral("Place Resistor"),
+                          QStringLiteral("Resistor"), QStringLiteral("R"));
+        addDeviceShortcut(QStringLiteral("schematic.place-nmos"), QStringLiteral("Place NMOS"), QStringLiteral("NMOS"),
+                          QStringLiteral("X"));
+        addDeviceShortcut(QStringLiteral("schematic.place-input"), QStringLiteral("Place Input"),
+                          QStringLiteral("Input"), QStringLiteral("I"));
+        addDeviceShortcut(QStringLiteral("schematic.place-output"), QStringLiteral("Place Output"),
+                          QStringLiteral("Output"), QStringLiteral("O"));
+        addDeviceShortcut(QStringLiteral("schematic.place-capacitor"), QStringLiteral("Place Capacitor"),
+                          QStringLiteral("Capacitor"), QStringLiteral("C"));
+        addDeviceShortcut(QStringLiteral("schematic.place-diode"), QStringLiteral("Place Diode"),
+                          QStringLiteral("Diode"), QStringLiteral("D"));
+        addDeviceShortcut(QStringLiteral("schematic.place-ground"), QStringLiteral("Place Ground"),
+                          QStringLiteral("Ground"), QStringLiteral("G"));
+        addDeviceShortcut(QStringLiteral("schematic.place-inductor"), QStringLiteral("Place Inductor"),
+                          QStringLiteral("Inductor"), QStringLiteral("L"));
+        addDeviceShortcut(QStringLiteral("schematic.place-sine-source"), QStringLiteral("Place Sine Voltage Source"),
+                          QStringLiteral("Sine Voltage Source"), QStringLiteral("S"));
         auto *placeCommentTool = addTool(QStringLiteral("message-square"), QStringLiteral("Comment"));
-        placeCommentTool->setToolTip(QStringLiteral("Comment (C)"));
-        placeCommentTool->setStatusTip(QStringLiteral("Comment (C)"));
+        placeCommentTool->setToolTip(QStringLiteral("Comment (Shift+C)"));
+        placeCommentTool->setStatusTip(QStringLiteral("Comment (Shift+C)"));
         placeCommentTool->setCheckable(true);
         schematicPlaceCommentTool_ = placeCommentTool;
         addShortcut(placeCommentTool, QStringLiteral("schematic.comment"), ice::ShortcutScope::schematic,
-                    QKeySequence(QStringLiteral("C")));
+                    QKeySequence(QStringLiteral("Shift+C")));
         auto *toolGroup = new QActionGroup(toolbar);
         toolGroup->setExclusive(true);
         for (auto *action : {selectTool, placeSymbolTool, placeCommentTool})
@@ -9324,10 +9435,10 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
-        rotateTool->setToolTip(QStringLiteral("Rotate selected devices (R)"));
-        rotateTool->setStatusTip(QStringLiteral("Rotate selected devices (R)"));
+        rotateTool->setToolTip(QStringLiteral("Rotate selected devices (Shift+R)"));
+        rotateTool->setStatusTip(QStringLiteral("Rotate selected devices (Shift+R)"));
         addShortcut(rotateTool, QStringLiteral("schematic.rotate"), ice::ShortcutScope::schematic,
-                    QKeySequence(QStringLiteral("R")));
+                    QKeySequence(QStringLiteral("Shift+R")));
         connect(rotateTool, &QAction::triggered, this, [this] {
             if (schematicCanvas_)
                 schematicCanvas_->rotateSelectedSymbols();

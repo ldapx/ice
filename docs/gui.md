@@ -244,7 +244,9 @@ Clicking in the canvas imports the device geometry into the project and creates
 a layout instance. Every placed device gets its own read-only library cell, so
 repeated placements do not share parameters or geometry. Each instance appears
 separately under its parent layout in the hierarchy and can be selected, moved,
-and deleted directly in the canvas. PCell parameter names, values, and
+and deleted directly in the canvas. Selecting a placed instance in the
+hierarchy highlights it in the canvas, and selecting an instance in the canvas
+highlights its hierarchy row. PCell parameter names, values, and
 descriptions are shown in **Properties** for the device preview and for imported
 library cells. Selecting
 a placed device instance shows that instance's own geometry preview and
@@ -401,7 +403,9 @@ Common defaults:
 - **Toggle grid**: Ctrl+G
 - **Snap to grid**: Shift+G
 - **Hierarchy up / down**: Alt+Up / Alt+Down
-- **Schematic rotate / flip**: R / H
+- **Schematic rotate / flip**: Shift+R / H
+- **Schematic place device**: R resistor, X NMOS, I input, O output, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
+- **Schematic comment**: Shift+C
 - **Layout rotate / flips**: Ctrl+R / H / J
 - **Layout rectangle / polygon / path / text / pin / ruler**: R / G / W / T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
