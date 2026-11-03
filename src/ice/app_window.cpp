@@ -453,6 +453,8 @@ class DocumentWindow : public QMainWindow {
                 if (cell.device.empty())
                     cell.device = device->name;
                 syncLayoutDeviceParameters(project, cell, *device);
+                if (cell.ports.empty() && !device->ports.empty())
+                    applyLayoutDevicePorts(project, cell, library, device->ports);
             }
         }
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
@@ -4292,10 +4294,9 @@ class DocumentWindow : public QMainWindow {
         project_->execute("place comment", [&](ice::Project &project) {
             auto &cell = project.schematicCells.at(cellId);
             const auto id = project.nextId();
-            cell.comments.emplace(id, ice::SchematicComment{id,
-                                                           text.trimmed().toStdString(),
-                                                           static_cast<ice::Coordinate>(position.x()),
-                                                           static_cast<ice::Coordinate>(-position.y())});
+            cell.comments.emplace(id, ice::SchematicComment{id, text.trimmed().toStdString(),
+                                                            static_cast<ice::Coordinate>(position.x()),
+                                                            static_cast<ice::Coordinate>(-position.y())});
         });
         refreshProject();
     }
@@ -4466,7 +4467,8 @@ class DocumentWindow : public QMainWindow {
     // Selection is view state, but it is discussed with the domain model so the
     // status bar and properties panel always describe the selected instance.
     void updateSelectionStatus() {
-        const auto selectedIds = schematicCanvas_ ? schematicCanvas_->selectedInstanceIds() : std::vector<ice::ObjectId>{};
+        const auto selectedIds =
+            schematicCanvas_ ? schematicCanvas_->selectedInstanceIds() : std::vector<ice::ObjectId>{};
         if (!selectionStatus_)
             return;
         if (selectedIds.empty()) {
@@ -4784,9 +4786,9 @@ class DocumentWindow : public QMainWindow {
             const auto commIt = cell.comments.find(instanceId);
             if (commIt != cell.comments.end()) {
                 bool accepted = false;
-                const auto newText = QInputDialog::getText(
-                    this, QStringLiteral("Edit Comment"), QStringLiteral("Comment:"),
-                    QLineEdit::Normal, QString::fromStdString(commIt->second.text), &accepted);
+                const auto newText =
+                    QInputDialog::getText(this, QStringLiteral("Edit Comment"), QStringLiteral("Comment:"),
+                                          QLineEdit::Normal, QString::fromStdString(commIt->second.text), &accepted);
                 if (accepted && !newText.trimmed().isEmpty()) {
                     project_->execute("edit comment", [&](ice::Project &project) {
                         auto cIt = project.schematicCells.find(cellId);

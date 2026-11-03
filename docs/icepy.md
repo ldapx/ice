@@ -146,7 +146,8 @@ with the ICE layout API.
 
 **IHP PyCell runtime.** The upstream IHP PyCell implementations are vendored
 inside the IHP package under `upstream/ihp`. `icepy` provides the ICE-side
-runtime and transfers generated polygons directly into an `icepy` layout cell:
+runtime, transfers generated polygons directly into an `icepy` layout cell, and
+converts the PyCell `MkPin` terminal declarations into layout pins:
 
 ```python
 import icepy

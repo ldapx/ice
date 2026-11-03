@@ -1075,6 +1075,14 @@ TEST_CASE("shipped IHP layout device library loads") {
     if (nmos) {
         CHECK(nmos->category == "Transistors");
         CHECK(!nmos->shapes.empty());
+        CHECK(nmos->ports.size() == 3);
+        const auto hasPort = [&](const std::string &name) {
+            return std::any_of(nmos->ports.begin(), nmos->ports.end(),
+                               [&](const ice::LayoutDevicePort &port) { return port.name == name; });
+        };
+        CHECK(hasPort("S"));
+        CHECK(hasPort("G"));
+        CHECK(hasPort("D"));
         CHECK(nmos->bounds.valid());
         CHECK(nmos->parameters.size() == 9);
         CHECK(nmos->generator.has_value());

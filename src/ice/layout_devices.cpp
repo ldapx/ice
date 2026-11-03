@@ -322,6 +322,35 @@ QString pythonExecutable() {
     return {};
 }
 
+namespace {
+ice::ObjectId layoutDeviceLayerId(ice::Project &project,
+                                 std::map<std::pair<int, int>, std::string> &layerNames,
+                                 std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype) {
+    const auto key = std::make_pair(number, datatype);
+    if (const auto existing = layerIds.find(key); existing != layerIds.end())
+        return existing->second;
+    const auto nameIt = layerNames.find(key);
+    std::string layerName;
+    if (nameIt != layerNames.end() && !nameIt->second.empty())
+        layerName = nameIt->second;
+    else if (datatype == 0)
+        layerName = "Layer " + std::to_string(number);
+    else
+        layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
+    ice::ObjectId layerId = 0;
+    for (const auto &[id, layer] : project.layers) {
+        if (layer.number == number && layer.name == layerName) {
+            layerId = id;
+            break;
+        }
+    }
+    if (layerId == 0)
+        layerId = ice::addLayer(project, layerName, number);
+    layerIds.emplace(key, layerId);
+    return layerId;
+}
+} // namespace
+
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                              const std::vector<ice::LayoutDeviceShape> &sourceShapes,
                              const std::vector<ice::LayoutDevicePort> &sourcePorts) {
@@ -333,28 +362,7 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     const auto layerIdFor = [&](int number, int datatype) {
-        const auto key = std::make_pair(number, datatype);
-        if (const auto existing = layerIds.find(key); existing != layerIds.end())
-            return existing->second;
-        const auto nameIt = layerNames.find(key);
-        std::string layerName;
-        if (nameIt != layerNames.end() && !nameIt->second.empty())
-            layerName = nameIt->second;
-        else if (datatype == 0)
-            layerName = "Layer " + std::to_string(number);
-        else
-            layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
-        ice::ObjectId layerId = 0;
-        for (const auto &[id, layer] : project.layers) {
-            if (layer.number == number && layer.name == layerName) {
-                layerId = id;
-                break;
-            }
-        }
-        if (layerId == 0)
-            layerId = ice::addLayer(project, layerName, number);
-        layerIds.emplace(key, layerId);
-        return layerId;
+        return layoutDeviceLayerId(project, layerNames, layerIds, number, datatype);
     };
     for (const auto &sourceShape : sourceShapes) {
         if (sourceShape.polygon.size() < 3)
@@ -381,6 +389,28 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
     for (const auto &sourcePort : sourcePorts) {
         const auto id = project.nextId();
         ice::Port port{id, sourcePort.name, layerIdFor(sourcePort.layer, sourcePort.datatype), sourcePort.rectangle};
+        port.direction = sourcePort.direction;
+        port.side = sourcePort.side;
+        port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
+        cell.ports.emplace(id, std::move(port));
+    }
+}
+
+void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
+                            const std::vector<ice::LayoutDevicePort> &sourcePorts) {
+    if (sourcePorts.empty())
+        return;
+    cell.ports.clear();
+    std::map<std::pair<int, int>, std::string> layerNames;
+    for (const auto &layer : library.layers)
+        layerNames[{layer.number, layer.datatype}] = layer.name;
+    std::map<std::pair<int, int>, ice::ObjectId> layerIds;
+    for (const auto &sourcePort : sourcePorts) {
+        const auto id = project.nextId();
+        ice::Port port{
+            id, sourcePort.name,
+            layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype),
+            sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;

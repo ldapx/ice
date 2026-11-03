@@ -80,6 +80,7 @@ def check_library(name: str, root: Path) -> None:
     assert device["generator"]["class"] == expected["class"]
     assert device["parameters"]
     assert device["shapes"]
+    assert device["ports"], f"{name}: device library has no ports"
     assert device["bounds"][2] > device["bounds"][0]
     assert device["bounds"][3] > device["bounds"][1]
 
@@ -126,8 +127,7 @@ def check_library(name: str, root: Path) -> None:
             },
         )
     assert generated["shapes"], f"{name}: generator produced no shapes"
-    if name != "ice-pkg-ihp-sg13g2":
-        assert generated["ports"], f"{name}: generator produced no ports"
+    assert generated["ports"], f"{name}: generator produced no ports"
     assert generated["bounds"][2] > generated["bounds"][0]
     assert generated["bounds"][3] > generated["bounds"][1]
     assert generated["bounds"][2] - generated["bounds"][0] < 1_000_000

@@ -290,6 +290,98 @@ def _layer_name(reverse, number: int, datatype: int) -> str:
     return f"Layer {number} (dt {datatype})" if datatype else f"Layer {number}"
 
 
+def _pin_side(rectangle: dict, bounds) -> str:
+    left, bottom, right, top = bounds
+    center_x = rectangle["x"] + rectangle["width"] / 2
+    center_y = rectangle["y"] + rectangle["height"] / 2
+    distances = {
+        "left": abs(center_x - left),
+        "right": abs(right - center_x),
+        "bottom": abs(center_y - bottom),
+        "top": abs(top - center_y),
+    }
+    minimum = min(distances.values())
+    for side in ("top", "bottom", "right", "left"):
+        if distances[side] == minimum:
+            return side
+    return "left"
+
+
+def _pin_direction(name: str) -> str:
+    upper = name.upper()
+    if upper in {"G", "B", "IN", "VIN"} or upper.startswith("IN"):
+        return "input"
+    if upper in {"Y", "OUT", "VOUT"} or upper.startswith("OUT"):
+        return "output"
+    return "inout"
+
+
+def _extract_ihp_ports(wrapper, cell, tech) -> list[dict]:
+    """Read terminal pins from the IHP PyCell cell context."""
+    implementation = getattr(wrapper, "_impl", None)
+    contexts = getattr(implementation, "_cellContexts", {}) if implementation else {}
+    context = contexts.get(cell)
+    if context is None:
+        return []
+
+    bounds = None
+    try:
+        box = cell.bbox()
+        if box is not None:
+            bounds = (box.left, box.bottom, box.right, box.top)
+    except Exception:
+        bounds = None
+
+    stream_layers = tech.stream_layers()
+    ports = []
+    seen = set()
+    for pin in getattr(context, "pins", {}).values():
+        name = pin.getName()
+        if not name or name in seen:
+            continue
+        bbox = pin.getBBox()
+        box = getattr(bbox, "box", None) if bbox is not None else None
+        if box is None:
+            continue
+        layer_number = None
+        datatype = 0
+        for layer in getattr(pin, "_layers", []):
+            stream = stream_layers.get(layer.getLayerName())
+            if stream is not None:
+                layer_number, datatype = stream
+                break
+        if layer_number is None:
+            continue
+        rectangle = {
+            "x": int(round(box.left * 1000)),
+            "y": int(round(box.bottom * 1000)),
+            "width": int(round((box.right - box.left) * 1000)),
+            "height": int(round((box.top - box.bottom) * 1000)),
+        }
+        if rectangle["width"] <= 0 or rectangle["height"] <= 0:
+            continue
+        if bounds is None:
+            bounds = (
+                rectangle["x"],
+                rectangle["y"],
+                rectangle["x"] + rectangle["width"],
+                rectangle["y"] + rectangle["height"],
+            )
+        ports.append(
+            {
+                "name": name,
+                "layer": int(layer_number),
+                "datatype": int(datatype),
+                "rectangle": rectangle,
+                "direction": _pin_direction(name),
+                "side": _pin_side(rectangle, bounds),
+                "label": name,
+            }
+        )
+        seen.add(name)
+    return ports
+
+
 def generate_cell(
     project,
     cell_name: str,
@@ -324,6 +416,21 @@ def generate_cell(
         builder.layer(layer, polygon["number"])
         points = [make_point(x, y) for x, y in polygon["points"]]
         builder.polygon(layer, points)
+    for port in _extract_ihp_ports(wrapper, pya_cell, tech):
+        layer = _layer_name(reverse, port["layer"], port["datatype"])
+        builder.layer(layer, port["layer"])
+        rectangle = port["rectangle"]
+        builder.port(
+            port["name"],
+            layer,
+            rectangle["x"],
+            rectangle["y"],
+            rectangle["width"],
+            rectangle["height"],
+            direction=port["direction"],
+            side=port["side"],
+            label=port["label"],
+        )
     return builder.cell()
 
 
@@ -373,6 +480,27 @@ def generate_geometry(
         raise RuntimeError(
             "the PyCell produced no polygon geometry after transfer to icepy"
         )
+    ports = []
+    for port in cell.ports:
+        layer = layers_by_id.get(port.layer)
+        name = layer.name if layer is not None else ""
+        number, datatype = stream_by_name.get(name, (layer.number if layer else 0, 0))
+        ports.append(
+            {
+                "name": port.name,
+                "layer": int(number),
+                "datatype": int(datatype),
+                "rectangle": {
+                    "x": port.rectangle.x,
+                    "y": port.rectangle.y,
+                    "width": port.rectangle.width,
+                    "height": port.rectangle.height,
+                },
+                "direction": port_direction_text(port.direction),
+                "side": port_side_text(port.side),
+                "label": port.label or port.name,
+            }
+        )
     bounds = cell.bounds
     if bounds is None:
         raise RuntimeError("the PyCell produced an empty bounding box")
@@ -384,6 +512,7 @@ def generate_geometry(
             bounds.y + bounds.height,
         ],
         "shapes": shapes,
+        "ports": ports,
     }
 
 

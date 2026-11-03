@@ -93,6 +93,9 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                              const std::vector<ice::LayoutDeviceShape> &sourceShapes,
                              const std::vector<ice::LayoutDevicePort> &sourcePorts = {});
+// Backfills pins on an existing library cell without regenerating geometry.
+void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
+                            const std::vector<ice::LayoutDevicePort> &sourcePorts);
 std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &project, const ice::LayoutCell &cell,
                                                            const ice::LayoutDeviceLibrary &library);
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,
