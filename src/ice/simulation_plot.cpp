@@ -2,6 +2,8 @@
 
 #include "ui_colors.hpp"
 
+#include <QInputDialog>
+#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -70,12 +72,33 @@ std::vector<double> axisTicks(double minimum, double maximum, int intervals) {
 
 QString formatTick(double value) { return QString::number(value, 'g', 5); }
 
+// Legend chips and the axis titles use the same palette as the traces.
+QColor traceColor(std::size_t index) {
+    auto cyan = ice::uiColor(ice::UiColor::Accent3);
+    cyan = cyan.darker(135);
+    const QColor colors[] = {ice::uiColor(ice::UiColor::Accent2), ice::uiColor(ice::UiColor::Accent4),
+                             ice::uiColor(ice::UiColor::Accent5), ice::uiColor(ice::UiColor::Accent6), cyan};
+    return colors[index % 5];
+}
+
+constexpr qreal plotLeft = 82.0;
+constexpr qreal plotRightMargin = 20.0;
+constexpr qreal plotBottomMargin = 56.0;
+constexpr qreal titleBottom = 28.0;
+constexpr qreal legendChipHeight = 18.0;
+constexpr qreal legendChipPadding = 7.0;
+constexpr qreal legendChipGap = 6.0;
+constexpr qreal legendRowGap = 4.0;
+// Each legend entry draws a short line in the signal colour before its name.
+constexpr qreal legendSwatchWidth = 16.0;
+constexpr qreal legendSwatchGap = 6.0;
+
 } // namespace
 
 SimulationPlot::SimulationPlot(QWidget *parent) : QWidget(parent) {
     setMinimumHeight(260);
     setAutoFillBackground(true);
-    setToolTip(QStringLiteral("Simulation traces"));
+    setToolTip(QStringLiteral("Simulation traces. Double-click an axis title or legend label to rename it."));
 }
 
 void SimulationPlot::setResult(std::shared_ptr<const ice::SimulationResult> result) {
@@ -100,6 +123,15 @@ void SimulationPlot::setGridVisible(bool visible) {
     update();
 }
 
+void SimulationPlot::setLabelEditCallback(
+    std::function<void(ice::ObjectId, const std::string &, const QString &)> callback) {
+    labelEditCallback_ = std::move(callback);
+}
+
+void SimulationPlot::setYAxisLabelEditCallback(std::function<void(ice::ObjectId, const QString &)> callback) {
+    yAxisLabelEditCallback_ = std::move(callback);
+}
+
 void SimulationPlot::clear() {
     result_.reset();
     invalidateDisplayCache();
@@ -109,6 +141,44 @@ void SimulationPlot::clear() {
 void SimulationPlot::resizeEvent(QResizeEvent *event) {
     invalidateDisplayCache();
     QWidget::resizeEvent(event);
+}
+
+void SimulationPlot::editLabel(const std::string &signal, const QString &currentLabel) {
+    if (!labelEditCallback_ || signal.empty())
+        return;
+    bool ok = false;
+    const auto label = QInputDialog::getText(this, tr("Rename Signal"),
+                                             tr("Display label for %1:").arg(QString::fromStdString(signal)),
+                                             QLineEdit::Normal, currentLabel, &ok);
+    if (!ok)
+        return;
+    labelEditCallback_(graph_.id, signal, label.trimmed());
+}
+
+void SimulationPlot::mouseDoubleClickEvent(QMouseEvent *event) {
+    ensureDisplayCache();
+    const auto position = event->position();
+    if (labelEditCallback_) {
+        for (std::size_t index = 0; index < cache_.legendChips.size() && index < cache_.legendSignals.size(); ++index) {
+            if (!cache_.legendChips[index].contains(position))
+                continue;
+            editLabel(cache_.legendSignals[index], cache_.traceLabels[index]);
+            return;
+        }
+        if (cache_.xLabelRect.contains(position)) {
+            editLabel(cache_.xSignal, cache_.xLabel);
+            return;
+        }
+    }
+    if (yAxisLabelEditCallback_ && cache_.yLabelRect.contains(position)) {
+        bool ok = false;
+        const auto label = QInputDialog::getText(this, tr("Rename Y Axis"), tr("Y axis title:"), QLineEdit::Normal,
+                                                 cache_.yLabel, &ok);
+        if (ok)
+            yAxisLabelEditCallback_(graph_.id, label.trimmed());
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
 }
 
 void SimulationPlot::invalidateDisplayCache() { cache_.valid = false; }
@@ -137,10 +207,29 @@ void SimulationPlot::ensureDisplayCache() const {
     static const ice::SimulationResult emptyResult;
     const auto &result = result_ ? *result_ : emptyResult;
 
-    const QRectF plot = rect().adjusted(82, 34, -20, -56);
-    const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
-    cache_.plot = plot;
-    cache_.traceArea = traceArea;
+    // Display labels fall back to the signal name. They are stored per signal
+    // on the graph, so a renamed axis or legend entry survives project reloads.
+    const auto labelFor = [this](const std::string &signal) {
+        const auto override = graph_.signalLabels.find(signal);
+        if (override != graph_.signalLabels.end() && !override->second.empty())
+            return QString::fromStdString(override->second);
+        return isTimeSignal(normalizedSignalName(signal)) ? QStringLiteral("Time (s)") : QString::fromStdString(signal);
+    };
+    const QFontMetricsF metrics(font());
+    const qreal legendWidth = std::max<qreal>(40.0, rect().width() - plotLeft - plotRightMargin);
+    qreal cursorX = plotLeft;
+    qreal cursorY = titleBottom;
+    // Lay the legend chips out in rows above the plot frame, in trace order.
+    const auto placeChip = [&](const QString &label) {
+        const qreal width =
+            legendSwatchWidth + legendSwatchGap + metrics.horizontalAdvance(label) + 2 * legendChipPadding;
+        if (cursorX > plotLeft && cursorX + width > plotLeft + legendWidth) {
+            cursorX = plotLeft;
+            cursorY += legendChipHeight + legendRowGap;
+        }
+        cache_.legendChips.emplace_back(cursorX, cursorY, width, legendChipHeight);
+        cursorX += width + legendChipGap;
+    };
 
     // Resolve the selected axes to result vectors. Time is always available;
     // missing signals fall back to time on X and the first returned trace on Y,
@@ -169,20 +258,30 @@ void SimulationPlot::ensureDisplayCache() const {
             yTraces.push_back({"time", &result.time});
     }
 
-    const auto axisLabel = [](const std::string &signal) {
-        return isTimeSignal(normalizedSignalName(signal)) ? QStringLiteral("Time (s)") : QString::fromStdString(signal);
-    };
-    cache_.xLabel = axisLabel(effectiveX);
-    QStringList yLabels;
+    cache_.xLabel = labelFor(effectiveX);
+    cache_.xSignal = effectiveX;
     for (const auto &trace : yTraces) {
-        const auto label = axisLabel(trace.signal);
+        const auto label = labelFor(trace.signal);
         cache_.traceLabels.push_back(label);
-        yLabels << label;
+        cache_.legendSignals.push_back(trace.signal);
+        placeChip(label);
     }
-    cache_.yLabel = yLabels.join(QStringLiteral(", "));
+    // The Y axis shows the unit-less caption "Signals" unless the graph was
+    // given an explicit title; individual signal names live in the legend.
+    cache_.yLabel = graph_.yAxisLabel.empty() ? QStringLiteral("Signals") : QString::fromStdString(graph_.yAxisLabel);
     cache_.title = graph_.name.empty() ? (result.traces.empty() ? QStringLiteral("No simulation trace")
                                                                 : QStringLiteral("Simulation traces"))
                                        : QString::fromStdString(graph_.name);
+
+    // The plot starts below the legend band so the chips sit outside the frame.
+    const qreal plotTop = cursorY + legendChipHeight + legendRowGap + 4.0;
+    const qreal plotBottom = std::max(plotTop + 2.0, rect().bottom() - plotBottomMargin);
+    const QRectF plot = QRectF(QPointF(plotLeft, plotTop), QPointF(rect().width() - plotRightMargin, plotBottom));
+    const QRectF traceArea = plot.adjusted(2, 2, -2, -2);
+    cache_.plot = plot;
+    cache_.traceArea = traceArea;
+    cache_.xLabelRect = QRectF(plot.left(), plot.bottom() + 26, plot.width(), 16);
+    cache_.yLabelRect = QRectF(4, plot.center().y() - plot.height() / 2.0, 16, plot.height());
 
     std::size_t maxCount = 0;
     for (const auto &trace : yTraces)
@@ -343,12 +442,35 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     painter.drawRect(plot);
     painter.setPen(QPen(axisText, 1));
     painter.drawText(QRectF(8, 6, width() - 16, 20), Qt::AlignCenter, cache_.title);
+
+    // Legend entries sit above the plot frame, left-aligned with it, so the
+    // labels never overlap the traces. Each entry is a white-outlined box
+    // holding a short line in the signal colour followed by the signal name.
+    const auto legendBorder = QColor(Qt::white);
+    for (std::size_t index = 0; index < cache_.legendChips.size() && index < cache_.traceLabels.size(); ++index) {
+        const auto &chip = cache_.legendChips[index];
+        painter.setPen(QPen(legendBorder, 1));
+        painter.setBrush(canvasBackground);
+        painter.drawRoundedRect(chip.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2);
+        const auto lineY = chip.center().y();
+        const auto lineLeft = chip.left() + legendChipPadding;
+        painter.setPen(QPen(traceColor(index), 2));
+        painter.drawLine(QPointF(lineLeft, lineY), QPointF(lineLeft + legendSwatchWidth, lineY));
+        painter.setPen(QPen(axisText, 1));
+        painter.drawText(QRectF(lineLeft + legendSwatchWidth + legendSwatchGap, chip.top(),
+                                chip.width() - (legendSwatchWidth + legendSwatchGap + 2 * legendChipPadding),
+                                chip.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, cache_.traceLabels[index]);
+    }
+    painter.setBrush(Qt::NoBrush);
+
+    painter.setPen(QPen(axisText, 1));
     painter.save();
     painter.translate(12, plot.center().y());
     painter.rotate(-90);
     painter.drawText(QRectF(-plot.height() / 2.0, -8, plot.height(), 16), Qt::AlignCenter, cache_.yLabel);
     painter.restore();
-    painter.drawText(QRectF(plot.left(), plot.bottom() + 26, plot.width(), 16), Qt::AlignHCenter, cache_.xLabel);
+    painter.drawText(cache_.xLabelRect, Qt::AlignHCenter, cache_.xLabel);
 
     if (cache_.paths.empty())
         return;
@@ -400,21 +522,11 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
     }
 
-    auto cyan = ice::uiColor(ice::UiColor::Accent3);
-    cyan = cyan.darker(135);
-    const QColor colors[] = {ice::uiColor(ice::UiColor::Accent2), ice::uiColor(ice::UiColor::Accent4),
-                             ice::uiColor(ice::UiColor::Accent5), ice::uiColor(ice::UiColor::Accent6), cyan};
     painter.save();
     painter.setClipRect(plot.adjusted(1, 1, -1, -1));
     for (std::size_t traceIndex = 0; traceIndex < cache_.paths.size(); ++traceIndex) {
-        painter.setPen(QPen(colors[traceIndex % 5], 2));
+        painter.setPen(QPen(traceColor(traceIndex), 2));
         painter.drawPath(cache_.paths[traceIndex]);
     }
     painter.restore();
-
-    for (std::size_t traceIndex = 0; traceIndex < cache_.traceLabels.size(); ++traceIndex) {
-        painter.setPen(QPen(colors[traceIndex % 5], 1));
-        painter.drawText(QRectF(plot.left() + 8, plot.top() + 6 + traceIndex * 16.0, plot.width() - 16, 16),
-                         Qt::AlignLeft, cache_.traceLabels[traceIndex]);
-    }
 }

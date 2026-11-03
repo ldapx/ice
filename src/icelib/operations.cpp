@@ -1134,6 +1134,8 @@ bool updateSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
     found->name = graph.name;
     found->xAxis = graph.xAxis;
     found->ySignals = graph.ySignals;
+    found->signalLabels = graph.signalLabels;
+    found->yAxisLabel = graph.yAxisLabel;
     found->xMin = graph.xMin;
     found->xMax = graph.xMax;
     found->yMin = graph.yMin;

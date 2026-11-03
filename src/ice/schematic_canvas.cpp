@@ -279,8 +279,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     void fitToContent() {
         QRectF bounds;
         for (auto *item : scene()->items()) {
-            const auto kind = item->data(0).toString();
-            if (!item->parentItem() && kind != QStringLiteral("canvas-title"))
+            if (!item->parentItem())
                 bounds |= item->sceneBoundingRect();
         }
         if (!bounds.isValid() || bounds.isNull()) {

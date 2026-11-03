@@ -21,6 +21,11 @@ void setLucideIcon(QAction *action, const QString &name);
 void setLucideIcon(QAbstractButton *button, const QString &name, int size = 18);
 QLabel *heading(const QString &text);
 
+// Suggests the next unused name for a new cell: the prefix followed by the
+// smallest two-digit counter that is not in existingNames, e.g. "Schematic01",
+// "Schematic02", ... Used as the default text of the create dialogs.
+QString nextDefaultCellName(const QString &prefix, const QStringList &existingNames);
+
 bool isAnalysisControlDirective(const QString &line);
 QStringList parseSignalList(const QString &text);
 

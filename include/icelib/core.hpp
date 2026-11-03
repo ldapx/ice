@@ -277,6 +277,13 @@ struct SimulationGraph {
     // one signal; Y can contain multiple signals sharing the same X axis.
     std::string xAxis = "time";
     std::vector<std::string> ySignals;
+    // Optional display-only label overrides keyed by signal name. Labels are
+    // used for the axis titles and the plot legend; they never change which
+    // signal is read from the simulation result.
+    std::map<std::string, std::string> signalLabels;
+    // Optional display label for the Y axis title. Empty uses the default
+    // "Signals" caption.
+    std::string yAxisLabel;
     // Optional display limits. Empty values auto-scale that axis from the
     // result data; they are presentation-only and never affect the simulation
     // request, netlist, or data acquisition.

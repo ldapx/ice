@@ -49,7 +49,8 @@ bool installMissingPackages(QWidget *parent, const std::vector<std::string> &pac
 
 class CreateSchematicDialog : public QDialog {
   public:
-    explicit CreateSchematicDialog(const std::filesystem::path &installDirectory, QWidget *parent = nullptr);
+    explicit CreateSchematicDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
+                                   QWidget *parent = nullptr);
 
     QString schematicName() const;
     std::string pdkId() const;

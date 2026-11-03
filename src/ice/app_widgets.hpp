@@ -248,6 +248,9 @@ class EmptySchematicPanel : public QWidget {
     void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
+    // Fills the name field with the suggested default unless the user typed
+    // their own name since the panel was last shown.
+    void setDefaultName(const QString &name);
 
   private:
     void submit();
@@ -257,6 +260,7 @@ class EmptySchematicPanel : public QWidget {
     QComboBox *open_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
+    bool nameEdited_ = false;
     CreateCallback onCreate_;
     OpenCallback onOpen_;
 };
@@ -271,6 +275,9 @@ class EmptyLayoutPanel : public QWidget {
     void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
+    // Fills the name field with the suggested default unless the user typed
+    // their own name since the panel was last shown.
+    void setDefaultName(const QString &name);
 
   private:
     void submit();
@@ -280,13 +287,15 @@ class EmptyLayoutPanel : public QWidget {
     QComboBox *open_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
+    bool nameEdited_ = false;
     CreateCallback onCreate_;
     OpenCallback onOpen_;
 };
 
 class CreateLayoutDialog : public QDialog {
   public:
-    explicit CreateLayoutDialog(const std::filesystem::path &installDirectory, QWidget *parent = nullptr);
+    explicit CreateLayoutDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
+                                QWidget *parent = nullptr);
     QString layoutName() const;
     std::string pdkId() const;
 
