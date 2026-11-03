@@ -26,7 +26,19 @@
 
 PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
-    layout->addWidget(heading(QStringLiteral("Properties")));
+    auto *headerRow = new QHBoxLayout;
+    headerRow->setContentsMargins(0, 0, 0, 0);
+    headerRow->addWidget(heading(QStringLiteral("Properties")));
+    headerRow->addStretch();
+    editButton_ = new QPushButton;
+    editButton_->setFixedWidth(24);
+    editButton_->setToolTip(QStringLiteral("Edit properties"));
+    editButton_->setAccessibleName(QStringLiteral("Edit properties"));
+    setLucideIcon(editButton_, QStringLiteral("pencil"), 14);
+    // Placeholder action: enabled by the schematic properties panel only.
+    editButton_->setVisible(false);
+    headerRow->addWidget(editButton_);
+    layout->addLayout(headerRow);
     auto *splitter = new QSplitter(Qt::Vertical);
     splitter->setObjectName(QStringLiteral("propertiesPreviewSplitter"));
     splitter->setChildrenCollapsible(false);
@@ -115,6 +127,11 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     });
     updateParameterButtons();
     refreshAppearance();
+}
+
+void PropertiesPanel::setEditButtonVisible(bool visible) {
+    if (editButton_)
+        editButton_->setVisible(visible);
 }
 
 void PropertiesPanel::setOnParameterChanged(ParameterChanged callback) { onParameterChanged_ = std::move(callback); }

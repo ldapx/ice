@@ -53,6 +53,9 @@ class PropertiesPanel : public QWidget {
     void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
 
     void refreshAppearance();
+    // Shows the pencil button in the panel heading. It is a placeholder until
+    // the properties editor lands, so it intentionally has no action yet.
+    void setEditButtonVisible(bool visible);
     void clearSelection();
     void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
                      const std::string &symbolSvg);
@@ -78,6 +81,7 @@ class PropertiesPanel : public QWidget {
     void removeParameters();
 
     QLabel *selection_ = nullptr;
+    QPushButton *editButton_ = nullptr;
     QStackedWidget *previewStack_ = nullptr;
     SymbolPreview *symbolPreview_ = nullptr;
     LayoutDevicePreview *layoutDevicePreview_ = nullptr;

@@ -939,6 +939,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void restoreLayoutInstanceSelection() { applyLayoutInstanceSelection(); }
 
+    // Mirrors a hierarchy selection onto the canvas. Instance ids are unique
+    // across the project, so the scene only needs the id to find its group.
+    void selectLayoutInstance(ice::ObjectId instanceId) override {
+        if (readOnly_ || !scene())
+            return;
+        scene()->clearSelection();
+        selectedLayoutInstance_ = instanceId;
+        applyLayoutInstanceSelection();
+        viewport()->update();
+    }
+
     void setDevicePlacementCallback(std::function<void(QPointF)> callback) {
         devicePlacementRequested_ = std::move(callback);
     }

@@ -1,10 +1,12 @@
 #include "schematic_canvas.hpp"
 
+#include "icons.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
 #include <QApplication>
 #include <QBrush>
+#include <QCursor>
 #include <QEvent>
 #include <QGraphicsColorizeEffect>
 #include <QGraphicsEllipseItem>
@@ -67,6 +69,14 @@ QGraphicsColorizeEffect *symbolArtworkEffect(QGraphicsItem *symbol) {
         return nullptr;
     const auto handle = artwork->data(3).toULongLong();
     return reinterpret_cast<QGraphicsColorizeEffect *>(handle);
+}
+
+// Comment placement shows the toolbar's comment glyph as the cursor so the
+// canvas makes the pending click obvious. Falls back to the native I-beam when
+// the icon asset is unavailable. Rebuilt per use so theme changes are picked up.
+QCursor commentPlacementCursor() {
+    const auto pixmap = ice::lucideIcon(QStringLiteral("message-square"), 20).pixmap(QSize(20, 20));
+    return pixmap.isNull() ? QCursor(Qt::IBeamCursor) : QCursor(pixmap);
 }
 
 void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
@@ -141,7 +151,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
         if (enabled) {
             placeSymbolMode_ = false;
             signalPickMode_ = false;
-            setCursor(Qt::CrossCursor);
+            setCursor(commentPlacementCursor());
         } else if (!placeSymbolMode_ && !signalPickMode_) {
             unsetCursor();
         }
@@ -195,6 +205,10 @@ class SchematicCanvasImpl : public SchematicCanvas {
         symbolPlacementRequested_ = std::move(callback);
     }
 
+    void setPlaceSymbolCycleCallback(std::function<void(int)> callback) override {
+        placeSymbolCycleRequested_ = std::move(callback);
+    }
+
     void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
 
     void setPlaceSymbolPreview(const QByteArray &artwork) override {
@@ -230,6 +244,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
         if (symbolSelected_)
             symbolSelected_(0);
     }
+
+    void selectInstance(ice::ObjectId instanceId) override { selectSymbol(itemById(instanceId), false); }
 
     void deleteSelectedSymbols() override {
         std::vector<ice::ObjectId> ids;
@@ -517,6 +533,14 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     void wheelEvent(QWheelEvent *event) override {
+        if (placeSymbolMode_ && event->modifiers().testFlag(Qt::ShiftModifier)) {
+            // Some platforms transpose the wheel deltas while Shift is held.
+            const int steps = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->angleDelta().x();
+            if (steps != 0 && placeSymbolCycleRequested_)
+                placeSymbolCycleRequested_(steps > 0 ? 1 : -1);
+            event->accept();
+            return;
+        }
         if (event->angleDelta().y() == 0) {
             event->ignore();
             return;
@@ -551,8 +575,10 @@ class SchematicCanvasImpl : public SchematicCanvas {
     void mouseReleaseEvent(QMouseEvent *event) override {
         if (panning_ && event->button() == Qt::MiddleButton) {
             panning_ = false;
-            if (placeSymbolMode_ || commentMode_)
+            if (placeSymbolMode_)
                 setCursor(Qt::CrossCursor);
+            else if (commentMode_)
+                setCursor(commentPlacementCursor());
             else
                 unsetCursor();
             event->accept();
@@ -900,6 +926,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     QByteArray placeSymbolArtwork_;
     QPointF cursorScenePosition_;
     std::function<void(QPointF)> symbolPlacementRequested_;
+    std::function<void(int)> placeSymbolCycleRequested_;
     std::function<void()> toolEscapeRequested_;
     std::set<ice::ObjectId> selectedInstances_;
     bool updatingSelection_ = false;
