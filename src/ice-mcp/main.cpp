@@ -524,6 +524,26 @@ ice::ObjectId resolveLayer(const ice::Project &project, const json &arguments, c
     return lookupByIdOrName(project.layers, requiredValue(arguments, key), "layer");
 }
 
+ice::ObjectId resolveLayoutNet(const ice::LayoutCell &cell, const json &value) {
+    return lookupByIdOrName(cell.nets, value, "layout net");
+}
+
+ice::ObjectId resolveLayoutPort(const ice::LayoutCell &cell, const json &value) {
+    return lookupByIdOrName(cell.ports, value, "layout port");
+}
+
+ice::PortDirection parsePortDirectionArgument(const std::string &text) {
+    if (const auto direction = ice::parsePortDirection(text))
+        return *direction;
+    throw ToolError("Unknown port direction: " + text);
+}
+
+ice::PortSide parsePortSideArgument(const std::string &text) {
+    if (const auto side = ice::parsePortSide(text))
+        return *side;
+    throw ToolError("Unknown port side: " + text);
+}
+
 ice::ObjectId resolveSimulation(const ice::Project &project, const json &value) {
     return lookupByIdOrName(project.simulations, value, "simulation");
 }
@@ -1843,10 +1863,114 @@ class IceMcpServer {
             const auto portName = requiredString(arguments, "name");
             const ice::Rect rectangle{requiredInteger(arguments, "x"), requiredInteger(arguments, "y"),
                                       requiredInteger(arguments, "width"), requiredInteger(arguments, "height")};
+            const auto direction = parsePortDirectionArgument(optionalString(arguments, "direction", "inout"));
+            const auto side = parsePortSideArgument(optionalString(arguments, "side", "left"));
+            const auto netValue = optionalString(arguments, "net");
+            const auto net = netValue.empty() ? ice::ObjectId{0}
+                                              : resolveLayoutNet(session.project().layoutCells.at(cell), netValue);
+            const auto label = optionalString(arguments, "label", portName);
+            const bool visible = optionalBoolean(arguments, "visible", true);
+            const bool locked = optionalBoolean(arguments, "locked", false);
             session.execute("mcp layout-add-port", [&](ice::Project &project) {
-                id = ice::addPort(project, cell, portName, layer, rectangle);
+                id = ice::addPort(project, cell, portName, layer, rectangle, direction, side, net, label);
+                auto &port = project.layoutCells.at(cell).ports.at(id);
+                port.visible = visible;
+                port.locked = locked;
             });
-            return {{"id", id}, {"cell", cell}, {"name", portName}};
+            return {{"id", id},
+                    {"cell", cell},
+                    {"name", portName},
+                    {"direction", ice::portDirectionName(direction)},
+                    {"side", ice::portSideName(side)},
+                    {"net", net == 0 ? json(nullptr) : json(net)}};
+        }
+        if (name == "layout_list_ports") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto &layout = session.project().layoutCells.at(cell);
+            json ports = json::array();
+            for (const auto &[id, port] : layout.ports) {
+                ports.push_back({{"id", id},
+                                 {"name", port.name},
+                                 {"layer", port.layer},
+                                 {"rectangle",
+                                  {{"x", port.rectangle.x},
+                                   {"y", port.rectangle.y},
+                                   {"width", port.rectangle.width},
+                                   {"height", port.rectangle.height}}},
+                                 {"direction", ice::portDirectionName(port.direction)},
+                                 {"side", ice::portSideName(port.side)},
+                                 {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                 {"label", port.label},
+                                 {"visible", port.visible},
+                                 {"locked", port.locked},
+                                 {"source_instance", port.sourceInstance},
+                                 {"source_port", port.sourcePort}});
+            }
+            return {{"cell", cell}, {"ports", std::move(ports)}};
+        }
+        if (name == "layout_update_port") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto &layout = session.project().layoutCells.at(cell);
+            const auto portId = resolveLayoutPort(layout, requiredValue(arguments, "port"));
+            auto port = layout.ports.at(portId);
+            if (arguments.contains("name"))
+                port.name = requiredString(arguments, "name");
+            if (arguments.contains("label"))
+                port.label = requiredString(arguments, "label");
+            if (arguments.contains("direction"))
+                port.direction = parsePortDirectionArgument(requiredString(arguments, "direction"));
+            if (arguments.contains("side"))
+                port.side = parsePortSideArgument(requiredString(arguments, "side"));
+            if (arguments.contains("net")) {
+                if (arguments.at("net").is_null())
+                    port.net = 0;
+                else
+                    port.net = resolveLayoutNet(layout, arguments.at("net"));
+            }
+            if (arguments.contains("x"))
+                port.rectangle.x = requiredInteger(arguments, "x");
+            if (arguments.contains("y"))
+                port.rectangle.y = requiredInteger(arguments, "y");
+            if (arguments.contains("width"))
+                port.rectangle.width = requiredInteger(arguments, "width");
+            if (arguments.contains("height"))
+                port.rectangle.height = requiredInteger(arguments, "height");
+            if (arguments.contains("visible"))
+                port.visible = optionalBoolean(arguments, "visible");
+            if (arguments.contains("locked"))
+                port.locked = optionalBoolean(arguments, "locked");
+            session.execute("mcp layout-update-port", [&](ice::Project &project) {
+                if (!ice::updatePort(project, cell, port))
+                    throw ToolError("Unknown layout port");
+            });
+            return {{"id", portId}, {"cell", cell}};
+        }
+        if (name == "layout_remove_port") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto portId =
+                resolveLayoutPort(session.project().layoutCells.at(cell), requiredValue(arguments, "port"));
+            session.execute("mcp layout-remove-port",
+                            [&](ice::Project &project) { ice::removePort(project, cell, portId); });
+            return {{"id", portId}, {"cell", cell}};
+        }
+        if (name == "layout_add_net") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto netName = requiredString(arguments, "name");
+            ice::ObjectId id = 0;
+            session.execute("mcp layout-add-net",
+                            [&](ice::Project &project) { id = ice::createLayoutNet(project, cell, netName); });
+            return {{"id", id}, {"cell", cell}, {"name", netName}};
+        }
+        if (name == "layout_assign_port_net") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto &layout = session.project().layoutCells.at(cell);
+            const auto portId = resolveLayoutPort(layout, requiredValue(arguments, "port"));
+            ice::ObjectId netId = 0;
+            if (arguments.contains("net") && !arguments.at("net").is_null())
+                netId = resolveLayoutNet(layout, arguments.at("net"));
+            session.execute("mcp layout-assign-port-net",
+                            [&](ice::Project &project) { ice::assignPortNet(project, cell, portId, netId); });
+            return {{"port", portId}, {"net", netId == 0 ? json(nullptr) : json(netId)}};
         }
         if (name == "layout_add_instance") {
             ice::ObjectId id = 0;
@@ -2163,7 +2287,7 @@ class IceMcpServer {
                             .with_integer_param("height", "Optional text height in database units", false)
                             .build());
         tools.push_back(tool_builder("layout_add_port")
-                            .with_description("Add a port to a layout cell.")
+                            .with_description("Add a pin/port to a layout cell.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("name", "Port name")
                             .with_string_param("layer", "Layer name or id")
@@ -2171,6 +2295,48 @@ class IceMcpServer {
                             .with_integer_param("y", "Y coordinate")
                             .with_integer_param("width", "Width")
                             .with_integer_param("height", "Height")
+                            .with_string_param("direction", "input, output, inout, power, or ground", false)
+                            .with_string_param("side", "left, right, top, or bottom", false)
+                            .with_string_param("net", "Optional layout net name or id", false)
+                            .with_string_param("label", "Optional display label", false)
+                            .with_boolean_param("visible", "Show the pin", false)
+                            .with_boolean_param("locked", "Prevent editing the pin", false)
+                            .build());
+        tools.push_back(tool_builder("layout_list_ports")
+                            .with_description("List the pins/ports of a layout cell.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_update_port")
+                            .with_description("Update a layout pin/port.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("port", "Port name or id")
+                            .with_string_param("name", "New port name", false)
+                            .with_string_param("label", "New display label", false)
+                            .with_string_param("direction", "input, output, inout, power, or ground", false)
+                            .with_string_param("side", "left, right, top, or bottom", false)
+                            .with_string_param("net", "Layout net name or id, or null", false)
+                            .with_integer_param("x", "X coordinate", false)
+                            .with_integer_param("y", "Y coordinate", false)
+                            .with_integer_param("width", "Width", false)
+                            .with_integer_param("height", "Height", false)
+                            .with_boolean_param("visible", "Show the pin", false)
+                            .with_boolean_param("locked", "Prevent editing the pin", false)
+                            .build());
+        tools.push_back(tool_builder("layout_remove_port")
+                            .with_description("Remove a layout pin/port.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("port", "Port name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_add_net")
+                            .with_description("Create a layout net.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("name", "Net name")
+                            .build());
+        tools.push_back(tool_builder("layout_assign_port_net")
+                            .with_description("Assign or clear the net of a layout pin/port.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("port", "Port name or id")
+                            .with_string_param("net", "Layout net name or id, or null", false)
                             .build());
         tools.push_back(tool_builder("layout_add_instance")
                             .with_description("Place a layout cell instance.")

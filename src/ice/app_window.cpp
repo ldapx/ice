@@ -2793,16 +2793,21 @@ class DocumentWindow : public QMainWindow {
             return {};
 
         std::string netName;
+        ice::ObjectId netId = 0;
         for (const auto connectionId : touchedConnections) {
             const auto connection = cell.plannedConnections.find(connectionId);
-            if (connection != cell.plannedConnections.end() && !connection->second.name.empty()) {
-                netName = connection->second.name;
+            if (connection == cell.plannedConnections.end())
+                continue;
+            const auto net = cell.nets.find(connection->second.net);
+            if (net != cell.nets.end() && !net->second.name.empty()) {
+                netId = net->first;
+                netName = net->second.name;
                 break;
             }
         }
-        if (!netName.empty()) {
+        if (netId != 0) {
             for (const auto &[connectionId, connection] : cell.plannedConnections) {
-                if (connection.name != netName)
+                if (connection.net != netId)
                     continue;
                 touchedConnections.insert(connectionId);
                 touchedDevices.insert(connection.from);
@@ -3118,6 +3123,57 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         refreshProject();
+    }
+
+    void addLayoutPin(QPointF position) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
+        if (availableLayers.empty()) {
+            QMessageBox::information(this, QStringLiteral("Create Pin"),
+                                     QStringLiteral("Create a layer before drawing pins."));
+            return;
+        }
+        if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Create Pin"),
+                                     QStringLiteral("Select a layer before drawing pins."));
+            return;
+        }
+        const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
+        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
+        const auto defaultSize = std::max<ice::Coordinate>(grid, 500);
+        const auto size = ((defaultSize + grid - 1) / grid) * grid;
+        const auto x = static_cast<ice::Coordinate>(std::lround(position.x())) - size / 2;
+        const auto y = static_cast<ice::Coordinate>(std::lround(-position.y())) - size / 2;
+        std::string name = "PIN1";
+        for (int index = 1;; ++index) {
+            name = "PIN" + std::to_string(index);
+            const bool exists = std::any_of(cellIt->second.ports.begin(), cellIt->second.ports.end(),
+                                            [&](const auto &entry) { return entry.second.name == name; });
+            if (!exists)
+                break;
+        }
+        ice::ObjectId portId = 0;
+        try {
+            project_->execute("create layout pin", [&](ice::Project &project) {
+                portId = ice::addPort(project, activeLayoutId_, name, layerId, ice::Rect{x, y, size, size},
+                                      ice::PortDirection::inout, ice::PortSide::left, 0, name);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create Pin"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        if (portId != 0)
+            QTimer::singleShot(0, this, [this, portId] { selectLayoutShapeItem(portId); });
+        if (layoutPropertiesPanel_ && layoutRightTabs_)
+            layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+        statusBar()->showMessage(QStringLiteral("Created pin %1 on %2")
+                                     .arg(QString::fromStdString(name),
+                                          QString::fromStdString(project_->project().layers.at(layerId).name)));
     }
 
     void removeSchematic(ice::ObjectId cellId) {
@@ -3478,6 +3534,8 @@ class DocumentWindow : public QMainWindow {
             layoutPolygonTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutTextTool_)
             layoutTextTool_->setEnabled(!readOnly && !availableLayers.empty());
+        if (layoutPinTool_)
+            layoutPinTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutDeleteTool_)
             layoutDeleteTool_->setEnabled(!readOnly);
         if (layoutCanvas_) {
@@ -3602,6 +3660,47 @@ class DocumentWindow : public QMainWindow {
             }
             item->setToolTip(readOnly ? QStringLiteral("Library cell shape %1").arg(id)
                                       : QStringLiteral("Shape %1").arg(id));
+        }
+
+        for (const auto &[id, port] : cellIt->second.ports) {
+            if (!port.visible || !layerVisible(port.layer))
+                continue;
+            const auto style = styles.contains(port.layer)
+                                   ? styles.at(port.layer)
+                                   : LayerStyle{ice::uiColor(ice::UiColor::Accent4), Qt::SolidPattern};
+            const QRectF rect(port.rectangle.x, -port.rectangle.y - port.rectangle.height, port.rectangle.width,
+                              port.rectangle.height);
+            QPen pen(style.color, 1.5);
+            pen.setCosmetic(true);
+            QColor fill = style.color;
+            fill.setAlpha(45);
+            auto *item = layoutCanvas_->scene()->addRect(rect, pen, QBrush(fill));
+            item->setZValue(6.0);
+            item->setData(0, QVariant::fromValue<qulonglong>(id));
+            item->setData(2, QStringLiteral("layout-pin"));
+            if (!readOnly) {
+                item->setFlag(QGraphicsItem::ItemIsSelectable);
+                if (!port.locked)
+                    item->setFlag(QGraphicsItem::ItemIsMovable);
+            }
+            auto *label = new QGraphicsSimpleTextItem(QString::fromStdString(port.label), item);
+            QFont font = label->font();
+            font.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, rect.height() * 0.35))));
+            label->setFont(font);
+            label->setBrush(QBrush(style.color));
+            label->setPos(rect.left() + 2.0, rect.top() + 1.0);
+            label->setAcceptedMouseButtons(Qt::NoButton);
+            item->setToolTip(QStringLiteral("Pin %1 · %2 · %3")
+                                 .arg(QString::fromStdString(port.name),
+                                      QString::fromStdString(ice::portDirectionName(port.direction)),
+                                      QString::fromStdString(ice::portSideName(port.side))));
+            if (!readOnly && !port.locked) {
+                for (int handle = 0; handle < 8; ++handle) {
+                    auto *resizeHandle = createLayoutResizeHandleItem(id, handle);
+                    resizeHandle->setPos(layoutResizeHandlePosition(rect, handle));
+                    layoutCanvas_->scene()->addItem(resizeHandle);
+                }
+            }
         }
 
         const auto drawCellToGroup = [&](const ice::LayoutCell &cell,
@@ -3741,8 +3840,8 @@ class DocumentWindow : public QMainWindow {
             line->setData(0, QVariant::fromValue<qulonglong>(connectionId));
             line->setData(2, QStringLiteral("planned-connection"));
             line->setAcceptedMouseButtons(Qt::NoButton);
-            if (!connection.name.empty())
-                line->setToolTip(QString::fromStdString(connection.name));
+            if (const auto net = cellIt->second.nets.find(connection.net); net != cellIt->second.nets.end())
+                line->setToolTip(QString::fromStdString(net->second.name));
         }
         for (const auto &[deviceId, device] : cellIt->second.plannedDevices) {
             layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
@@ -3930,6 +4029,35 @@ class DocumentWindow : public QMainWindow {
 
             const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
             if (activeIt != project_->project().layoutCells.end()) {
+                ice::ObjectId selectedPortId = 0;
+                bool multiplePorts = false;
+                for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+                    if (item->data(3).toString() == QStringLiteral("resize-handle") ||
+                        item->data(3).toString() == QStringLiteral("polygon-handle"))
+                        continue;
+                    const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+                    if (id == 0 || !activeIt->second.ports.contains(id))
+                        continue;
+                    if (selectedPortId != 0 && selectedPortId != id) {
+                        multiplePorts = true;
+                        break;
+                    }
+                    selectedPortId = id;
+                }
+                if (!multiplePorts && selectedPortId != 0) {
+                    const auto &port = activeIt->second.ports.at(selectedPortId);
+                    QString layerName;
+                    if (const auto layerIt = project_->project().layers.find(port.layer);
+                        layerIt != project_->project().layers.end())
+                        layerName = QString::fromStdString(layerIt->second.name);
+                    QString netName;
+                    if (const auto netIt = activeIt->second.nets.find(port.net); netIt != activeIt->second.nets.end())
+                        netName = QString::fromStdString(netIt->second.name);
+                    layoutPropertiesPanel_->setLayoutPort(port, layerName.toStdString(), netName.toStdString());
+                    if (bringToFront && layoutRightTabs_)
+                        layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                    return;
+                }
                 ice::ObjectId selectedShapeId = 0;
                 bool multipleShapes = false;
                 for (auto *item : layoutCanvas_->scene()->selectedItems()) {
@@ -4270,6 +4398,37 @@ class DocumentWindow : public QMainWindow {
             QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
             updateSelectionStatus();
         }
+    }
+
+    void updateLayoutPort(const ice::Port &port, const std::string &netName) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        try {
+            project_->execute("edit layout pin", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                auto edited = port;
+                if (!netName.empty()) {
+                    edited.net = 0;
+                    for (const auto &[id, net] : cell.nets) {
+                        if (net.name == netName) {
+                            edited.net = id;
+                            break;
+                        }
+                    }
+                    if (edited.net == 0)
+                        edited.net = ice::createLayoutNet(project, activeLayoutId_, netName);
+                } else {
+                    edited.net = 0;
+                }
+                ice::updatePort(project, activeLayoutId_, edited);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Edit Pin"), QString::fromStdString(error.what()));
+            refreshLayoutProperties();
+            return;
+        }
+        refreshProject();
+        QTimer::singleShot(0, this, [this, portId = port.id] { selectLayoutShapeItem(portId); });
     }
 
     void updateLayoutCellParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
@@ -7450,6 +7609,8 @@ class DocumentWindow : public QMainWindow {
             [this](const std::string &deviceName, const std::string &name, const std::string &value) {
                 updateLayoutDeviceParameter(deviceName, name, value);
             });
+        layoutPropertiesPanel_->setOnLayoutPortChanged(
+            [this](const ice::Port &port, const std::string &netName) { updateLayoutPort(port, netName); });
         layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
         layoutPropertiesPanel_->setOnGridSpacingChanged([this](int spacing) {
             if (!project_ || spacing <= 0)
@@ -8181,6 +8342,7 @@ class DocumentWindow : public QMainWindow {
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
+            layoutCanvas_->setPinPlacedCallback([this](QPointF position) { addLayoutPin(position); });
             layoutCanvas_->setPolygonCreatedCallback(
                 [this](const std::vector<QPointF> &points) { addLayoutPolygon(points); });
             layoutCanvas_->setPolygonPointMovedCallback(
@@ -8235,6 +8397,11 @@ class DocumentWindow : public QMainWindow {
                                                static_cast<ice::Coordinate>(-delta.y()));
                             return;
                         }
+                        if (cellIt->second.ports.contains(objectId)) {
+                            ice::movePort(project, activeLayoutId_, objectId, static_cast<ice::Coordinate>(delta.x()),
+                                          static_cast<ice::Coordinate>(-delta.y()));
+                            return;
+                        }
                         if (auto planned = cellIt->second.plannedDevices.find(objectId);
                             planned != cellIt->second.plannedDevices.end()) {
                             planned->second.x += static_cast<ice::Coordinate>(delta.x());
@@ -8256,8 +8423,12 @@ class DocumentWindow : public QMainWindow {
                                                 static_cast<ice::Coordinate>(-sceneRect.bottom()),
                                                 static_cast<ice::Coordinate>(sceneRect.width()),
                                                 static_cast<ice::Coordinate>(sceneRect.height())};
-                    project_->execute("resize layout rectangle", [&](ice::Project &project) {
-                        ice::resizeRectangle(project, activeLayoutId_, objectId, rect);
+                    project_->execute("resize layout object", [&](ice::Project &project) {
+                        auto &cell = project.layoutCells.at(activeLayoutId_);
+                        if (cell.ports.contains(objectId))
+                            ice::resizePort(project, activeLayoutId_, objectId, rect);
+                        else
+                            ice::resizeRectangle(project, activeLayoutId_, objectId, rect);
                     });
                     refreshProject();
                     QTimer::singleShot(0, this, [this, objectId] { selectLayoutShapeItem(objectId); });
@@ -8274,6 +8445,11 @@ class DocumentWindow : public QMainWindow {
                                 std::erase_if(cellIt->second.plannedConnections, [&](const auto &entry) {
                                     return entry.second.from == id || entry.second.to == id;
                                 });
+                                continue;
+                            }
+                            if (const auto port = cellIt->second.ports.find(id); port != cellIt->second.ports.end()) {
+                                if (!port->second.locked)
+                                    cellIt->second.ports.erase(port);
                                 continue;
                             }
                             if (cellIt->second.shapes.erase(id) == 0)
@@ -8360,6 +8536,17 @@ class DocumentWindow : public QMainWindow {
             auto *textTool = addTool(QStringLiteral("type"), QStringLiteral("Draw Text"));
             textTool->setCheckable(true);
             layoutTextTool_ = textTool;
+
+            auto *pinTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Pin"));
+            pinTool->setCheckable(true);
+            layoutPinTool_ = pinTool;
+            connect(pinTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::pin);
+                    layoutCanvas_->setFocus();
+                }
+                statusBar()->showMessage(QStringLiteral("Pin: click to place a pin on the active layer"));
+            });
             connect(textTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::text);
@@ -8388,8 +8575,8 @@ class DocumentWindow : public QMainWindow {
 
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
-            for (auto *action :
-                 {selectTool, moveTool, placeSymbolTool, rectangleTool, polygonTool, pathTool, rulerTool, textTool})
+            for (auto *action : {selectTool, moveTool, placeSymbolTool, rectangleTool, polygonTool, pathTool, rulerTool,
+                                 textTool, pinTool})
                 toolGroup->addAction(action);
 
             connect(selectTool, &QAction::triggered, this, [this] {
@@ -8817,6 +9004,7 @@ class DocumentWindow : public QMainWindow {
     QAction *layoutPathTool_ = nullptr;
     QAction *layoutPolygonTool_ = nullptr;
     QAction *layoutTextTool_ = nullptr;
+    QAction *layoutPinTool_ = nullptr;
     QAction *layoutRulerTool_ = nullptr;
     QAction *layoutUnionTool_ = nullptr;
     QAction *layoutIntersectionTool_ = nullptr;

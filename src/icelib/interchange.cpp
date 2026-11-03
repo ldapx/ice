@@ -221,6 +221,29 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
         }
         writeBoundary(layerNumber, std::move(polygon));
     }
+    for (const auto &[_, port] : cell.ports) {
+        if (!port.visible)
+            continue;
+        int layerNumber = 0;
+        if (const auto layerIt = project.layers.find(port.layer); layerIt != project.layers.end())
+            layerNumber = layerIt->second.number;
+        if (layerNumber < 0 || layerNumber > 65535)
+            throw ProjectError("interchange.export", "Layer number out of GDSII range");
+        const auto &rect = port.rectangle;
+        writeBoundary(layerNumber, {{rect.x, rect.y},
+                                    {rect.x + rect.width, rect.y},
+                                    {rect.x + rect.width, rect.y + rect.height},
+                                    {rect.x, rect.y + rect.height}});
+        const auto layerValue = static_cast<std::uint32_t>(layerNumber);
+        writeEmptyRecord(output, kText);
+        writeRecord(
+            output, kLayer, 0x02,
+            {static_cast<unsigned char>((layerValue >> 8) & 0xff), static_cast<unsigned char>(layerValue & 0xff)});
+        writeRecord(output, kTextType, 0x02, {0, 0});
+        writeXyRecord(output, rect.x + rect.width / 2, rect.y + rect.height / 2);
+        writeStringRecord(output, kString, port.label.empty() ? port.name : port.label);
+        writeEmptyRecord(output, kEndEl);
+    }
     writeEmptyRecord(output, kEndStr);
     writeEmptyRecord(output, kEndLib);
     if (!output)

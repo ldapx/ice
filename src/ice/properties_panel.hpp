@@ -34,6 +34,7 @@ class PropertiesPanel : public QWidget {
                                                           const std::string &name, const std::string &value)>;
     using LayoutDeviceParameterChanged =
         std::function<void(const std::string &deviceName, const std::string &name, const std::string &value)>;
+    using LayoutPortChanged = std::function<void(const ice::Port &port, const std::string &netName)>;
     using PathWidthChanged = std::function<void(int width)>;
     using GridSpacingChanged = std::function<void(int spacing)>;
     using LayoutShapeSizeChanged = std::function<void(ice::ObjectId shapeId, int width, int height)>;
@@ -46,6 +47,7 @@ class PropertiesPanel : public QWidget {
     void setOnCellParametersRemoved(CellParametersRemoved callback);
     void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback);
     void setOnLayoutDeviceParameterChanged(LayoutDeviceParameterChanged callback);
+    void setOnLayoutPortChanged(LayoutPortChanged callback);
     void setOnPathWidthChanged(PathWidthChanged callback);
     void setOnGridSpacingChanged(GridSpacingChanged callback);
     void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
@@ -60,6 +62,7 @@ class PropertiesPanel : public QWidget {
     void setPathTool(int width, const std::string &layerName);
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
                         const std::string &typeName);
+    void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName);
     void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell, int spacing);
 
   private:
@@ -93,6 +96,10 @@ class PropertiesPanel : public QWidget {
     int layoutShapeHeight_ = 0;
     int pathWidth_ = 200;
     std::string pathLayerName_;
+    bool portMode_ = false;
+    ice::Port layoutPort_;
+    std::string layoutPortLayerName_;
+    std::string layoutPortNetName_;
     QGroupBox *gridOptions_ = nullptr;
     QSpinBox *gridSpacingSpin_ = nullptr;
     QWidget *parametersHeader_ = nullptr;
@@ -102,6 +109,7 @@ class PropertiesPanel : public QWidget {
     CellParametersRemoved onCellParametersRemoved_;
     LayoutCellParameterChanged onLayoutCellParameterChanged_;
     LayoutDeviceParameterChanged onLayoutDeviceParameterChanged_;
+    LayoutPortChanged onLayoutPortChanged_;
     PathWidthChanged onPathWidthChanged_;
     GridSpacingChanged onGridSpacingChanged_;
     LayoutShapeSizeChanged onLayoutShapeSizeChanged_;

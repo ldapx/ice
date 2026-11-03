@@ -39,12 +39,13 @@ using LayoutPathPointInsertedCallback = std::function<void(ice::ObjectId id, int
 using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int index)>;
 using LayoutPathFinishedCallback = std::function<void()>;
 using LayoutTextPlacedCallback = std::function<void(QPointF)>;
+using LayoutPinPlacedCallback = std::function<void(QPointF)>;
 using LayoutPolygonCreatedCallback = std::function<void(const std::vector<QPointF> &points)>;
 using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 
 class LayoutCanvas : public QGraphicsView {
   public:
-    enum class Tool { select, move, path, rectangle, polygon, placeDevice, ruler, text };
+    enum class Tool { select, move, path, rectangle, polygon, pin, placeDevice, ruler, text };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
@@ -82,6 +83,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) = 0;
     virtual void setPathFinishedCallback(LayoutPathFinishedCallback callback) = 0;
     virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
+    virtual void setPinPlacedCallback(LayoutPinPlacedCallback callback) = 0;
     virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;
     virtual void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) = 0;
     virtual void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;

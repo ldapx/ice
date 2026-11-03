@@ -110,6 +110,12 @@ def main() -> int:
                 "project_migrate",
                 "schematic_add_text",
                 "layout_add_instance",
+                "layout_add_port",
+                "layout_list_ports",
+                "layout_update_port",
+                "layout_remove_port",
+                "layout_add_net",
+                "layout_assign_port_net",
             }:
                 if required not in tools:
                     raise RuntimeError(f"Missing MCP tool: {required}")
@@ -157,6 +163,43 @@ def main() -> int:
             assert len(info["nets"]) == 1
             assert info["symbols"][0]["pins"]
             mcp.tool("schematic_netlist", schematic="ring_test")
+
+            mcp.tool("layout_create", name="pin_test")
+            mcp.tool("layout_add_layer", name="Metal1", number=8)
+            mcp.tool("layout_add_net", cell="pin_test", name="VIN")
+            mcp.tool(
+                "layout_add_port",
+                cell="pin_test",
+                name="VIN",
+                layer="Metal1",
+                x=0,
+                y=0,
+                width=400,
+                height=400,
+                direction="input",
+                side="left",
+                net="VIN",
+                label="VIN",
+            )
+            ports = mcp.tool("layout_list_ports", cell="pin_test")["ports"]
+            assert len(ports) == 1, ports
+            assert ports[0]["direction"] == "input", ports
+            mcp.tool(
+                "layout_update_port",
+                cell="pin_test",
+                port="VIN",
+                direction="power",
+                side="right",
+                visible=False,
+            )
+            updated = mcp.tool("layout_list_ports", cell="pin_test")["ports"][0]
+            assert updated["direction"] == "power", updated
+            assert updated["visible"] is False, updated
+            mcp.tool("layout_assign_port_net", cell="pin_test", port="VIN", net=None)
+            cleared = mcp.tool("layout_list_ports", cell="pin_test")["ports"][0]
+            assert cleared["net"] is None, cleared
+            mcp.tool("layout_remove_port", cell="pin_test", port="VIN")
+            assert not mcp.tool("layout_list_ports", cell="pin_test")["ports"]
 
             # Regression: the advertised 'schematic' key must work without
             # also supplying the legacy 'cell' key.

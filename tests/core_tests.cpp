@@ -601,6 +601,52 @@ TEST_CASE("hierarchical schematic instances become subcircuits") {
     CHECK(notes.empty());
 }
 
+TEST_CASE("layout pins and nets round-trip with required metadata") {
+    ice::Project project;
+    project.identity = "pins";
+    project.name = "pins";
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto net = ice::createLayoutNet(project, layout, "VIN");
+    const auto port = ice::addPort(project, layout, "VIN", layer, {0, 0, 400, 400}, ice::PortDirection::input,
+                                   ice::PortSide::left, net, "VIN");
+    CHECK(project.validate().empty());
+
+    const auto &stored = project.layoutCells.at(layout).ports.at(port);
+    CHECK(stored.name == "VIN");
+    CHECK(stored.direction == ice::PortDirection::input);
+    CHECK(stored.side == ice::PortSide::left);
+    CHECK(stored.net == net);
+    CHECK(stored.label == "VIN");
+    CHECK_THROWS_AS(ice::addPort(project, layout, "vin", layer, {0, 0, 100, 100}), ice::ProjectError);
+
+    const auto serialized = project.serialize();
+    auto oldSchema = serialized;
+    const auto version = oldSchema.find("\"schema_version\": 2");
+    CHECK(version != std::string::npos);
+    if (version != std::string::npos)
+        oldSchema.replace(version, std::string("\"schema_version\": 2").size(), "\"schema_version\": 1");
+    CHECK_THROWS_AS(ice::Project::deserialize(oldSchema), ice::ProjectError);
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto &roundTripPort = roundTrip.layoutCells.at(layout).ports.at(port);
+    CHECK(roundTripPort.name == "VIN");
+    CHECK(roundTripPort.direction == ice::PortDirection::input);
+    CHECK(roundTripPort.side == ice::PortSide::left);
+    CHECK(roundTripPort.net == net);
+    CHECK(roundTrip.layoutCells.at(layout).nets.at(net).name == "VIN");
+
+    ice::movePort(project, layout, port, 100, 200);
+    CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.x == 100);
+    ice::resizePort(project, layout, port, {100, 200, 800, 600});
+    CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.width == 800);
+    ice::assignPortNet(project, layout, port, 0);
+    CHECK(project.layoutCells.at(layout).ports.at(port).net == 0);
+    ice::assignPortNet(project, layout, port, net);
+    CHECK(project.layoutCells.at(layout).ports.at(port).net == net);
+    ice::removePort(project, layout, port);
+    CHECK(project.layoutCells.at(layout).ports.empty());
+}
+
 TEST_CASE("waveform and current source symbols generate SPICE source expressions") {
     ice::Project project;
     project.identity = "sources";
@@ -1438,7 +1484,9 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(layout.plannedDevices.size() == 2);
     CHECK(layout.plannedConnections.size() == 1);
     const auto &connection = layout.plannedConnections.begin()->second;
-    CHECK(connection.name == "out");
+    const auto layoutNet = layout.nets.find(connection.net);
+    CHECK(layoutNet != layout.nets.end());
+    CHECK(layoutNet->second.name == "out");
 
     ice::ObjectId resistorDevice = 0;
     ice::ObjectId capacitorDevice = 0;
@@ -1464,7 +1512,10 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.size() == 2);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.size() == 1);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.at(resistorDevice).name == "R1");
-    CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.begin()->second.name == "out");
+    const auto roundTripConnection = roundTrip.layoutCells.at(layoutId).plannedConnections.begin()->second;
+    const auto roundTripNet = roundTrip.layoutCells.at(layoutId).nets.find(roundTripConnection.net);
+    CHECK(roundTripNet != roundTrip.layoutCells.at(layoutId).nets.end());
+    CHECK(roundTripNet->second.name == "out");
 
     const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
     CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);

@@ -35,12 +35,11 @@
 void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
     const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
     for (const auto &layer : pdk.layers) {
-        const auto exists = std::find_if(project.layers.begin(), project.layers.end(),
-                                         [&](const auto &entry) {
-                                             const auto &existing = entry.second;
-                                             return existing.name == layer.name && existing.layout == 0 &&
-                                                    (existing.pdk.empty() || existing.pdk == technology);
-                                         });
+        const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+            const auto &existing = entry.second;
+            return existing.name == layer.name && existing.layout == 0 &&
+                   (existing.pdk.empty() || existing.pdk == technology);
+        });
         if (exists == project.layers.end()) {
             ice::addLayer(project, layer.name, layer.number, 0, technology);
         } else if (exists->second.pdk.empty()) {
@@ -269,7 +268,9 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     clone.ports.clear();
     for (const auto &[_, port] : source.ports) {
         const auto id = nextId++;
-        clone.ports.emplace(id, ice::Port{id, port.name, port.layer, port.rectangle});
+        auto clonedPort = port;
+        clonedPort.id = id;
+        clone.ports.emplace(id, std::move(clonedPort));
     }
     clone.instances.clear();
     for (const auto &[_, instance] : source.instances) {

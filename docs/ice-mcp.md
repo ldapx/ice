@@ -91,7 +91,12 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_text` | Add text to a layout cell on a layer. |
 | `layout_add_polygon` | Add a polygon shape. |
-| `layout_add_port` | Add a port. |
+| `layout_add_port` | Add a pin with required direction/side/label metadata and optional net. |
+| `layout_list_ports` | List pins and nets for a layout cell. |
+| `layout_update_port` | Update pin geometry, direction, label, visibility, lock state, or net. |
+| `layout_remove_port` | Remove a layout pin. |
+| `layout_add_net` | Create a layout net. |
+| `layout_assign_port_net` | Assign or clear a pin’s net. |
 | `layout_add_instance` | Instance another layout cell. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report. |
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |

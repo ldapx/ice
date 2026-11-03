@@ -65,6 +65,12 @@ struct ParsedPort {
     std::string name;
     std::string layer;
     Rect rectangle;
+    PortDirection direction = PortDirection::inout;
+    PortSide side = PortSide::left;
+    std::string net;
+    std::string label;
+    bool visible = true;
+    bool locked = false;
 };
 
 struct ParsedInstance {
@@ -247,6 +253,28 @@ bool parseGeneratedLayout(const QJsonObject &root, ParsedLayout &layout, QString
                            QStringLiteral("Port %1 rectangle").arg(QString::fromStdString(port.name)), port.rectangle,
                            error))
                 return false;
+            const auto direction = parsePortDirection(object.value("direction").toString().toStdString());
+            const auto side = parsePortSide(object.value("side").toString().toStdString());
+            if (!direction || !side) {
+                if (error)
+                    *error = QStringLiteral("Port %1 has an unknown direction or side.")
+                                 .arg(QString::fromStdString(port.name));
+                return false;
+            }
+            port.direction = *direction;
+            port.side = *side;
+            port.net = object.value("net").toString().trimmed().toStdString();
+            port.label = object.value("label").toString().trimmed().toStdString();
+            if (port.label.empty())
+                port.label = port.name;
+            if (!object.value("visible").isBool() || !object.value("locked").isBool()) {
+                if (error)
+                    *error = QStringLiteral("Port %1 needs visible and locked booleans.")
+                                 .arg(QString::fromStdString(port.name));
+                return false;
+            }
+            port.visible = object.value("visible").toBool();
+            port.locked = object.value("locked").toBool();
             layout.ports.push_back(std::move(port));
         }
     }
@@ -360,6 +388,7 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
         auto &cell = project.layoutCells.at(procedural.generatedCell);
         cell.shapes.clear();
         cell.ports.clear();
+        cell.nets.clear();
         cell.instances.clear();
         cell.plannedDevices.clear();
         cell.plannedConnections.clear();
@@ -385,8 +414,26 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
                                           Rect{minX, minY, maxX - minX, maxY - minY}, shape.polygon});
         }
         for (const auto &port : generated.ports) {
+            ObjectId netId = 0;
+            if (!port.net.empty()) {
+                for (const auto &[id, net] : cell.nets) {
+                    if (net.name == port.net) {
+                        netId = id;
+                        break;
+                    }
+                }
+                if (netId == 0)
+                    netId = createLayoutNet(project, procedural.generatedCell, port.net);
+            }
             const auto id = project.nextId();
-            cell.ports.emplace(id, Port{id, port.name, layerIdFor(port.layer), port.rectangle});
+            Port value{id, port.name, layerIdFor(port.layer), port.rectangle};
+            value.direction = port.direction;
+            value.side = port.side;
+            value.net = netId;
+            value.label = port.label;
+            value.visible = port.visible;
+            value.locked = port.locked;
+            cell.ports.emplace(id, std::move(value));
         }
         for (const auto &instance : generated.instances) {
             const auto id = project.nextId();

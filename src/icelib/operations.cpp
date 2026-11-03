@@ -357,6 +357,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             pinDevices[pin.id].push_back(deviceId);
     }
 
+    std::set<std::string> layoutNetNames;
     for (const auto &[_, net] : schematic.nets) {
         std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
         std::vector<ObjectId> devices;
@@ -371,6 +372,12 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         }
         if (devices.size() < 2)
             continue;
+        auto netName = net.name.empty() ? "N" + std::to_string(net.id) : net.name;
+        if (!layoutNetNames.insert(lower(netName)).second)
+            netName += "_" + std::to_string(net.id);
+        layoutNetNames.insert(lower(netName));
+        const auto layoutNetId = project.nextId();
+        layout.nets.emplace(layoutNetId, LayoutNet{layoutNetId, netName});
         const auto from = devices.front();
         for (std::size_t index = 1; index < devices.size(); ++index) {
             const auto to = devices[index];
@@ -380,7 +387,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             if (!connectedPairs.insert(pair).second)
                 continue;
             const auto connectionId = project.nextId();
-            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, net.name});
+            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, layoutNetId});
         }
     }
     return layoutId;
@@ -466,17 +473,116 @@ ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const s
     cell.shapes.emplace(id, std::move(shape));
     return id;
 }
-ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle) {
-    if (name.empty())
+namespace {
+std::string normalizedLayoutName(std::string value) { return lower(std::move(value)); }
+
+void validatePortForCell(const Project &project, const LayoutCell &cell, const Port &port, ObjectId ignorePort) {
+    if (port.name.empty())
         throw ProjectError("layout.port", "Port name must not be empty");
+    if (port.label.empty())
+        throw ProjectError("layout.port.label", "Port label must not be empty");
+    if (!port.rectangle.valid())
+        throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
+    if (!project.layers.contains(port.layer))
+        throw ProjectError("layout.layer", "Layer does not exist");
+    if (port.net != 0 && !cell.nets.contains(port.net))
+        throw ProjectError("layout.port.net", "Port references a missing layout net");
+    const auto wanted = normalizedLayoutName(port.name);
+    for (const auto &[id, existing] : cell.ports) {
+        if (id != ignorePort && id != port.id && normalizedLayoutName(existing.name) == wanted)
+            throw ProjectError("layout.port.name", "A port named '" + port.name + "' already exists");
+    }
+    if (port.sourceInstance != 0 || port.sourcePort != 0) {
+        const auto instance = cell.instances.find(port.sourceInstance);
+        if (instance == cell.instances.end())
+            throw ProjectError("layout.port.source_instance", "Promoted port references a missing layout instance");
+        const auto child = project.layoutCells.find(instance->second.cell);
+        if (child == project.layoutCells.end() || !child->second.ports.contains(port.sourcePort))
+            throw ProjectError("layout.port.source_port", "Promoted port references a missing child port");
+    }
+}
+} // namespace
+
+ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle,
+                 PortDirection direction, PortSide side, ObjectId net, std::string label) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    Port port;
+    port.id = project.nextId();
+    port.name = std::move(name);
+    port.layer = layerId;
+    port.rectangle = rectangle;
+    port.direction = direction;
+    port.side = side;
+    port.net = net;
+    port.label = label.empty() ? port.name : std::move(label);
+    validatePortForCell(project, cell, port, port.id);
+    const auto id = port.id;
+    cell.ports.emplace(id, std::move(port));
+    return id;
+}
+
+bool updatePort(Project &project, ObjectId cellId, const Port &port) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (!cell.ports.contains(port.id))
+        return false;
+    validatePortForCell(project, cell, port, port.id);
+    cell.ports.at(port.id) = port;
+    return true;
+}
+
+void movePort(Project &project, ObjectId cellId, ObjectId portId, Coordinate dx, Coordinate dy) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
+    port.rectangle.x += dx;
+    port.rectangle.y += dy;
+}
+
+void resizePort(Project &project, ObjectId cellId, ObjectId portId, Rect rectangle) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
     if (!rectangle.valid())
         throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
+    port.rectangle = rectangle;
+}
+
+void removePort(Project &project, ObjectId cellId, ObjectId portId) {
     auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
-    if (!project.layers.contains(layerId))
-        throw ProjectError("layout.layer", "Layer does not exist");
-    ObjectId id = project.nextId();
-    cell.ports.emplace(id, Port{id, std::move(name), layerId, rectangle});
+    if (!cell.ports.contains(portId))
+        throw ProjectError("layout.port", "Port does not exist");
+    for (const auto &[otherId, other] : project.layoutCells) {
+        if (otherId == cellId)
+            continue;
+        for (const auto &[_, port] : other.ports) {
+            if (port.sourceInstance == 0)
+                continue;
+            const auto instance = other.instances.find(port.sourceInstance);
+            if (instance != other.instances.end() && instance->second.cell == cellId && port.sourcePort == portId)
+                throw ProjectError("layout.port.referenced", "Port is promoted by another layout cell");
+        }
+    }
+    cell.ports.erase(portId);
+}
+
+ObjectId createLayoutNet(Project &project, ObjectId cellId, std::string name) {
+    if (name.empty())
+        throw ProjectError("layout.net", "Layout net name must not be empty");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    const auto wanted = normalizedLayoutName(name);
+    for (const auto &[_, net] : cell.nets) {
+        if (normalizedLayoutName(net.name) == wanted)
+            throw ProjectError("layout.net.name", "A layout net named '" + name + "' already exists");
+    }
+    const auto id = project.nextId();
+    cell.nets.emplace(id, LayoutNet{id, std::move(name)});
     return id;
+}
+
+void assignPortNet(Project &project, ObjectId cellId, ObjectId portId, ObjectId net) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
+    if (net != 0 && !cell.nets.contains(net))
+        throw ProjectError("layout.port.net", "Port references a missing layout net");
+    port.net = net;
 }
 ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
                            Coordinate x, Coordinate y, Orientation orientation) {

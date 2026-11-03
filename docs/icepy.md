@@ -50,7 +50,11 @@ builder.polygon(
         icepy.LayoutPoint(2000, 3000),
     ],
 )
-builder.port("P1", "Metal1", 0, 0, 200, 200)
+builder.layout_net("VIN")
+builder.port(
+    "P1", "Metal1", 0, 0, 200, 200,
+    direction="input", side="left", net="VIN", label="VIN",
+)
 builder.parameter("w", "1u")
 
 cell = builder.cell()

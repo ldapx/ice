@@ -139,6 +139,8 @@ void PropertiesPanel::setOnLayoutDeviceParameterChanged(LayoutDeviceParameterCha
     onLayoutDeviceParameterChanged_ = std::move(callback);
 }
 
+void PropertiesPanel::setOnLayoutPortChanged(LayoutPortChanged callback) { onLayoutPortChanged_ = std::move(callback); }
+
 void PropertiesPanel::setOnPathWidthChanged(PathWidthChanged callback) { onPathWidthChanged_ = std::move(callback); }
 
 void PropertiesPanel::setOnGridSpacingChanged(GridSpacingChanged callback) {
@@ -162,6 +164,7 @@ void PropertiesPanel::clearSelection() {
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -181,6 +184,7 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -201,6 +205,7 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -220,6 +225,7 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -250,6 +256,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -277,6 +284,7 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     layoutDeviceName_.clear();
     pathMode_ = true;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     if (gridOptions_)
         gridOptions_->setVisible(false);
@@ -315,6 +323,7 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = true;
+    portMode_ = false;
     shapeIsRectangle_ = !shape.isPath() && !shape.isText() && shape.polygon.empty();
     layoutShapeId_ = shape.id;
     layoutShapeWidth_ = static_cast<int>(std::clamp<ice::Coordinate>(shape.rectangle.width, 1, 1000000000));
@@ -357,6 +366,56 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     updateParameterButtons();
 }
 
+void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName) {
+    instanceId_ = 0;
+    cellId_ = 0;
+    layoutCellId_ = 0;
+    layoutDeviceName_.clear();
+    pathMode_ = false;
+    shapeMode_ = false;
+    portMode_ = false;
+    portMode_ = true;
+    layoutShapeId_ = 0;
+    layoutPort_ = port;
+    layoutPortLayerName_ = layerName;
+    layoutPortNetName_ = netName;
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
+    selection_->setText(QStringLiteral("%1 (Pin)").arg(QString::fromStdString(port.name)));
+    previewFrame_->setVisible(false);
+    QSignalBlocker blocker(parameters_);
+    parameters_->setRowCount(0);
+    const auto addRow = [&](const QString &name, const QString &value, bool editable) {
+        const int row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        auto *valueItem = new QTableWidgetItem(value);
+        if (!editable)
+            valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(row, 0, nameItem);
+        parameters_->setItem(row, 1, valueItem);
+    };
+    addRow(QStringLiteral("name"), QString::fromStdString(port.name), true);
+    addRow(QStringLiteral("label"), QString::fromStdString(port.label), true);
+    addRow(QStringLiteral("direction"), QString::fromStdString(ice::portDirectionName(port.direction)), true);
+    addRow(QStringLiteral("side"), QString::fromStdString(ice::portSideName(port.side)), true);
+    addRow(QStringLiteral("layer"), QString::fromStdString(layerName), false);
+    addRow(QStringLiteral("x (nm)"), QString::number(port.rectangle.x), false);
+    addRow(QStringLiteral("y (nm)"), QString::number(port.rectangle.y), false);
+    addRow(QStringLiteral("width (nm)"), QString::number(port.rectangle.width), true);
+    addRow(QStringLiteral("height (nm)"), QString::number(port.rectangle.height), true);
+    addRow(QStringLiteral("net"), QString::fromStdString(netName), true);
+    addRow(QStringLiteral("visible"), port.visible ? QStringLiteral("true") : QStringLiteral("false"), true);
+    addRow(QStringLiteral("locked"), port.locked ? QStringLiteral("true") : QStringLiteral("false"), true);
+    if (port.sourceInstance != 0)
+        addRow(QStringLiteral("source_instance"), QString::number(port.sourceInstance), false);
+    if (port.sourcePort != 0)
+        addRow(QStringLiteral("source_port"), QString::number(port.sourcePort), false);
+    updateParameterButtons();
+}
+
 void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutDeviceCell *previewCell,
                                         int spacing) {
     instanceId_ = 0;
@@ -365,6 +424,7 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     layoutDeviceName_.clear();
     pathMode_ = false;
     shapeMode_ = false;
+    portMode_ = false;
     layoutShapeId_ = 0;
     setParametersVisible(false);
     layoutCellPreview_ = previewCell ? *previewCell : ice::LayoutDeviceCell{};
@@ -437,6 +497,71 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
     const auto *name = parameters_->item(item->row(), 0);
     if (!name)
         return;
+    if (portMode_) {
+        const auto field = name->text();
+        const auto value = item->text().trimmed();
+        const auto revert = [&](const QString &text) {
+            QSignalBlocker blocker(parameters_);
+            item->setText(text);
+        };
+        if (field == QStringLiteral("name") || field == QStringLiteral("label")) {
+            if (value.isEmpty()) {
+                revert(field == QStringLiteral("name") ? QString::fromStdString(layoutPort_.name)
+                                                       : QString::fromStdString(layoutPort_.label));
+                return;
+            }
+            if (field == QStringLiteral("name"))
+                layoutPort_.name = value.toStdString();
+            else
+                layoutPort_.label = value.toStdString();
+        } else if (field == QStringLiteral("direction")) {
+            const auto direction = ice::parsePortDirection(value.toStdString());
+            if (!direction) {
+                revert(QString::fromStdString(ice::portDirectionName(layoutPort_.direction)));
+                return;
+            }
+            layoutPort_.direction = *direction;
+        } else if (field == QStringLiteral("side")) {
+            const auto side = ice::parsePortSide(value.toStdString());
+            if (!side) {
+                revert(QString::fromStdString(ice::portSideName(layoutPort_.side)));
+                return;
+            }
+            layoutPort_.side = *side;
+        } else if (field == QStringLiteral("width (nm)") || field == QStringLiteral("height (nm)")) {
+            bool accepted = false;
+            const auto number = value.toInt(&accepted);
+            if (!accepted || number <= 0) {
+                revert(QString::number(field == QStringLiteral("width (nm)") ? layoutPort_.rectangle.width
+                                                                             : layoutPort_.rectangle.height));
+                return;
+            }
+            if (field == QStringLiteral("width (nm)"))
+                layoutPort_.rectangle.width = number;
+            else
+                layoutPort_.rectangle.height = number;
+        } else if (field == QStringLiteral("net")) {
+            layoutPortNetName_ = value.toStdString();
+        } else if (field == QStringLiteral("visible") || field == QStringLiteral("locked")) {
+            const auto lowered = value.toLower();
+            if (lowered != QStringLiteral("true") && lowered != QStringLiteral("false")) {
+                const bool current = field == QStringLiteral("visible") ? layoutPort_.visible : layoutPort_.locked;
+                revert(current ? QStringLiteral("true") : QStringLiteral("false"));
+                return;
+            }
+            const bool enabled = lowered == QStringLiteral("true");
+            if (field == QStringLiteral("visible"))
+                layoutPort_.visible = enabled;
+            else
+                layoutPort_.locked = enabled;
+        } else {
+            return;
+        }
+        selection_->setText(QStringLiteral("%1 (Pin)").arg(QString::fromStdString(layoutPort_.name)));
+        if (onLayoutPortChanged_)
+            onLayoutPortChanged_(layoutPort_, layoutPortNetName_);
+        return;
+    }
     if (shapeMode_) {
         if (name->text() != QStringLiteral("width (nm)") && name->text() != QStringLiteral("height (nm)"))
             return;

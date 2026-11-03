@@ -163,11 +163,34 @@ struct Shape {
     }
 };
 
+enum class PortDirection { input, output, inout, power, ground };
+enum class PortSide { left, right, top, bottom };
+
+const char *portDirectionName(PortDirection direction);
+const char *portSideName(PortSide side);
+std::optional<PortDirection> parsePortDirection(const std::string &value);
+std::optional<PortSide> parsePortSide(const std::string &value);
+
+struct LayoutNet {
+    ObjectId id = 0;
+    std::string name;
+};
+
 struct Port {
     ObjectId id = 0;
     std::string name;
     ObjectId layer = 0;
     Rect rectangle;
+    PortDirection direction = PortDirection::inout;
+    PortSide side = PortSide::left;
+    // LayoutNet id, or zero when the pin is intentionally unassigned.
+    ObjectId net = 0;
+    std::string label;
+    bool visible = true;
+    bool locked = false;
+    // Set when this pin is promoted from a child layout instance.
+    ObjectId sourceInstance = 0;
+    ObjectId sourcePort = 0;
 };
 
 struct LayoutInstance {
@@ -194,13 +217,13 @@ struct PlannedDevice {
     Coordinate height = 0;
 };
 
-// A straight logical connection between two planned devices. The name carries
-// the source schematic net name for display and diagnostics.
+// A straight logical connection between two planned devices. The net points at
+// a LayoutNet in the same cell.
 struct PlannedConnection {
     ObjectId id = 0;
     ObjectId from = 0;
     ObjectId to = 0;
-    std::string name;
+    ObjectId net = 0;
 };
 
 struct LayoutCell {
@@ -217,6 +240,7 @@ struct LayoutCell {
     std::vector<Parameter> parameters;
     std::map<ObjectId, Shape> shapes;
     std::map<ObjectId, Port> ports;
+    std::map<ObjectId, LayoutNet> nets;
     std::map<ObjectId, LayoutInstance> instances;
     std::map<ObjectId, PlannedDevice> plannedDevices;
     std::map<ObjectId, PlannedConnection> plannedConnections;
@@ -291,7 +315,7 @@ struct ProjectLoadReport {
 
 class Project {
   public:
-    static constexpr int schemaVersion = 1;
+    static constexpr int schemaVersion = 2;
 
     std::string identity;
     std::string name;

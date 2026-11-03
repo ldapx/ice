@@ -321,11 +321,14 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             continue;
         }
         validConnection = true;
-        if (!connection.name.empty()) {
-            auto &members = namedGroups[connection.name];
+        const auto layoutNet = cell.nets.find(connection.net);
+        const std::string netName =
+            layoutNet != cell.nets.end() && !layoutNet->second.name.empty() ? layoutNet->second.name : std::string{};
+        if (!netName.empty()) {
+            auto &members = namedGroups[netName];
             members.insert(connection.from);
             members.insert(connection.to);
-            const auto [entry, inserted] = namedObjects.emplace(connection.name, connection.id);
+            const auto [entry, inserted] = namedObjects.emplace(netName, connection.id);
             if (!inserted && connection.id < entry->second)
                 entry->second = connection.id;
         } else {

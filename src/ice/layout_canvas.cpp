@@ -1155,6 +1155,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setPathFinishedCallback(LayoutPathFinishedCallback callback) override { pathFinished_ = std::move(callback); }
 
     void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
+    void setPinPlacedCallback(LayoutPinPlacedCallback callback) override { pinPlaced_ = std::move(callback); }
 
     void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) override {
         polygonCreated_ = std::move(callback);
@@ -1467,6 +1468,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
             if (textPlaced_)
                 textPlaced_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::pin && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (pinPlaced_)
+                pinPlaced_(snapPosition(mapToScene(event->pos())));
             event->accept();
             return;
         }
@@ -1969,7 +1981,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
-             tool_ == Tool::polygon || tool_ == Tool::ruler || tool_ == Tool::text)) {
+             tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -2303,6 +2315,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     LayoutPathLayerChangedCallback pathLayerChanged_;
     LayoutPathFinishedCallback pathFinished_;
     LayoutTextPlacedCallback textPlaced_;
+    LayoutPinPlacedCallback pinPlaced_;
     LayoutPolygonCreatedCallback polygonCreated_;
     LayoutPolygonPointMovedCallback polygonPointMoved_;
     bool polygonActive_ = false;

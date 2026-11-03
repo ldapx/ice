@@ -95,9 +95,34 @@ class LayoutBuilder {
         return ice::addPolygon(*project_, cellId_, layerId(layer), points);
     }
 
+    ObjectId layoutNet(const std::string &name) {
+        if (name.empty())
+            return 0;
+        auto &cell = project_->layoutCells.at(cellId_);
+        for (const auto &[id, net] : cell.nets) {
+            if (net.name == name)
+                return id;
+        }
+        return ice::createLayoutNet(*project_, cellId_, name);
+    }
+
     ObjectId port(const std::string &name, const std::string &layer, Coordinate x, Coordinate y, Coordinate width,
-                  Coordinate height) {
-        return ice::addPort(*project_, cellId_, name, layerId(layer), Rect{x, y, width, height});
+                  Coordinate height, const std::string &direction = "inout", const std::string &side = "left",
+                  const std::string &net = {}, const std::string &label = {}) {
+        const auto parsedDirection = ice::parsePortDirection(direction);
+        const auto parsedSide = ice::parsePortSide(side);
+        if (!parsedDirection || !parsedSide)
+            throw ProjectError("icepy.port", "Unknown port direction or side");
+        return ice::addPort(*project_, cellId_, name, layerId(layer), Rect{x, y, width, height}, *parsedDirection,
+                            *parsedSide, layoutNet(net), label);
+    }
+
+    bool updatePort(const Port &port) { return ice::updatePort(*project_, cellId_, port); }
+
+    void removePort(ObjectId portId) { ice::removePort(*project_, cellId_, portId); }
+
+    void assignPortNet(ObjectId portId, const std::string &net) {
+        ice::assignPortNet(*project_, cellId_, portId, layoutNet(net));
     }
 
     ObjectId instance(const std::string &cellName, Coordinate x, Coordinate y, const std::string &instanceName = {},
@@ -247,12 +272,38 @@ NB_MODULE(icepy, module) {
         .def_rw("name", &Shape::name)
         .def_prop_ro("is_path", &Shape::isPath);
 
+    nb::enum_<PortDirection>(module, "PortDirection")
+        .value("input", PortDirection::input)
+        .value("output", PortDirection::output)
+        .value("inout", PortDirection::inout)
+        .value("power", PortDirection::power)
+        .value("ground", PortDirection::ground);
+
+    nb::enum_<PortSide>(module, "PortSide")
+        .value("left", PortSide::left)
+        .value("right", PortSide::right)
+        .value("top", PortSide::top)
+        .value("bottom", PortSide::bottom);
+
+    nb::class_<LayoutNet>(module, "LayoutNet")
+        .def(nb::init<>())
+        .def_rw("id", &LayoutNet::id)
+        .def_rw("name", &LayoutNet::name);
+
     nb::class_<Port>(module, "Port")
         .def(nb::init<>())
         .def_rw("id", &Port::id)
         .def_rw("name", &Port::name)
         .def_rw("layer", &Port::layer)
-        .def_rw("rectangle", &Port::rectangle);
+        .def_rw("rectangle", &Port::rectangle)
+        .def_rw("direction", &Port::direction)
+        .def_rw("side", &Port::side)
+        .def_rw("net", &Port::net)
+        .def_rw("label", &Port::label)
+        .def_rw("visible", &Port::visible)
+        .def_rw("locked", &Port::locked)
+        .def_rw("source_instance", &Port::sourceInstance)
+        .def_rw("source_port", &Port::sourcePort);
 
     nb::class_<LayoutInstance>(module, "LayoutInstance")
         .def(nb::init<>())
@@ -296,6 +347,14 @@ NB_MODULE(icepy, module) {
                              ports.push_back(port);
                          return ports;
                      })
+        .def_prop_ro("nets",
+                     [](const LayoutCell &cell) {
+                         std::vector<LayoutNet> nets;
+                         nets.reserve(cell.nets.size());
+                         for (const auto &[_, net] : cell.nets)
+                             nets.push_back(net);
+                         return nets;
+                     })
         .def_prop_ro("instances",
                      [](const LayoutCell &cell) {
                          std::vector<LayoutInstance> instances;
@@ -320,7 +379,12 @@ NB_MODULE(icepy, module) {
              nb::arg("height"))
         .def("polygon", &LayoutBuilder::polygon, nb::arg("layer"), nb::arg("points"))
         .def("port", &LayoutBuilder::port, nb::arg("name"), nb::arg("layer"), nb::arg("x"), nb::arg("y"),
-             nb::arg("width"), nb::arg("height"))
+             nb::arg("width"), nb::arg("height"), nb::arg("direction") = "inout", nb::arg("side") = "left",
+             nb::arg("net") = "", nb::arg("label") = "")
+        .def("layout_net", &LayoutBuilder::layoutNet, nb::arg("name"))
+        .def("update_port", &LayoutBuilder::updatePort, nb::arg("port"))
+        .def("remove_port", &LayoutBuilder::removePort, nb::arg("port"))
+        .def("assign_port_net", &LayoutBuilder::assignPortNet, nb::arg("port"), nb::arg("net"))
         .def("instance", &LayoutBuilder::instance, nb::arg("cell"), nb::arg("x"), nb::arg("y"), nb::arg("name") = "",
              nb::arg("orientation") = "r0")
         .def("parameter", &LayoutBuilder::parameter, nb::arg("name"), nb::arg("value"))

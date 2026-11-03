@@ -325,6 +325,15 @@ Click the canvas, enter the string, and ICE creates a movable text object with
 a 1 um nominal height. Text is stored in the project and exported as GDSII
 TEXT records.
 
+The **Create Pin** tool places a named layout pin on the currently selected
+layer. Pins are visible as layer-colored rectangles with labels, are
+selectable/movable/resizable, and can be locked or hidden. The Properties panel
+edits the pin name, label, direction, physical side, net, size, visibility, and
+lock state. Pins are exported as GDSII boundary geometry plus TEXT labels.
+Layout nets are created through the pin net field or
+`ice-cli layout-add-net`; assign a net by name in Properties or with
+`ice-cli layout-assign-port-net`.
+
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of

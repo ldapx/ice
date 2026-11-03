@@ -3,6 +3,7 @@
 #include "icelib/core.hpp"
 #include "icelib/geometry.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,7 +50,15 @@ ObjectId addText(Project &project, ObjectId cellId, ObjectId layerId, Coordinate
                  Coordinate height = 1000, std::optional<ObjectId> net = std::nullopt);
 ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const std::vector<LayoutPoint> &points,
                     std::optional<ObjectId> net = std::nullopt);
-ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle);
+ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle,
+                 PortDirection direction = PortDirection::inout, PortSide side = PortSide::left, ObjectId net = 0,
+                 std::string label = {});
+bool updatePort(Project &project, ObjectId cellId, const Port &port);
+void movePort(Project &project, ObjectId cellId, ObjectId portId, Coordinate dx, Coordinate dy);
+void resizePort(Project &project, ObjectId cellId, ObjectId portId, Rect rectangle);
+void removePort(Project &project, ObjectId cellId, ObjectId portId);
+ObjectId createLayoutNet(Project &project, ObjectId cellId, std::string name);
+void assignPortNet(Project &project, ObjectId cellId, ObjectId portId, ObjectId net);
 ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
                            Coordinate x, Coordinate y, Orientation orientation = Orientation::r0);
 void moveRectangle(Project &project, ObjectId cellId, ObjectId shapeId, Coordinate dx, Coordinate dy);
