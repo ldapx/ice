@@ -39,12 +39,23 @@ struct LayoutDeviceGenerator {
     std::string class_name;
 };
 
+struct LayoutDevicePort {
+    std::string name;
+    int layer = 0;
+    int datatype = 0;
+    Rect rectangle;
+    PortDirection direction = PortDirection::inout;
+    PortSide side = PortSide::left;
+    std::string label;
+};
+
 struct LayoutDeviceCell {
     std::string name;
     std::string category;
     std::string source;
     Rect bounds;
     std::vector<LayoutDeviceShape> shapes;
+    std::vector<LayoutDevicePort> ports;
     std::vector<LayoutDeviceParameter> parameters;
     std::optional<LayoutDeviceGenerator> generator;
 };
@@ -52,6 +63,7 @@ struct LayoutDeviceCell {
 struct LayoutDeviceGeometry {
     Rect bounds;
     std::vector<LayoutDeviceShape> shapes;
+    std::vector<LayoutDevicePort> ports;
 };
 
 struct LayoutDeviceLibrary {

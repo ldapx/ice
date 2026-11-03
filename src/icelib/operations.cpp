@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -368,6 +369,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             pinDevices[pin.id].push_back(deviceId);
     }
 
+    std::set<std::string> layoutNetNames;
     for (const auto &[_, net] : schematic.nets) {
         std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
         std::vector<ObjectId> devices;
@@ -382,6 +384,12 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         }
         if (devices.size() < 2)
             continue;
+        auto netName = net.name.empty() ? "N" + std::to_string(net.id) : net.name;
+        if (!layoutNetNames.insert(lower(netName)).second)
+            netName += "_" + std::to_string(net.id);
+        layoutNetNames.insert(lower(netName));
+        const auto layoutNetId = project.nextId();
+        layout.nets.emplace(layoutNetId, LayoutNet{layoutNetId, netName});
         const auto from = devices.front();
         for (std::size_t index = 1; index < devices.size(); ++index) {
             const auto to = devices[index];
@@ -391,7 +399,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             if (!connectedPairs.insert(pair).second)
                 continue;
             const auto connectionId = project.nextId();
-            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, net.name});
+            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, layoutNetId});
         }
     }
     return layoutId;
@@ -477,17 +485,116 @@ ObjectId addPolygon(Project &project, ObjectId cellId, ObjectId layerId, const s
     cell.shapes.emplace(id, std::move(shape));
     return id;
 }
-ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle) {
-    if (name.empty())
+namespace {
+std::string normalizedLayoutName(std::string value) { return lower(std::move(value)); }
+
+void validatePortForCell(const Project &project, const LayoutCell &cell, const Port &port, ObjectId ignorePort) {
+    if (port.name.empty())
         throw ProjectError("layout.port", "Port name must not be empty");
+    if (port.label.empty())
+        throw ProjectError("layout.port.label", "Port label must not be empty");
+    if (!port.rectangle.valid())
+        throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
+    if (!project.layers.contains(port.layer))
+        throw ProjectError("layout.layer", "Layer does not exist");
+    if (port.net != 0 && !cell.nets.contains(port.net))
+        throw ProjectError("layout.port.net", "Port references a missing layout net");
+    const auto wanted = normalizedLayoutName(port.name);
+    for (const auto &[id, existing] : cell.ports) {
+        if (id != ignorePort && id != port.id && normalizedLayoutName(existing.name) == wanted)
+            throw ProjectError("layout.port.name", "A port named '" + port.name + "' already exists");
+    }
+    if (port.sourceInstance != 0 || port.sourcePort != 0) {
+        const auto instance = cell.instances.find(port.sourceInstance);
+        if (instance == cell.instances.end())
+            throw ProjectError("layout.port.source_instance", "Promoted port references a missing layout instance");
+        const auto child = project.layoutCells.find(instance->second.cell);
+        if (child == project.layoutCells.end() || !child->second.ports.contains(port.sourcePort))
+            throw ProjectError("layout.port.source_port", "Promoted port references a missing child port");
+    }
+}
+} // namespace
+
+ObjectId addPort(Project &project, ObjectId cellId, std::string name, ObjectId layerId, Rect rectangle,
+                 PortDirection direction, PortSide side, ObjectId net, std::string label) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    Port port;
+    port.id = project.nextId();
+    port.name = std::move(name);
+    port.layer = layerId;
+    port.rectangle = rectangle;
+    port.direction = direction;
+    port.side = side;
+    port.net = net;
+    port.label = label.empty() ? port.name : std::move(label);
+    validatePortForCell(project, cell, port, port.id);
+    const auto id = port.id;
+    cell.ports.emplace(id, std::move(port));
+    return id;
+}
+
+bool updatePort(Project &project, ObjectId cellId, const Port &port) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (!cell.ports.contains(port.id))
+        return false;
+    validatePortForCell(project, cell, port, port.id);
+    cell.ports.at(port.id) = port;
+    return true;
+}
+
+void movePort(Project &project, ObjectId cellId, ObjectId portId, Coordinate dx, Coordinate dy) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
+    port.rectangle.x += dx;
+    port.rectangle.y += dy;
+}
+
+void resizePort(Project &project, ObjectId cellId, ObjectId portId, Rect rectangle) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
     if (!rectangle.valid())
         throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
+    port.rectangle = rectangle;
+}
+
+void removePort(Project &project, ObjectId cellId, ObjectId portId) {
     auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
-    if (!project.layers.contains(layerId))
-        throw ProjectError("layout.layer", "Layer does not exist");
-    ObjectId id = project.nextId();
-    cell.ports.emplace(id, Port{id, std::move(name), layerId, rectangle});
+    if (!cell.ports.contains(portId))
+        throw ProjectError("layout.port", "Port does not exist");
+    for (const auto &[otherId, other] : project.layoutCells) {
+        if (otherId == cellId)
+            continue;
+        for (const auto &[_, port] : other.ports) {
+            if (port.sourceInstance == 0)
+                continue;
+            const auto instance = other.instances.find(port.sourceInstance);
+            if (instance != other.instances.end() && instance->second.cell == cellId && port.sourcePort == portId)
+                throw ProjectError("layout.port.referenced", "Port is promoted by another layout cell");
+        }
+    }
+    cell.ports.erase(portId);
+}
+
+ObjectId createLayoutNet(Project &project, ObjectId cellId, std::string name) {
+    if (name.empty())
+        throw ProjectError("layout.net", "Layout net name must not be empty");
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    const auto wanted = normalizedLayoutName(name);
+    for (const auto &[_, net] : cell.nets) {
+        if (normalizedLayoutName(net.name) == wanted)
+            throw ProjectError("layout.net.name", "A layout net named '" + name + "' already exists");
+    }
+    const auto id = project.nextId();
+    cell.nets.emplace(id, LayoutNet{id, std::move(name)});
     return id;
+}
+
+void assignPortNet(Project &project, ObjectId cellId, ObjectId portId, ObjectId net) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto &port = require(cell.ports, portId, "layout.port", "Port does not exist");
+    if (net != 0 && !cell.nets.contains(net))
+        throw ProjectError("layout.port.net", "Port references a missing layout net");
+    port.net = net;
 }
 ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId childCellId, std::string name,
                            Coordinate x, Coordinate y, Orientation orientation) {
@@ -674,150 +781,307 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
 
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes) {
-    const auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    const auto &topCell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     auto note = [notes](std::string message) {
         if (notes)
             notes->push_back(std::move(message));
     };
 
-    // A symbol is reusable, so placing it twice duplicates its pin ids. Detect
-    // symbols used by more than one instance; their pins cannot be resolved to
-    // a unique instance and are skipped below.
-    std::map<ObjectId, int> symbolUseCount;
-    for (const auto &[_, instance] : cell.instances)
-        ++symbolUseCount[instance.symbol];
+    // SPICE identifiers cannot contain arbitrary whitespace. Schematic names
+    // and port names normally are simple identifiers, but sanitize them here
+    // so hierarchy still produces a valid deck for names like "my block".
+    const auto spiceIdentifier = [](const std::string &name) {
+        std::string result;
+        result.reserve(name.size());
+        for (const auto character : name) {
+            const auto byte = static_cast<unsigned char>(character);
+            result.push_back(std::isalnum(byte) || character == '_' ? character : '_');
+        }
+        if (result.empty())
+            result = "cell";
+        if (std::isdigit(static_cast<unsigned char>(result.front())))
+            result.insert(result.begin(), '_');
+        return result;
+    };
 
-    // For every net, map each member pin id to the unique (instance, symbol,
-    // pin) that owns it, and derive the SPICE node name.
-    std::ostringstream out;
-    out << "* ICE schematic netlist: " << cell.name << "\n";
-
-    // Resolve a pin id to its owning instance, or null when ambiguous/unknown.
-    auto resolvePin = [&](ObjectId pinId, const SchematicInstance **owner, const Pin **pin) -> bool {
-        const SchematicInstance *found = nullptr;
-        const Pin *foundPin = nullptr;
+    // Hierarchical block pins are generated from the child schematic's Input
+    // and Output instances, in the same order as generatedSchematicSymbol().
+    const auto portInstances = [&](const SchematicCell &cell) {
+        std::vector<const SchematicInstance *> inputs;
+        std::vector<const SchematicInstance *> outputs;
         for (const auto &[_, instance] : cell.instances) {
             const auto symbol = cell.symbols.find(instance.symbol);
             if (symbol == cell.symbols.end())
                 continue;
-            for (const auto &candidate : symbol->second.pins) {
-                if (candidate.id != pinId)
+            const auto type = lower(symbol->second.name);
+            if (type == "input")
+                inputs.push_back(&instance);
+            else if (type == "output")
+                outputs.push_back(&instance);
+        }
+        const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
+            std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
+                if (left->y != right->y)
+                    return left->y > right->y;
+                return lower(left->name) < lower(right->name);
+            });
+        };
+        sortPorts(inputs);
+        sortPorts(outputs);
+        std::vector<const SchematicInstance *> ports;
+        ports.reserve(inputs.size() + outputs.size());
+        ports.insert(ports.end(), inputs.begin(), inputs.end());
+        ports.insert(ports.end(), outputs.begin(), outputs.end());
+        return ports;
+    };
+
+    // A child Input/Output instance defines a port. Its connected net becomes
+    // that port inside the subcircuit body.
+    const auto portNodes = [&](const SchematicCell &cell) {
+        std::map<ObjectId, std::string> result;
+        for (const auto *port : portInstances(cell)) {
+            const auto symbol = cell.symbols.find(port->symbol);
+            if (symbol == cell.symbols.end() || symbol->second.pins.empty())
+                continue;
+            const auto pinId = symbol->second.pins.front().id;
+            for (const auto &[netId, net] : cell.nets) {
+                if (std::find(net.pins.begin(), net.pins.end(), pinId) == net.pins.end())
                     continue;
-                if (symbolUseCount[instance.symbol] > 1)
-                    return false; // ambiguous: shared symbol
-                found = &instance;
-                foundPin = &candidate;
+                if (!result.emplace(netId, spiceIdentifier(port->name)).second)
+                    note("multiple schematic ports share a net in " + cell.name + "; using " + port->name);
+                break;
             }
         }
-        if (!found)
-            return false;
-        *owner = found;
-        *pin = foundPin;
-        return true;
+        return result;
     };
 
-    // Node name for a net: ground nets collapse to 0; otherwise use the net
-    // name when set, else a stable n<id>.
-    auto nodeFor = [&](const Net &net) -> std::string {
-        for (const auto &pinId : net.pins) {
-            const SchematicInstance *owner = nullptr;
-            const Pin *pin = nullptr;
-            if (resolvePin(pinId, &owner, &pin)) {
-                const auto symbol = cell.symbols.find(owner->symbol);
-                if (symbol != cell.symbols.end() && spiceElementForSymbol(symbol->second.name) == 'G')
-                    return "0";
+    std::ostringstream out;
+    out << "* ICE schematic netlist: " << topCell.name << "\n";
+    std::ostringstream subcircuits;
+    std::set<ObjectId> emittedSubcircuits;
+    std::set<ObjectId> visiting;
+    std::function<std::string(const SchematicCell &, const std::map<ObjectId, std::string> &)> emitBody;
+    std::function<void(ObjectId)> emitSubcircuit;
+
+    emitBody = [&](const SchematicCell &cell, const std::map<ObjectId, std::string> &portNodeNames) {
+        // A symbol is reusable, so placing it twice duplicates its pin ids.
+        // Detect symbols used by more than one instance; their pins cannot be
+        // resolved to a unique instance for netlisting.
+        std::map<ObjectId, int> symbolUseCount;
+        for (const auto &[_, instance] : cell.instances)
+            ++symbolUseCount[instance.symbol];
+
+        const auto resolvePin = [&](ObjectId pinId, const SchematicInstance **owner, const Pin **pin) -> bool {
+            const SchematicInstance *found = nullptr;
+            const Pin *foundPin = nullptr;
+            for (const auto &[_, instance] : cell.instances) {
+                const auto symbol = cell.symbols.find(instance.symbol);
+                if (symbol == cell.symbols.end())
+                    continue;
+                for (const auto &candidate : symbol->second.pins) {
+                    if (candidate.id != pinId)
+                        continue;
+                    if (symbolUseCount[instance.symbol] > 1)
+                        return false; // ambiguous: shared symbol
+                    found = &instance;
+                    foundPin = &candidate;
+                }
             }
-        }
-        if (!net.name.empty())
-            return net.name;
-        return "n" + std::to_string(net.id);
-    };
+            if (!found)
+                return false;
+            *owner = found;
+            *pin = foundPin;
+            return true;
+        };
 
-    // Emit one SPICE element per instance, wiring each pin to its net's node.
-    for (const auto &[instanceId, instance] : cell.instances) {
-        const auto symbol = cell.symbols.find(instance.symbol);
-        if (symbol == cell.symbols.end())
-            continue;
-        const char element = spiceElementForSymbol(symbol->second.name);
-        if (element == 'G')
-            continue; // ground contributes the reference node only
-        if (element == 0) {
-            note("unsupported symbol skipped: " + symbol->second.name + " (" + instance.name + ")");
-            out << "* unsupported: " << instance.name << " " << symbol->second.name << "\n";
-            continue;
-        }
-        if (symbolUseCount[instance.symbol] > 1) {
-            note("symbol instantiated more than once, cannot resolve pins: " + symbol->second.name);
-            continue;
-        }
-
-        // Map this instance's pins to node names via the nets they belong to.
-        std::map<ObjectId, std::string> pinToNode;
-        for (const auto &[_, net] : cell.nets) {
-            const auto node = nodeFor(net);
+        const auto nodeFor = [&](const Net &net) -> std::string {
+            if (const auto portNode = portNodeNames.find(net.id); portNode != portNodeNames.end())
+                return portNode->second;
             for (const auto &pinId : net.pins) {
                 const SchematicInstance *owner = nullptr;
                 const Pin *pin = nullptr;
-                if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
-                    pinToNode[pinId] = node;
+                if (resolvePin(pinId, &owner, &pin)) {
+                    const auto symbol = cell.symbols.find(owner->symbol);
+                    if (symbol != cell.symbols.end() && spiceElementForSymbol(symbol->second.name) == 'G')
+                        return "0";
+                }
             }
-        }
+            if (!net.name.empty())
+                return net.name;
+            return "n" + std::to_string(net.id);
+        };
 
-        // Ordered node list follows the symbol's pin order.
-        std::vector<std::string> nodes;
-        for (const auto &pin : symbol->second.pins) {
-            const auto node = pinToNode.find(pin.id);
-            nodes.push_back(node != pinToNode.end() ? node->second : "0");
-        }
-        if (nodes.empty()) {
-            note("instance has no connected pins: " + instance.name);
-            continue;
-        }
+        std::ostringstream body;
+        for (const auto &[instanceId, instance] : cell.instances) {
+            const auto symbol = cell.symbols.find(instance.symbol);
+            if (symbol == cell.symbols.end())
+                continue;
+            const auto type = lower(symbol->second.name);
+            if (type == "input" || type == "output")
+                continue; // hierarchical port markers, not devices
+            const char element = spiceElementForSymbol(symbol->second.name);
+            if (element == 'G')
+                continue; // ground contributes the reference node only
 
-        const std::string value = [&] {
-            switch (element) {
-            case 'R':
-                return parameterValue(instance, {"resistance", "value"});
-            case 'C':
-                return parameterValue(instance, {"capacitance", "value"});
-            case 'L':
-                return parameterValue(instance, {"inductance", "value"});
-            case 'V':
-            case 'I':
-                return sourceExpression(instance, symbol->second.name, element);
-            default:
-                return parameterValue(instance, {"value"});
+            if (symbol->second.sourceCell != 0) {
+                const auto child = project.schematicCells.find(symbol->second.sourceCell);
+                if (child == project.schematicCells.end()) {
+                    note("hierarchical symbol references a missing schematic: " + symbol->second.name + " (" +
+                         instance.name + ")");
+                    body << "* missing schematic: " << instance.name << " " << symbol->second.name << "\n";
+                    continue;
+                }
+                if (visiting.contains(child->first)) {
+                    note("hierarchical schematic cycle skipped: " + child->second.name + " (" + instance.name + ")");
+                    body << "* hierarchical cycle: " << instance.name << " " << child->second.name << "\n";
+                    continue;
+                }
+                if (symbolUseCount[instance.symbol] > 1) {
+                    note("symbol instantiated more than once, cannot resolve pins: " + symbol->second.name);
+                    continue;
+                }
+                emitSubcircuit(child->first);
+                if (!emittedSubcircuits.contains(child->first)) {
+                    body << "* unavailable subcircuit: " << instance.name << " " << child->second.name << "\n";
+                    continue;
+                }
+
+                std::map<ObjectId, std::string> pinToNode;
+                for (const auto &[_, net] : cell.nets) {
+                    const auto node = nodeFor(net);
+                    for (const auto &pinId : net.pins) {
+                        const SchematicInstance *owner = nullptr;
+                        const Pin *pin = nullptr;
+                        if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
+                            pinToNode[pinId] = node;
+                    }
+                }
+
+                std::string designator = instance.name;
+                if (designator.empty() || std::toupper(static_cast<unsigned char>(designator.front())) != 'X')
+                    designator.insert(designator.begin(), 'X');
+                body << designator << " ";
+                for (const auto &pin : symbol->second.pins) {
+                    const auto node = pinToNode.find(pin.id);
+                    body << (node != pinToNode.end() ? node->second : "0") << " ";
+                }
+                body << spiceIdentifier(child->second.name) << "\n";
+                continue;
             }
-        }();
-        std::string resolved = value;
-        if (resolved.empty()) {
-            resolved = element == 'R'   ? "1k"
-                       : element == 'C' ? "1n"
-                       : element == 'L' ? "1u"
-                       : element == 'D' ? "Dmodel"
-                       : element == 'I' ? "1m"
-                                        : "1";
-            note("missing value parameter for " + instance.name + ", using " + resolved);
+
+            if (element == 0) {
+                note("unsupported symbol skipped: " + symbol->second.name + " (" + instance.name + ")");
+                body << "* unsupported: " << instance.name << " " << symbol->second.name << "\n";
+                continue;
+            }
+            if (symbolUseCount[instance.symbol] > 1) {
+                note("symbol instantiated more than once, cannot resolve pins: " + symbol->second.name);
+                continue;
+            }
+
+            // Map this instance's pins to node names via the nets they belong to.
+            std::map<ObjectId, std::string> pinToNode;
+            for (const auto &[_, net] : cell.nets) {
+                const auto node = nodeFor(net);
+                for (const auto &pinId : net.pins) {
+                    const SchematicInstance *owner = nullptr;
+                    const Pin *pin = nullptr;
+                    if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
+                        pinToNode[pinId] = node;
+                }
+            }
+
+            // Ordered node list follows the symbol's pin order.
+            std::vector<std::string> nodes;
+            for (const auto &pin : symbol->second.pins) {
+                const auto node = pinToNode.find(pin.id);
+                nodes.push_back(node != pinToNode.end() ? node->second : "0");
+            }
+            if (nodes.empty()) {
+                note("instance has no connected pins: " + instance.name);
+                continue;
+            }
+
+            const std::string value = [&] {
+                switch (element) {
+                case 'R':
+                    return parameterValue(instance, {"resistance", "value"});
+                case 'C':
+                    return parameterValue(instance, {"capacitance", "value"});
+                case 'L':
+                    return parameterValue(instance, {"inductance", "value"});
+                case 'V':
+                case 'I':
+                    return sourceExpression(instance, symbol->second.name, element);
+                default:
+                    return parameterValue(instance, {"value"});
+                }
+            }();
+            std::string resolved = value;
+            if (resolved.empty()) {
+                resolved = element == 'R'   ? "1k"
+                           : element == 'C' ? "1n"
+                           : element == 'L' ? "1u"
+                           : element == 'D' ? "Dmodel"
+                           : element == 'I' ? "1m"
+                                            : "1";
+                note("missing value parameter for " + instance.name + ", using " + resolved);
+            }
+
+            // Instance names commonly already carry the element letter (V1, R1);
+            // only prepend it when they do not, so we never emit "VV1".
+            std::string designator = instance.name;
+            const auto prefix = static_cast<char>(std::toupper(static_cast<unsigned char>(element)));
+            if (designator.empty() ||
+                static_cast<char>(std::toupper(static_cast<unsigned char>(designator.front()))) != prefix)
+                designator.insert(designator.begin(), prefix);
+            body << designator << " ";
+            if (element == 'D')
+                body << resolved << " "; // diode: D<name> <node+> <node-> <model>
+            for (const auto &node : nodes)
+                body << node << " ";
+            if (element != 'D')
+                body << resolved << " ";
+            body << "\n";
+        }
+        return body.str();
+    };
+
+    emitSubcircuit = [&](ObjectId childId) {
+        if (emittedSubcircuits.contains(childId))
+            return;
+        if (visiting.contains(childId)) {
+            note("hierarchical schematic cycle skipped: " + std::to_string(childId));
+            return;
+        }
+        const auto child = project.schematicCells.find(childId);
+        if (child == project.schematicCells.end())
+            return;
+        if (child->second.textSchematic) {
+            note("text schematic cannot be used as a drawn hierarchical block: " + child->second.name);
+            return;
         }
 
-        // Instance names commonly already carry the element letter (V1, R1);
-        // only prepend it when they do not, so we never emit "VV1".
-        std::string designator = instance.name;
-        const auto prefix = static_cast<char>(std::toupper(static_cast<unsigned char>(element)));
-        if (designator.empty() ||
-            static_cast<char>(std::toupper(static_cast<unsigned char>(designator.front()))) != prefix)
-            designator.insert(designator.begin(), prefix);
-        out << designator << " ";
-        if (element == 'D')
-            out << resolved << " "; // diode: D<name> <node+> <node-> <model>
-        for (const auto &node : nodes)
-            out << node << " ";
-        if (element != 'D')
-            out << resolved << " ";
-        out << "\n";
-    }
+        visiting.insert(childId);
+        const auto ports = portInstances(child->second);
+        const auto portNodeNames = portNodes(child->second);
+        const auto body = emitBody(child->second, portNodeNames);
 
-    // Split into lines so callers can hand it to the simulator request.
+        std::ostringstream definition;
+        definition << ".subckt " << spiceIdentifier(child->second.name);
+        for (const auto *port : ports)
+            definition << " " << spiceIdentifier(port->name);
+        definition << "\n" << body << ".ends " << spiceIdentifier(child->second.name) << "\n";
+        visiting.erase(childId);
+        emittedSubcircuits.insert(childId);
+        subcircuits << definition.str();
+    };
+
+    visiting.insert(cellId);
+    const auto topBody = emitBody(topCell, {});
+    visiting.erase(cellId);
+    out << subcircuits.str() << topBody;
+
     std::vector<std::string> lines;
     std::istringstream stream(out.str());
     std::string line;

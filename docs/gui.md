@@ -325,6 +325,23 @@ Click the canvas, enter the string, and ICE creates a movable text object with
 a 1 um nominal height. Text is stored in the project and exported as GDSII
 TEXT records.
 
+The **Create Pin** tool places a named layout pin on the currently selected
+layer. Pins are visible as layer-colored rectangles with labels, are
+selectable/movable/resizable, and can be locked or hidden. The Properties panel
+edits the pin name, label, direction, physical side, net, size, visibility, and
+lock state. Pins are exported as GDSII boundary geometry plus TEXT labels.
+Layout nets are created through the pin net field or
+`ice-cli layout-add-net`; assign a net by name in Properties or with
+`ice-cli layout-assign-port-net`. The **Hierarchy** panel lists each layout's
+pins with visibility checkboxes and pin details in the tooltip. Child-cell pins
+are drawn read-only inside instances; double-clicking one promotes it to a
+parent pin that keeps the source instance and child port link.
+
+**File → Open Layout Interchange** imports GDSII and asks which layer carries
+pin-label TEXT records; use `-1` to import text as ordinary text shapes only.
+**Save Layout Interchange** writes the active cell as GDSII. LEF and DEF pin
+exchange is available through `ice-cli` and `ice-mcp`.
+
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
@@ -337,9 +354,12 @@ checks device presence, reference names, device types, shared parameters on
 placed device instances, and net topology from planned connections. Device
 parameters are compared numerically when both sides use compatible quantity
 values, so `0.15u` and `150n` are equivalent. If the layout has no planned
-connectivity, LVS reports a warning and compares devices only. Results appear in
-the **LVS Report** tab with mismatch categories and schematic/layout object ids.
-Text SPICE schematics are not supported by LVS yet.
+connectivity, LVS reports a warning and compares devices only. Top-level
+schematic ports created with `Input`/`Output` symbols are matched to layout pins
+by name; missing pins, extra pins, direction changes, and net-binding changes
+are reported. Results appear in the **LVS Report** tab with mismatch categories
+and schematic/layout object ids. Text SPICE schematics are not supported by LVS
+yet.
 
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database

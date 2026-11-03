@@ -544,6 +544,109 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     CHECK(joined.find(".end") == std::string::npos);
 }
 
+TEST_CASE("hierarchical schematic instances become subcircuits") {
+    ice::Project project;
+    project.identity = "hierarchy";
+    project.name = "hierarchy";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    const auto childId = ice::createSchematicCell(project, "filter");
+    const auto inputId = addSymbol(childId, "Input", {"A"});
+    const auto outputId = addSymbol(childId, "Output", {"Y"});
+    const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
+    const auto childInput = ice::addSchematicInstance(project, childId, inputId, "A", 0, 0);
+    const auto childOutput = ice::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
+    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    project.schematicCells.at(childId)
+        .instances.at(childResistor)
+        .parameters.push_back({project.nextId(), "resistance", "2k"});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0)});
+    ice::addNet(project, childId, "", {pinIdOf(childId, outputId, 0), pinIdOf(childId, resistorId, 1)});
+    CHECK(childInput != 0);
+    CHECK(childOutput != 0);
+
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockId = addSymbol(parentId, "filter", {"A", "Y"});
+    project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
+    const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
+    const auto block = ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "value", "1"});
+    ice::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
+    ice::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
+    CHECK(block != 0);
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find(".subckt filter A Y") != std::string::npos);
+    CHECK(joined.find("R1 A Y 2k") != std::string::npos);
+    CHECK(joined.find(".ends filter") != std::string::npos);
+    CHECK(joined.find("X1 in out filter") != std::string::npos);
+    CHECK(joined.find("V1 in out 1") != std::string::npos);
+    CHECK(notes.empty());
+}
+
+TEST_CASE("layout pins and nets round-trip with required metadata") {
+    ice::Project project;
+    project.identity = "pins";
+    project.name = "pins";
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto net = ice::createLayoutNet(project, layout, "VIN");
+    const auto port = ice::addPort(project, layout, "VIN", layer, {0, 0, 400, 400}, ice::PortDirection::input,
+                                   ice::PortSide::left, net, "VIN");
+    CHECK(project.validate().empty());
+
+    const auto &stored = project.layoutCells.at(layout).ports.at(port);
+    CHECK(stored.name == "VIN");
+    CHECK(stored.direction == ice::PortDirection::input);
+    CHECK(stored.side == ice::PortSide::left);
+    CHECK(stored.net == net);
+    CHECK(stored.label == "VIN");
+    CHECK_THROWS_AS(ice::addPort(project, layout, "vin", layer, {0, 0, 100, 100}), ice::ProjectError);
+
+    const auto serialized = project.serialize();
+    auto oldSchema = serialized;
+    const auto version = oldSchema.find("\"schema_version\": 2");
+    CHECK(version != std::string::npos);
+    if (version != std::string::npos)
+        oldSchema.replace(version, std::string("\"schema_version\": 2").size(), "\"schema_version\": 1");
+    CHECK_THROWS_AS(ice::Project::deserialize(oldSchema), ice::ProjectError);
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto &roundTripPort = roundTrip.layoutCells.at(layout).ports.at(port);
+    CHECK(roundTripPort.name == "VIN");
+    CHECK(roundTripPort.direction == ice::PortDirection::input);
+    CHECK(roundTripPort.side == ice::PortSide::left);
+    CHECK(roundTripPort.net == net);
+    CHECK(roundTrip.layoutCells.at(layout).nets.at(net).name == "VIN");
+
+    ice::movePort(project, layout, port, 100, 200);
+    CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.x == 100);
+    ice::resizePort(project, layout, port, {100, 200, 800, 600});
+    CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.width == 800);
+    ice::assignPortNet(project, layout, port, 0);
+    CHECK(project.layoutCells.at(layout).ports.at(port).net == 0);
+    ice::assignPortNet(project, layout, port, net);
+    CHECK(project.layoutCells.at(layout).ports.at(port).net == net);
+    ice::removePort(project, layout, port);
+    CHECK(project.layoutCells.at(layout).ports.empty());
+}
+
 TEST_CASE("waveform and current source symbols generate SPICE source expressions") {
     ice::Project project;
     project.identity = "sources";
@@ -999,7 +1102,9 @@ TEST_CASE("shipped IHP layout device library loads") {
 
 TEST_CASE("generated layout device geometry parses") {
     const auto geometry = ice::parseLayoutDeviceGeometry(
-        R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}]})");
+        R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}],)"
+        R"("ports":[{"name":"G","layer":1,"datatype":0,"rectangle":{"x":0,"y":0,"width":2,"height":3},)"
+        R"("direction":"input","side":"left","label":"G"}]})");
     CHECK(geometry.bounds.x == 0);
     CHECK(geometry.bounds.y == -1);
     CHECK(geometry.bounds.width == 10);
@@ -1008,6 +1113,11 @@ TEST_CASE("generated layout device geometry parses") {
     CHECK(geometry.shapes.front().layer == 1);
     CHECK(geometry.shapes.front().datatype == 2);
     CHECK(geometry.shapes.front().polygon.size() == 4);
+    CHECK(geometry.ports.size() == 1);
+    CHECK(geometry.ports.front().name == "G");
+    CHECK(geometry.ports.front().direction == ice::PortDirection::input);
+    CHECK(geometry.ports.front().side == ice::PortSide::left);
+    CHECK(geometry.ports.front().rectangle.width == 2);
     CHECK_THROWS_AS(ice::parseLayoutDeviceGeometry(R"({"bounds":[0,0,0,0],"shapes":[]})"), ice::ProjectError);
 }
 
@@ -1334,8 +1444,8 @@ TEST_CASE("layout spacing changes do not reject off-grid layout or schematic dat
     symbol.artwork = "device";
     project.schematicCells.at(schematic).symbols.emplace(symbolId, symbol);
     const auto instanceId = project.nextId();
-    project.schematicCells.at(schematic).instances.emplace(
-        instanceId, ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
+    project.schematicCells.at(schematic).instances.emplace(instanceId,
+                                                           ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
 
     ice::ProjectSession session(project);
     bool changed = true;
@@ -1381,7 +1491,9 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(layout.plannedDevices.size() == 2);
     CHECK(layout.plannedConnections.size() == 1);
     const auto &connection = layout.plannedConnections.begin()->second;
-    CHECK(connection.name == "out");
+    const auto layoutNet = layout.nets.find(connection.net);
+    CHECK(layoutNet != layout.nets.end());
+    CHECK(layoutNet->second.name == "out");
 
     ice::ObjectId resistorDevice = 0;
     ice::ObjectId capacitorDevice = 0;
@@ -1407,7 +1519,10 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.size() == 2);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.size() == 1);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.at(resistorDevice).name == "R1");
-    CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.begin()->second.name == "out");
+    const auto roundTripConnection = roundTrip.layoutCells.at(layoutId).plannedConnections.begin()->second;
+    const auto roundTripNet = roundTrip.layoutCells.at(layoutId).nets.find(roundTripConnection.net);
+    CHECK(roundTripNet != roundTrip.layoutCells.at(layoutId).nets.end());
+    CHECK(roundTripNet->second.name == "out");
 
     const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
     CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);

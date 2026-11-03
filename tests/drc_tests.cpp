@@ -1,9 +1,11 @@
 #include "icelib/drc.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/verification.hpp"
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -198,4 +200,34 @@ TEST_CASE("gdscheck process and argument mapping is stable") {
     CHECK((ice::gdsCheckArguments(options) == std::vector<std::string>{"run", "--input", "/tmp/layout.gds", "--process",
                                                                        "ihp-sg13g2", "--topcell", "TOP", "--report",
                                                                        "/tmp/drc.lyrdb", "--suite", "main"}));
+}
+
+TEST_CASE("local verification checks pin geometry and pin shorts") {
+    ice::Project project;
+    project.identity = "pin-drc";
+    project.name = "pin-drc";
+    project.grid = 10;
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto power = ice::createLayoutNet(project, cell, "VDD");
+    const auto ground = ice::createLayoutNet(project, cell, "VSS");
+    ice::addRectangle(project, cell, layer, {0, 0, 4000, 4000});
+    ice::addPort(project, cell, "VDD", layer, {0, 0, 1000, 1000}, ice::PortDirection::power, ice::PortSide::left, power,
+                 "VDD");
+    ice::addPort(project, cell, "VSS", layer, {500, 500, 1000, 1000}, ice::PortDirection::ground, ice::PortSide::bottom,
+                 ground, "VSS");
+    ice::addPort(project, cell, "NARROW", layer, {2000, 2000, 1, 1000}, ice::PortDirection::input, ice::PortSide::right,
+                 0, "NARROW");
+    ice::addPort(project, cell, "OUTSIDE", layer, {5000, 5000, 500, 500}, ice::PortDirection::output,
+                 ice::PortSide::right, 0, "OUTSIDE");
+
+    ice::LocalVerificationAdapter adapter;
+    const auto report = adapter.run(project, cell);
+    const auto hasRule = [&](const std::string &rule) {
+        return std::any_of(report.drc.begin(), report.drc.end(),
+                           [&](const ice::DrcViolation &violation) { return violation.rule == rule; });
+    };
+    CHECK(hasRule("pin-short"));
+    CHECK(hasRule("pin-min-width"));
+    CHECK(hasRule("pin-outside-cell"));
 }

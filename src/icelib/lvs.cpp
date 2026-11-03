@@ -135,9 +135,17 @@ struct LogicalNet {
     ObjectId object = 0;
 };
 
+struct LogicalPort {
+    ObjectId object = 0;
+    std::string name;
+    std::string direction;
+    std::string net;
+};
+
 struct LogicalSide {
     std::map<ObjectId, LogicalDevice> devices;
     std::vector<LogicalNet> nets;
+    std::vector<LogicalPort> ports;
 };
 
 struct LayoutLogicalSide {
@@ -157,25 +165,66 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
 
     LogicalSide side;
     std::map<ObjectId, std::vector<ObjectId>> pinOwners;
+    struct PortInstance {
+        ObjectId id = 0;
+        std::string name;
+        std::string direction;
+        std::vector<ObjectId> pins;
+    };
+    std::vector<PortInstance> portInstances;
     for (const auto &[id, instance] : cell.instances) {
         LogicalDevice device;
         device.object = id;
         const auto symbol = cell.symbols.find(instance.symbol);
+        std::string symbolType;
+        if (symbol != cell.symbols.end())
+            symbolType = normalizedIdentifier(symbol->second.name);
+        const bool isPort = symbolType == "input" || symbolType == "output";
         if (symbol != cell.symbols.end()) {
             device.type = symbol->second.name;
             device.sourceCell = symbol->second.sourceCell;
-            for (const auto &pin : symbol->second.pins)
-                pinOwners[pin.id].push_back(id);
+            if (isPort) {
+                PortInstance port;
+                port.id = id;
+                port.name = instance.name.empty() ? symbol->second.name : instance.name;
+                port.direction = symbolType;
+                for (const auto &pin : symbol->second.pins)
+                    port.pins.push_back(pin.id);
+                portInstances.push_back(std::move(port));
+            } else {
+                for (const auto &pin : symbol->second.pins)
+                    pinOwners[pin.id].push_back(id);
+            }
         } else {
             device.type = "unknown";
             mismatches.push_back({1, "schematic-symbol",
                                   "Schematic instance '" + instance.name + "' references a missing symbol", id,
                                   std::nullopt, VerificationSeverity::error});
         }
+        if (isPort)
+            continue;
         device.name = instance.name.empty() ? device.type + " " + std::to_string(id) : instance.name;
         device.parameters = parameterMap(instance.parameters);
         device.hasParameters = true;
         side.devices.emplace(id, std::move(device));
+    }
+
+    std::map<ObjectId, std::string> netByPin;
+    for (const auto &[id, net] : cell.nets) {
+        const auto netName = net.name.empty() ? "N" + std::to_string(id) : net.name;
+        for (const auto pinId : net.pins)
+            netByPin.emplace(pinId, netName);
+    }
+    for (auto &port : portInstances) {
+        for (const auto pinId : port.pins) {
+            if (const auto net = netByPin.find(pinId); net != netByPin.end()) {
+                side.ports.push_back({port.id, port.name, port.direction, net->second});
+                break;
+            }
+        }
+        if (std::none_of(side.ports.begin(), side.ports.end(),
+                         [&](const LogicalPort &candidate) { return candidate.object == port.id; }))
+            side.ports.push_back({port.id, port.name, port.direction, {}});
     }
 
     for (const auto &[id, net] : cell.nets) {
@@ -321,11 +370,14 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             continue;
         }
         validConnection = true;
-        if (!connection.name.empty()) {
-            auto &members = namedGroups[connection.name];
+        const auto layoutNet = cell.nets.find(connection.net);
+        const std::string netName =
+            layoutNet != cell.nets.end() && !layoutNet->second.name.empty() ? layoutNet->second.name : std::string{};
+        if (!netName.empty()) {
+            auto &members = namedGroups[netName];
             members.insert(connection.from);
             members.insert(connection.to);
-            const auto [entry, inserted] = namedObjects.emplace(connection.name, connection.id);
+            const auto [entry, inserted] = namedObjects.emplace(netName, connection.id);
             if (!inserted && connection.id < entry->second)
                 entry->second = connection.id;
         } else {
@@ -369,6 +421,17 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         }
         if (net.devices.size() >= 2)
             result.side.nets.push_back(std::move(net));
+    }
+
+    for (const auto &[_, port] : cell.ports) {
+        if (!port.visible)
+            continue;
+        std::string netName;
+        if (port.net != 0) {
+            if (const auto net = cell.nets.find(port.net); net != cell.nets.end())
+                netName = net->second.name;
+        }
+        result.side.ports.push_back({port.id, port.name, portDirectionName(port.direction), netName});
     }
 
     return result;
@@ -510,6 +573,48 @@ std::string signatureNames(const NetSignature &signature, const std::map<std::st
     return joinNames(names);
 }
 
+int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::vector<LvsMismatch> &mismatches) {
+    if (schematic.ports.empty() && layout.ports.empty())
+        return 0;
+    std::map<std::string, LogicalPort> schematicPorts;
+    std::map<std::string, LogicalPort> layoutPorts;
+    for (const auto &port : schematic.ports)
+        schematicPorts[normalizedIdentifier(port.name)] = port;
+    for (const auto &port : layout.ports)
+        layoutPorts[normalizedIdentifier(port.name)] = port;
+    int matched = 0;
+    for (const auto &[name, port] : schematicPorts) {
+        const auto layoutPort = layoutPorts.find(name);
+        if (layoutPort == layoutPorts.end()) {
+            mismatches.push_back({1, "missing-port", "Schematic port '" + port.name + "' has no matching layout pin",
+                                  port.object, std::nullopt, VerificationSeverity::error});
+            continue;
+        }
+        ++matched;
+        if (!port.direction.empty() && !layoutPort->second.direction.empty() &&
+            port.direction != layoutPort->second.direction)
+            mismatches.push_back({1, "port-direction",
+                                  "Port '" + port.name + "' is '" + port.direction + "' in the schematic but '" +
+                                      layoutPort->second.direction + "' in the layout",
+                                  port.object, layoutPort->second.object, VerificationSeverity::warning});
+        const auto schematicNet = normalizedIdentifier(port.net);
+        const auto layoutNet = normalizedIdentifier(layoutPort->second.net);
+        if (!schematicNet.empty() && schematicNet != layoutNet)
+            mismatches.push_back({1, "port-net",
+                                  "Port '" + port.name + "' is connected to net '" + port.net +
+                                      "' in the schematic but '" +
+                                      (layoutPort->second.net.empty() ? "an unassigned pin" : layoutPort->second.net) +
+                                      "' in the layout",
+                                  port.object, layoutPort->second.object, VerificationSeverity::error});
+    }
+    for (const auto &[name, port] : layoutPorts) {
+        if (!schematicPorts.contains(name))
+            mismatches.push_back({1, "extra-port", "Layout pin '" + port.name + "' has no matching schematic port",
+                                  std::nullopt, port.object, VerificationSeverity::error});
+    }
+    return matched;
+}
+
 void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
                  const std::map<ObjectId, std::string> &schematicKeys,
                  const std::map<ObjectId, std::string> &layoutKeys, const std::map<std::string, std::string> &keyNames,
@@ -634,6 +739,7 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
 
     auto schematic = collectSchematicSide(project, schematicCellId, report.mismatches);
     auto layout = collectLayoutSide(project, layoutCellId, schematicIt->second, report.mismatches);
+    report.portsMatched = comparePorts(schematic, layout.side, report.mismatches);
 
     std::map<std::string, std::vector<ObjectId>> schematicByName;
     for (const auto &[id, device] : schematic.devices)
@@ -688,6 +794,7 @@ std::string serializeLvsReport(const LvsReport &report) {
                 {"schematic", report.schematic},
                 {"layout", report.layout},
                 {"matched", report.matched()},
+                {"ports_matched", report.portsMatched},
                 {"mismatches", json::array()}};
     const auto optionalId = [](std::optional<ObjectId> id) -> json { return id ? json(*id) : json(nullptr); };
     for (const auto &mismatch : report.mismatches) {

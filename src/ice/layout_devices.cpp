@@ -35,12 +35,11 @@
 void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
     const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
     for (const auto &layer : pdk.layers) {
-        const auto exists = std::find_if(project.layers.begin(), project.layers.end(),
-                                         [&](const auto &entry) {
-                                             const auto &existing = entry.second;
-                                             return existing.name == layer.name && existing.layout == 0 &&
-                                                    (existing.pdk.empty() || existing.pdk == technology);
-                                         });
+        const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+            const auto &existing = entry.second;
+            return existing.name == layer.name && existing.layout == 0 &&
+                   (existing.pdk.empty() || existing.pdk == technology);
+        });
         if (exists == project.layers.end()) {
             ice::addLayer(project, layer.name, layer.number, 0, technology);
         } else if (exists->second.pdk.empty()) {
@@ -269,7 +268,9 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     clone.ports.clear();
     for (const auto &[_, port] : source.ports) {
         const auto id = nextId++;
-        clone.ports.emplace(id, ice::Port{id, port.name, port.layer, port.rectangle});
+        auto clonedPort = port;
+        clonedPort.id = id;
+        clone.ports.emplace(id, std::move(clonedPort));
     }
     clone.instances.clear();
     for (const auto &[_, instance] : source.instances) {
@@ -322,7 +323,8 @@ QString pythonExecutable() {
 }
 
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
-                             const std::vector<ice::LayoutDeviceShape> &sourceShapes) {
+                             const std::vector<ice::LayoutDeviceShape> &sourceShapes,
+                             const std::vector<ice::LayoutDevicePort> &sourcePorts) {
     cell.shapes.clear();
     cell.ports.clear();
     cell.instances.clear();
@@ -330,32 +332,34 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
     for (const auto &layer : library.layers)
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
+    const auto layerIdFor = [&](int number, int datatype) {
+        const auto key = std::make_pair(number, datatype);
+        if (const auto existing = layerIds.find(key); existing != layerIds.end())
+            return existing->second;
+        const auto nameIt = layerNames.find(key);
+        std::string layerName;
+        if (nameIt != layerNames.end() && !nameIt->second.empty())
+            layerName = nameIt->second;
+        else if (datatype == 0)
+            layerName = "Layer " + std::to_string(number);
+        else
+            layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
+        ice::ObjectId layerId = 0;
+        for (const auto &[id, layer] : project.layers) {
+            if (layer.number == number && layer.name == layerName) {
+                layerId = id;
+                break;
+            }
+        }
+        if (layerId == 0)
+            layerId = ice::addLayer(project, layerName, number);
+        layerIds.emplace(key, layerId);
+        return layerId;
+    };
     for (const auto &sourceShape : sourceShapes) {
         if (sourceShape.polygon.size() < 3)
             continue;
-        const auto key = std::make_pair(sourceShape.layer, sourceShape.datatype);
-        auto layerIt = layerIds.find(key);
-        if (layerIt == layerIds.end()) {
-            const auto nameIt = layerNames.find(key);
-            std::string layerName;
-            if (nameIt != layerNames.end() && !nameIt->second.empty())
-                layerName = nameIt->second;
-            else if (sourceShape.datatype == 0)
-                layerName = "Layer " + std::to_string(sourceShape.layer);
-            else
-                layerName =
-                    "Layer " + std::to_string(sourceShape.layer) + " (dt " + std::to_string(sourceShape.datatype) + ")";
-            ice::ObjectId layerId = 0;
-            for (const auto &[id, layer] : project.layers) {
-                if (layer.number == sourceShape.layer && layer.name == layerName) {
-                    layerId = id;
-                    break;
-                }
-            }
-            if (layerId == 0)
-                layerId = ice::addLayer(project, layerName, sourceShape.layer);
-            layerIt = layerIds.emplace(key, layerId).first;
-        }
+        const auto layerId = layerIdFor(sourceShape.layer, sourceShape.datatype);
         ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
@@ -371,8 +375,16 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
         for (const auto &point : sourceShape.polygon)
             polygon.push_back({point.x, point.y});
         const auto shapeId = project.nextId();
-        cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerIt->second, std::nullopt,
+        cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerId, std::nullopt,
                                                 ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+    }
+    for (const auto &sourcePort : sourcePorts) {
+        const auto id = project.nextId();
+        ice::Port port{id, sourcePort.name, layerIdFor(sourcePort.layer, sourcePort.datatype), sourcePort.rectangle};
+        port.direction = sourcePort.direction;
+        port.side = sourcePort.side;
+        port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
+        cell.ports.emplace(id, std::move(port));
     }
 }
 

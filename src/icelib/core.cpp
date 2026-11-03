@@ -106,6 +106,8 @@ ObjectId Project::nextId() {
             update(shapeId);
         for (const auto &[portId, port] : cell.ports)
             update(portId);
+        for (const auto &[netId, net] : cell.nets)
+            update(netId);
         for (const auto &[instanceId, instance] : cell.instances)
             update(instanceId);
         for (const auto &[deviceId, device] : cell.plannedDevices)
@@ -182,8 +184,50 @@ std::vector<Diagnostic> Project::validate() const {
         }
         (void)cellId;
     }
+    const auto layoutNameKey = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    };
     for (const auto &[cellId, cell] : layoutCells) {
+        std::set<std::string> layoutNetNames;
+        for (const auto &[netId, net] : cell.nets) {
+            if (net.name.empty())
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.net.name", "Layout net name is required", netId});
+            else if (!layoutNetNames.insert(layoutNameKey(net.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.net.name.duplicate",
+                                  "Layout net name is listed more than once: " + net.name, netId});
+        }
+        std::set<std::string> portNames;
+        for (const auto &[portId, port] : cell.ports) {
+            if (port.name.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.port.name", "Port name is required", portId});
+            else if (!portNames.insert(layoutNameKey(port.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.port.name.duplicate",
+                                  "Port name is listed more than once: " + port.name, portId});
+            if (port.label.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.port.label", "Port label is required", portId});
+            if (port.net != 0 && !cell.nets.contains(port.net))
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.port.net", "Port references a missing layout net", portId});
+            if (port.sourceInstance != 0 || port.sourcePort != 0) {
+                const auto instance = cell.instances.find(port.sourceInstance);
+                if (instance == cell.instances.end())
+                    result.push_back({Diagnostic::Severity::error, "layout.port.source_instance",
+                                      "Promoted port references a missing layout instance", portId});
+                else {
+                    const auto child = layoutCells.find(instance->second.cell);
+                    if (child == layoutCells.end() || !child->second.ports.contains(port.sourcePort))
+                        result.push_back({Diagnostic::Severity::error, "layout.port.source_port",
+                                          "Promoted port references a missing child port", portId});
+                }
+            }
+        }
         for (const auto &[shapeId, shape] : cell.shapes) {
+            if (shape.net && *shape.net != 0 && !cell.nets.contains(*shape.net))
+                result.push_back({Diagnostic::Severity::error, "layout.shape.net",
+                                  "Shape references a missing layout net", shapeId});
             if (!layers.contains(shape.layer))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.shape.layer", "Shape references a missing layer", shapeId});
@@ -247,6 +291,9 @@ std::vector<Diagnostic> Project::validate() const {
             if (connection.from == connection.to)
                 result.push_back({Diagnostic::Severity::error, "layout.planned_connection.self",
                                   "Planned connection must join two different devices", connectionId});
+            if (connection.net != 0 && !cell.nets.contains(connection.net))
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.net",
+                                  "Planned connection references a missing layout net", connectionId});
         }
         (void)cellId;
     }
@@ -355,11 +402,11 @@ std::string Project::serialize() const {
     j["layers"] = json::array();
     for (const auto &[id, layer] : layers)
         j["layers"].push_back({{"id", id},
-                                {"name", layer.name},
-                                {"number", layer.number},
-                                {"visible", layer.visible},
-                                {"layout", layer.layout},
-                                {"pdk", layer.pdk}});
+                               {"name", layer.name},
+                               {"number", layer.number},
+                               {"visible", layer.visible},
+                               {"layout", layer.layout},
+                               {"pdk", layer.pdk}});
     j["layout_cells"] = json::array();
     for (const auto &[id, cell] : layoutCells) {
         json c = {{"id", id},
@@ -421,10 +468,24 @@ std::string Project::serialize() const {
             c["shapes"].push_back(s);
         }
         for (const auto &[pid, port] : cell.ports) {
-            json p = {{"id", pid}, {"name", port.name}, {"layer", port.layer}, {"rectangle", json::object()}};
+            json p = {{"id", pid},
+                      {"name", port.name},
+                      {"layer", port.layer},
+                      {"rectangle", json::object()},
+                      {"direction", portDirectionName(port.direction)},
+                      {"side", portSideName(port.side)},
+                      {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                      {"label", port.label},
+                      {"visible", port.visible},
+                      {"locked", port.locked},
+                      {"source_instance", port.sourceInstance},
+                      {"source_port", port.sourcePort}};
             put(p["rectangle"], port.rectangle);
             c["ports"].push_back(p);
         }
+        c["nets"] = json::array();
+        for (const auto &[netId, net] : cell.nets)
+            c["nets"].push_back({{"id", netId}, {"name", net.name}});
         for (const auto &[iid, instance] : cell.instances)
             c["instances"].push_back({{"id", iid},
                                       {"cell", instance.cell},
@@ -441,7 +502,7 @@ std::string Project::serialize() const {
         }
         for (const auto &[cid, connection] : cell.plannedConnections)
             c["planned_connections"].push_back(
-                {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"name", connection.name}});
+                {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"net", connection.net}});
         j["layout_cells"].push_back(c);
     }
     j["procedural_layouts"] = json::array();
@@ -525,6 +586,60 @@ static PinDirection parsePinDirection(const std::string &value) {
     return it == values.end() ? PinDirection::right : it->second;
 }
 
+const char *portDirectionName(PortDirection direction) {
+    switch (direction) {
+    case PortDirection::input:
+        return "input";
+    case PortDirection::output:
+        return "output";
+    case PortDirection::inout:
+        return "inout";
+    case PortDirection::power:
+        return "power";
+    case PortDirection::ground:
+        return "ground";
+    }
+    throw ProjectError("project.port_direction", "Unknown port direction value");
+}
+
+const char *portSideName(PortSide side) {
+    switch (side) {
+    case PortSide::left:
+        return "left";
+    case PortSide::right:
+        return "right";
+    case PortSide::top:
+        return "top";
+    case PortSide::bottom:
+        return "bottom";
+    }
+    throw ProjectError("project.port_side", "Unknown port side value");
+}
+
+std::optional<PortDirection> parsePortDirection(const std::string &value) {
+    static const std::map<std::string, PortDirection> values = {
+        {"input", PortDirection::input}, {"output", PortDirection::output}, {"inout", PortDirection::inout},
+        {"power", PortDirection::power}, {"ground", PortDirection::ground},
+    };
+    const auto it = values.find(value);
+    if (it == values.end())
+        return std::nullopt;
+    return it->second;
+}
+
+std::optional<PortSide> parsePortSide(const std::string &value) {
+    static const std::map<std::string, PortSide> values = {
+        {"left", PortSide::left},
+        {"right", PortSide::right},
+        {"top", PortSide::top},
+        {"bottom", PortSide::bottom},
+    };
+    const auto it = values.find(value);
+    if (it == values.end())
+        return std::nullopt;
+    return it->second;
+}
+
 Project Project::deserialize(const std::string &text) {
     try {
         auto j = json::parse(text);
@@ -590,12 +705,8 @@ Project Project::deserialize(const std::string &text) {
             p.schematicCells.emplace(cell.id, std::move(cell));
         }
         for (const auto &l : j.at("layers"))
-            p.layers.emplace(l.at("id"), Layer{l.at("id"),
-                                                l.at("name"),
-                                                l.at("number"),
-                                                l.value("visible", true),
-                                                l.value("layout", ObjectId{0}),
-                                                l.value("pdk", std::string{})});
+            p.layers.emplace(l.at("id"), Layer{l.at("id"), l.at("name"), l.at("number"), l.value("visible", true),
+                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{})});
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
             cell.pdk = c.value("pdk", std::string{genericPdkId});
@@ -636,11 +747,26 @@ Project Project::deserialize(const std::string &text) {
                 shape.name = s.value("name", std::string{});
                 cell.shapes.emplace(shape.id, shape);
             }
-            for (const auto &port : c.at("ports"))
-                cell.ports.emplace(port.at("id"),
-                                   Port{port.at("id"), port.at("name"), port.at("layer"),
-                                        Rect{port.at("rectangle").at("x"), port.at("rectangle").at("y"),
-                                             port.at("rectangle").at("width"), port.at("rectangle").at("height")}});
+            for (const auto &net : c.at("nets"))
+                cell.nets.emplace(net.at("id"), LayoutNet{net.at("id"), net.at("name")});
+            for (const auto &port : c.at("ports")) {
+                Port value{port.at("id"), port.at("name"), port.at("layer"),
+                           Rect{port.at("rectangle").at("x"), port.at("rectangle").at("y"),
+                                port.at("rectangle").at("width"), port.at("rectangle").at("height")}};
+                const auto direction = parsePortDirection(port.at("direction").get<std::string>());
+                const auto side = parsePortSide(port.at("side").get<std::string>());
+                if (!direction || !side)
+                    throw ProjectError("project.port", "Layout port has an unknown direction or side");
+                value.direction = *direction;
+                value.side = *side;
+                value.net = port.at("net").is_null() ? ObjectId{0} : port.at("net").get<ObjectId>();
+                value.label = port.at("label").get<std::string>();
+                value.visible = port.at("visible").get<bool>();
+                value.locked = port.at("locked").get<bool>();
+                value.sourceInstance = port.at("source_instance").get<ObjectId>();
+                value.sourcePort = port.at("source_port").get<ObjectId>();
+                cell.ports.emplace(value.id, std::move(value));
+            }
             for (const auto &i : c.at("instances"))
                 cell.instances.emplace(i.at("id"), LayoutInstance{i.at("id"), i.at("cell"), i.at("name"), i.at("x"),
                                                                   i.at("y"), parseOrientation(i.at("orientation"))});
@@ -662,9 +788,9 @@ Project Project::deserialize(const std::string &text) {
                 for (const auto &connection : c.at("planned_connections")) {
                     PlannedConnection planned;
                     planned.id = connection.at("id");
-                    planned.from = connection.value("from", ObjectId{0});
-                    planned.to = connection.value("to", ObjectId{0});
-                    planned.name = connection.value("name", std::string{});
+                    planned.from = connection.at("from").get<ObjectId>();
+                    planned.to = connection.at("to").get<ObjectId>();
+                    planned.net = connection.at("net").get<ObjectId>();
                     const auto connectionId = planned.id;
                     cell.plannedConnections.emplace(connectionId, std::move(planned));
                 }
@@ -1178,13 +1304,13 @@ void Project::save(const std::filesystem::path &path) const {
         const auto id = cell.at("id").get<ObjectId>();
         const auto stem = uniqueStem(cell.value("name", std::string{}), id, usedLayouts);
         writeJsonFile(layoutDir / (stem + ".icelay"),
-                      json{{"format", "ice-layout"}, {"schema_version", 1}, {"layout", cell}});
+                      json{{"format", "ice-layout"}, {"schema_version", 2}, {"layout", cell}});
     }
     for (const auto &layout : proceduralLayouts) {
         const auto id = layout.at("id").get<ObjectId>();
         const auto stem = uniqueStem(layout.value("name", std::string{}), id, usedLayouts);
         writeJsonFile(layoutDir / (stem + ".icelay"),
-                      json{{"format", "ice-layout"}, {"schema_version", 1}, {"procedural_layout", layout}});
+                      json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", layout}});
     }
 
     std::set<std::string> usedSimulations;
@@ -1280,6 +1406,8 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
     readDirectory(root / "lay", ".icelay", [&](const json &document) {
         if (document.value("format", std::string{}) != "ice-layout")
             throw ProjectError("project.format", "Invalid layout file: expected format 'ice-layout'");
+        if (document.value("schema_version", 0) != 2)
+            throw ProjectError("project.schema", "Unsupported layout schema version");
         if (document.contains("layout"))
             full["layout_cells"].push_back(document.at("layout"));
         else if (document.contains("procedural_layout"))
@@ -1432,9 +1560,10 @@ BuildInfo buildInfo() {
 #else
     info.buildType = "unknown";
 #endif
-    info.features = {"project_repair", "project_recovery",    "project_migrate",    "schematic_add_pin",
-                     "text_schematic", "ngspice_log_capture", "simulation_metrics", "pdk_status",
-                     "pdk_build",      "save_revision_guard"};
+    info.features = {"project_repair",      "project_recovery",    "project_migrate",    "schematic_add_pin",
+                     "text_schematic",      "ngspice_log_capture", "simulation_metrics", "pdk_status",
+                     "pdk_build",           "save_revision_guard", "layout_pins",        "layout_pin_hierarchy",
+                     "layout_connectivity", "layout_lef_def",      "layout_pin_drc"};
     return info;
 }
 } // namespace ice

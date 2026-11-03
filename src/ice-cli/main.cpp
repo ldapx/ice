@@ -1,3 +1,4 @@
+#include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
@@ -141,6 +142,32 @@ ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &
 
 ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
     return resolveByIdOrName(project.layers, text, "layer");
+}
+
+ice::ObjectId resolveLayoutNet(const ice::LayoutCell &cell, const std::string &text) {
+    return resolveByIdOrName(cell.nets, text, "layout net");
+}
+
+ice::ObjectId resolveLayoutPort(const ice::LayoutCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && cell.ports.contains(*id))
+        return *id;
+    for (const auto &[id, port] : cell.ports) {
+        if (port.name == text)
+            return id;
+    }
+    argumentError("Unknown layout port: " + text);
+}
+
+ice::PortDirection parsePortDirectionArgument(const std::string &text) {
+    if (const auto direction = ice::parsePortDirection(text))
+        return *direction;
+    argumentError("Unknown port direction: " + text);
+}
+
+ice::PortSide parsePortSideArgument(const std::string &text) {
+    if (const auto side = ice::parsePortSide(text))
+        return *side;
+    argumentError("Unknown port side: " + text);
 }
 
 ice::ObjectId resolveSymbol(const ice::SchematicCell &cell, const std::string &text) {
@@ -527,7 +554,13 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
                                    {"x", port.rectangle.x},
                                    {"y", port.rectangle.y},
                                    {"width", port.rectangle.width},
-                                   {"height", port.rectangle.height}});
+                                   {"height", port.rectangle.height},
+                                   {"direction", ice::portDirectionName(port.direction)},
+                                   {"side", ice::portSideName(port.side)},
+                                   {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                   {"label", port.label},
+                                   {"visible", port.visible},
+                                   {"locked", port.locked}});
     }
     for (const auto &[id, instance] : cell.instances) {
         result["instances"].push_back({{"id", id},
@@ -758,9 +791,20 @@ void printHelp() {
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
-              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>\n"
+              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [pin options]\n"
+              << "  layout-list-ports <project> <cell>\n"
+              << "  layout-update-port <project> <cell> <port> [pin options]\n"
+              << "  layout-remove-port <project> <cell> <port>\n"
+              << "  layout-add-net <project> <cell> <name>\n"
+              << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
               << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
-              << "  layout-export-gds <project> <cell> <output.gds>\n\n"
+              << "  layout-connectivity <project> <cell>\n"
+              << "  layout-export-gds <project> <cell> <output.gds>\n"
+              << "  layout-export-lef <project> <cell> <output.lef>\n"
+              << "  layout-export-def <project> <cell> <output.def>\n"
+              << "  layout-import-gds <input.gds> <project> [pin-label-layer]\n"
+              << "  layout-import-lef <input.lef> <project>\n"
+              << "  layout-import-def <input.def> <project>\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n\n"
@@ -1334,18 +1378,163 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-add-port") {
-            expectArguments(args, 9, 9, "layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>");
+            expectArguments(args, 9, 1000,
+                            "layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [options]");
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveLayout(project, args[2]);
             const auto layer = resolveLayer(project, args[4]);
             const ice::Rect rect{parseInteger(args[5], "x"), parseInteger(args[6], "y"), parseInteger(args[7], "width"),
                                  parseInteger(args[8], "height")};
+            auto direction = ice::PortDirection::inout;
+            auto side = ice::PortSide::left;
+            ice::ObjectId net = 0;
+            std::string label = args[3];
+            bool visible = true;
+            bool locked = false;
+            for (std::size_t index = 9; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--direction" && index + 1 < args.size())
+                    direction = parsePortDirectionArgument(args[++index]);
+                else if (option == "--side" && index + 1 < args.size())
+                    side = parsePortSideArgument(args[++index]);
+                else if (option == "--net" && index + 1 < args.size())
+                    net = resolveLayoutNet(project.layoutCells.at(cell), args[++index]);
+                else if (option == "--label" && index + 1 < args.size())
+                    label = args[++index];
+                else if (option == "--hidden")
+                    visible = false;
+                else if (option == "--locked")
+                    locked = true;
+                else
+                    argumentError("Unknown layout-add-port option: " + option);
+            }
             ice::ProjectSession session(project);
             ice::ObjectId id = 0;
-            session.execute("layout-add-port",
-                            [&](ice::Project &p) { id = ice::addPort(p, cell, args[3], layer, rect); });
+            session.execute("layout-add-port", [&](ice::Project &p) {
+                id = ice::addPort(p, cell, args[3], layer, rect, direction, side, net, label);
+                auto &port = p.layoutCells.at(cell).ports.at(id);
+                port.visible = visible;
+                port.locked = locked;
+            });
             session.save(args[1]);
-            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"layer", layer}});
+            printJson({{"id", id},
+                       {"cell", cell},
+                       {"name", args[3]},
+                       {"layer", layer},
+                       {"direction", ice::portDirectionName(direction)},
+                       {"side", ice::portSideName(side)},
+                       {"net", net == 0 ? json(nullptr) : json(net)}});
+            return 0;
+        }
+
+        if (command == "layout-list-ports") {
+            expectArguments(args, 3, 3, "layout-list-ports <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            json ports = json::array();
+            for (const auto &[id, port] : project.layoutCells.at(cell).ports) {
+                ports.push_back({{"id", id},
+                                 {"name", port.name},
+                                 {"layer", port.layer},
+                                 {"x", port.rectangle.x},
+                                 {"y", port.rectangle.y},
+                                 {"width", port.rectangle.width},
+                                 {"height", port.rectangle.height},
+                                 {"direction", ice::portDirectionName(port.direction)},
+                                 {"side", ice::portSideName(port.side)},
+                                 {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                 {"label", port.label},
+                                 {"visible", port.visible},
+                                 {"locked", port.locked},
+                                 {"source_instance", port.sourceInstance},
+                                 {"source_port", port.sourcePort}});
+            }
+            printJson({{"cell", cell}, {"ports", std::move(ports)}});
+            return 0;
+        }
+
+        if (command == "layout-update-port") {
+            expectArguments(args, 4, 1000, "layout-update-port <project> <cell> <port> [options]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            auto &cellRef = project.layoutCells.at(cell);
+            const auto portId = resolveLayoutPort(cellRef, args[3]);
+            auto port = cellRef.ports.at(portId);
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--name" && index + 1 < args.size())
+                    port.name = args[++index];
+                else if (option == "--label" && index + 1 < args.size())
+                    port.label = args[++index];
+                else if (option == "--direction" && index + 1 < args.size())
+                    port.direction = parsePortDirectionArgument(args[++index]);
+                else if (option == "--side" && index + 1 < args.size())
+                    port.side = parsePortSideArgument(args[++index]);
+                else if (option == "--net" && index + 1 < args.size()) {
+                    const auto &value = args[++index];
+                    port.net = value == "none" ? ice::ObjectId{0} : resolveLayoutNet(cellRef, value);
+                } else if (option == "--x" && index + 1 < args.size())
+                    port.rectangle.x = parseInteger(args[++index], "x");
+                else if (option == "--y" && index + 1 < args.size())
+                    port.rectangle.y = parseInteger(args[++index], "y");
+                else if (option == "--width" && index + 1 < args.size())
+                    port.rectangle.width = parseInteger(args[++index], "width");
+                else if (option == "--height" && index + 1 < args.size())
+                    port.rectangle.height = parseInteger(args[++index], "height");
+                else if (option == "--visible")
+                    port.visible = true;
+                else if (option == "--hidden")
+                    port.visible = false;
+                else if (option == "--locked")
+                    port.locked = true;
+                else if (option == "--unlocked")
+                    port.locked = false;
+                else
+                    argumentError("Unknown layout-update-port option: " + option);
+            }
+            ice::ProjectSession session(project);
+            session.execute("layout-update-port", [&](ice::Project &p) { ice::updatePort(p, cell, port); });
+            session.save(args[1]);
+            printJson({{"id", portId}, {"cell", cell}});
+            return 0;
+        }
+
+        if (command == "layout-remove-port") {
+            expectArguments(args, 4, 4, "layout-remove-port <project> <cell> <port>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto portId = resolveLayoutPort(project.layoutCells.at(cell), args[3]);
+            ice::ProjectSession session(project);
+            session.execute("layout-remove-port", [&](ice::Project &p) { ice::removePort(p, cell, portId); });
+            session.save(args[1]);
+            printJson({{"id", portId}, {"cell", cell}});
+            return 0;
+        }
+
+        if (command == "layout-add-net") {
+            expectArguments(args, 4, 4, "layout-add-net <project> <cell> <name>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::ProjectSession session(project);
+            ice::ObjectId id = 0;
+            session.execute("layout-add-net", [&](ice::Project &p) { id = ice::createLayoutNet(p, cell, args[3]); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-assign-port-net") {
+            expectArguments(args, 5, 5, "layout-assign-port-net <project> <cell> <port> <net|none>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto portId = resolveLayoutPort(project.layoutCells.at(cell), args[3]);
+            const auto netId =
+                args[4] == "none" ? ice::ObjectId{0} : resolveLayoutNet(project.layoutCells.at(cell), args[4]);
+            ice::ProjectSession session(project);
+            session.execute("layout-assign-port-net",
+                            [&](ice::Project &p) { ice::assignPortNet(p, cell, portId, netId); });
+            session.save(args[1]);
+            printJson({{"port", portId}, {"net", netId == 0 ? json(nullptr) : json(netId)}});
             return 0;
         }
 
@@ -1373,6 +1562,82 @@ int main(int argc, char **argv) {
             const auto cell = resolveLayout(project, args[2]);
             ice::LayoutInterchange::exportGds(project, cell, args[3]);
             printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-export-lef") {
+            expectArguments(args, 4, 4, "layout-export-lef <project> <cell> <output.lef>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::LayoutInterchange::exportLef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-export-def") {
+            expectArguments(args, 4, 4, "layout-export-def <project> <cell> <output.def>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            ice::LayoutInterchange::exportDef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-import-gds") {
+            expectArguments(args, 3, 4, "layout-import-gds <input.gds> <project> [pin-label-layer]");
+            ice::LayoutImportOptions options;
+            if (args.size() == 4)
+                options.pinLabelLayer = std::stoi(args[3]);
+            auto project = ice::LayoutInterchange::importGds(args[1], options);
+            auto name = projectNameForPath(args[2]);
+            if (project.name.empty())
+                project.name = name;
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-import-lef") {
+            expectArguments(args, 3, 3, "layout-import-lef <input.lef> <project>");
+            auto project = ice::LayoutInterchange::importLef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-import-def") {
+            expectArguments(args, 3, 3, "layout-import-def <input.def> <project>");
+            auto project = ice::LayoutInterchange::importDef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-connectivity") {
+            expectArguments(args, 3, 3, "layout-connectivity <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            json groups = json::array();
+            for (const auto &group : ice::extractLayoutNets(project, cell)) {
+                groups.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
+                                  {"name", group.name},
+                                  {"shapes", group.shapes},
+                                  {"ports", group.ports},
+                                  {"connections", group.connections}});
+            }
+            printJson({{"cell", cell}, {"nets", std::move(groups)}});
             return 0;
         }
 

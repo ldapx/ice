@@ -91,7 +91,8 @@ std::string uniqueDeviceCellName(const ice::Project &project, const std::string 
 ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCell &source, const std::string &name);
 
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
-                             const std::vector<ice::LayoutDeviceShape> &sourceShapes);
+                             const std::vector<ice::LayoutDeviceShape> &sourceShapes,
+                             const std::vector<ice::LayoutDevicePort> &sourcePorts = {});
 std::optional<ice::LayoutDeviceCell> makeLayoutCellPreview(const ice::Project &project, const ice::LayoutCell &cell,
                                                            const ice::LayoutDeviceLibrary &library);
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,

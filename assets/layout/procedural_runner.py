@@ -143,9 +143,35 @@ class Layout:
 
     poly = polygon
 
-    def port(self, name, layer, x, y, width, height):
+    def port(
+        self,
+        name,
+        layer,
+        x,
+        y,
+        width,
+        height,
+        direction="inout",
+        side="left",
+        net=None,
+        label=None,
+        visible=True,
+        locked=False,
+    ):
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Port name must be a non-empty string")
+        if direction not in {"input", "output", "inout", "power", "ground"}:
+            raise ValueError(
+                "Port direction must be input, output, inout, power, or ground"
+            )
+        if side not in {"left", "right", "top", "bottom"}:
+            raise ValueError("Port side must be left, right, top, or bottom")
+        if net is not None and (not isinstance(net, str) or not net.strip()):
+            raise ValueError("Port net must be a non-empty string or None")
+        if label is None:
+            label = name.strip()
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("Port label must be a non-empty string")
         self.ports.append(
             {
                 "name": name.strip(),
@@ -156,6 +182,12 @@ class Layout:
                     "width": _positive(width, "port width"),
                     "height": _positive(height, "port height"),
                 },
+                "direction": direction,
+                "side": side,
+                "net": net.strip() if isinstance(net, str) else None,
+                "label": label.strip(),
+                "visible": bool(visible),
+                "locked": bool(locked),
             }
         )
 

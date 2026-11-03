@@ -30,12 +30,29 @@ def test_layout_builder() -> None:
             icepy.LayoutPoint(2000, 3000),
         ],
     )
-    builder.port("P1", "Metal1", 0, 0, 200, 200)
+    builder.layout_net("VIN")
+    builder.port(
+        "P1",
+        "Metal1",
+        0,
+        0,
+        200,
+        200,
+        direction="input",
+        side="left",
+        net="VIN",
+        label="VIN",
+    )
     builder.parameter("w", "1u")
     cell = builder.cell()
     assert cell.name == "top"
     assert len(cell.shapes) == 2
     assert len(cell.ports) == 1
+    assert cell.ports[0].direction == icepy.PortDirection.input
+    assert cell.ports[0].side == icepy.PortSide.left
+    assert cell.ports[0].label == "VIN"
+    assert len(cell.nets) == 1
+    assert cell.ports[0].net == cell.nets[0].id
     assert cell.parameters[0].value == "1u"
     assert cell.bounds is not None
     assert project.validate() == 0

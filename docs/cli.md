@@ -78,15 +78,39 @@ ice-cli layout-add-layer <project> <name> <number>
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
 ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
 ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
-ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height>
+ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [pin options]
+ice-cli layout-list-ports <project> <cell>
+ice-cli layout-update-port <project> <cell> <port> [pin options]
+ice-cli layout-remove-port <project> <cell> <port>
+ice-cli layout-add-net <project> <cell> <name>
+ice-cli layout-assign-port-net <project> <cell> <port> <net|none>
 ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
+ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds>
+ice-cli layout-export-lef <project> <cell> <output.lef>
+ice-cli layout-export-def <project> <cell> <output.def>
+ice-cli layout-import-gds <input.gds> <project> [pin-label-layer]
+ice-cli layout-import-lef <input.lef> <project>
+ice-cli layout-import-def <input.def> <project>
 ```
 
-Coordinates are integer database units. `layout-remove` accepts either a static
-layout cell or a procedural layout; removing a procedural layout also removes
-its generated static child. Removal is blocked when instances reference the
-layout, and library cells cannot be removed.
+Pin options are `--direction input|output|inout|power|ground`, `--side
+left|right|top|bottom`, `--net <name-or-id>`, `--label <text>`, `--hidden`,
+`--locked`, and for updates `--unlocked`, `--visible`, `--name`, `--x`, `--y`,
+`--width`, and `--height`. Coordinates are integer database units.
+
+`layout-remove` accepts either a static layout cell or a procedural layout;
+removing a procedural layout also removes its generated static child. Removal
+is blocked when instances reference the layout, and library cells cannot be
+removed. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
+TEXT label. `layout-connectivity` merges objects assigned to the same layout
+net and geometry that overlaps or touches on the same layer; via and contact
+layers also connect overlapping layers. `layout-export-lef` and
+`layout-export-def` write minimal pin metadata for place-and-route exchange.
+`layout-import-gds` creates a new project and, when a pin-label layer is given,
+converts matching TEXT records into pins. `layout-import-lef` and
+`layout-import-def` create a new project from a macro or design's pins and
+nets.
 
 ## Verification
 
@@ -110,8 +134,10 @@ callable.
 `lvs-auto` infers the schematic from planned-device links or matching names.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
-device types, shared device parameters, and net topology from planned
-connections.
+device types, shared device parameters, net topology from planned connections,
+and top-level pins matched by name, direction, and bound net. The JSON report
+includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
+and `port-net` mismatch categories.
 
 ## PDK setup
 

@@ -68,7 +68,7 @@ def check_library(name: str, root: Path) -> None:
     expected = PACKAGES[name]
     library = json.loads((root / "layout" / "devices.json").read_text())
     assert library["format"] == "ice-layout-device-library"
-    assert library["schema_version"] == 1
+    assert library["schema_version"] == 2
     assert library["pdk"]
     assert library["cell_prefix"]
     assert len(library["cells"]) >= expected["cells"]
@@ -126,6 +126,8 @@ def check_library(name: str, root: Path) -> None:
             },
         )
     assert generated["shapes"], f"{name}: generator produced no shapes"
+    if name != "ice-pkg-ihp-sg13g2":
+        assert generated["ports"], f"{name}: generator produced no ports"
     assert generated["bounds"][2] > generated["bounds"][0]
     assert generated["bounds"][3] > generated["bounds"][1]
     assert generated["bounds"][2] - generated["bounds"][0] < 1_000_000
