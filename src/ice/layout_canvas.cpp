@@ -1984,32 +1984,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_Space) {
-            setTool(Tool::select);
-            if (toolEscapeRequested_)
-                toolEscapeRequested_();
-            event->accept();
-            return;
-        }
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
              tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
-            event->accept();
-            return;
-        }
-        if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) && deleted_ && !readOnly_) {
-            std::vector<ice::ObjectId> ids;
-            for (auto *item : scene()->selectedItems())
-                if (item->data(0).isValid()) {
-                    const auto id = item->data(0).toULongLong();
-                    if (id != 0)
-                        ids.push_back(id);
-                }
-            if (!ids.empty())
-                deleted_(std::move(ids));
             event->accept();
             return;
         }

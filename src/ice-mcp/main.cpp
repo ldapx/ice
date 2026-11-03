@@ -972,8 +972,6 @@ class IceMcpServer {
             }
         }
         return result;
-
-        return result;
     }
 
     json call(const std::string &name, const json &arguments) {

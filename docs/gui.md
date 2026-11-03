@@ -370,6 +370,33 @@ layout. The user should be able to inspect generated provenance, edit geometry,
 and continue with Python or agent operations without exporting to an
 intermediate format.
 
+## Keyboard shortcuts
+
+Editor tool shortcuts are active while the schematic or layout canvas has
+focus. The same key may be used for different tools in the two editors.
+
+Common defaults:
+
+- **Select**: Space
+- **Place device**: P
+- **Delete selection**: Del
+- **Run simulation / DRC / LVS**: F6 / F7 / F8
+- **Fit to view**: F
+- **Toggle grid**: Ctrl+G
+- **Snap to grid**: Shift+G
+- **Hierarchy up / down**: Alt+Up / Alt+Down
+- **Schematic rotate / flip**: R / H
+- **Layout rotate / flips**: Ctrl+R / H / J
+- **Layout rectangle / polygon / path / text / pin / ruler**: R / G / W / T / N / L
+- **Layout boolean union / intersection / difference / XOR**: U / I / D / X
+
+Use **Settings → Keyboard Shortcuts…** (Ctrl+Shift+K) to reassign commands,
+clear a binding, reset one command, or reset all commands. Global commands work
+anywhere in the window; schematic and layout entries are scoped to their editor
+canvas so the same key can be reused. Conflicts within a scope, or against a
+global shortcut, are rejected. Bindings are stored in the user's Qt settings and
+applied immediately.
+
 ## Simulation scripts
 
 The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation

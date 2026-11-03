@@ -18,6 +18,7 @@
 #include "python_highlighter.hpp"
 #include "schematic_canvas.hpp"
 #include "schematic_utils.hpp"
+#include "shortcuts.hpp"
 #include "side_panels.hpp"
 
 #include "appearance.hpp"
@@ -67,6 +68,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
@@ -4521,7 +4523,17 @@ class DocumentWindow : public QMainWindow {
                 layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
             if (layoutDevicesPanel_)
                 layoutDevicesPanel_->focusDeviceList();
-            statusBar()->showMessage(QStringLiteral("Select a layout device"));
+            if (layoutPlaceDeviceTool_)
+                layoutPlaceDeviceTool_->setChecked(true);
+            if (layoutCanvas_) {
+                layoutCanvas_->setTool(LayoutCanvas::Tool::placeDevice);
+                layoutCanvas_->setFocus();
+            }
+            if (!selectedLayoutDevice_)
+                statusBar()->showMessage(QStringLiteral("Select a device in the Devices tab first"));
+            else
+                statusBar()->showMessage(QStringLiteral("Click in the layout to place %1")
+                                             .arg(QString::fromStdString(selectedLayoutDevice_->name)));
             return;
         }
         if (const auto definition = chooseSchematicPlacementDevice())
@@ -7482,9 +7494,9 @@ class DocumentWindow : public QMainWindow {
 
     QAction *addCommand(const QString &text, const QKeySequence &shortcut = {}) {
         auto *action = new QAction(text, this);
-        if (!shortcut.isEmpty())
-            action->setShortcut(shortcut);
         commands_.append(action);
+        shortcuts_.registerAction(action, ice::ShortcutRegistry::idForText(QStringLiteral("global"), text), text,
+                                  ice::ShortcutScope::global, shortcut);
         return action;
     }
 
@@ -7536,6 +7548,31 @@ class DocumentWindow : public QMainWindow {
         update();
     }
 
+    bool invokeFocusedTextAction(const char *method) {
+        auto *focus = QApplication::focusWidget();
+        if (!focus ||
+            !(focus->inherits("QLineEdit") || focus->inherits("QPlainTextEdit") || focus->inherits("QTextEdit")))
+            return false;
+        return QMetaObject::invokeMethod(focus, method);
+    }
+
+    void deleteCurrentSelection() {
+        if (auto *focus = QApplication::focusWidget();
+            focus &&
+            (focus->inherits("QLineEdit") || focus->inherits("QPlainTextEdit") || focus->inherits("QTextEdit"))) {
+            QKeyEvent event(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+            QApplication::sendEvent(focus, &event);
+            return;
+        }
+        if (documents_ && layoutPage_ && documents_->currentWidget() == layoutPage_) {
+            if (layoutCanvas_)
+                layoutCanvas_->deleteSelectedShapes();
+            return;
+        }
+        if (schematicCanvas_)
+            schematicCanvas_->deleteSelectedSymbols();
+    }
+
     void createMenus() {
         auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
         auto *newAction = addCommand(QStringLiteral("New Project"), QKeySequence::New);
@@ -7564,18 +7601,32 @@ class DocumentWindow : public QMainWindow {
         auto *redoAction = addCommand(QStringLiteral("Redo"), QKeySequence(QStringLiteral("Ctrl+Y")));
         editMenu->addAction(undoAction);
         editMenu->addAction(redoAction);
-        connect(undoAction, &QAction::triggered, this, [this] { undoCurrentSection(); });
-        connect(redoAction, &QAction::triggered, this, [this] { redoCurrentSection(); });
+        connect(undoAction, &QAction::triggered, this, [this] {
+            if (!invokeFocusedTextAction("undo"))
+                undoCurrentSection();
+        });
+        connect(redoAction, &QAction::triggered, this, [this] {
+            if (!invokeFocusedTextAction("redo"))
+                redoCurrentSection();
+        });
         editMenu->addSeparator();
-        editMenu->addAction(addCommand(QStringLiteral("Cut"), QKeySequence::Cut));
-        editMenu->addAction(addCommand(QStringLiteral("Copy"), QKeySequence::Copy));
-        editMenu->addAction(addCommand(QStringLiteral("Paste"), QKeySequence::Paste));
+        auto *cutAction = addCommand(QStringLiteral("Cut"), QKeySequence::Cut);
+        auto *copyAction = addCommand(QStringLiteral("Copy"), QKeySequence::Copy);
+        auto *pasteAction = addCommand(QStringLiteral("Paste"), QKeySequence::Paste);
+        editMenu->addAction(cutAction);
+        editMenu->addAction(copyAction);
+        editMenu->addAction(pasteAction);
+        connect(cutAction, &QAction::triggered, this, [this] { invokeFocusedTextAction("cut"); });
+        connect(copyAction, &QAction::triggered, this, [this] { invokeFocusedTextAction("copy"); });
+        connect(pasteAction, &QAction::triggered, this, [this] { invokeFocusedTextAction("paste"); });
         // A shortcut is deliberately omitted here: the properties editor is a
         // modal dialog, so a window level shortcut would steal Return from the
         // line edits inside it.
         auto *propertiesAction = addCommand(QStringLiteral("Device Properties"));
         editMenu->addAction(propertiesAction);
-        editMenu->addAction(addCommand(QStringLiteral("Delete"), QKeySequence::Delete));
+        auto *deleteAction = addCommand(QStringLiteral("Delete"));
+        editMenu->addAction(deleteAction);
+        connect(deleteAction, &QAction::triggered, this, [this] { deleteCurrentSelection(); });
         connect(propertiesAction, &QAction::triggered, this, [this] { editSelectedSymbol(); });
 
         auto *viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
@@ -7604,8 +7655,8 @@ class DocumentWindow : public QMainWindow {
         auto *placeSymbolAction = addCommand(QStringLiteral("Place Device"), QKeySequence(QStringLiteral("P")));
         projectMenu->addAction(placeSymbolAction);
         projectMenu->addSeparator();
-        projectMenu->addAction(addCommand(QStringLiteral("Validate Project")));
-        projectMenu->addAction(addCommand(QStringLiteral("Project Settings")));
+        auto *validateAction = addCommand(QStringLiteral("Validate Project"));
+        projectMenu->addAction(validateAction);
         auto *managePackagesAction = addCommand(QStringLiteral("Manage Packages"));
         setLucideIcon(managePackagesAction, QStringLiteral("package"));
         projectMenu->addAction(managePackagesAction);
@@ -7613,16 +7664,18 @@ class DocumentWindow : public QMainWindow {
         auto *toolsMenu = menuBar()->addMenu(QStringLiteral("&Tools"));
         auto *simulationAction = addCommand(QStringLiteral("Run Simulation"), QKeySequence(QStringLiteral("F6")));
         toolsMenu->addAction(simulationAction);
-        auto *drcAction = addCommand(QStringLiteral("Run DRC"));
+        auto *drcAction = addCommand(QStringLiteral("Run DRC"), QKeySequence(QStringLiteral("F7")));
         toolsMenu->addAction(drcAction);
-        auto *lvsAction = addCommand(QStringLiteral("Run LVS"));
+        auto *lvsAction = addCommand(QStringLiteral("Run LVS"), QKeySequence(QStringLiteral("F8")));
         toolsMenu->addAction(lvsAction);
         auto *netStackAction = addCommand(QStringLiteral("Net Trace Layer Stack"));
         toolsMenu->addAction(netStackAction);
-        toolsMenu->addAction(addCommand(QStringLiteral("Run PEX")));
-        toolsMenu->addAction(addCommand(QStringLiteral("Open Python Console")));
 
         auto *settingsMenu = menuBar()->addMenu(QStringLiteral("&Settings"));
+        auto *shortcutsAction =
+            addCommand(QStringLiteral("Keyboard Shortcuts…"), QKeySequence(QStringLiteral("Ctrl+Shift+K")));
+        settingsMenu->addAction(shortcutsAction);
+        settingsMenu->addSeparator();
         auto *appearanceMenu = settingsMenu->addMenu(QStringLiteral("Appearance"));
         auto *systemAppearanceAction = addCommand(QStringLiteral("System Theme"));
         auto *lightAppearanceAction = addCommand(QStringLiteral("Light Theme"));
@@ -7647,8 +7700,18 @@ class DocumentWindow : public QMainWindow {
         }
 
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
-        helpMenu->addAction(addCommand(QStringLiteral("Keyboard Shortcuts")));
-        helpMenu->addAction(addCommand(QStringLiteral("About ICE")));
+        helpMenu->addAction(shortcutsAction);
+        auto *aboutAction = addCommand(QStringLiteral("About ICE"));
+        helpMenu->addAction(aboutAction);
+        connect(shortcutsAction, &QAction::triggered, this, [this] { ice::showShortcutSettings(this, shortcuts_); });
+        connect(aboutAction, &QAction::triggered, this, [this] {
+            const auto info = ice::buildInfo();
+            QMessageBox::about(this, QStringLiteral("About ICE"),
+                               QStringLiteral("ICE %1\nCommit: %2\nBuild: %3 (%4)")
+                                   .arg(QString::fromStdString(info.version), QString::fromStdString(info.commit),
+                                        QString::fromStdString(info.buildTime),
+                                        QString::fromStdString(info.buildType)));
+        });
 
         connect(newAction, &QAction::triggered, this, &DocumentWindow::newProject);
         connect(openAction, &QAction::triggered, this, &DocumentWindow::openProject);
@@ -7662,6 +7725,25 @@ class DocumentWindow : public QMainWindow {
         connect(createLayerAction, &QAction::triggered, this, &DocumentWindow::createLayer);
         connect(managePackagesAction, &QAction::triggered, this, &DocumentWindow::managePackages);
         connect(placeSymbolAction, &QAction::triggered, this, &DocumentWindow::placeSymbol);
+        connect(validateAction, &QAction::triggered, this, [this] {
+            if (!project_)
+                return;
+            const auto diagnostics = project_->project().validate();
+            if (diagnostics.empty()) {
+                statusBar()->showMessage(QStringLiteral("Project validation passed"), 5000);
+                return;
+            }
+            QStringList messages;
+            for (const auto &diagnostic : diagnostics) {
+                if (messages.size() >= 10)
+                    break;
+                messages << QString::fromStdString(diagnostic.message);
+            }
+            QMessageBox::warning(this, QStringLiteral("Validate Project"),
+                                 QStringLiteral("%1 diagnostic(s):\n\n%2")
+                                     .arg(diagnostics.size())
+                                     .arg(messages.join(QLatin1Char('\n'))));
+        });
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
         connect(drcAction, &QAction::triggered, this, &DocumentWindow::runDrc);
         connect(lvsAction, &QAction::triggered, this, &DocumentWindow::runLvs);
@@ -7929,11 +8011,6 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
         schematicCanvasPage_ = makeEditor(QStringLiteral("Schematic editor"), false);
-        if (schematicCanvas_) {
-            auto *selectToolShortcut = new QShortcut(QKeySequence(Qt::Key_Space), schematicCanvas_);
-            selectToolShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-            connect(selectToolShortcut, &QShortcut::activated, this, [this] { selectSchematicTool(); });
-        }
         textSchematicEditor_ = new TextDocumentEditor;
         textSchematicEditor_->setOnTextEdited([this](const QString &text) { onTextSchematicEdited(text); });
         textSchematicEditorPage_ = textSchematicEditor_;
@@ -8543,6 +8620,8 @@ class DocumentWindow : public QMainWindow {
         workspaceStack_->addWidget(documents);
         setCentralWidget(workspaceStack_);
         updateEmptyWorkspaceState();
+        shortcuts_.attachScope(ice::ShortcutScope::schematic, schematicCanvas_);
+        shortcuts_.attachScope(ice::ShortcutScope::layout, layoutCanvas_);
     }
 
     QWidget *makeEditor(const QString &title, bool layoutEditor) {
@@ -8957,17 +9036,25 @@ class DocumentWindow : public QMainWindow {
         toolbar->setAccessibleName(layoutEditor ? QStringLiteral("Layout toolbar")
                                                 : QStringLiteral("Schematic toolbar"));
 
-        auto addTool = [toolbar](const QString &iconName, const QString &name) {
+        auto addTool = [this, toolbar](const QString &iconName, const QString &name) {
             auto *action = toolbar->addAction(name);
             setLucideIcon(action, iconName);
             action->setToolTip(name);
             action->setStatusTip(name);
+            commands_.append(action);
             return action;
+        };
+        auto addShortcut = [this](QAction *action, const QString &id, ice::ShortcutScope scope,
+                                  const QKeySequence &sequence) {
+            shortcuts_.registerAction(action, id, action->text(), scope, sequence);
         };
 
         auto *selectTool = addTool(QStringLiteral("mouse-pointer-2"), QStringLiteral("Select"));
         selectTool->setToolTip(QStringLiteral("Select (Space)"));
         selectTool->setStatusTip(QStringLiteral("Select (Space)"));
+        addShortcut(selectTool, layoutEditor ? QStringLiteral("layout.select") : QStringLiteral("schematic.select"),
+                    layoutEditor ? ice::ShortcutScope::layout : ice::ShortcutScope::schematic,
+                    QKeySequence(Qt::Key_Space));
         if (layoutEditor) {
             selectTool->setCheckable(true);
             selectTool->setChecked(true);
@@ -8975,9 +9062,11 @@ class DocumentWindow : public QMainWindow {
 
             auto *moveTool = addTool(QStringLiteral("hand"), QStringLiteral("Move"));
             moveTool->setCheckable(true);
-            moveTool->setToolTip(QStringLiteral("Move objects"));
-            moveTool->setStatusTip(QStringLiteral("Move objects"));
+            moveTool->setToolTip(QStringLiteral("Move objects (M)"));
+            moveTool->setStatusTip(QStringLiteral("Move objects (M)"));
             layoutMoveTool_ = moveTool;
+            addShortcut(moveTool, QStringLiteral("layout.move"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("M")));
             connect(moveTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::move);
@@ -8988,15 +9077,21 @@ class DocumentWindow : public QMainWindow {
 
             auto *placeSymbolTool = addTool(QStringLiteral("circuit-board"), QStringLiteral("Place Symbol"));
             placeSymbolTool->setCheckable(true);
+            placeSymbolTool->setToolTip(QStringLiteral("Place device (P)"));
+            placeSymbolTool->setStatusTip(QStringLiteral("Place device (P)"));
             layoutPlaceDeviceTool_ = placeSymbolTool;
 
             auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create Rectangle"));
             rectangleTool->setCheckable(true);
             layoutRectangleTool_ = rectangleTool;
+            addShortcut(rectangleTool, QStringLiteral("layout.rectangle"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("R")));
 
             auto *polygonTool = addTool(QStringLiteral("pentagon"), QStringLiteral("Create Polygon"));
             polygonTool->setCheckable(true);
             layoutPolygonTool_ = polygonTool;
+            addShortcut(polygonTool, QStringLiteral("layout.polygon"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("G")));
             connect(polygonTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::polygon);
@@ -9008,15 +9103,27 @@ class DocumentWindow : public QMainWindow {
 
             auto *pathTool = addTool(QStringLiteral("route"), QStringLiteral("Draw Path"));
             pathTool->setCheckable(true);
+            pathTool->setToolTip(QStringLiteral("Draw path (W)"));
+            pathTool->setStatusTip(QStringLiteral("Draw path (W)"));
             layoutPathTool_ = pathTool;
+            addShortcut(pathTool, QStringLiteral("layout.path"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("W")));
 
             auto *textTool = addTool(QStringLiteral("type"), QStringLiteral("Draw Text"));
             textTool->setCheckable(true);
+            textTool->setToolTip(QStringLiteral("Draw text (T)"));
+            textTool->setStatusTip(QStringLiteral("Draw text (T)"));
             layoutTextTool_ = textTool;
+            addShortcut(textTool, QStringLiteral("layout.text"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("T")));
 
             auto *pinTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Pin"));
             pinTool->setCheckable(true);
+            pinTool->setToolTip(QStringLiteral("Create pin (N)"));
+            pinTool->setStatusTip(QStringLiteral("Create pin (N)"));
             layoutPinTool_ = pinTool;
+            addShortcut(pinTool, QStringLiteral("layout.pin"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("N")));
             connect(pinTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::pin);
@@ -9041,7 +9148,11 @@ class DocumentWindow : public QMainWindow {
 
             auto *rulerTool = addTool(QStringLiteral("ruler"), QStringLiteral("Ruler"));
             rulerTool->setCheckable(true);
+            rulerTool->setToolTip(QStringLiteral("Measure distance (L)"));
+            rulerTool->setStatusTip(QStringLiteral("Measure distance (L)"));
             layoutRulerTool_ = rulerTool;
+            addShortcut(rulerTool, QStringLiteral("layout.ruler"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("L")));
             connect(rulerTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::ruler);
@@ -9106,12 +9217,16 @@ class DocumentWindow : public QMainWindow {
             });
             toolbar->addSeparator();
             auto *hierarchyUpTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Hierarchy Go Up"));
-            hierarchyUpTool->setToolTip(QStringLiteral("Go to the parent layout"));
+            hierarchyUpTool->setToolTip(QStringLiteral("Go to the parent layout (Alt+Up)"));
             hierarchyUpTool->setStatusTip(hierarchyUpTool->toolTip());
+            addShortcut(hierarchyUpTool, QStringLiteral("layout.hierarchy-up"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("Alt+Up")));
             connect(hierarchyUpTool, &QAction::triggered, this, [this] { openLayoutParentCell(); });
             auto *hierarchyDownTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Hierarchy Go Down"));
-            hierarchyDownTool->setToolTip(QStringLiteral("Open the selected layout instance"));
+            hierarchyDownTool->setToolTip(QStringLiteral("Open the selected layout instance (Alt+Down)"));
             hierarchyDownTool->setStatusTip(hierarchyDownTool->toolTip());
+            addShortcut(hierarchyDownTool, QStringLiteral("layout.hierarchy-down"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("Alt+Down")));
             connect(hierarchyDownTool, &QAction::triggered, this, [this] { openSelectedLayoutCell(); });
             return toolbar;
         }
@@ -9122,10 +9237,12 @@ class DocumentWindow : public QMainWindow {
         placeSymbolTool->setCheckable(true);
         schematicPlaceSymbolTool_ = placeSymbolTool;
         auto *placeCommentTool = addTool(QStringLiteral("message-square"), QStringLiteral("Comment"));
-        placeCommentTool->setToolTip(QStringLiteral("Comment"));
-        placeCommentTool->setStatusTip(QStringLiteral("Comment"));
+        placeCommentTool->setToolTip(QStringLiteral("Comment (C)"));
+        placeCommentTool->setStatusTip(QStringLiteral("Comment (C)"));
         placeCommentTool->setCheckable(true);
         schematicPlaceCommentTool_ = placeCommentTool;
+        addShortcut(placeCommentTool, QStringLiteral("schematic.comment"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("C")));
         auto *toolGroup = new QActionGroup(toolbar);
         toolGroup->setExclusive(true);
         for (auto *action : {selectTool, placeSymbolTool, placeCommentTool})
@@ -9193,6 +9310,10 @@ class DocumentWindow : public QMainWindow {
         auto *toggleGridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
         toggleGridTool->setCheckable(true);
         toggleGridTool->setChecked(true);
+        toggleGridTool->setToolTip(QStringLiteral("Toggle grid (Ctrl+G)"));
+        toggleGridTool->setStatusTip(QStringLiteral("Toggle grid (Ctrl+G)"));
+        addShortcut(toggleGridTool, QStringLiteral("schematic.toggle-grid"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("Ctrl+G")));
         connect(toggleGridTool, &QAction::toggled, this, [this](bool checked) {
             if (schematicCanvas_)
                 schematicCanvas_->setGridVisible(checked);
@@ -9200,11 +9321,19 @@ class DocumentWindow : public QMainWindow {
         auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
         snapTool->setCheckable(true);
         snapTool->setChecked(true);
+        snapTool->setToolTip(QStringLiteral("Snap to grid (Shift+G)"));
+        snapTool->setStatusTip(QStringLiteral("Snap to grid (Shift+G)"));
+        addShortcut(snapTool, QStringLiteral("schematic.snap"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("Shift+G")));
         connect(snapTool, &QAction::toggled, this, [this](bool checked) {
             if (schematicCanvas_)
                 schematicCanvas_->setSnapToGrid(checked);
         });
         auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to View"));
+        fitTool->setToolTip(QStringLiteral("Fit to view (F)"));
+        fitTool->setStatusTip(QStringLiteral("Fit to view (F)"));
+        addShortcut(fitTool, QStringLiteral("schematic.fit"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("F")));
         connect(fitTool, &QAction::triggered, this, [this] {
             if (schematicCanvas_)
                 schematicCanvas_->fitToContent();
@@ -9212,11 +9341,19 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
+        rotateTool->setToolTip(QStringLiteral("Rotate selected devices (R)"));
+        rotateTool->setStatusTip(QStringLiteral("Rotate selected devices (R)"));
+        addShortcut(rotateTool, QStringLiteral("schematic.rotate"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("R")));
         connect(rotateTool, &QAction::triggered, this, [this] {
             if (schematicCanvas_)
                 schematicCanvas_->rotateSelectedSymbols();
         });
         auto *flipTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontal"));
+        flipTool->setToolTip(QStringLiteral("Flip selected devices horizontally (H)"));
+        flipTool->setStatusTip(QStringLiteral("Flip selected devices horizontally (H)"));
+        addShortcut(flipTool, QStringLiteral("schematic.flip-horizontal"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("H")));
         connect(flipTool, &QAction::triggered, this, [this] {
             if (schematicCanvas_)
                 schematicCanvas_->flipSelectedSymbols();
@@ -9224,12 +9361,16 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *upTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Go Up the Hierarchy"));
-        upTool->setToolTip(QStringLiteral("Go to the parent schematic"));
+        upTool->setToolTip(QStringLiteral("Go to the parent schematic (Alt+Up)"));
         upTool->setStatusTip(upTool->toolTip());
+        addShortcut(upTool, QStringLiteral("schematic.hierarchy-up"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("Alt+Up")));
         connect(upTool, &QAction::triggered, this, [this] { openSchematicParentCell(); });
         auto *downTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Go Down the Hierarchy"));
-        downTool->setToolTip(QStringLiteral("Open the selected schematic instance"));
+        downTool->setToolTip(QStringLiteral("Open the selected schematic instance (Alt+Down)"));
         downTool->setStatusTip(downTool->toolTip());
+        addShortcut(downTool, QStringLiteral("schematic.hierarchy-down"), ice::ShortcutScope::schematic,
+                    QKeySequence(QStringLiteral("Alt+Down")));
         connect(downTool, &QAction::triggered, this, [this] { openSelectedSchematicCell(); });
 
         toolbar->addSeparator();
@@ -9237,6 +9378,10 @@ class DocumentWindow : public QMainWindow {
         connect(wrapTool, &QAction::triggered, this,
                 [this] { statusBar()->showMessage(QStringLiteral("Wrapping symbols is not available yet")); });
         auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+        deleteTool->setToolTip(QStringLiteral("Delete selected devices (Del)"));
+        deleteTool->setStatusTip(QStringLiteral("Delete selected devices (Del)"));
+        addShortcut(deleteTool, QStringLiteral("schematic.delete"), ice::ShortcutScope::schematic,
+                    QKeySequence::Delete);
         connect(deleteTool, &QAction::triggered, this, [this] {
             if (schematicCanvas_)
                 schematicCanvas_->deleteSelectedSymbols();
@@ -9251,17 +9396,24 @@ class DocumentWindow : public QMainWindow {
         toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
         toolbar->setAccessibleName(QStringLiteral("Layout options toolbar"));
 
-        auto addTool = [toolbar](const QString &iconName, const QString &name) {
+        auto addTool = [this, toolbar](const QString &iconName, const QString &name) {
             auto *action = toolbar->addAction(name);
             setLucideIcon(action, iconName);
             action->setToolTip(name);
             action->setStatusTip(name);
+            commands_.append(action);
             return action;
+        };
+        auto addShortcut = [this](QAction *action, const QString &id, const QKeySequence &sequence) {
+            shortcuts_.registerAction(action, id, action->text(), ice::ShortcutScope::layout, sequence);
         };
 
         auto *gridTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Toggle Grid"));
         gridTool->setCheckable(true);
         gridTool->setChecked(layoutGridVisible_);
+        gridTool->setToolTip(QStringLiteral("Toggle grid (Ctrl+G)"));
+        gridTool->setStatusTip(QStringLiteral("Toggle grid (Ctrl+G)"));
+        addShortcut(gridTool, QStringLiteral("layout.toggle-grid"), QKeySequence(QStringLiteral("Ctrl+G")));
         connect(gridTool, &QAction::toggled, this, [this](bool checked) {
             layoutGridVisible_ = checked;
             if (layoutCanvas_)
@@ -9270,12 +9422,18 @@ class DocumentWindow : public QMainWindow {
         auto *snapTool = addTool(QStringLiteral("magnet"), QStringLiteral("Snap to Grid"));
         snapTool->setCheckable(true);
         snapTool->setChecked(layoutSnapToGrid_);
+        snapTool->setToolTip(QStringLiteral("Snap to grid (Shift+G)"));
+        snapTool->setStatusTip(QStringLiteral("Snap to grid (Shift+G)"));
+        addShortcut(snapTool, QStringLiteral("layout.snap"), QKeySequence(QStringLiteral("Shift+G")));
         connect(snapTool, &QAction::toggled, this, [this](bool enabled) {
             layoutSnapToGrid_ = enabled;
             if (layoutCanvas_)
                 layoutCanvas_->setSnapToGrid(enabled);
         });
         auto *fitTool = addTool(QStringLiteral("scan"), QStringLiteral("Fit to View"));
+        fitTool->setToolTip(QStringLiteral("Fit to view (F)"));
+        fitTool->setStatusTip(QStringLiteral("Fit to view (F)"));
+        addShortcut(fitTool, QStringLiteral("layout.fit"), QKeySequence(QStringLiteral("F")));
         connect(fitTool, &QAction::triggered, this, [this] {
             if (layoutCanvas_)
                 layoutCanvas_->fitToContent();
@@ -9283,12 +9441,21 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
+        rotateTool->setToolTip(QStringLiteral("Rotate selected device (Ctrl+R)"));
+        rotateTool->setStatusTip(QStringLiteral("Rotate selected device (Ctrl+R)"));
+        addShortcut(rotateTool, QStringLiteral("layout.rotate"), QKeySequence(QStringLiteral("Ctrl+R")));
         connect(rotateTool, &QAction::triggered, this, [this] { rotateSelectedLayoutFigures(); });
         auto *flipHorizontalTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontally"));
+        flipHorizontalTool->setToolTip(QStringLiteral("Flip selected device horizontally (H)"));
+        flipHorizontalTool->setStatusTip(QStringLiteral("Flip selected device horizontally (H)"));
+        addShortcut(flipHorizontalTool, QStringLiteral("layout.flip-horizontal"), QKeySequence(QStringLiteral("H")));
         connect(flipHorizontalTool, &QAction::triggered, this, [this] {
             transformSelectedLayoutInstance(ice::Orientation::my, QStringLiteral("flip layout device"));
         });
         auto *flipVerticalTool = addTool(QStringLiteral("flip-vertical-2"), QStringLiteral("Flip Vertically"));
+        flipVerticalTool->setToolTip(QStringLiteral("Flip selected device vertically (J)"));
+        flipVerticalTool->setStatusTip(QStringLiteral("Flip selected device vertically (J)"));
+        addShortcut(flipVerticalTool, QStringLiteral("layout.flip-vertical"), QKeySequence(QStringLiteral("J")));
         connect(flipVerticalTool, &QAction::triggered, this, [this] {
             transformSelectedLayoutInstance(ice::Orientation::mx, QStringLiteral("flip layout device"));
         });
@@ -9300,6 +9467,7 @@ class DocumentWindow : public QMainWindow {
         unionTool->setStatusTip(unionTool->toolTip());
         layoutUnionTool_ = unionTool;
         connect(unionTool, &QAction::triggered, this, [this] { applyLayoutBoolean(ice::BooleanOperation::union_); });
+        addShortcut(unionTool, QStringLiteral("layout.union"), QKeySequence(QStringLiteral("U")));
 
         auto *intersectionTool = addTool(QStringLiteral("squares-intersect"), QStringLiteral("Intersection"));
         intersectionTool->setToolTip(
@@ -9308,6 +9476,7 @@ class DocumentWindow : public QMainWindow {
         layoutIntersectionTool_ = intersectionTool;
         connect(intersectionTool, &QAction::triggered, this,
                 [this] { applyLayoutBoolean(ice::BooleanOperation::intersection); });
+        addShortcut(intersectionTool, QStringLiteral("layout.intersection"), QKeySequence(QStringLiteral("I")));
 
         auto *differenceTool = addTool(QStringLiteral("squares-subtract"), QStringLiteral("Difference"));
         differenceTool->setToolTip(
@@ -9316,6 +9485,7 @@ class DocumentWindow : public QMainWindow {
         layoutDifferenceTool_ = differenceTool;
         connect(differenceTool, &QAction::triggered, this,
                 [this] { applyLayoutBoolean(ice::BooleanOperation::difference); });
+        addShortcut(differenceTool, QStringLiteral("layout.difference"), QKeySequence(QStringLiteral("D")));
 
         auto *xorTool = addTool(QStringLiteral("squares-exclude"), QStringLiteral("Exclusive Or"));
         xorTool->setToolTip(
@@ -9323,11 +9493,15 @@ class DocumentWindow : public QMainWindow {
         xorTool->setStatusTip(xorTool->toolTip());
         layoutXorTool_ = xorTool;
         connect(xorTool, &QAction::triggered, this, [this] { applyLayoutBoolean(ice::BooleanOperation::xor_); });
+        addShortcut(xorTool, QStringLiteral("layout.xor"), QKeySequence(QStringLiteral("X")));
         refreshLayoutBooleanActions();
 
         toolbar->addSeparator();
         auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
+        deleteTool->setToolTip(QStringLiteral("Delete selected objects (Del)"));
+        deleteTool->setStatusTip(QStringLiteral("Delete selected objects (Del)"));
         layoutDeleteTool_ = deleteTool;
+        addShortcut(deleteTool, QStringLiteral("layout.delete"), QKeySequence::Delete);
         connect(deleteTool, &QAction::triggered, this, [this] {
             if (layoutCanvas_)
                 layoutCanvas_->deleteSelectedShapes();
@@ -9511,6 +9685,7 @@ class DocumentWindow : public QMainWindow {
     int layoutTextHeight_ = 1000;
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
+    ice::ShortcutRegistry shortcuts_;
     QList<QAction *> commands_;
 };
 

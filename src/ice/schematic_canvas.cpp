@@ -638,16 +638,6 @@ class SchematicCanvasImpl : public SchematicCanvas {
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_R && scene()) {
-            rotateSelectedSymbols();
-            event->accept();
-            return;
-        }
-        if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) && scene()) {
-            deleteSelectedSymbols();
-            event->accept();
-            return;
-        }
         QGraphicsView::keyPressEvent(event);
     }
 
