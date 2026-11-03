@@ -8060,6 +8060,7 @@ class DocumentWindow : public QMainWindow {
         schematicContentLayout->addWidget(schematicEditorStack_, 1);
         auto *schematicProperties = new QTabWidget;
         schematicPropertiesPanel_ = new PropertiesPanel(false);
+        schematicPropertiesPanel_->setEditButtonVisible(true);
         schematicPropertiesPanel_->setOnParameterChanged(
             [this](ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
                    const std::string &value) { updateInstanceParameter(instanceId, parameterId, name, value); });
