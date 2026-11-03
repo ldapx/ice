@@ -150,6 +150,10 @@ static std::string serializeSimulationRunWithIdentity(const SimulationRunContext
     output["graphs"] = json::array();
     for (const auto &graph : context.graphs) {
         json entry = {{"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_signals", graph.ySignals}};
+        if (!graph.signalLabels.empty())
+            entry["signal_labels"] = graph.signalLabels;
+        if (!graph.yAxisLabel.empty())
+            entry["y_axis_label"] = graph.yAxisLabel;
         if (graph.xMin)
             entry["x_min"] = *graph.xMin;
         if (graph.xMax)

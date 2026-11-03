@@ -79,6 +79,41 @@ QIcon buildIcon(const QByteArray &source, int size) {
 }
 } // namespace
 
+namespace {
+QPixmap renderArtworkIcon(const QByteArray &source, const QColor &color, int size) {
+    const int pixelSize = size * 2;
+    QPixmap pixmap(pixelSize, pixelSize);
+    pixmap.fill(Qt::transparent);
+    QSvgRenderer renderer(source);
+    if (renderer.isValid()) {
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QRectF target(0.0, 0.0, pixelSize, pixelSize);
+        const auto bounds = renderer.defaultSize();
+        if (bounds.isValid() && !bounds.isEmpty()) {
+            const auto scaled = bounds.scaled(QSize(pixelSize, pixelSize), Qt::KeepAspectRatio);
+            target = QRectF((pixelSize - scaled.width()) / 2.0, (pixelSize - scaled.height()) / 2.0, scaled.width(),
+                            scaled.height());
+        }
+        renderer.render(&painter, target);
+        // Symbol artwork is authored in black; tint it with the palette colour so
+        // the icon stays visible in dark and light themes.
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(QRectF(0.0, 0.0, pixelSize, pixelSize), color);
+    }
+    pixmap.setDevicePixelRatio(2.0);
+    return pixmap;
+}
+} // namespace
+
+QIcon symbolArtworkIcon(const QByteArray &svg, int size) {
+    QIcon icon;
+    icon.addPixmap(renderArtworkIcon(svg, uiColor(UiColor::Text1), size), QIcon::Normal, QIcon::Off);
+    icon.addPixmap(renderArtworkIcon(svg, uiColor(UiColor::TextOnAccent), size), QIcon::Selected, QIcon::Off);
+    icon.addPixmap(renderArtworkIcon(svg, uiColor(UiColor::Text2), size), QIcon::Disabled, QIcon::Off);
+    return icon;
+}
+
 QIcon lucideIcon(const QString &name, int size) {
     const auto source = iconSource(name);
     if (source.isEmpty())

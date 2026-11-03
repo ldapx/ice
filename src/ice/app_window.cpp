@@ -84,6 +84,7 @@
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalBlocker>
@@ -401,6 +402,7 @@ class DocumentWindow : public QMainWindow {
         suppressProjectWatcher_ = false;
         projectDiskChangePending_ = false;
         clearProjectWatcher();
+        lastSchematicPlacementDevice_.reset();
         flattenedLayouts_->clear();
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         if (layoutDevicesPanel_) {
@@ -1419,6 +1421,7 @@ class DocumentWindow : public QMainWindow {
         activeReportId_ = 0;
         selectingReport_ = false;
         loadedCachedRunPath_.clear();
+        lastSchematicPlacementDevice_.reset();
         project_.reset();
         savedSchematicSignatures_.clear();
         savedLayoutSignatures_.clear();
@@ -1520,7 +1523,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto installDirectory = configuredPackageInstallDirectory();
-        CreateSchematicDialog dialog(installDirectory, this);
+        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName(), this);
         if (dialog.exec() != QDialog::Accepted)
             return;
         createSchematic(dialog.schematicName(), dialog.pdkId());
@@ -1577,7 +1580,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto installDirectory = configuredPackageInstallDirectory();
-        CreateSchematicDialog dialog(installDirectory, this);
+        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName(), this);
         dialog.setWindowTitle(QStringLiteral("Create Text SPICE Schematic"));
         if (dialog.exec() != QDialog::Accepted)
             return;
@@ -1667,7 +1670,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto installDirectory = configuredPackageInstallDirectory();
-        CreateLayoutDialog dialog(installDirectory, this);
+        CreateLayoutDialog dialog(installDirectory, nextLayoutDefaultName(), this);
         if (dialog.exec() != QDialog::Accepted)
             return;
         createLayoutCell(dialog.layoutName(), dialog.pdkId());
@@ -1723,7 +1726,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         const auto installDirectory = configuredPackageInstallDirectory();
-        CreateLayoutDialog dialog(installDirectory, this);
+        CreateLayoutDialog dialog(installDirectory, nextLayoutDefaultName(), this);
         dialog.setWindowTitle(QStringLiteral("Create Procedural Layout"));
         if (dialog.exec() != QDialog::Accepted)
             return;
@@ -1883,6 +1886,63 @@ class DocumentWindow : public QMainWindow {
                 documents_->setCurrentWidget(schematicPage_);
             return;
         }
+    }
+
+    // An instance whose symbol was created from another schematic cell
+    // (Symbol::sourceCell) descends into that cell, so "go down" follows the
+    // selected instance and "go up" returns to the cell that instantiates the
+    // active schematic.
+    void openSelectedSchematicCell() {
+        if (!project_ || activeSchematicId_ == 0) {
+            statusBar()->showMessage(QStringLiteral("Open a schematic first"));
+            return;
+        }
+        const auto instanceId = schematicCanvas_ ? schematicCanvas_->selectedInstanceId() : 0;
+        if (instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Select a schematic instance first"));
+            return;
+        }
+        const auto activeIt = project_->project().schematicCells.find(activeSchematicId_);
+        if (activeIt == project_->project().schematicCells.end())
+            return;
+        const auto instanceIt = activeIt->second.instances.find(instanceId);
+        if (instanceIt == activeIt->second.instances.end())
+            return;
+        const auto symbolIt = activeIt->second.symbols.find(instanceIt->second.symbol);
+        if (symbolIt == activeIt->second.symbols.end())
+            return;
+        const auto childIt = project_->project().schematicCells.find(symbolIt->second.sourceCell);
+        if (childIt == project_->project().schematicCells.end()) {
+            statusBar()->showMessage(QStringLiteral("This instance does not reference another schematic"));
+            return;
+        }
+        const auto childId = childIt->first;
+        const auto childName = QString::fromStdString(childIt->second.name);
+        selectSchematicTab(childId);
+        statusBar()->showMessage(QStringLiteral("Opened %1").arg(childName));
+    }
+
+    void openSchematicParentCell() {
+        if (!project_ || activeSchematicId_ == 0) {
+            statusBar()->showMessage(QStringLiteral("Open a schematic first"));
+            return;
+        }
+        for (const auto &[id, cell] : project_->project().schematicCells) {
+            if (id == activeSchematicId_)
+                continue;
+            const auto instantiatesActive =
+                std::any_of(cell.instances.begin(), cell.instances.end(), [&](const auto &entry) {
+                    const auto symbol = cell.symbols.find(entry.second.symbol);
+                    return symbol != cell.symbols.end() && symbol->second.sourceCell == activeSchematicId_;
+                });
+            if (!instantiatesActive)
+                continue;
+            const auto name = QString::fromStdString(cell.name);
+            selectSchematicTab(id);
+            statusBar()->showMessage(QStringLiteral("Opened %1").arg(name));
+            return;
+        }
+        statusBar()->showMessage(QStringLiteral("Already at the top of the schematic hierarchy"));
     }
 
     void showProceduralLayoutEditor(ice::ObjectId proceduralId) {
@@ -4100,19 +4160,11 @@ class DocumentWindow : public QMainWindow {
         return position;
     }
 
-    void placeSymbol() {
-        if (documents_ && layoutPage_ && documents_->currentWidget() == layoutPage_) {
-            if (layoutLeftTabs_ && layoutDevicesPanel_)
-                layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
-            if (layoutDevicesPanel_)
-                layoutDevicesPanel_->focusDeviceList();
-            statusBar()->showMessage(QStringLiteral("Select a layout device"));
-            return;
-        }
+    std::optional<SymbolDefinition> chooseSchematicPlacementDevice() {
         if (!project_ || project_->project().schematicCells.empty()) {
             QMessageBox::information(this, QStringLiteral("Place Device"),
                                      QStringLiteral("Create a project and schematic first."));
-            return;
+            return std::nullopt;
         }
         try {
             const auto cellId = project_->project().schematicCells.contains(activeSchematicId_)
@@ -4129,7 +4181,7 @@ class DocumentWindow : public QMainWindow {
                         QStringLiteral("The PDK package %1 is not installed or does not provide schematic symbols. "
                                        "Install or update it from Manage Packages before placing symbols.")
                             .arg(QString::fromStdString(pdk)));
-                    return;
+                    return std::nullopt;
                 }
                 pdkSymbols = packageSymbolLibrary(symbolDirectory);
                 if (pdkSymbols.empty()) {
@@ -4137,17 +4189,30 @@ class DocumentWindow : public QMainWindow {
                         this, QStringLiteral("Package PDK symbols"),
                         QStringLiteral("The PDK package %1 does not provide a valid schematic symbol library.")
                             .arg(QString::fromStdString(pdk)));
-                    return;
+                    return std::nullopt;
                 }
             }
             SymbolLibraryDialog dialog(genericSymbolLibrary(), std::move(pdkSymbols), this);
             if (dialog.exec() != QDialog::Accepted)
-                return;
-            const auto definition = dialog.selected();
-            activateSchematicPlaceSymbolTool(definition, true);
+                return std::nullopt;
+            return dialog.selected();
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Place Device"), QString::fromStdString(error.what()));
+            return std::nullopt;
         }
+    }
+
+    void placeSymbol() {
+        if (documents_ && layoutPage_ && documents_->currentWidget() == layoutPage_) {
+            if (layoutLeftTabs_ && layoutDevicesPanel_)
+                layoutLeftTabs_->setCurrentWidget(layoutDevicesPanel_);
+            if (layoutDevicesPanel_)
+                layoutDevicesPanel_->focusDeviceList();
+            statusBar()->showMessage(QStringLiteral("Select a layout device"));
+            return;
+        }
+        if (const auto definition = chooseSchematicPlacementDevice())
+            activateSchematicPlaceSymbolTool(*definition, true);
     }
 
     bool placeSymbolDefinition(const SymbolDefinition &definition, QPointF position) {
@@ -4544,6 +4609,79 @@ class DocumentWindow : public QMainWindow {
 
     // ── Simulation management ────────────────────────────────────────────────
 
+    // Graph plots let the user rename the display label of a signal; the edit
+    // is stored on the owning SimulationGraph so it survives tab rebuilds.
+    SimulationPlot *createGraphPlot() {
+        auto *plot = new SimulationPlot;
+        plot->setLabelEditCallback([this](ice::ObjectId graphId, const std::string &signal, const QString &label) {
+            renameGraphSignalLabel(graphId, signal, label);
+        });
+        plot->setYAxisLabelEditCallback(
+            [this](ice::ObjectId graphId, const QString &label) { renameGraphYAxisLabel(graphId, label); });
+        return plot;
+    }
+
+    void renameGraphSignalLabel(ice::ObjectId graphId, const std::string &signal, const QString &label) {
+        if (!project_ || activeSimulationId_ == 0 || graphId == 0 || signal.empty())
+            return;
+        const auto simId = activeSimulationId_;
+        const auto text = label.trimmed().toStdString();
+        auto found = false;
+        project_->execute("rename graph label", [&found, simId, graphId, signal, text](ice::Project &project) {
+            auto it = project.simulations.find(simId);
+            if (it == project.simulations.end())
+                return;
+            for (auto &graph : it->second.graphs) {
+                if (graph.id != graphId)
+                    continue;
+                found = true;
+                if (text.empty())
+                    graph.signalLabels.erase(signal);
+                else
+                    graph.signalLabels[signal] = text;
+                break;
+            }
+        });
+        if (found)
+            refreshGraphAfterLabelEdit(simId, graphId, QStringLiteral("Signal label updated"));
+    }
+
+    void renameGraphYAxisLabel(ice::ObjectId graphId, const QString &label) {
+        if (!project_ || activeSimulationId_ == 0 || graphId == 0)
+            return;
+        const auto simId = activeSimulationId_;
+        const auto text = label.trimmed().toStdString();
+        auto found = false;
+        project_->execute("rename graph y axis", [&found, simId, graphId, text](ice::Project &project) {
+            auto it = project.simulations.find(simId);
+            if (it == project.simulations.end())
+                return;
+            for (auto &graph : it->second.graphs) {
+                if (graph.id != graphId)
+                    continue;
+                found = true;
+                graph.yAxisLabel = text;
+                break;
+            }
+        });
+        if (found)
+            refreshGraphAfterLabelEdit(simId, graphId, QStringLiteral("Y axis label updated"));
+    }
+
+    void refreshGraphAfterLabelEdit(ice::ObjectId simId, ice::ObjectId graphId, const QString &message) {
+        const auto &simulation = project_->project().simulations.at(simId);
+        rebuildGraphTabs(simulation.graphs);
+        simulationPanel_->setProject(project_->project());
+        // Rebuild keeps the previous tab index; select the edited graph's tab.
+        for (int index = 0; index < graphTabs_->count(); ++index) {
+            if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
+                graphTabs_->setCurrentIndex(index);
+                break;
+            }
+        }
+        statusBar()->showMessage(message);
+    }
+
     // Build (or rebuild) graphTabs_ from a SimulationItem's graphs vector.
     void rebuildGraphTabs(const std::vector<ice::SimulationGraph> &graphs) {
         loadedCachedRunPath_.clear();
@@ -4585,7 +4723,7 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         for (std::size_t i = 0; i < graphs.size(); ++i) {
-            SimulationPlot *plot = (i == 0) ? simulationPlot_ : new SimulationPlot;
+            SimulationPlot *plot = (i == 0) ? simulationPlot_ : createGraphPlot();
             auto displayGraph = graphs[i];
             std::vector<std::string> normalizedSignals;
             for (const auto &signal : displayGraph.ySignals) {
@@ -5509,10 +5647,23 @@ class DocumentWindow : public QMainWindow {
             xIndex = 0;
         xAxisCombo->setCurrentIndex(xIndex);
 
-        auto *ySignalsList = new QListWidget;
-        ySignalsList->setMinimumHeight(130);
-        ySignalsList->setSelectionMode(QAbstractItemView::NoSelection);
-        ySignalsList->setAccessibleName(QStringLiteral("Y axis signals"));
+        // One explicit check box per signal: the previous list items relied on
+        // the item check indicator, which the widget style does not draw.
+        auto *ySignalsContainer = new QWidget;
+        auto *ySignalsLayout = new QVBoxLayout(ySignalsContainer);
+        ySignalsLayout->setContentsMargins(6, 4, 6, 4);
+        ySignalsLayout->setSpacing(4);
+        auto *ySignalsArea = new QScrollArea;
+        ySignalsArea->setWidgetResizable(true);
+        ySignalsArea->setMinimumHeight(130);
+        ySignalsArea->setFrameShape(QFrame::StyledPanel);
+        ySignalsArea->setWidget(ySignalsContainer);
+        ySignalsArea->setAccessibleName(QStringLiteral("Y axis signals"));
+        struct YSignalChoice {
+            QCheckBox *box = nullptr;
+            QString data;
+        };
+        std::vector<YSignalChoice> ySignalChoices;
         const auto selectedYSignal = [&](const QString &data) {
             for (const auto &signal : currentGraph.ySignals) {
                 for (const auto &part : parseSignalList(QString::fromStdString(signal))) {
@@ -5526,19 +5677,20 @@ class DocumentWindow : public QMainWindow {
             return false;
         };
         const auto addYSignal = [&](const QString &label, const QString &data) {
-            auto *item = new QListWidgetItem(label, ySignalsList);
-            item->setData(Qt::UserRole, data);
-            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            item->setCheckState(selectedYSignal(data) ? Qt::Checked : Qt::Unchecked);
+            auto *box = new QCheckBox(label);
+            box->setChecked(selectedYSignal(data));
+            ySignalsLayout->addWidget(box);
+            ySignalChoices.push_back({box, data});
         };
         addYSignal(QStringLiteral("Time (s)"), QStringLiteral("time"));
         for (const auto &signal : capturedSignals)
             addYSignal(signal, signal);
+        ySignalsLayout->addStretch(1);
         bool anyYChecked = false;
-        for (int index = 0; index < ySignalsList->count(); ++index)
-            anyYChecked |= ySignalsList->item(index)->checkState() == Qt::Checked;
-        if (!anyYChecked && ySignalsList->count() > 0)
-            ySignalsList->item(ySignalsList->count() > 1 ? 1 : 0)->setCheckState(Qt::Checked);
+        for (const auto &choice : ySignalChoices)
+            anyYChecked |= choice.box->isChecked();
+        if (!anyYChecked && !ySignalChoices.empty())
+            ySignalChoices[ySignalChoices.size() > 1 ? 1 : 0].box->setChecked(true);
 
         const auto makeLimitEdit = [](const std::optional<double> &limit) {
             auto *edit = new QLineEdit;
@@ -5562,7 +5714,7 @@ class DocumentWindow : public QMainWindow {
         };
         form->addRow(QStringLiteral("Graph name:"), nameEdit);
         form->addRow(QStringLiteral("X axis:"), xAxisCombo);
-        form->addRow(QStringLiteral("Y axis signals:"), ySignalsList);
+        form->addRow(QStringLiteral("Y axis signals:"), ySignalsArea);
         form->addRow(QStringLiteral("X limits:"), makeLimitRow(xMinEdit, xMaxEdit));
         form->addRow(QStringLiteral("Y limits:"), makeLimitRow(yMinEdit, yMaxEdit));
         dlgLayout->addLayout(form);
@@ -5594,11 +5746,10 @@ class DocumentWindow : public QMainWindow {
         };
         connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
             newYSignals.clear();
-            for (int index = 0; index < ySignalsList->count(); ++index) {
-                const auto *item = ySignalsList->item(index);
-                if (item->checkState() != Qt::Checked)
+            for (const auto &choice : ySignalChoices) {
+                if (!choice.box->isChecked())
                     continue;
-                const auto signal = item->data(Qt::UserRole).toString().toStdString();
+                const auto signal = choice.data.toStdString();
                 if (!signal.empty() && std::find(newYSignals.begin(), newYSignals.end(), signal) == newYSignals.end())
                     newYSignals.push_back(signal);
             }
@@ -6743,13 +6894,6 @@ class DocumentWindow : public QMainWindow {
         }
         if (schematicNetlistPanel_)
             schematicNetlistPanel_->setCell(project_->project(), &cell);
-        const auto pdkLabel = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
-                                                                                : QString::fromStdString(cell.pdk);
-        auto *cellTitle =
-            scene->addText(QStringLiteral("Schematic: %1  ·  %2").arg(QString::fromStdString(cell.name), pdkLabel));
-        cellTitle->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
-        cellTitle->setPos(-900, -900);
-        cellTitle->setData(0, QStringLiteral("canvas-title"));
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
                 continue;
@@ -7246,6 +7390,7 @@ class DocumentWindow : public QMainWindow {
         if (schematicLeftTabs_ && schematicSymbolsPanel_)
             schematicLeftTabs_->setCurrentWidget(schematicSymbolsPanel_);
         selectedSchematicSymbol_ = definition;
+        lastSchematicPlacementDevice_ = definition;
         if (clearPanelSelection && schematicSymbolsPanel_)
             schematicSymbolsPanel_->selectSymbol(definition.name);
         if (schematicCanvas_) {
@@ -7256,7 +7401,7 @@ class DocumentWindow : public QMainWindow {
         if (toolEscapeShortcut_)
             toolEscapeShortcut_->setEnabled(true);
         statusBar()->showMessage(
-            QStringLiteral("Select a device in the Devices tab, then click in the schematic to place it"));
+            QStringLiteral("Click in the schematic to place %1").arg(definition.name));
     }
 
     void activateSchematicPlaceSymbolTool() {
@@ -7279,6 +7424,29 @@ class DocumentWindow : public QMainWindow {
         if (toolEscapeShortcut_)
             toolEscapeShortcut_->setEnabled(false);
         statusBar()->showMessage(QStringLiteral("Select tool"));
+    }
+
+    // Default names offered by the create dialogs and empty workspace panels:
+    // Schematic01, Schematic02, ... and Layout01, Layout02, ... skipping names
+    // the project already uses.
+    QString nextSchematicDefaultName() const {
+        QStringList names;
+        if (project_) {
+            for (const auto &entry : project_->project().schematicCells)
+                names.push_back(QString::fromStdString(entry.second.name));
+        }
+        return nextDefaultCellName(QStringLiteral("Schematic"), names);
+    }
+
+    QString nextLayoutDefaultName() const {
+        QStringList names;
+        if (project_) {
+            for (const auto &entry : project_->project().layoutCells)
+                names.push_back(QString::fromStdString(entry.second.name));
+            for (const auto &entry : project_->project().proceduralLayouts)
+                names.push_back(QString::fromStdString(entry.second.name));
+        }
+        return nextDefaultCellName(QStringLiteral("Layout"), names);
     }
 
     void updateEmptyWorkspaceState() {
@@ -7341,6 +7509,7 @@ class DocumentWindow : public QMainWindow {
                 schematicEditorStack_->setCurrentWidget(schematicEmptyPanel_);
                 if (!showingEmpty)
                     schematicEmptyPanel_->prepareForDisplay();
+                schematicEmptyPanel_->setDefaultName(nextSchematicDefaultName());
             }
         }
         if (layoutEditorStack_ && layoutEditorPage_ && layoutEmptyPanel_) {
@@ -7362,6 +7531,7 @@ class DocumentWindow : public QMainWindow {
                 layoutEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
                 if (!showingEmpty)
                     layoutEmptyPanel_->prepareForDisplay();
+                layoutEmptyPanel_->setDefaultName(nextLayoutDefaultName());
             }
         }
     }
@@ -7414,6 +7584,11 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->setSpacing(0);
         schematicEditorLayout->addWidget(schematicCellTabs_);
         schematicCanvasPage_ = makeEditor(QStringLiteral("Schematic editor"), false);
+        if (schematicCanvas_) {
+            auto *selectToolShortcut = new QShortcut(QKeySequence(Qt::Key_Space), schematicCanvas_);
+            selectToolShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+            connect(selectToolShortcut, &QShortcut::activated, this, [this] { selectSchematicTool(); });
+        }
         textSchematicEditor_ = new TextDocumentEditor;
         textSchematicEditor_->setOnTextEdited([this](const QString &text) { onTextSchematicEdited(text); });
         textSchematicEditorPage_ = textSchematicEditor_;
@@ -7815,7 +7990,7 @@ class DocumentWindow : public QMainWindow {
         graphTabs_->setDocumentMode(true);
         graphTabs_->setTabsClosable(false);
         graphTabs_->setCornerWidget(graphControls, Qt::TopRightCorner);
-        simulationPlot_ = new SimulationPlot;
+        simulationPlot_ = createGraphPlot();
         graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
         graphsLayout->addWidget(graphTabs_, 1);
         simulationTabs_->addTab(graphsPage, QStringLiteral("Graphs"));
@@ -8603,10 +8778,19 @@ class DocumentWindow : public QMainWindow {
             if (toolEscapeShortcut_)
                 toolEscapeShortcut_->setEnabled(false);
         });
-        connect(placeSymbolTool, &QAction::triggered, this, [this, placeSymbolTool] {
+        connect(placeSymbolTool, &QAction::triggered, this, [this, placeSymbolTool, selectTool] {
             if (!placeSymbolTool->isChecked())
                 return;
-            activateSchematicPlaceSymbolTool();
+            // Re-using the tool keeps the device chosen last time, so placing
+            // several copies never reopens the chooser.
+            if (lastSchematicPlacementDevice_) {
+                activateSchematicPlaceSymbolTool(*lastSchematicPlacementDevice_, true);
+            } else if (const auto definition = chooseSchematicPlacementDevice()) {
+                activateSchematicPlaceSymbolTool(*definition, true);
+            } else {
+                selectTool->setChecked(true);
+                return;
+            }
             if (schematicCanvas_)
                 schematicCanvas_->setFocus();
         });
@@ -8660,11 +8844,13 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *upTool = addTool(QStringLiteral("arrow-up"), QStringLiteral("Go Up the Hierarchy"));
-        connect(upTool, &QAction::triggered, this,
-                [this] { statusBar()->showMessage(QStringLiteral("Hierarchy navigation is not available yet")); });
+        upTool->setToolTip(QStringLiteral("Go to the parent schematic"));
+        upTool->setStatusTip(upTool->toolTip());
+        connect(upTool, &QAction::triggered, this, [this] { openSchematicParentCell(); });
         auto *downTool = addTool(QStringLiteral("arrow-down"), QStringLiteral("Go Down the Hierarchy"));
-        connect(downTool, &QAction::triggered, this,
-                [this] { statusBar()->showMessage(QStringLiteral("Hierarchy navigation is not available yet")); });
+        downTool->setToolTip(QStringLiteral("Open the selected schematic instance"));
+        downTool->setStatusTip(downTool->toolTip());
+        connect(downTool, &QAction::triggered, this, [this] { openSelectedSchematicCell(); });
 
         toolbar->addSeparator();
         auto *wrapTool = addTool(QStringLiteral("package"), QStringLiteral("Wrap into Symbol"));
@@ -8917,6 +9103,8 @@ class DocumentWindow : public QMainWindow {
     bool schematicSymbolsLoaded_ = false;
     std::vector<SymbolDefinition> schematicBaseSymbols_;
     std::optional<SymbolDefinition> selectedSchematicSymbol_;
+    // Kept after the tool is left so re-activating Place Device can reuse it.
+    std::optional<SymbolDefinition> lastSchematicPlacementDevice_;
     StatusBar *statusBar_ = nullptr;
     QLabel *selectionStatus_ = nullptr;
     QLabel *gridStatusLabel_ = nullptr;

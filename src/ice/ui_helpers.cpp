@@ -27,6 +27,14 @@ void setLucideIcon(QAbstractButton *button, const QString &name, int size) {
     button->setIconSize(QSize(size, size));
 }
 
+QString nextDefaultCellName(const QString &prefix, const QStringList &existingNames) {
+    for (int index = 1;; ++index) {
+        const auto candidate = prefix + QStringLiteral("%1").arg(index, 2, 10, QChar('0'));
+        if (!existingNames.contains(candidate))
+            return candidate;
+    }
+}
+
 QLabel *heading(const QString &text) {
     auto *label = new QLabel(text);
     label->setStyleSheet(QStringLiteral("font-weight: bold; padding: 4px 2px;"));

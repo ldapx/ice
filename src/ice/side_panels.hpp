@@ -3,6 +3,7 @@
 #include "icelib/core.hpp"
 #include "symbol_ui.hpp"
 
+#include <QIcon>
 #include <QWidget>
 
 #include <functional>
@@ -154,6 +155,8 @@ class SymbolsPanel : public QWidget {
     QComboBox *category_ = nullptr;
     QListWidget *list_ = nullptr;
     std::vector<SymbolDefinition> symbols_;
+    // Row icons rendered once per symbol set; the list stays cheap to filter.
+    std::vector<QIcon> icons_;
     std::function<void()> onSelectionChanged_;
     std::function<void()> onSymbolSelected_;
 };

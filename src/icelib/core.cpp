@@ -468,7 +468,12 @@ std::string Project::serialize() const {
         for (const auto &graph : sim.graphs) {
             json graphJson = {
                 {"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_signals", graph.ySignals}};
-            // Limits are optional so older projects keep auto-scaling.
+            // Labels and limits are optional so older projects keep the
+            // signal names and auto-scaling.
+            if (!graph.signalLabels.empty())
+                graphJson["signal_labels"] = graph.signalLabels;
+            if (!graph.yAxisLabel.empty())
+                graphJson["y_axis_label"] = graph.yAxisLabel;
             if (graph.xMin)
                 graphJson["x_min"] = *graph.xMin;
             if (graph.xMax)
@@ -721,6 +726,14 @@ Project Project::deserialize(const std::string &text) {
                                     legacySignals.push_back(signal);
                             }
                         }
+                        if (const auto labels = g.find("signal_labels");
+                            labels != g.end() && labels->is_object()) {
+                            for (auto label = labels->begin(); label != labels->end(); ++label) {
+                                if (label.value().is_string() && !label.value().get<std::string>().empty())
+                                    graph.signalLabels[label.key()] = label.value().get<std::string>();
+                            }
+                        }
+                        graph.yAxisLabel = g.value("y_axis_label", std::string{});
                         if (g.contains("x_min") && !g.at("x_min").is_null())
                             graph.xMin = g.at("x_min").get<double>();
                         if (g.contains("x_max") && !g.at("x_max").is_null())

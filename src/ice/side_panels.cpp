@@ -18,11 +18,13 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSize>
 #include <QStringList>
+#include <QStyledItemDelegate>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -49,6 +51,22 @@ enum class HierarchyItemKind : int {
 };
 
 enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, text = 3 };
+
+constexpr int kDeviceIconSize = 18;
+
+// The schematic devices list puts the symbol artwork on the far right of the
+// row, so the name reads first and the shape it draws sits beside it.
+class TrailingDeviceIconDelegate : public QStyledItemDelegate {
+  public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+        opt.decorationPosition = QStyleOptionViewItem::Right;
+        QStyledItemDelegate::paint(painter, opt, index);
+    }
+};
 
 ShapeEntryKind shapeEntryKind(const ice::Shape &shape) {
     if (shape.isText())
@@ -1011,6 +1029,9 @@ SymbolsPanel::SymbolsPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(category_);
     list_ = new QListWidget;
     list_->setAccessibleName(QStringLiteral("Available devices"));
+    // Device rows show the symbol artwork on the far right of the name.
+    list_->setIconSize(QSize(kDeviceIconSize, kDeviceIconSize));
+    list_->setItemDelegate(new TrailingDeviceIconDelegate(list_));
     layout->addWidget(list_, 1);
 
     connect(search_, &QLineEdit::textChanged, this, [this] { rebuildList(); });
@@ -1058,12 +1079,18 @@ void SymbolsPanel::setSymbols(std::vector<SymbolDefinition> symbols) {
             selectedName = symbols_[index].name;
     }
     symbols_ = std::move(symbols);
+    icons_.clear();
+    icons_.reserve(symbols_.size());
+    for (const auto &symbol : symbols_)
+        icons_.push_back(symbol.svg.isEmpty() ? QIcon() : ice::symbolArtworkIcon(symbol.svg.toUtf8(),
+                                                                                kDeviceIconSize));
     rebuildCategories();
     rebuildList(selectedName);
 }
 
 void SymbolsPanel::clear() {
     symbols_.clear();
+    icons_.clear();
     rebuildCategories();
     rebuildList();
 }
@@ -1108,6 +1135,8 @@ void SymbolsPanel::rebuildList(const QString &keepSelected) {
             continue;
         auto *item = new QListWidgetItem(symbol.name, list_);
         item->setData(Qt::UserRole, static_cast<int>(index));
+        if (index < icons_.size())
+            item->setIcon(icons_[index]);
         item->setToolTip(symbol.category.isEmpty() ? QStringLiteral("Uncategorized") : symbol.category);
     }
     if (list_->count() == 0) {

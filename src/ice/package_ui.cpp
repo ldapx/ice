@@ -4,6 +4,7 @@
 
 #include "icons.hpp"
 #include "ui_colors.hpp"
+#include "ui_helpers.hpp"
 
 #include <QApplication>
 #include <QComboBox>
@@ -334,7 +335,8 @@ bool installMissingPackages(QWidget *parent, const std::vector<std::string> &pac
     return dialog.exec() == QDialog::Accepted;
 }
 
-CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &installDirectory, QWidget *parent)
+CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &installDirectory,
+                                             const QString &defaultName, QWidget *parent)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("Create Schematic"));
     setModal(true);
@@ -348,7 +350,7 @@ CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &instal
     layout->addWidget(description);
 
     auto *form = new QFormLayout;
-    name_ = new QLineEdit(QStringLiteral("top"));
+    name_ = new QLineEdit(defaultName.isEmpty() ? QStringLiteral("Schematic01") : defaultName);
     name_->setClearButtonEnabled(true);
     form->addRow(QStringLiteral("Schematic name"), name_);
     pdk_ = new QComboBox;

@@ -2307,8 +2307,9 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     cardLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
-    name_ = new QLineEdit(QStringLiteral("top"));
+    name_ = new QLineEdit(QStringLiteral("Schematic01"));
     name_->setClearButtonEnabled(true);
+    connect(name_, &QLineEdit::textEdited, this, [this](const QString &) { nameEdited_ = true; });
     pdk_ = new QComboBox;
     pdk_->setAccessibleName(QStringLiteral("Schematic PDK"));
     form->addRow(QStringLiteral("Schematic name"), name_);
@@ -2371,8 +2372,16 @@ void EmptySchematicPanel::refreshPdks(const std::filesystem::path &installDirect
 }
 
 void EmptySchematicPanel::prepareForDisplay() {
+    nameEdited_ = false;
     name_->selectAll();
     name_->setFocus();
+}
+
+void EmptySchematicPanel::setDefaultName(const QString &name) {
+    if (name.isEmpty() || nameEdited_)
+        return;
+    name_->setText(name);
+    name_->selectAll();
 }
 
 void EmptySchematicPanel::submit() {
@@ -2406,8 +2415,9 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     cardLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
-    name_ = new QLineEdit(QStringLiteral("top"));
+    name_ = new QLineEdit(QStringLiteral("Layout01"));
     name_->setClearButtonEnabled(true);
+    connect(name_, &QLineEdit::textEdited, this, [this](const QString &) { nameEdited_ = true; });
     pdk_ = new QComboBox;
     pdk_->setAccessibleName(QStringLiteral("Layout PDK"));
     form->addRow(QStringLiteral("Layout cell name"), name_);
@@ -2470,8 +2480,16 @@ void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory
 }
 
 void EmptyLayoutPanel::prepareForDisplay() {
+    nameEdited_ = false;
     name_->selectAll();
     name_->setFocus();
+}
+
+void EmptyLayoutPanel::setDefaultName(const QString &name) {
+    if (name.isEmpty() || nameEdited_)
+        return;
+    name_->setText(name);
+    name_->selectAll();
 }
 
 void EmptyLayoutPanel::submit() {
@@ -2484,7 +2502,8 @@ void EmptyLayoutPanel::submit() {
         onCreate_(name, pdk_->currentData().toString().toStdString());
 }
 
-CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirectory, QWidget *parent)
+CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
+                                       QWidget *parent)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("Create Layout Cell"));
     setModal(true);
@@ -2498,7 +2517,7 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
     layout->addWidget(description);
 
     auto *form = new QFormLayout;
-    name_ = new QLineEdit(QStringLiteral("top"));
+    name_ = new QLineEdit(defaultName.isEmpty() ? QStringLiteral("Layout01") : defaultName);
     name_->setClearButtonEnabled(true);
     form->addRow(QStringLiteral("Layout cell name"), name_);
     pdk_ = new QComboBox;
