@@ -112,6 +112,24 @@ void paintPolygon(QPainter &painter, const QPolygonF &polygon, const LayerStyle 
     painter.drawPolygon(polygon);
 }
 
+void drawHaloText(QPainter &painter, const QRectF &rectangle, int alignment, const QString &text,
+                  const QColor &color) {
+    auto halo = uiColor(UiColor::Background2);
+    halo.setAlpha(225);
+    QPen haloPen(halo, 2.0);
+    haloPen.setCosmetic(true);
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(haloPen);
+    static const QPointF offsets[] = {{-1.5, 0.0}, {1.5, 0.0},  {0.0, -1.5}, {0.0, 1.5},
+                                      {-1.0, -1.0}, {1.0, -1.0}, {-1.0, 1.0}, {1.0, 1.0}};
+    for (const auto &offset : offsets)
+        painter.drawText(rectangle.translated(offset), alignment, text);
+    painter.setPen(color);
+    painter.drawText(rectangle, alignment, text);
+    painter.restore();
+}
+
 void paintText(QPainter &painter, const QRectF &rectangle, const QString &text, const LayerStyle &style,
                const LayoutRenderer::PaintOptions &options) {
     if (!options.showText || text.isEmpty() || !rectangle.isValid())
@@ -119,9 +137,7 @@ void paintText(QPainter &painter, const QRectF &rectangle, const QString &text, 
     QFont font = painter.font();
     font.setPixelSize(std::max(1, static_cast<int>(std::round(rectangle.height() * 0.85))));
     painter.setFont(font);
-    painter.setPen(penFor(style, options.outlineWidth));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawText(rectangle, Qt::AlignLeft | Qt::AlignTop, text);
+    drawHaloText(painter, rectangle, Qt::AlignLeft | Qt::AlignTop, text, style.color);
 }
 
 void paintModel(QPainter &painter, const LayoutPreviewModel &model, const LayoutRenderer::LayerStyleMap &styles,
@@ -140,10 +156,8 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
 
     for (const auto &shape : model.shapes) {
         const auto style = styleFor(shape.layer, styles, deviceStyles);
-        if (shape.kind == LayoutPreviewShape::Kind::text) {
-            paintText(painter, transform.map(shape.textRectangle), shape.text, style, options);
+        if (shape.kind == LayoutPreviewShape::Kind::text)
             continue;
-        }
         if (shape.kind == LayoutPreviewShape::Kind::path) {
             if (!options.showPaths || shape.centerline.size() < 2)
                 continue;
@@ -196,6 +210,15 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
         }
     }
 
+    // Text labels stay above geometry and below pin overlays, matching the
+    // canvas z-order.
+    for (const auto &shape : model.shapes) {
+        if (shape.kind != LayoutPreviewShape::Kind::text)
+            continue;
+        const auto style = styleFor(shape.layer, styles, deviceStyles);
+        paintText(painter, transform.map(shape.textRectangle), shape.text, style, options);
+    }
+
     if (options.showPorts) {
         for (const auto &port : model.ports) {
             const auto style = styleFor(port.layer, styles, deviceStyles);
@@ -211,9 +234,7 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 QFont font = painter.font();
                 font.setPixelSize(std::max(5, static_cast<int>(rectangle.height() * 0.35)));
                 painter.setFont(font);
-                painter.setPen(style.color);
-                painter.setBrush(Qt::NoBrush);
-                painter.drawText(rectangle.adjusted(2, 1, -2, -1), Qt::AlignCenter, port.label);
+                drawHaloText(painter, rectangle.adjusted(2, 1, -2, -1), Qt::AlignCenter, port.label, style.color);
             }
         }
     }

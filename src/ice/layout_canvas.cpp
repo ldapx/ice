@@ -1200,6 +1200,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setPathFinishedCallback(LayoutPathFinishedCallback callback) override { pathFinished_ = std::move(callback); }
 
     void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
+    void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) override {
+        textPolygonPlaced_ = std::move(callback);
+    }
     void setPinPlacedCallback(LayoutPinPlacedCallback callback) override { pinPlaced_ = std::move(callback); }
     void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) override {
         instancePinActivated_ = std::move(callback);
@@ -1506,6 +1509,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::textPolygon && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (textPolygonPlaced_)
+                textPolygonPlaced_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::pin && event->button() == Qt::LeftButton) {
             if (readOnly_) {
                 QApplication::beep();
@@ -1588,6 +1602,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if ((tool_ == Tool::select || tool_ == Tool::move) && event->button() == Qt::LeftButton) {
             auto *clicked = itemAt(event->pos());
+            if (auto *owner = textPolygonOwner(clicked))
+                clicked = owner;
             if (tool_ == Tool::select && clicked && clicked->data(3).toString() == QStringLiteral("polygon-handle") &&
                 !readOnly_) {
                 QGraphicsPolygonItem *polygonItem = nullptr;
@@ -2014,6 +2030,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
+        if (tool_ == Tool::textPolygon && event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
             // Clicking repeatedly adds points; finish the path with Escape or
             // Space instead of treating the second click as a finish gesture.
@@ -2045,7 +2065,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
-             tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text)) {
+             tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text ||
+             tool_ == Tool::textPolygon)) {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -2254,6 +2275,14 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
+    QGraphicsItem *textPolygonOwner(QGraphicsItem *item) const {
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            if (cursor->data(3).toString() == QStringLiteral("text-polygon"))
+                return cursor;
+        }
+        return nullptr;
+    }
+
     void applyLayoutInstanceSelection() {
         if (readOnly_)
             selectedLayoutInstance_ = 0;
@@ -2366,6 +2395,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     LayoutPathLayerChangedCallback pathLayerChanged_;
     LayoutPathFinishedCallback pathFinished_;
     LayoutTextPlacedCallback textPlaced_;
+    LayoutTextPolygonPlacedCallback textPolygonPlaced_;
     LayoutPinPlacedCallback pinPlaced_;
     LayoutInstancePinActivatedCallback instancePinActivated_;
     LayoutPolygonCreatedCallback polygonCreated_;

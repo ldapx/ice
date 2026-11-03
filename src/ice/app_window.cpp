@@ -28,6 +28,7 @@
 #include "simulation_plot.hpp"
 #include "symbol_ui.hpp"
 #include "text_document_editor.hpp"
+#include "text_geometry.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
@@ -99,6 +100,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -139,6 +141,32 @@ std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Pr
         if (layerAvailableForLayout(project, layoutId, layer))
             result.emplace_back(layer);
     return result;
+}
+
+QString layerPurposeSuffix(const ice::Layer &layer) {
+    const auto name = QString::fromStdString(layer.name);
+    const auto dot = name.indexOf('.');
+    if (dot < 0 || dot + 1 >= name.size())
+        return {};
+    return name.mid(dot + 1).toLower();
+}
+
+bool layerIsPinLayer(const ice::Layer &layer) {
+    return layerPurposeSuffix(layer) == QStringLiteral("pin") || layer.datatype == 2;
+}
+
+bool layerIsDrawingLayer(const ice::Layer &layer) {
+    const auto purpose = layerPurposeSuffix(layer);
+    return purpose.isEmpty() || purpose == QStringLiteral("drawing");
+}
+
+QPen layoutLabelHaloPen() {
+    auto color = ice::uiColor(ice::UiColor::Background2);
+    color.setAlpha(225);
+    QPen pen(color, 2.0);
+    pen.setCosmetic(true);
+    pen.setJoinStyle(Qt::RoundJoin);
+    return pen;
 }
 
 QPainterPath layoutShapeScenePath(const ice::Shape &shape) {
@@ -3077,7 +3105,8 @@ class DocumentWindow : public QMainWindow {
                     for (const auto id : ids) {
                         const auto shapeIt = cellIt->second.shapes.find(id);
                         if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.isPath() ||
-                            shapeIt->second.isText() || (layer && *layer != shapeIt->second.layer)) {
+                            shapeIt->second.isText() || shapeIt->second.textGroup != 0 ||
+                            (layer && *layer != shapeIt->second.layer)) {
                             enabled = false;
                             break;
                         }
@@ -3101,6 +3130,13 @@ class DocumentWindow : public QMainWindow {
         const auto shapeIds = selectedLayoutShapeIds();
         if (shapeIds.size() < 2) {
             statusBar()->showMessage(QStringLiteral("Select at least two rectangles or polygons on one layer"));
+            return;
+        }
+        if (std::any_of(shapeIds.begin(), shapeIds.end(), [&](ice::ObjectId id) {
+                const auto shape = cellIt->second.shapes.find(id);
+                return shape != cellIt->second.shapes.end() && shape->second.textGroup != 0;
+            })) {
+            statusBar()->showMessage(QStringLiteral("Text polygons cannot be used in Boolean operations"));
             return;
         }
 
@@ -3270,6 +3306,94 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         refreshProject();
+    }
+
+    void addLayoutTextPolygon(QPointF position) {
+        if (!project_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
+        if (availableLayers.empty()) {
+            QMessageBox::information(this, QStringLiteral("Draw Text Polygon"),
+                                     QStringLiteral("Create a layer before drawing text polygons."));
+            return;
+        }
+        if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Draw Text Polygon"),
+                                     QStringLiteral("Select a layer before drawing text polygons."));
+            return;
+        }
+        const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
+        bool accepted = false;
+        const auto text = QInputDialog::getText(this, QStringLiteral("Draw Text Polygon"), QStringLiteral("Text:"),
+                                                QLineEdit::Normal, QString(), &accepted);
+        if (!accepted || text.trimmed().isEmpty())
+            return;
+
+        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
+        const auto height = ((layoutTextHeight_ + grid - 1) / grid) * grid;
+        const auto polygons =
+            ice::textPolygonGeometry(text, static_cast<int>(height), QPointF(position.x(), -position.y()));
+        if (polygons.empty()) {
+            QMessageBox::information(this, QStringLiteral("Draw Text Polygon"),
+                                     QStringLiteral("The selected text produced no filled polygons."));
+            return;
+        }
+
+        ice::ObjectId firstShape = 0;
+        try {
+            project_->execute("create text polygon", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                const auto groupName = ice::nextShapeName(cell, "Text Polygon");
+                const auto groupText = text.toStdString();
+                for (const auto &points : polygons) {
+                    if (points.size() < 3)
+                        continue;
+                    ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
+                    ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
+                    ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
+                    ice::Coordinate maxY = std::numeric_limits<ice::Coordinate>::lowest();
+                    for (const auto &point : points) {
+                        minX = std::min(minX, point.x);
+                        minY = std::min(minY, point.y);
+                        maxX = std::max(maxX, point.x);
+                        maxY = std::max(maxY, point.y);
+                    }
+                    if (maxX <= minX || maxY <= minY)
+                        continue;
+                    std::vector<ice::LayoutPoint> layoutPoints;
+                    layoutPoints.reserve(points.size());
+                    for (const auto &point : points)
+                        layoutPoints.push_back({point.x, point.y});
+                    const auto shapeId = project.nextId();
+                    ice::Shape shape{shapeId, layerId, std::nullopt,
+                                     ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(layoutPoints)};
+                    shape.name = groupName;
+                    shape.textPolygon = true;
+                    shape.textSource = groupText;
+                    if (firstShape == 0)
+                        firstShape = shapeId;
+                    shape.textGroup = firstShape;
+                    cell.shapes.emplace(shapeId, std::move(shape));
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Draw Text Polygon"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (firstShape == 0) {
+            QMessageBox::information(this, QStringLiteral("Draw Text Polygon"),
+                                     QStringLiteral("The selected text produced no filled polygons."));
+            return;
+        }
+        refreshProject();
+        QTimer::singleShot(0, this, [this, firstShape] { selectLayoutShapeItem(firstShape); });
+        if (layoutPropertiesPanel_ && layoutRightTabs_)
+            layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+        statusBar()->showMessage(QStringLiteral("Created text polygon on %1")
+                                     .arg(QString::fromStdString(project_->project().layers.at(layerId).name)));
     }
 
     void addLayoutPin(QPointF first, QPointF second) {
@@ -3541,7 +3665,13 @@ class DocumentWindow : public QMainWindow {
                 const auto shapeIt = cellIt->second.shapes.find(shapeId);
                 if (shapeIt == cellIt->second.shapes.end())
                     return;
-                shapeIt->second.name = name;
+                if (shapeIt->second.textGroup != 0) {
+                    for (auto &[_, shape] : cellIt->second.shapes)
+                        if (shape.textGroup == shapeIt->second.textGroup)
+                            shape.name = name;
+                } else {
+                    shapeIt->second.name = name;
+                }
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::warning(this, QStringLiteral("Rename Shape"), QString::fromStdString(error.what()));
@@ -3771,6 +3901,8 @@ class DocumentWindow : public QMainWindow {
             layoutPolygonTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutTextTool_)
             layoutTextTool_->setEnabled(!readOnly && !availableLayers.empty());
+        if (layoutTextPolygonTool_)
+            layoutTextPolygonTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutPinTool_)
             layoutPinTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutDeleteTool_)
@@ -3806,6 +3938,7 @@ class DocumentWindow : public QMainWindow {
             const auto layer = project.layers.find(layerId);
             return layer == project.layers.end() || layer->second.visible;
         };
+        std::map<ice::ObjectId, QGraphicsItemGroup *> textPolygonItems;
         for (const auto &[id, shape] : cellIt->second.shapes) {
             if (!layerVisible(shape.layer))
                 continue;
@@ -3816,6 +3949,51 @@ class DocumentWindow : public QMainWindow {
             QBrush brush(QColor(style.color.red(), style.color.green(), style.color.blue(), 110), style.pattern);
             if (style.pattern == Qt::NoBrush)
                 brush = QBrush(Qt::NoBrush);
+            if (shape.textGroup != 0) {
+                if (textPolygonItems.contains(shape.textGroup))
+                    continue;
+                auto *group = new QGraphicsItemGroup;
+                for (const auto &[memberId, member] : cellIt->second.shapes) {
+                    if (member.textGroup != shape.textGroup || !layerVisible(member.layer) ||
+                        member.polygon.size() < 3)
+                        continue;
+                    const auto memberStyle = styles.contains(member.layer)
+                                                 ? styles.at(member.layer)
+                                                 : LayerStyle{ice::uiColor(ice::UiColor::Border1),
+                                                              Qt::SolidPattern};
+                    QPolygonF polygon;
+                    polygon.reserve(static_cast<int>(member.polygon.size()));
+                    for (const auto &point : member.polygon)
+                        polygon << QPointF(point.x, -point.y);
+                    auto *child = new QGraphicsPolygonItem(polygon);
+                    child->setPen(QPen(memberStyle.color, 1));
+                    QBrush memberBrush(
+                        QColor(memberStyle.color.red(), memberStyle.color.green(), memberStyle.color.blue(), 110),
+                        memberStyle.pattern);
+                    if (memberStyle.pattern == Qt::NoBrush)
+                        memberBrush = QBrush(Qt::NoBrush);
+                    child->setBrush(memberBrush);
+                    child->setAcceptedMouseButtons(Qt::NoButton);
+                    group->addToGroup(child);
+                }
+                if (group->childItems().empty()) {
+                    delete group;
+                    continue;
+                }
+                group->setData(0, QVariant::fromValue<qulonglong>(shape.textGroup));
+                group->setData(3, QStringLiteral("text-polygon"));
+                group->setZValue(1.0);
+                if (!readOnly) {
+                    group->setFlag(QGraphicsItem::ItemIsSelectable);
+                    group->setFlag(QGraphicsItem::ItemIsMovable);
+                }
+                group->setToolTip(QStringLiteral("%1 · %2")
+                                      .arg(QString::fromStdString(shape.name),
+                                           QString::fromStdString(shape.textSource)));
+                layoutCanvas_->scene()->addItem(group);
+                textPolygonItems.emplace(shape.textGroup, group);
+                continue;
+            }
             QGraphicsItem *item = nullptr;
             if (shape.isText()) {
                 auto *textItem = new QGraphicsSimpleTextItem(QString::fromStdString(shape.text));
@@ -3824,6 +4002,7 @@ class DocumentWindow : public QMainWindow {
                 textItem->setFont(font);
                 textItem->setBrush(QBrush(style.color));
                 textItem->setPos(shape.rectangle.x, -shape.rectangle.y - shape.rectangle.height);
+                textItem->setPen(layoutLabelHaloPen());
                 textItem->setZValue(2.0);
                 item = textItem;
                 layoutCanvas_->scene()->addItem(item);
@@ -3934,6 +4113,7 @@ class DocumentWindow : public QMainWindow {
             const auto labelBounds = label->boundingRect();
             label->setPos(rect.center().x() - labelBounds.width() / 2.0,
                           rect.center().y() - labelBounds.height() / 2.0);
+            label->setPen(layoutLabelHaloPen());
             label->setAcceptedMouseButtons(Qt::NoButton);
             item->setToolTip(QStringLiteral("Pin %1 · %2 · %3")
                                  .arg(QString::fromStdString(port.name),
@@ -4000,6 +4180,7 @@ class DocumentWindow : public QMainWindow {
                 const auto pinLabelBounds = pinLabel->boundingRect();
                 pinLabel->setPos(pinRect.center().x() - pinLabelBounds.width() / 2.0,
                                  pinRect.center().y() - pinLabelBounds.height() / 2.0);
+                pinLabel->setPen(layoutLabelHaloPen());
                 pinLabel->setAcceptedMouseButtons(Qt::NoButton);
             }
             const auto bounds = group->childrenBoundingRect();
@@ -4301,7 +4482,9 @@ class DocumentWindow : public QMainWindow {
                     if (shapeIt != activeIt->second.shapes.end()) {
                         const auto &shape = shapeIt->second;
                         QString typeName;
-                        if (shape.isText())
+                        if (shape.textGroup != 0)
+                            typeName = QStringLiteral("Text Polygon");
+                        else if (shape.isText())
                             typeName = QStringLiteral("Text");
                         else if (shape.isPath())
                             typeName = QStringLiteral("Path");
@@ -8170,6 +8353,25 @@ class DocumentWindow : public QMainWindow {
             if (changed)
                 refreshLayout();
         });
+        layersPanel_->setOnLayerVisibilityFilter([this](bool pinOnly) {
+            if (!project_)
+                return;
+            bool changed = false;
+            project_->execute(pinOnly ? "show only pin layers" : "show only drawing layers",
+                              [&](ice::Project &project) {
+                                  for (auto &[_, layer] : project.layers) {
+                                      if (!layerAvailableForLayout(project, activeLayoutId_, layer))
+                                          continue;
+                                      const bool visible = pinOnly ? layerIsPinLayer(layer) : layerIsDrawingLayer(layer);
+                                      if (layer.visible == visible)
+                                          continue;
+                                      layer.visible = visible;
+                                      changed = true;
+                                  }
+                              });
+            if (changed)
+                refreshLayout();
+        });
         layersPanel_->setOnAllLayersVisibilityChanged([this](bool visible) {
             if (!project_)
                 return;
@@ -8878,6 +9080,8 @@ class DocumentWindow : public QMainWindow {
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
+            layoutCanvas_->setTextPolygonPlacedCallback(
+                [this](QPointF position) { addLayoutTextPolygon(position); });
             layoutCanvas_->setPinPlacedCallback(
                 [this](QPointF first, QPointF second) { addLayoutPin(first, second); });
             layoutCanvas_->setInstancePinActivatedCallback(
@@ -8931,9 +9135,16 @@ class DocumentWindow : public QMainWindow {
                         if (cellIt == project.layoutCells.end() || cellIt->second.library)
                             return;
                         if (cellIt->second.shapes.contains(objectId)) {
-                            ice::moveRectangle(project, activeLayoutId_, objectId,
-                                               static_cast<ice::Coordinate>(delta.x()),
-                                               static_cast<ice::Coordinate>(-delta.y()));
+                            const auto dx = static_cast<ice::Coordinate>(delta.x());
+                            const auto dy = static_cast<ice::Coordinate>(-delta.y());
+                            const auto group = cellIt->second.shapes.at(objectId).textGroup;
+                            if (group != 0) {
+                                for (const auto &[memberId, member] : cellIt->second.shapes)
+                                    if (member.textGroup == group)
+                                        ice::moveRectangle(project, activeLayoutId_, memberId, dx, dy);
+                            } else {
+                                ice::moveRectangle(project, activeLayoutId_, objectId, dx, dy);
+                            }
                             return;
                         }
                         if (cellIt->second.ports.contains(objectId)) {
@@ -8979,7 +9190,16 @@ class DocumentWindow : public QMainWindow {
                         auto cellIt = project.layoutCells.find(activeLayoutId_);
                         if (cellIt == project.layoutCells.end() || cellIt->second.library)
                             return;
+                        std::set<ice::ObjectId> deleteIds(ids.begin(), ids.end());
                         for (const auto id : ids) {
+                            const auto shape = cellIt->second.shapes.find(id);
+                            if (shape == cellIt->second.shapes.end() || shape->second.textGroup == 0)
+                                continue;
+                            for (const auto &[memberId, member] : cellIt->second.shapes)
+                                if (member.textGroup == shape->second.textGroup)
+                                    deleteIds.insert(memberId);
+                        }
+                        for (const auto id : deleteIds) {
                             if (cellIt->second.plannedDevices.erase(id) != 0) {
                                 std::erase_if(cellIt->second.plannedConnections, [&](const auto &entry) {
                                     return entry.second.from == id || entry.second.to == id;
@@ -9092,13 +9312,43 @@ class DocumentWindow : public QMainWindow {
             addShortcut(pathTool, QStringLiteral("layout.path"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("W")));
 
-            auto *textTool = addTool(QStringLiteral("type"), QStringLiteral("Draw Text"));
+            auto *textTool = addTool(QStringLiteral("message-square"), QStringLiteral("Draw Text Label"));
             textTool->setCheckable(true);
-            textTool->setToolTip(QStringLiteral("Draw text (T)"));
-            textTool->setStatusTip(QStringLiteral("Draw text (T)"));
+            textTool->setToolTip(QStringLiteral("Draw text label (T)"));
+            textTool->setStatusTip(QStringLiteral("Draw text label (T)"));
             layoutTextTool_ = textTool;
             addShortcut(textTool, QStringLiteral("layout.text"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("T")));
+
+            // Keep the polygon tools together: the main toolbar button creates
+            // a normal polygon, while the dropdown also offers text polygons.
+            auto *textPolygonTool = new QAction(QStringLiteral("Draw Text Polygon"), toolbar);
+            setLucideIcon(textPolygonTool, QStringLiteral("type"));
+            textPolygonTool->setCheckable(true);
+            textPolygonTool->setToolTip(QStringLiteral("Draw text as polygon (Shift+T)"));
+            textPolygonTool->setStatusTip(QStringLiteral("Draw text as polygon (Shift+T)"));
+            commands_.append(textPolygonTool);
+            layoutTextPolygonTool_ = textPolygonTool;
+            addShortcut(textPolygonTool, QStringLiteral("layout.text-polygon"), ice::ShortcutScope::layout,
+                        QKeySequence(QStringLiteral("Shift+T")));
+            auto *polygonMenu = new QMenu(QStringLiteral("Polygon Tools"), toolbar);
+            polygonMenu->addAction(polygonTool);
+            polygonMenu->addAction(textPolygonTool);
+            if (auto *polygonButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(polygonTool))) {
+                polygonButton->setMenu(polygonMenu);
+                polygonButton->setPopupMode(QToolButton::MenuButtonPopup);
+                polygonButton->setToolTip(QStringLiteral("Create polygon (G) · dropdown for text polygon"));
+                polygonButton->setStatusTip(QStringLiteral("Create polygon (G) · dropdown for text polygon"));
+                const auto followDefaultAction = [polygonButton](QAction *action) {
+                    polygonButton->setDefaultAction(action);
+                    polygonButton->setToolTip(action->toolTip());
+                    polygonButton->setStatusTip(action->statusTip());
+                };
+                connect(polygonTool, &QAction::triggered, polygonButton,
+                        [followDefaultAction, polygonTool] { followDefaultAction(polygonTool); });
+                connect(textPolygonTool, &QAction::triggered, polygonButton,
+                        [followDefaultAction, textPolygonTool] { followDefaultAction(textPolygonTool); });
+            }
 
             auto *pinTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Pin"));
             pinTool->setCheckable(true);
@@ -9119,7 +9369,21 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::text);
                     layoutCanvas_->setFocus();
                 }
-                QString message = QStringLiteral("Text: click to place text");
+                QString message = QStringLiteral("Text label: click to place an annotation");
+                if (project_ && activeLayoutLayerId_ != 0) {
+                    if (const auto layer = project_->project().layers.find(activeLayoutLayerId_);
+                        layer != project_->project().layers.end())
+                        message += QStringLiteral(" on %1").arg(QString::fromStdString(layer->second.name));
+                }
+                message += QStringLiteral(" · height %1 nm").arg(layoutTextHeight_);
+                statusBar()->showMessage(message);
+            });
+            connect(textPolygonTool, &QAction::triggered, this, [this] {
+                if (layoutCanvas_) {
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::textPolygon);
+                    layoutCanvas_->setFocus();
+                }
+                QString message = QStringLiteral("Text polygon: click to place filled polygon text");
                 if (project_ && activeLayoutLayerId_ != 0) {
                     if (const auto layer = project_->project().layers.find(activeLayoutLayerId_);
                         layer != project_->project().layers.end())
@@ -9147,7 +9411,7 @@ class DocumentWindow : public QMainWindow {
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
             for (auto *action : {selectTool, moveTool, placeSymbolTool, rectangleTool, polygonTool, pathTool, rulerTool,
-                                 textTool, pinTool})
+                                 textTool, textPolygonTool, pinTool})
                 toolGroup->addAction(action);
 
             connect(selectTool, &QAction::triggered, this, [this] {
@@ -9655,6 +9919,7 @@ class DocumentWindow : public QMainWindow {
     QAction *layoutPathTool_ = nullptr;
     QAction *layoutPolygonTool_ = nullptr;
     QAction *layoutTextTool_ = nullptr;
+    QAction *layoutTextPolygonTool_ = nullptr;
     QAction *layoutPinTool_ = nullptr;
     QAction *layoutRulerTool_ = nullptr;
     QAction *layoutUnionTool_ = nullptr;

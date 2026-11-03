@@ -353,6 +353,8 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     addReadOnlyRow(QStringLiteral("name"), QString::fromStdString(displayName));
     addReadOnlyRow(QStringLiteral("type"), QString::fromStdString(typeName));
     addReadOnlyRow(QStringLiteral("layer"), QString::fromStdString(layerName));
+    if (shape.textGroup != 0 && !shape.textSource.empty())
+        addReadOnlyRow(QStringLiteral("text"), QString::fromStdString(shape.textSource));
     if (shapeIsRectangle_) {
         const int widthRow = parameters_->rowCount();
         parameters_->insertRow(widthRow);

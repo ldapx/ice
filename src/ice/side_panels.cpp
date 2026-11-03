@@ -51,10 +51,11 @@ enum class HierarchyItemKind : int {
     polygon = 8,
     path = 9,
     text = 10,
-    pin = 11
+    pin = 11,
+    textPolygon = 12
 };
 
-enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, text = 3 };
+enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, text = 3, textPolygon = 4 };
 
 constexpr int kDeviceIconSize = 18;
 
@@ -73,6 +74,8 @@ class TrailingDeviceIconDelegate : public QStyledItemDelegate {
 };
 
 ShapeEntryKind shapeEntryKind(const ice::Shape &shape) {
+    if (shape.textGroup != 0)
+        return ShapeEntryKind::textPolygon;
     if (shape.isText())
         return ShapeEntryKind::text;
     if (shape.isPath())
@@ -92,6 +95,8 @@ const char *shapeEntryIcon(ShapeEntryKind kind) {
         return "route";
     case ShapeEntryKind::text:
         return "type";
+    case ShapeEntryKind::textPolygon:
+        return "type";
     }
     return "square";
 }
@@ -106,6 +111,8 @@ const char *shapeEntryName(ShapeEntryKind kind) {
         return "Path";
     case ShapeEntryKind::text:
         return "Text";
+    case ShapeEntryKind::textPolygon:
+        return "Text Polygon";
     }
     return "Shape";
 }
@@ -120,6 +127,8 @@ HierarchyItemKind shapeEntryHierarchyKind(ShapeEntryKind kind) {
         return HierarchyItemKind::path;
     case ShapeEntryKind::text:
         return HierarchyItemKind::text;
+    case ShapeEntryKind::textPolygon:
+        return HierarchyItemKind::textPolygon;
     }
     return HierarchyItemKind::rectangle;
 }
@@ -492,8 +501,16 @@ void ProjectPanel::rebuildTree() {
             return;
         std::vector<std::pair<ice::ObjectId, const ice::Shape *>> shapeEntries;
         shapeEntries.reserve(layoutIt->second.shapes.size());
-        for (const auto &[shapeId, shape] : layoutIt->second.shapes)
+        std::map<ice::ObjectId, const ice::Shape *> textPolygonEntries;
+        for (const auto &[shapeId, shape] : layoutIt->second.shapes) {
+            if (shape.textGroup != 0) {
+                textPolygonEntries.emplace(shape.textGroup, &shape);
+                continue;
+            }
             shapeEntries.emplace_back(shapeId, &shape);
+        }
+        for (const auto &[groupId, shape] : textPolygonEntries)
+            shapeEntries.emplace_back(groupId, shape);
         std::sort(shapeEntries.begin(), shapeEntries.end(), [](const auto &left, const auto &right) {
             const auto leftKind = shapeEntryKind(*left.second);
             const auto rightKind = shapeEntryKind(*right.second);
@@ -508,8 +525,11 @@ void ProjectPanel::rebuildTree() {
             shapeItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(shapeId));
             shapeItem->setData(0, kItemKindRole, static_cast<int>(shapeEntryHierarchyKind(kind)));
             shapeItem->setIcon(0, hierarchyIcon(shapeEntryIcon(kind)));
-            shapeItem->setToolTip(
-                0, QStringLiteral("%1 shape: %2").arg(QString::fromLatin1(shapeEntryName(kind)), displayName));
+            auto tooltip =
+                QStringLiteral("%1 shape: %2").arg(QString::fromLatin1(shapeEntryName(kind)), displayName);
+            if (kind == ShapeEntryKind::textPolygon && !shape->textSource.empty())
+                tooltip += QStringLiteral(" · %1").arg(QString::fromStdString(shape->textSource));
+            shapeItem->setToolTip(0, tooltip);
         }
     };
     std::set<ice::ObjectId> generatedCells;
@@ -636,7 +656,8 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
                       [this, parentId, id](const std::string &name) { onRenamePlannedDevice_(parentId, id, name); });
     } else if (kind == static_cast<int>(HierarchyItemKind::rectangle) ||
                kind == static_cast<int>(HierarchyItemKind::polygon) ||
-               kind == static_cast<int>(HierarchyItemKind::path) || kind == static_cast<int>(HierarchyItemKind::text)) {
+               kind == static_cast<int>(HierarchyItemKind::path) || kind == static_cast<int>(HierarchyItemKind::text) ||
+               kind == static_cast<int>(HierarchyItemKind::textPolygon)) {
         const auto *parent = item->parent();
         const auto parentId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;
         if (parentId != 0 && id != 0 && onRenameShape_)
@@ -970,18 +991,22 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     search_->setClearButtonEnabled(true);
     search_->setAccessibleName(QStringLiteral("Search layers"));
     controls->addWidget(search_, 1);
-    auto *showAllButton = new QPushButton;
-    showAllButton->setFixedWidth(28);
-    showAllButton->setToolTip(QStringLiteral("Show all layers"));
-    showAllButton->setAccessibleName(QStringLiteral("Show all layers"));
-    setLucideIcon(showAllButton, QStringLiteral("eye"), 16);
-    auto *hideAllButton = new QPushButton;
-    hideAllButton->setFixedWidth(28);
-    hideAllButton->setToolTip(QStringLiteral("Hide all layers"));
-    hideAllButton->setAccessibleName(QStringLiteral("Hide all layers"));
-    setLucideIcon(hideAllButton, QStringLiteral("eye-off"), 16);
-    controls->addWidget(showAllButton);
-    controls->addWidget(hideAllButton);
+    auto *drawingButton = new QPushButton;
+    drawingButton->setFixedWidth(28);
+    drawingButton->setToolTip(QStringLiteral("Show only drawing layers"));
+    drawingButton->setAccessibleName(QStringLiteral("Show only drawing layers"));
+    setLucideIcon(drawingButton, QStringLiteral("square"), 16);
+    controls->addWidget(drawingButton);
+    auto *pinButton = new QPushButton;
+    pinButton->setFixedWidth(28);
+    pinButton->setToolTip(QStringLiteral("Show only pin layers"));
+    pinButton->setAccessibleName(QStringLiteral("Show only pin layers"));
+    setLucideIcon(pinButton, QStringLiteral("circle-dot"), 16);
+    controls->addWidget(pinButton);
+    visibilityButton_ = new QPushButton;
+    visibilityButton_->setFixedWidth(28);
+    setLucideIcon(visibilityButton_, QStringLiteral("eye"), 16);
+    controls->addWidget(visibilityButton_);
     layout->addLayout(controls);
 
     tree_ = new QTreeWidget;
@@ -995,6 +1020,35 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(tree_, 1);
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    connect(drawingButton, &QPushButton::clicked, this, [this] {
+        if (onLayerVisibilityFilter_)
+            onLayerVisibilityFilter_(false);
+    });
+    connect(pinButton, &QPushButton::clicked, this, [this] {
+        if (onLayerVisibilityFilter_)
+            onLayerVisibilityFilter_(true);
+    });
+    connect(visibilityButton_, &QPushButton::clicked, this, [this] {
+        if (!onAllLayersVisibilityChanged_)
+            return;
+        bool allVisible = true;
+        bool anyLayer = false;
+        for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+            const auto *item = tree_->topLevelItem(index);
+            const auto include = [&](const QTreeWidgetItem *layerItem) {
+                if (layerItem->data(0, Qt::UserRole).toULongLong() == 0)
+                    return;
+                anyLayer = true;
+                if (layerItem->checkState(0) != Qt::Checked)
+                    allVisible = false;
+            };
+            include(item);
+            for (int child = 0; child < item->childCount(); ++child)
+                include(item->child(child));
+        }
+        allVisible = anyLayer && allVisible;
+        onAllLayersVisibilityChanged_(!allVisible);
+    });
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
         if (!item || column != 0)
             return;
@@ -1011,6 +1065,7 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
             ids.reserve(groupIds.size());
             for (const auto &text : groupIds)
                 ids.push_back(static_cast<ice::ObjectId>(text.toULongLong()));
+            updateVisibilityButton();
             // The callback usually rebuilds this tree. Queue it so Qt is done
             // with the QTreeWidgetItem before the panel is repopulated.
             QTimer::singleShot(0, this, [this, ids = std::move(ids), visible] {
@@ -1035,6 +1090,7 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
                                          ? Qt::Checked
                                          : (unchecked == parent->childCount() ? Qt::Unchecked : Qt::PartiallyChecked));
         }
+        updateVisibilityButton();
         QTimer::singleShot(0, this, [this, layerId, visible] {
             if (onLayerVisibilityChanged_)
                 onLayerVisibilityChanged_(layerId, visible);
@@ -1049,14 +1105,7 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
         if (id != 0)
             onLayerSelected_(id);
     });
-    connect(showAllButton, &QPushButton::clicked, this, [this] {
-        if (onAllLayersVisibilityChanged_)
-            onAllLayersVisibilityChanged_(true);
-    });
-    connect(hideAllButton, &QPushButton::clicked, this, [this] {
-        if (onAllLayersVisibilityChanged_)
-            onAllLayersVisibilityChanged_(false);
-    });
+    updateVisibilityButton();
 }
 
 void LayersPanel::setOnCreateLayer(std::function<void()> callback) { onCreateLayer_ = std::move(callback); }
@@ -1095,6 +1144,35 @@ void LayersPanel::setOnLayerGroupVisibilityChanged(
 
 void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> callback) {
     onAllLayersVisibilityChanged_ = std::move(callback);
+}
+
+void LayersPanel::setOnLayerVisibilityFilter(std::function<void(bool pinOnly)> callback) {
+    onLayerVisibilityFilter_ = std::move(callback);
+}
+
+void LayersPanel::updateVisibilityButton() {
+    if (!visibilityButton_)
+        return;
+    bool anyLayer = false;
+    bool allVisible = true;
+    const auto include = [&](const QTreeWidgetItem *item) {
+        if (item->data(0, Qt::UserRole).toULongLong() == 0)
+            return;
+        anyLayer = true;
+        if (item->checkState(0) != Qt::Checked)
+            allVisible = false;
+    };
+    for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+        const auto *item = tree_->topLevelItem(index);
+        include(item);
+        for (int child = 0; child < item->childCount(); ++child)
+            include(item->child(child));
+    }
+    visibilityButton_->setEnabled(anyLayer);
+    const bool hideAll = anyLayer && allVisible;
+    visibilityButton_->setToolTip(hideAll ? QStringLiteral("Hide all layers") : QStringLiteral("Show all layers"));
+    visibilityButton_->setAccessibleName(visibilityButton_->toolTip());
+    setLucideIcon(visibilityButton_, hideAll ? QStringLiteral("eye-off") : QStringLiteral("eye"), 16);
 }
 
 void LayersPanel::applyFilter(const QString &text) {
@@ -1218,6 +1296,7 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
     }
     if (search_)
         applyFilter(search_->text());
+    updateVisibilityButton();
 }
 
 SymbolsPanel::SymbolsPanel(QWidget *parent) : QWidget(parent) {

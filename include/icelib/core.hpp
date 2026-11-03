@@ -172,6 +172,11 @@ struct Shape {
     // Optional hierarchy display name. Shapes without a name use a generated
     // type/id label in the layout hierarchy.
     std::string name;
+    // Text-polygon pieces share textGroup. The group id is the first piece's
+    // shape id so existing shape selection and references keep working.
+    bool textPolygon = false;
+    ObjectId textGroup = 0;
+    std::string textSource;
     bool isPath() const { return centerline.size() >= 2 && width > 0; }
     bool isText() const { return !text.empty(); }
     ObjectId layerForSegment(std::size_t index) const {

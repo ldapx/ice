@@ -132,16 +132,20 @@ class LayersPanel : public QWidget {
     void setOnLayerGroupVisibilityChanged(
         std::function<void(const std::vector<ice::ObjectId> &, bool)> callback);
     void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
+    void setOnLayerVisibilityFilter(std::function<void(bool pinOnly)> callback);
 
   private:
     void applyFilter(const QString &text);
     void showContextMenu(const QPoint &pos);
+    void updateVisibilityButton();
 
     QTreeWidget *tree_ = nullptr;
     QLineEdit *search_ = nullptr;
+    QPushButton *visibilityButton_ = nullptr;
     std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
     std::function<void(const std::vector<ice::ObjectId> &, bool)> onLayerGroupVisibilityChanged_;
     std::function<void(bool)> onAllLayersVisibilityChanged_;
+    std::function<void(bool)> onLayerVisibilityFilter_;
     std::function<void()> onCreateLayer_;
     std::function<void(ice::ObjectId)> onLayerSelected_;
 };
