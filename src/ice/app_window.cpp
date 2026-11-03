@@ -391,6 +391,45 @@ class DocumentWindow : public QMainWindow {
         return symbols;
     }
 
+    // Older projects can contain IHP instances placed before the package
+    // sidecars declared model/size defaults. Seed only completely empty
+    // parameter lists so existing user-edited values are never overwritten.
+    void backfillSchematicInstanceParameters(ice::Project &project) const {
+        std::map<std::string, std::vector<SymbolDefinition>> packageLibraries;
+        for (auto &[_, cell] : project.schematicCells) {
+            if (cell.textSchematic)
+                continue;
+            const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
+            if (pdk == ice::genericPdkId)
+                continue;
+            auto library = packageLibraries.find(pdk);
+            if (library == packageLibraries.end()) {
+                const auto packageRoot = installedPdkPackageRoot(pdk);
+                const auto symbolDirectory = packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols"
+                                                                 : packageRoot / "symbols";
+                auto definitions = directoryHasSymbols(symbolDirectory) ? packageSymbolLibrary(symbolDirectory)
+                                                                        : std::vector<SymbolDefinition>{};
+                library = packageLibraries.emplace(pdk, std::move(definitions)).first;
+            }
+            if (library->second.empty())
+                continue;
+            std::map<std::string, const SymbolDefinition *> defaults;
+            for (const auto &definition : library->second)
+                defaults.emplace(definition.name.toStdString(), &definition);
+            for (auto &[_, instance] : cell.instances) {
+                if (!instance.parameters.empty())
+                    continue;
+                const auto symbol = cell.symbols.find(instance.symbol);
+                if (symbol == cell.symbols.end())
+                    continue;
+                const auto definition = defaults.find(symbol->second.name);
+                if (definition == defaults.end())
+                    continue;
+                ice::seedDefaultParameters(project, instance, instanceDefaults(*definition->second));
+            }
+        }
+    }
+
     bool setProject(ice::Project project) {
         if (reportDirty_ && !saveReportSource()) {
             QMessageBox::warning(this, QStringLiteral("Simulation Script"),
@@ -459,6 +498,7 @@ class DocumentWindow : public QMainWindow {
                     applyLayoutDevicePorts(project, cell, library, device->ports);
             }
         }
+        backfillSchematicInstanceParameters(project);
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         project_->subscribe([this] { updateFileTabDirtyIndicators(); });
         captureSavedFileBaselines();
@@ -7706,8 +7746,7 @@ class DocumentWindow : public QMainWindow {
         }
         if (toolEscapeShortcut_)
             toolEscapeShortcut_->setEnabled(true);
-        statusBar()->showMessage(
-            QStringLiteral("Click in the schematic to place %1").arg(definition.name));
+        statusBar()->showMessage(QStringLiteral("Click in the schematic to place %1").arg(definition.name));
     }
 
     void activateSchematicPlaceSymbolTool() {

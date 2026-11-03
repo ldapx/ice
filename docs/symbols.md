@@ -87,8 +87,10 @@ generic symbols and PDK-specific symbols together. The IHP SG13G2, Sky130, and
 GF180MCU packages provide NMOS/PMOS, bipolar, passive, and diode definitions and
 merge them into the generic transistor, passive, and semiconductor categories.
 Their sidecars reference ICE's shared artwork with `generic:` values, so the
-packages do not duplicate SVG files. There are no built-in IHP, Sky130, or
-GF180MCU symbol definitions in ICE.
+packages do not duplicate SVG files. PDK transistor and passive sidecars also
+declare default `model`/size parameters, so newly placed instances start with
+editable values such as `model`, `w`, `l`, and `m`. There are no built-in IHP,
+Sky130, or GF180MCU symbol definitions in ICE.
 
 ## Source symbols
 

@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 import icepy
 
@@ -83,6 +84,37 @@ def check_library(name: str, root: Path) -> None:
     assert device["ports"], f"{name}: device library has no ports"
     assert device["bounds"][2] > device["bounds"][0]
     assert device["bounds"][3] > device["bounds"][1]
+
+    if name == "ice-pkg-ihp-sg13g2":
+        expected = {
+            "nmos.toml": {
+                "model": "sg13_lv_nmos",
+                "w": "0.15u",
+                "l": "0.13u",
+                "m": "1",
+            },
+            "pmos.toml": {
+                "model": "sg13_lv_pmos",
+                "w": "0.15u",
+                "l": "0.13u",
+                "m": "1",
+            },
+            "npn_bjt.toml": {"model": "npn13G2", "m": "1"},
+            "mim_capacitor.toml": {
+                "model": "cap_cmim",
+                "capacitance": "74.6f",
+                "w": "6.99u",
+                "l": "6.99u",
+                "m": "1",
+            },
+        }
+        for filename, defaults in expected.items():
+            sidecar = tomllib.loads((root / "symbols" / filename).read_text())
+            actual = {
+                parameter["name"]: parameter["value"]
+                for parameter in sidecar.get("parameter", [])
+            }
+            assert actual == defaults, f"{name}: {filename} parameters {actual}"
 
     if name == "ice-pkg-ihp-sg13g2":
         # The IHP package routes through its vendored upstream PyCell runtime.
