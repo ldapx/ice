@@ -116,6 +116,13 @@ struct SchematicCell {
     // as a drawn symbol-and-net canvas.
     bool textSchematic = false;
     std::string spiceText;
+    // True for a schematic authored as a SystemVerilog source cell. Source
+    // cells participate in the project hierarchy and simulation selector but
+    // are not drawn canvases or hierarchical blocks.
+    bool systemVerilogSchematic = false;
+    std::string systemVerilogText;
+    bool isTextSource() const { return textSchematic || systemVerilogSchematic; }
+    const std::string &sourceText() const { return systemVerilogSchematic ? systemVerilogText : spiceText; }
 };
 
 struct Layer {

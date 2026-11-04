@@ -12,6 +12,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/vcd.hpp"
 #include "icelib/verification.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
@@ -428,7 +429,7 @@ class DocumentWindow : public QMainWindow {
     void backfillSchematicInstanceParameters(ice::Project &project) const {
         std::map<std::string, std::vector<SymbolDefinition>> packageLibraries;
         for (auto &[_, cell] : project.schematicCells) {
-            if (cell.textSchematic)
+            if (cell.isTextSource())
                 continue;
             const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
             if (pdk == ice::genericPdkId)
@@ -1131,7 +1132,7 @@ class DocumentWindow : public QMainWindow {
                 const auto &localCell = current->second;
                 const bool emptyPlaceholder = localCell.parameters.empty() && localCell.symbols.empty() &&
                                               localCell.instances.empty() && localCell.nets.empty() &&
-                                              (!localCell.textSchematic || localCell.spiceText.empty());
+                                              (!localCell.isTextSource() || localCell.sourceText().empty());
                 if (emptyPlaceholder) {
                     current->second = diskCell;
                     savedSchematic[id] = diskSignature;
@@ -1648,11 +1649,114 @@ class DocumentWindow : public QMainWindow {
         setLucideIcon(schematicAction, QStringLiteral("microchip"));
         auto *textAction = menu.addAction(QStringLiteral("Text SPICE Schematic"));
         setLucideIcon(textAction, QStringLiteral("notebook-text"));
+        auto *svBlockAction = menu.addAction(QStringLiteral("SystemVerilog Block"));
+        setLucideIcon(svBlockAction, QStringLiteral("notebook-text"));
         const auto *chosen = menu.exec(QCursor::pos());
         if (chosen == schematicAction)
             createSchematic();
         else if (chosen == textAction)
             createTextSchematic();
+        else if (chosen == svBlockAction)
+            createSystemVerilogBlock();
+    }
+
+    static QString systemVerilogIdentifier(QString text) {
+        const auto trimmed = text.trimmed();
+        QString result;
+        result.reserve(trimmed.size());
+        for (const auto character : trimmed) {
+            if (character.isLetterOrNumber() || character == QLatin1Char('_'))
+                result += character;
+            else if (!result.endsWith(QLatin1Char('_')))
+                result += QLatin1Char('_');
+        }
+        while (result.endsWith(QLatin1Char('_')))
+            result.chop(1);
+        if (result.isEmpty())
+            result = QStringLiteral("digital_block");
+        if (result.front().isDigit())
+            result.prepend(QStringLiteral("block_"));
+        return result;
+    }
+
+    static QString systemVerilogTemplate(const QString &name, bool testbench) {
+        const auto module = systemVerilogIdentifier(name);
+        if (testbench) {
+            return QStringLiteral("`timescale 1ns/1ps\n"
+                                  "// SystemVerilog testbench: %1\n"
+                                  "module %2_tb;\n"
+                                  "    logic clk = 1'b0;\n"
+                                  "    logic rst = 1'b1;\n"
+                                  "    logic out;\n"
+                                  "\n"
+                                  "    // Instantiate and drive the design under test here.\n"
+                                  "    always #5 clk = ~clk;\n"
+                                  "\n"
+                                  "    initial begin\n"
+                                  "        $dumpfile(\"%2.vcd\");\n"
+                                  "        $dumpvars(0, %2_tb);\n"
+                                  "        #20 rst = 1'b0;\n"
+                                  "        #200 $finish;\n"
+                                  "    end\n"
+                                  "endmodule\n")
+                .arg(name, module);
+        }
+        return QStringLiteral("// SystemVerilog block: %1\n"
+                              "module %2 (\n"
+                              "    input  logic clk,\n"
+                              "    input  logic rst,\n"
+                              "    output logic out\n"
+                              ");\n"
+                              "    assign out = 1'b0;\n"
+                              "endmodule\n")
+            .arg(name, module);
+    }
+
+    void createSystemVerilogBlock() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Create SystemVerilog Block"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto installDirectory = configuredPackageInstallDirectory();
+        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName() + QStringLiteral(" Block"), this);
+        dialog.setWindowTitle(QStringLiteral("Create SystemVerilog Block"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        createSystemVerilogCell(dialog.schematicName(), dialog.pdkId(), false);
+    }
+
+    void createSystemVerilogCell(const QString &name, const std::string &pdk, bool testbench) {
+        if (!project_)
+            return;
+        const auto trimmedName = name.trimmed();
+        if (trimmedName.isEmpty())
+            return;
+        QString pdkLabel;
+        bool addDependency = false;
+        if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
+            return;
+        ice::ObjectId createdId = 0;
+        try {
+            project_->execute("create SystemVerilog cell", [&](ice::Project &project) {
+                if (addDependency)
+                    project.packageDependencies.push_back(pdk);
+                createdId = ice::createSystemVerilogCell(project, trimmedName.toStdString(), pdk,
+                                                         systemVerilogTemplate(trimmedName, testbench).toStdString());
+            });
+            project_->setLastHistoryLabel("Created SystemVerilog cell " + trimmedName.toStdString());
+            activeSchematicId_ = createdId;
+            refreshProject();
+            selectSchematicTab(createdId);
+            if (documents_ && schematicPage_)
+                documents_->setCurrentWidget(schematicPage_);
+            statusBar()->showMessage(
+                QStringLiteral("SystemVerilog %1 created with %2")
+                    .arg(testbench ? QStringLiteral("testbench") : QStringLiteral("block"), pdkLabel));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Create SystemVerilog Cell"),
+                                  QString::fromStdString(error.what()));
+        }
     }
 
     void createTextSchematic() {
@@ -1904,12 +2008,13 @@ class DocumentWindow : public QMainWindow {
             return;
         auto &cells = project_->project().schematicCells;
         const auto it = cells.find(activeSchematicId_);
-        if (it == cells.end() || !it->second.textSchematic)
+        if (it == cells.end() || !it->second.isTextSource())
             return;
         const auto value = text.toStdString();
-        if (it->second.spiceText == value)
+        auto &source = it->second.systemVerilogSchematic ? it->second.systemVerilogText : it->second.spiceText;
+        if (source == value)
             return;
-        it->second.spiceText = value;
+        source = value;
         project_->markDirty();
         updateFileTabDirtyIndicators();
     }
@@ -1918,13 +2023,13 @@ class DocumentWindow : public QMainWindow {
         if (!project_)
             return;
         const auto it = project_->project().schematicCells.find(schematicId);
-        if (it == project_->project().schematicCells.end() || !it->second.textSchematic)
+        if (it == project_->project().schematicCells.end() || !it->second.isTextSource())
             return;
         activeSchematicId_ = schematicId;
         if (schematicViewStack_ && textSchematicEditorPage_)
             schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
         if (textSchematicEditor_) {
-            const auto text = QString::fromStdString(it->second.spiceText);
+            const auto text = QString::fromStdString(it->second.sourceText());
             if (textSchematicEditor_->text() != text)
                 textSchematicEditor_->setText(text);
         }
@@ -1938,7 +2043,7 @@ class DocumentWindow : public QMainWindow {
         if (it == project_->project().schematicCells.end())
             return;
         activeSchematicId_ = id;
-        if (it->second.textSchematic) {
+        if (it->second.isTextSource()) {
             showTextSchematicEditor(id);
             updateEmptyWorkspaceState();
             return;
@@ -3388,8 +3493,8 @@ class DocumentWindow : public QMainWindow {
                     for (const auto &point : points)
                         layoutPoints.push_back({point.x, point.y});
                     const auto shapeId = project.nextId();
-                    ice::Shape shape{shapeId, layerId, std::nullopt,
-                                     ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(layoutPoints)};
+                    ice::Shape shape{shapeId, layerId, std::nullopt, ice::Rect{minX, minY, maxX - minX, maxY - minY},
+                                     std::move(layoutPoints)};
                     shape.name = groupName;
                     shape.textPolygon = true;
                     shape.textSource = groupText;
@@ -3974,13 +4079,11 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 auto *group = new QGraphicsItemGroup;
                 for (const auto &[memberId, member] : cellIt->second.shapes) {
-                    if (member.textGroup != shape.textGroup || !layerVisible(member.layer) ||
-                        member.polygon.size() < 3)
+                    if (member.textGroup != shape.textGroup || !layerVisible(member.layer) || member.polygon.size() < 3)
                         continue;
                     const auto memberStyle = styles.contains(member.layer)
                                                  ? styles.at(member.layer)
-                                                 : LayerStyle{ice::uiColor(ice::UiColor::Border1),
-                                                              Qt::SolidPattern};
+                                                 : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
                     QPolygonF polygon;
                     polygon.reserve(static_cast<int>(member.polygon.size()));
                     for (const auto &point : member.polygon)
@@ -4007,9 +4110,8 @@ class DocumentWindow : public QMainWindow {
                     group->setFlag(QGraphicsItem::ItemIsSelectable);
                     group->setFlag(QGraphicsItem::ItemIsMovable);
                 }
-                group->setToolTip(QStringLiteral("%1 · %2")
-                                      .arg(QString::fromStdString(shape.name),
-                                           QString::fromStdString(shape.textSource)));
+                group->setToolTip(QStringLiteral("%1 · %2").arg(QString::fromStdString(shape.name),
+                                                                QString::fromStdString(shape.textSource)));
                 layoutCanvas_->scene()->addItem(group);
                 textPolygonItems.emplace(shape.textGroup, group);
                 continue;
@@ -4445,8 +4547,7 @@ class DocumentWindow : public QMainWindow {
                     if (instanceIt != activeIt->second.instances.end()) {
                         const auto childIt = project_->project().layoutCells.find(instanceIt->second.cell);
                         if (childIt != project_->project().layoutCells.end()) {
-                            layoutPropertiesPanel_->setLayoutCell(childIt->second,
-                                                                  previewModelFor(childIt->second));
+                            layoutPropertiesPanel_->setLayoutCell(childIt->second, previewModelFor(childIt->second));
                             if (bringToFront && layoutRightTabs_)
                                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
                             return;
@@ -5345,6 +5446,8 @@ class DocumentWindow : public QMainWindow {
             line = QStringLiteral(".dc V1 0 1 0.01");
         } else if (analysis == QStringLiteral("ac")) {
             line = QStringLiteral(".ac dec 10 1 1e6");
+        } else if (analysis == QStringLiteral("digital")) {
+            line = QStringLiteral("SystemVerilog testbench: $finish / VCD traces");
         } else {
             line = QStringLiteral(".op");
         }
@@ -5402,6 +5505,7 @@ class DocumentWindow : public QMainWindow {
         signalsCapture_->setText(QString::fromStdString(sim.captureSignals));
         useInitialConditions_->setChecked(sim.use_initial_conditions);
         updateAnalysisControlLine();
+        applySimulationLanguageDefaults();
 
         // Avoid rebuilding the graph tabs (and losing plot results) when the
         // selection did not actually change, e.g. after a property commit.
@@ -5570,6 +5674,77 @@ class DocumentWindow : public QMainWindow {
         simulationPanel_->setProject(project_->project());
         simulationPanel_->selectSimulation(newId);
         statusBar()->showMessage(QStringLiteral("Simulation added"));
+    }
+
+    void addSystemVerilogTestbench() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Add SystemVerilog Testbench"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto installDirectory = configuredPackageInstallDirectory();
+        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName() + QStringLiteral(" Testbench"), this);
+        dialog.setWindowTitle(QStringLiteral("Add SystemVerilog Testbench"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto name = dialog.schematicName().trimmed();
+        if (name.isEmpty())
+            return;
+        const auto pdk = dialog.pdkId();
+        QString pdkLabel;
+        bool addDependency = false;
+        if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
+            return;
+
+        ice::ObjectId testbenchId = 0;
+        ice::ObjectId simulationId = 0;
+        try {
+            project_->execute("add SystemVerilog testbench", [&](ice::Project &project) {
+                if (addDependency)
+                    project.packageDependencies.push_back(pdk);
+                testbenchId = ice::createSystemVerilogCell(project, name.toStdString(), pdk,
+                                                           systemVerilogTemplate(name, true).toStdString());
+                const auto baseName = name.toStdString() + " Simulation";
+                auto simulationName = baseName;
+                const auto simulationNameExists = [&project](const std::string &candidate) {
+                    return std::any_of(project.simulations.begin(), project.simulations.end(),
+                                       [&](const auto &entry) { return entry.second.name == candidate; });
+                };
+                for (int suffix = 2; simulationNameExists(simulationName); ++suffix)
+                    simulationName = baseName + " " + std::to_string(suffix);
+
+                simulationId = project.nextId();
+                ice::SimulationItem simulation;
+                simulation.id = simulationId;
+                simulation.name = simulationName;
+                simulation.schematic = testbenchId;
+                simulation.simulator = "iverilog";
+                simulation.analysis = "digital";
+                project.simulations.emplace(simulationId, std::move(simulation));
+
+                ice::SimulationGraph graph;
+                graph.id = project.nextId();
+                graph.name = "Graph 1";
+                graph.xAxis = "time";
+                project.simulations.at(simulationId).graphs.push_back(std::move(graph));
+            });
+            project_->setLastHistoryLabel("Created SystemVerilog testbench " + name.toStdString());
+            refreshProject();
+            if (simulationPanel_) {
+                simulationPanel_->setProject(project_->project());
+                simulationPanel_->selectSimulation(simulationId);
+            }
+            if (documents_ && simulationPage_)
+                documents_->setCurrentWidget(simulationPage_);
+            if (simulationTabs_ && simulationTestbenchPage_) {
+                updateSimulationTestbenchTab();
+                simulationTabs_->setCurrentWidget(simulationTestbenchPage_);
+            }
+            statusBar()->showMessage(QStringLiteral("SystemVerilog testbench %1 created with %2").arg(name, pdkLabel));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Add SystemVerilog Testbench"),
+                                  QString::fromStdString(error.what()));
+        }
     }
 
     QString reportSlug(const QString &name) const {
@@ -6360,6 +6535,8 @@ class DocumentWindow : public QMainWindow {
         request.stop = sim.stop;
         request.step = sim.step;
         request.use_initial_conditions = sim.use_initial_conditions;
+        if (!projectPath_.isEmpty())
+            request.workingDirectory = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
         // The circuit comes from the schematic the simulation points at, so
         // Run simulates what you drew instead of hand-typed directives. The
         // additional directives box is reserved for model cards / .include
@@ -6368,22 +6545,36 @@ class DocumentWindow : public QMainWindow {
         const auto cellId = sim.schematic != 0 && project.schematicCells.contains(sim.schematic)
                                 ? sim.schematic
                                 : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
+        bool hdl = false;
         if (cellId != 0) {
-            std::vector<std::string> notes;
-            const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
-            request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
             const auto &cell = project.schematicCells.at(cellId);
-            ice::applyPdkSimulationSetup(cell.pdk, request);
-            for (const auto &noteText : notes)
-                netlistNotes << QString::fromStdString(noteText);
+            if (cell.systemVerilogSchematic) {
+                hdl = true;
+                request.simulator = "iverilog";
+                request.analysis = "digital";
+                std::istringstream source(cell.systemVerilogText);
+                std::string line;
+                while (std::getline(source, line))
+                    request.netlist.push_back(line);
+                netlistNotes << QStringLiteral("SystemVerilog source cell");
+            } else {
+                std::vector<std::string> notes;
+                const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
+                request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
+                ice::applyPdkSimulationSetup(cell.pdk, request);
+                for (const auto &noteText : notes)
+                    netlistNotes << QString::fromStdString(noteText);
+            }
         }
-        for (const auto &line : additionalDirectives_->text().split('\n')) {
-            const auto trimmed = line.trimmed();
-            // Skip analysis/control directives the runner already handles from
-            // the simulation properties; keep model cards and includes.
-            if (trimmed.isEmpty() || isAnalysisControlDirective(trimmed))
-                continue;
-            request.netlist.push_back(trimmed.toStdString());
+        if (!hdl) {
+            for (const auto &line : additionalDirectives_->text().split('\n')) {
+                const auto trimmed = line.trimmed();
+                // Skip analysis/control directives the runner already handles from
+                // the simulation properties; keep model cards and includes.
+                if (trimmed.isEmpty() || isAnalysisControlDirective(trimmed))
+                    continue;
+                request.netlist.push_back(trimmed.toStdString());
+            }
         }
         // The captured-signal list tells the adapter which vectors to fetch
         // back from ngspice. Graph axis selections then pick from those traces.
@@ -6406,7 +6597,17 @@ class DocumentWindow : public QMainWindow {
         if (id == 0)
             return false;
         const auto cell = project_->project().schematicCells.find(id);
-        return cell != project_->project().schematicCells.end() && cell->second.textSchematic;
+        return cell != project_->project().schematicCells.end() && cell->second.isTextSource();
+    }
+
+    bool selectedSimulationSchematicIsHdl() const {
+        if (!project_)
+            return false;
+        const auto id = selectedSimulationSchematicId();
+        if (id == 0)
+            return false;
+        const auto cell = project_->project().schematicCells.find(id);
+        return cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
     }
 
     ice::SimulationItem currentSimulationFormItem() const {
@@ -6461,8 +6662,77 @@ class DocumentWindow : public QMainWindow {
             simulationRunButton_->setEnabled(hasSimulation && hasSchematic && (textSchematic || upToDate));
     }
 
+    void onSimulationTestbenchEdited(const QString &text) {
+        if (!project_ || activeSimulationId_ == 0)
+            return;
+        auto &project = project_->project();
+        const auto simulation = project.simulations.find(activeSimulationId_);
+        if (simulation == project.simulations.end())
+            return;
+        const auto cell = project.schematicCells.find(simulation->second.schematic);
+        if (cell == project.schematicCells.end() || !cell->second.systemVerilogSchematic)
+            return;
+        const auto value = text.toStdString();
+        if (cell->second.systemVerilogText == value)
+            return;
+        cell->second.systemVerilogText = value;
+        project_->markDirty();
+        updateFileTabDirtyIndicators();
+        updateSimulationNetlistState();
+    }
+
+    void updateSimulationTestbenchTab() {
+        if (!project_ || !simulationTabs_ || simulationTestbenchTabIndex_ < 0)
+            return;
+        const auto id = selectedSimulationSchematicId();
+        const auto cell = project_->project().schematicCells.find(id);
+        const bool hdl = cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
+        simulationTabs_->setTabVisible(simulationTestbenchTabIndex_, hdl);
+        if (!hdl)
+            return;
+        if (simulationTestbenchEditor_) {
+            const auto text = QString::fromStdString(cell->second.systemVerilogText);
+            if (simulationTestbenchEditor_->text() != text)
+                simulationTestbenchEditor_->setText(text);
+        }
+        simulationTabs_->setTabToolTip(
+            simulationTestbenchTabIndex_,
+            QStringLiteral("SystemVerilog testbench: %1").arg(QString::fromStdString(cell->second.name)));
+    }
+
+    void applySimulationLanguageDefaults() {
+        if (!project_ || !schematicSelector_ || !simulatorSelector_ || !analysisSelector_)
+            return;
+        const auto id = selectedSimulationSchematicId();
+        const auto cell = project_->project().schematicCells.find(id);
+        const bool hdl = cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
+        QSignalBlocker simulatorBlocker(simulatorSelector_);
+        QSignalBlocker analysisBlocker(analysisSelector_);
+        if (hdl) {
+            const auto simulator = simulatorSelector_->findData(QStringLiteral("iverilog"));
+            if (simulator >= 0)
+                simulatorSelector_->setCurrentIndex(simulator);
+            const auto analysis = analysisSelector_->findData(QStringLiteral("digital"));
+            if (analysis >= 0)
+                analysisSelector_->setCurrentIndex(analysis);
+        } else {
+            if (simulatorSelector_->currentData().toString() == QStringLiteral("iverilog")) {
+                const auto simulator = simulatorSelector_->findData(QStringLiteral("ngspice"));
+                if (simulator >= 0)
+                    simulatorSelector_->setCurrentIndex(simulator);
+            }
+            if (analysisSelector_->currentData().toString() == QStringLiteral("digital")) {
+                const auto analysis = analysisSelector_->findData(QStringLiteral("transient"));
+                if (analysis >= 0)
+                    analysisSelector_->setCurrentIndex(analysis);
+            }
+        }
+        updateAnalysisControlLine();
+    }
+
     void updateSimulationControlStates() {
         const bool hasSimulation = project_ && activeSimulationId_ != 0;
+        const bool hasSchematic = project_ && selectedSimulationSchematicId() != 0;
         const bool textSchematic = selectedSimulationSchematicIsText();
         const auto setPropertyEnabled = [hasSimulation](QWidget *widget) {
             if (widget)
@@ -6476,7 +6746,19 @@ class DocumentWindow : public QMainWindow {
         setPropertyEnabled(useInitialConditions_);
         setPropertyEnabled(analysisControl_);
         setPropertyEnabled(signalsCapture_);
-        setPropertyEnabled(additionalDirectives_);
+        const bool hdl = selectedSimulationSchematicIsHdl();
+        if (stopTime_)
+            stopTime_->setEnabled(hasSimulation && !hdl);
+        if (stepTime_)
+            stepTime_->setEnabled(hasSimulation && !hdl);
+        if (useInitialConditions_)
+            useInitialConditions_->setEnabled(hasSimulation && !hdl && analysisSelector_ &&
+                                              analysisSelector_->currentData().toString() ==
+                                                  QStringLiteral("transient"));
+        if (additionalDirectives_)
+            additionalDirectives_->setEnabled(hasSimulation && !hdl);
+        if (analysisControl_)
+            analysisControl_->setEnabled(hasSimulation);
         if (signalSelectButton_) {
             signalSelectButton_->setVisible(!textSchematic);
             signalSelectButton_->setEnabled(hasSimulation && !textSchematic);
@@ -6489,6 +6771,11 @@ class DocumentWindow : public QMainWindow {
             simulationEditGraphButton_->setEnabled(hasSimulation);
         if (simulationGridButton_)
             simulationGridButton_->setEnabled(hasSimulation);
+        if (simulationLoadVcdButton_)
+            simulationLoadVcdButton_->setEnabled(hasSimulation);
+        if (simulationTestbenchRunButton_)
+            simulationTestbenchRunButton_->setEnabled(hasSimulation && hasSchematic && hdl);
+        updateSimulationTestbenchTab();
         updateSimulationBuildButton();
     }
 
@@ -6544,6 +6831,76 @@ class DocumentWindow : public QMainWindow {
         return QString::fromStdString(output.str());
     }
 
+    void loadVcdGraphs() {
+        if (!project_ || activeSimulationId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Load VCD"), QStringLiteral("Select a simulation first."));
+            return;
+        }
+        const auto directory = projectPath_.isEmpty() ? QString() : QFileInfo(projectPath_).absolutePath();
+        const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Load VCD"), directory,
+                                                       QStringLiteral("VCD files (*.vcd);;All files (*)"));
+        if (path.isEmpty())
+            return;
+        auto vcd = ice::parseVcdFile(path.toStdString());
+        if (vcd.traces.empty()) {
+            QMessageBox::warning(this, QStringLiteral("Load VCD"),
+                                 QStringLiteral("No graphable traces were found in %1").arg(path));
+            return;
+        }
+
+        std::vector<std::string> traceNames;
+        traceNames.reserve(vcd.traces.size());
+        std::string capture;
+        for (const auto &trace : vcd.traces) {
+            traceNames.push_back(trace.name);
+            if (!capture.empty())
+                capture += ",";
+            capture += trace.name;
+        }
+        bool graphsUpdated = false;
+        project_->execute("load VCD traces", [&](ice::Project &project) {
+            auto it = project.simulations.find(activeSimulationId_);
+            if (it == project.simulations.end())
+                return;
+            it->second.captureSignals = capture;
+            for (auto &graph : it->second.graphs) {
+                if (!graph.ySignals.empty())
+                    continue;
+                const auto count = std::min<std::size_t>(4, traceNames.size());
+                for (std::size_t index = 0; index < count; ++index)
+                    graph.ySignals.push_back(traceNames[index]);
+                if (graph.xAxis.empty())
+                    graph.xAxis = "time";
+            }
+            graphsUpdated = true;
+        });
+        if (!graphsUpdated)
+            return;
+        if (const auto updated = project_->project().simulations.find(activeSimulationId_);
+            updated != project_->project().simulations.end()) {
+            QSignalBlocker blocker(signalsCapture_);
+            signalsCapture_->setText(QString::fromStdString(updated->second.captureSignals));
+            if (simulationPanel_)
+                simulationPanel_->setProject(project_->project());
+            rebuildGraphTabs(updated->second.graphs);
+        }
+        auto result = std::make_shared<ice::SimulationResult>();
+        result->state = ice::JobState::succeeded;
+        result->analysis = "VCD";
+        result->simulator = "vcd";
+        result->simulator_version = "VCD";
+        result->time = std::move(vcd.time);
+        result->traces = std::move(vcd.traces);
+        result->warnings = std::move(vcd.warnings);
+        applySimulationResultToGraphTabs(result);
+        if (simulationTabs_ && simulationGraphsPage_)
+            simulationTabs_->setCurrentWidget(simulationGraphsPage_);
+        if (documents_ && simulationPage_)
+            documents_->setCurrentWidget(simulationPage_);
+        statusBar()->showMessage(
+            QStringLiteral("Loaded VCD %1 (%2 traces)").arg(QFileInfo(path).fileName()).arg(result->traces.size()));
+    }
+
     void runSimulation() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Run Simulation"),
@@ -6587,8 +6944,25 @@ class DocumentWindow : public QMainWindow {
 
         QStringList netlistNotes;
         const auto request = buildSimulationRequest(sim, netlistNotes);
-        auto result =
-            ice::SimulationRunner(std::make_shared<ice::NgspiceSimulator>()).run(request, std::chrono::seconds(10));
+        auto result = ice::SimulationRunner().run(request, std::chrono::seconds(10));
+
+        // Populate empty capture and graph fields from the generated traces so
+        // the first run produces a usable plot, including for digital VCDs.
+        bool graphsUpdated = false;
+        if (result.state == ice::JobState::succeeded && !result.traces.empty()) {
+            auto updatedSim = sim;
+            if (ice::populateSimulationSignalsFromTraces(updatedSim, result.traces)) {
+                project_->execute("populate simulation trace signals", [&](ice::Project &project) {
+                    auto it = project.simulations.find(sim.id);
+                    if (it != project.simulations.end())
+                        ice::populateSimulationSignalsFromTraces(it->second, result.traces);
+                });
+                graphsUpdated = true;
+                if (const auto updated = project_->project().simulations.find(sim.id);
+                    updated != project_->project().simulations.end())
+                    sim = updated->second;
+            }
+        }
         auto report = formatSimulationReport(request, result, netlistNotes);
         QString storedPath;
 
@@ -6624,11 +6998,21 @@ class DocumentWindow : public QMainWindow {
         }
         simulationOutput_->setPlainText(report);
 
+        if (graphsUpdated) {
+            QSignalBlocker blocker(signalsCapture_);
+            signalsCapture_->setText(QString::fromStdString(sim.captureSignals));
+            if (simulationPanel_)
+                simulationPanel_->setProject(project_->project());
+            rebuildGraphTabs(sim.graphs);
+        }
+
         // Show result in the currently active graph tab.
         if (graphTabs_) {
-            auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->currentWidget());
-            if (plot)
-                plot->setResult(std::make_shared<ice::SimulationResult>(std::move(result)));
+            auto resultPtr = std::make_shared<ice::SimulationResult>(std::move(result));
+            if (graphsUpdated)
+                applySimulationResultToGraphTabs(resultPtr);
+            else if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->currentWidget()))
+                plot->setResult(resultPtr);
         }
         statusBar()->showMessage(storedPath.isEmpty() ? QStringLiteral("Simulation finished")
                                                       : QStringLiteral("Simulation stored: %1").arg(storedPath));
@@ -6912,13 +7296,12 @@ class DocumentWindow : public QMainWindow {
             selectSchematicTab(report.schematicCell);
             if (documents_ && schematicPage_)
                 documents_->setCurrentWidget(schematicPage_);
-            statusBar()->showMessage(
-                QStringLiteral("PEX created %1: %2 net(s), %3 device(s), R=%4 ohm, C=%5 fF")
-                    .arg(QString::fromStdString(report.schematic))
-                    .arg(report.nets.size())
-                    .arg(report.devices.size())
-                    .arg(QString::number(report.totalResistance, 'g', 4))
-                    .arg(QString::number(report.totalCapacitance, 'g', 4)));
+            statusBar()->showMessage(QStringLiteral("PEX created %1: %2 net(s), %3 device(s), R=%4 ohm, C=%5 fF")
+                                         .arg(QString::fromStdString(report.schematic))
+                                         .arg(report.nets.size())
+                                         .arg(report.devices.size())
+                                         .arg(QString::number(report.totalResistance, 'g', 4))
+                                         .arg(QString::number(report.totalCapacitance, 'g', 4)));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Run PEX"), QString::fromStdString(error.what()));
         } catch (const std::exception &error) {
@@ -7122,6 +7505,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     static QString schematicFileExtension(const ice::SchematicCell &cell) {
+        if (cell.systemVerilogSchematic)
+            return QStringLiteral("sv");
         return cell.textSchematic ? QStringLiteral("sp") : QStringLiteral("icesch");
     }
 
@@ -7282,9 +7667,12 @@ class DocumentWindow : public QMainWindow {
                 schematicCellTabs_->tabBar()->setTabData(tab, QVariant::fromValue<qulonglong>(id));
                 const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
                                                                                    : QString::fromStdString(cell.pdk);
-                schematicCellTabs_->setTabToolTip(tab, cell.textSchematic
-                                                           ? QStringLiteral("Text SPICE schematic · PDK: %1").arg(pdk)
-                                                           : QStringLiteral("PDK: %1").arg(pdk));
+                const auto tooltip =
+                    cell.systemVerilogSchematic
+                        ? QStringLiteral("SystemVerilog · PDK: %1").arg(pdk)
+                        : (cell.textSchematic ? QStringLiteral("Text SPICE schematic · PDK: %1").arg(pdk)
+                                              : QStringLiteral("PDK: %1").arg(pdk));
+                schematicCellTabs_->setTabToolTip(tab, tooltip);
             }
             bool selectedTab = false;
             for (int index = 0; index < schematicCellTabs_->count(); ++index) {
@@ -7448,11 +7836,11 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project_->project().schematicCells.end())
             return;
         const auto &cell = cellIt->second;
-        if (cell.textSchematic) {
+        if (cell.isTextSource()) {
             if (schematicViewStack_ && textSchematicEditorPage_)
                 schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
             if (textSchematicEditor_) {
-                const auto text = QString::fromStdString(cell.spiceText);
+                const auto text = QString::fromStdString(cell.sourceText());
                 if (textSchematicEditor_->text() != text)
                     textSchematicEditor_->setText(text);
             }
@@ -7475,7 +7863,7 @@ class DocumentWindow : public QMainWindow {
             }
             auto symbols = schematicBaseSymbols_;
             for (const auto &[id, other] : project_->project().schematicCells) {
-                if (id == cell.id || other.textSchematic)
+                if (id == cell.id || other.isTextSource())
                     continue;
                 symbols.push_back(generatedSchematicSymbol(other));
             }
@@ -8164,11 +8552,11 @@ class DocumentWindow : public QMainWindow {
         if (project_ && hasOpenSchematics) {
             const auto active = project_->project().schematicCells.find(activeSchematicId_);
             if (active != project_->project().schematicCells.end()) {
-                showingCanvasSchematic = !active->second.textSchematic;
+                showingCanvasSchematic = !active->second.isTextSource();
             } else {
                 for (const auto id : openSchematicTabs_) {
                     const auto cell = project_->project().schematicCells.find(id);
-                    if (cell != project_->project().schematicCells.end() && !cell->second.textSchematic) {
+                    if (cell != project_->project().schematicCells.end() && !cell->second.isTextSource()) {
                         showingCanvasSchematic = true;
                         break;
                     }
@@ -8477,41 +8865,41 @@ class DocumentWindow : public QMainWindow {
             });
             refreshLayout();
         });
-        layersPanel_->setOnLayerGroupVisibilityChanged([this](const std::vector<ice::ObjectId> &layerIds,
-                                                              bool visible) {
-            if (!project_ || layerIds.empty())
-                return;
-            bool changed = false;
-            project_->execute(visible ? "show layer group" : "hide layer group", [&](ice::Project &project) {
-                for (const auto layerId : layerIds) {
-                    const auto layer = project.layers.find(layerId);
-                    if (layer == project.layers.end() ||
-                        !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
-                        layer->second.visible == visible)
-                        continue;
-                    layer->second.visible = visible;
-                    changed = true;
-                }
+        layersPanel_->setOnLayerGroupVisibilityChanged(
+            [this](const std::vector<ice::ObjectId> &layerIds, bool visible) {
+                if (!project_ || layerIds.empty())
+                    return;
+                bool changed = false;
+                project_->execute(visible ? "show layer group" : "hide layer group", [&](ice::Project &project) {
+                    for (const auto layerId : layerIds) {
+                        const auto layer = project.layers.find(layerId);
+                        if (layer == project.layers.end() ||
+                            !layerAvailableForLayout(project, activeLayoutId_, layer->second) ||
+                            layer->second.visible == visible)
+                            continue;
+                        layer->second.visible = visible;
+                        changed = true;
+                    }
+                });
+                if (changed)
+                    refreshLayout();
             });
-            if (changed)
-                refreshLayout();
-        });
         layersPanel_->setOnLayerVisibilityFilter([this](bool pinOnly) {
             if (!project_)
                 return;
             bool changed = false;
-            project_->execute(pinOnly ? "show only pin layers" : "show only drawing layers",
-                              [&](ice::Project &project) {
-                                  for (auto &[_, layer] : project.layers) {
-                                      if (!layerAvailableForLayout(project, activeLayoutId_, layer))
-                                          continue;
-                                      const bool visible = pinOnly ? layerIsPinLayer(layer) : layerIsDrawingLayer(layer);
-                                      if (layer.visible == visible)
-                                          continue;
-                                      layer.visible = visible;
-                                      changed = true;
-                                  }
-                              });
+            project_->execute(
+                pinOnly ? "show only pin layers" : "show only drawing layers", [&](ice::Project &project) {
+                    for (auto &[_, layer] : project.layers) {
+                        if (!layerAvailableForLayout(project, activeLayoutId_, layer))
+                            continue;
+                        const bool visible = pinOnly ? layerIsPinLayer(layer) : layerIsDrawingLayer(layer);
+                        if (layer.visible == visible)
+                            continue;
+                        layer.visible = visible;
+                        changed = true;
+                    }
+                });
             if (changed)
                 refreshLayout();
         });
@@ -8626,11 +9014,13 @@ class DocumentWindow : public QMainWindow {
         schematicSelector_ = new QComboBox;
         simulatorSelector_ = new QComboBox;
         simulatorSelector_->addItem(QStringLiteral("ngspice"), QStringLiteral("ngspice"));
+        simulatorSelector_->addItem(QStringLiteral("Icarus Verilog (SystemVerilog)"), QStringLiteral("iverilog"));
         analysisSelector_ = new QComboBox;
         analysisSelector_->addItem(QStringLiteral("Transient"), QStringLiteral("transient"));
         analysisSelector_->addItem(QStringLiteral("DC sweep"), QStringLiteral("dc"));
         analysisSelector_->addItem(QStringLiteral("AC sweep"), QStringLiteral("ac"));
         analysisSelector_->addItem(QStringLiteral("Operating point"), QStringLiteral("op"));
+        analysisSelector_->addItem(QStringLiteral("Digital / VCD"), QStringLiteral("digital"));
         stopTime_ = new QDoubleSpinBox;
         stopTime_->setRange(1e-12, 1e9);
         stopTime_->setDecimals(9);
@@ -8743,10 +9133,17 @@ class DocumentWindow : public QMainWindow {
         simulationGridButton_->setFixedWidth(32);
         simulationGridButton_->setEnabled(false);
         setLucideIcon(simulationGridButton_, QStringLiteral("grid-3x3"), 16);
+        simulationLoadVcdButton_ = new QPushButton;
+        simulationLoadVcdButton_->setToolTip(QStringLiteral("Load VCD traces into this simulation's graphs"));
+        simulationLoadVcdButton_->setAccessibleName(QStringLiteral("Load VCD"));
+        simulationLoadVcdButton_->setFixedWidth(32);
+        simulationLoadVcdButton_->setEnabled(false);
+        setLucideIcon(simulationLoadVcdButton_, QStringLiteral("notebook-text"), 16);
         graphControlsLayout->addWidget(simulationAddGraphButton_);
         graphControlsLayout->addWidget(simulationDeleteGraphButton_);
         graphControlsLayout->addWidget(simulationEditGraphButton_);
         graphControlsLayout->addWidget(simulationGridButton_);
+        graphControlsLayout->addWidget(simulationLoadVcdButton_);
 
         graphTabs_ = new QTabWidget;
         graphTabs_->setDocumentMode(true);
@@ -8757,6 +9154,28 @@ class DocumentWindow : public QMainWindow {
         graphsLayout->addWidget(graphTabs_, 1);
         simulationTabs_->addTab(graphsPage, QStringLiteral("Graphs"));
 
+        auto *testbenchPage = new QWidget;
+        simulationTestbenchPage_ = testbenchPage;
+        auto *testbenchLayout = new QVBoxLayout(testbenchPage);
+        testbenchLayout->setContentsMargins(0, 0, 0, 0);
+        auto *testbenchToolbar = new QHBoxLayout;
+        auto *testbenchHint = new QLabel(QStringLiteral(
+            "SystemVerilog testbench source for the selected simulation. Changes are saved with the project."));
+        testbenchHint->setWordWrap(true);
+        simulationTestbenchRunButton_ = new QPushButton(QStringLiteral("Run Simulation"));
+        setLucideIcon(simulationTestbenchRunButton_, QStringLiteral("play"), 16);
+        simulationTestbenchRunButton_->setToolTip(QStringLiteral("Run the selected simulation"));
+        simulationTestbenchRunButton_->setAccessibleName(QStringLiteral("Run simulation from testbench"));
+        simulationTestbenchRunButton_->setEnabled(false);
+        connect(simulationTestbenchRunButton_, &QPushButton::clicked, this, [this] { runSimulation(); });
+        testbenchToolbar->addWidget(testbenchHint, 1);
+        testbenchToolbar->addWidget(simulationTestbenchRunButton_);
+        testbenchLayout->addLayout(testbenchToolbar);
+        simulationTestbenchEditor_ = new TextDocumentEditor;
+        simulationTestbenchEditor_->setOnTextEdited([this](const QString &text) { onSimulationTestbenchEdited(text); });
+        testbenchLayout->addWidget(simulationTestbenchEditor_, 1);
+        simulationTestbenchTabIndex_ = simulationTabs_->addTab(testbenchPage, QStringLiteral("Testbench"));
+        simulationTabs_->setTabVisible(simulationTestbenchTabIndex_, false);
         simEditorLayout->addWidget(simulationTabs_, 1);
 
         simulationEditorPage_ = simEditor;
@@ -8767,6 +9186,7 @@ class DocumentWindow : public QMainWindow {
 
         // ── Wire SimulationPanel ─────────────────────────────────────────
         simulationPanel_->setOnAddClicked([this] { addSimulation(); });
+        simulationPanel_->setOnAddSystemVerilogTestbench([this] { addSystemVerilogTestbench(); });
         simulationPanel_->setOnAddReport([this] { addReport(); });
         simulationPanel_->setOnOpenReport([this](ice::ObjectId reportId) { openReportFile(reportId); });
         simulationPanel_->setOnDeleteClicked([this] { deleteSimulation(); });
@@ -8788,6 +9208,7 @@ class DocumentWindow : public QMainWindow {
         // ── Wire properties form → save back to project ──────────────────
         auto saveSimProps = [this] { commitSimulationProperties(); };
         connect(schematicSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, saveSimProps] {
+            applySimulationLanguageDefaults();
             saveSimProps();
             updateSimulationNetlistState();
         });
@@ -8834,6 +9255,7 @@ class DocumentWindow : public QMainWindow {
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
                     plot->setGridVisible(visible);
         });
+        connect(simulationLoadVcdButton_, &QPushButton::clicked, this, [this] { loadVcdGraphs(); });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
         connect(simulationTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (simulationTabs_ && simulationGraphsPage_ && simulationTabs_->widget(index) == simulationGraphsPage_)
@@ -9233,10 +9655,8 @@ class DocumentWindow : public QMainWindow {
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
-            layoutCanvas_->setTextPolygonPlacedCallback(
-                [this](QPointF position) { addLayoutTextPolygon(position); });
-            layoutCanvas_->setPinPlacedCallback(
-                [this](QPointF first, QPointF second) { addLayoutPin(first, second); });
+            layoutCanvas_->setTextPolygonPlacedCallback([this](QPointF position) { addLayoutTextPolygon(position); });
+            layoutCanvas_->setPinPlacedCallback([this](QPointF first, QPointF second) { addLayoutPin(first, second); });
             layoutCanvas_->setInstancePinActivatedCallback(
                 [this](ice::ObjectId instance, ice::ObjectId port) { promoteInstancePin(instance, port); });
             layoutCanvas_->setPolygonCreatedCallback(
@@ -10022,6 +10442,10 @@ class DocumentWindow : public QMainWindow {
     QPlainTextEdit *simulationOutput_ = nullptr;
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
+    QWidget *simulationTestbenchPage_ = nullptr;
+    TextDocumentEditor *simulationTestbenchEditor_ = nullptr;
+    QPushButton *simulationTestbenchRunButton_ = nullptr;
+    int simulationTestbenchTabIndex_ = -1;
     QWidget *simulationPage_ = nullptr;
     QWidget *simulationEditorPage_ = nullptr;
     QWidget *simulationGraphsPage_ = nullptr;
@@ -10058,6 +10482,7 @@ class DocumentWindow : public QMainWindow {
     QPushButton *simulationDeleteGraphButton_ = nullptr;
     QPushButton *simulationEditGraphButton_ = nullptr;
     QPushButton *simulationGridButton_ = nullptr;
+    QPushButton *simulationLoadVcdButton_ = nullptr;
     QString currentSimulationNetlist_;
     QString builtSimulationNetlist_;
     ice::ObjectId builtSimulationNetlistSchematicId_ = 0;

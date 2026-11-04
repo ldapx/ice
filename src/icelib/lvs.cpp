@@ -159,9 +159,10 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
     if (cellIt == project.schematicCells.end())
         throw ProjectError("lvs.schematic", "Schematic cell does not exist");
     const auto &cell = cellIt->second;
-    if (cell.textSchematic)
-        throw ProjectError("lvs.schematic", "LVS currently requires a drawn schematic; text SPICE schematics are not "
-                                            "supported yet");
+    if (cell.isTextSource())
+        throw ProjectError(
+            "lvs.schematic",
+            "LVS requires a drawn schematic; SPICE text and SystemVerilog source cells are not supported");
 
     LogicalSide side;
     std::map<ObjectId, std::vector<ObjectId>> pinOwners;

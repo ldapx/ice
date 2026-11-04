@@ -296,6 +296,25 @@ std::string trimText(const std::string &text) {
     return text.substr(first, last - first + 1);
 }
 
+std::string verilogIdentifier(const std::string &text) {
+    std::string result;
+    result.reserve(text.size());
+    for (const auto character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) || character == '_')
+            result.push_back(character);
+        else if (!result.empty() && result.back() != '_')
+            result.push_back('_');
+    }
+    while (!result.empty() && result.back() == '_')
+        result.pop_back();
+    if (result.empty())
+        result = "digital_block";
+    if (std::isdigit(static_cast<unsigned char>(result.front())))
+        result.insert(result.begin(), '_');
+    return result;
+}
+
 std::string normalizeAnalysisName(const std::string &text) {
     std::string normalized;
     for (const unsigned char character : text) {
@@ -310,6 +329,8 @@ std::string normalizeAnalysisName(const std::string &text) {
         return "ac";
     if (normalized == "op" || normalized == "operatingpoint")
         return "op";
+    if (normalized == "digital" || normalized == "vcd" || normalized == "systemverilog")
+        return "digital";
     argumentError("Unsupported analysis: " + text);
 }
 
@@ -391,6 +412,7 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                         {"name", cell.name},
                                         {"pdk", cell.pdk},
                                         {"text", cell.textSchematic},
+                                        {"systemverilog", cell.systemVerilogSchematic},
                                         {"symbols", cell.symbols.size()},
                                         {"instances", cell.instances.size()},
                                         {"nets", cell.nets.size()}});
@@ -477,7 +499,8 @@ json schematicInfo(const ice::SchematicCell &cell) {
                    {"name", cell.name},
                    {"pdk", cell.pdk},
                    {"text", cell.textSchematic},
-                   {"source", cell.spiceText},
+                   {"systemverilog", cell.systemVerilogSchematic},
+                   {"source", cell.sourceText()},
                    {"symbols", json::array()},
                    {"instances", json::array()},
                    {"nets", json::array()}};
@@ -1113,6 +1136,36 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-add-sv" || command == "schematic-add-systemverilog") {
+            expectArguments(args, 3, 5, "schematic-add-sv <project> <name> [pdk] [source-file]");
+            auto pdk = std::string(ice::genericPdkId);
+            std::string sourceFile;
+            if (args.size() == 4) {
+                std::error_code status;
+                if (std::filesystem::is_regular_file(args[3], status) && !status)
+                    sourceFile = args[3];
+                else
+                    pdk = args[3];
+            } else if (args.size() == 5) {
+                pdk = args[3];
+                sourceFile = args[4];
+            }
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto moduleName = verilogIdentifier(args[2]);
+            const auto source = sourceFile.empty()
+                                    ? "// SystemVerilog block: " + args[2] + "\nmodule " + moduleName +
+                                          " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
+                                          "    assign out = 1'b0;\nendmodule\n"
+                                    : readTextFile(sourceFile);
+            ice::ObjectId id = 0;
+            session.execute("schematic-add-systemverilog", [&](ice::Project &project) {
+                id = ice::createSystemVerilogCell(project, args[2], pdk, source);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"source", source}});
+            return 0;
+        }
+
         if (command == "schematic-list") {
             expectArguments(args, 2, 2, "schematic-list <project>");
             const auto project = ice::Project::load(args[1]);
@@ -1122,6 +1175,7 @@ int main(int argc, char **argv) {
                                   {"name", cell.name},
                                   {"pdk", cell.pdk},
                                   {"text", cell.textSchematic},
+                                  {"systemverilog", cell.systemVerilogSchematic},
                                   {"symbols", cell.symbols.size()},
                                   {"instances", cell.instances.size()},
                                   {"nets", cell.nets.size()}});
@@ -1669,9 +1723,14 @@ int main(int argc, char **argv) {
                             "[signals (comma-separated or multiple arguments)]");
             const auto project = ice::Project::load(args[1]);
             const auto schematic = resolveSchematic(project, args[3]);
+            const auto &schematicCell = project.schematicCells.at(schematic);
             ice::SimulationItem simulation;
             simulation.name = args[2];
             simulation.schematic = schematic;
+            if (schematicCell.systemVerilogSchematic) {
+                simulation.simulator = "iverilog";
+                simulation.analysis = "digital";
+            }
             if (args.size() >= 5)
                 simulation.analysis = normalizeAnalysisName(args[4]);
             if (args.size() >= 6)
@@ -1741,7 +1800,7 @@ int main(int argc, char **argv) {
             const auto timeout = std::chrono::milliseconds(
                 end > 3 ? std::max<ice::Coordinate>(1, parseInteger(args[3], "timeout")) : 60000);
 
-            const auto project = ice::Project::load(args[1]);
+            auto project = ice::Project::load(args[1]);
             const auto simulationId = resolveSimulation(project, args[2]);
             const auto &simulation = project.simulations.at(simulationId);
             const auto schematic = project.schematicCells.find(simulation.schematic);
@@ -1749,20 +1808,30 @@ int main(int argc, char **argv) {
                 throw ice::ProjectError("simulation.schematic", "Simulation references a missing schematic");
 
             ice::SimulationRequest request;
-            request.analysis = normalizeAnalysisName(simulation.analysis);
             request.simulator = simulation.simulator;
             request.stop = simulation.stop;
             request.step = simulation.step;
             request.use_initial_conditions = simulation.use_initial_conditions;
+            request.workingDirectory = projectRootForCli(args[1]);
             std::vector<std::string> notes;
-            request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
-            ice::applyPdkSimulationSetup(schematic->second.pdk, request);
-            std::istringstream directives(simulation.directives);
-            std::string directive;
-            while (std::getline(directives, directive)) {
-                const auto trimmed = trimText(directive);
-                if (!trimmed.empty() && !isAnalysisDirective(trimmed))
-                    request.netlist.push_back(trimmed);
+            if (schematic->second.systemVerilogSchematic) {
+                request.analysis = "digital";
+                request.simulator = "iverilog";
+                std::istringstream source(schematic->second.systemVerilogText);
+                std::string line;
+                while (std::getline(source, line))
+                    request.netlist.push_back(line);
+            } else {
+                request.analysis = normalizeAnalysisName(simulation.analysis);
+                request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
+                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+                std::istringstream directives(simulation.directives);
+                std::string directive;
+                while (std::getline(directives, directive)) {
+                    const auto trimmed = trimText(directive);
+                    if (!trimmed.empty() && !isAnalysisDirective(trimmed))
+                        request.netlist.push_back(trimmed);
+                }
             }
             request.probeSignals = splitSignals(simulation.captureSignals);
 
@@ -1770,6 +1839,13 @@ int main(int argc, char **argv) {
             const auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
                 std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
             });
+            if (result.state == ice::JobState::succeeded && !result.traces.empty()) {
+                auto updated = project.simulations.at(simulationId);
+                if (ice::populateSimulationSignalsFromTraces(updated, result.traces)) {
+                    project.simulations[simulationId] = std::move(updated);
+                    project.save(args[1]);
+                }
+            }
 
             ice::SimulationRunContext context;
             context.projectRoot = projectRootForCli(args[1]);
@@ -1804,6 +1880,7 @@ int main(int argc, char **argv) {
                             {"stored", storedPath.string()},
                             {"error", result.error}};
             summary["warnings"] = result.warnings;
+            summary["capture_signals"] = simulation.captureSignals;
             if (!runId.empty())
                 summary["run_id"] = runId;
             printJson(summary);
@@ -2125,8 +2202,18 @@ int main(int argc, char **argv) {
                 const auto project = ice::Project::load(args[1]);
                 const auto schematicId = resolveSchematic(project, args[2]);
                 const auto &schematic = project.schematicCells.at(schematicId);
-                request.netlist = ice::buildSimulationNetlist(project, schematicId);
-                ice::applyPdkSimulationSetup(schematic.pdk, request);
+                if (schematic.systemVerilogSchematic) {
+                    request.simulator = "iverilog";
+                    request.analysis = "digital";
+                    request.workingDirectory = projectRootForCli(args[1]);
+                    std::istringstream source(schematic.systemVerilogText);
+                    std::string line;
+                    while (std::getline(source, line))
+                        request.netlist.push_back(line);
+                } else {
+                    request.netlist = ice::buildSimulationNetlist(project, schematicId);
+                    ice::applyPdkSimulationSetup(schematic.pdk, request);
+                }
                 context.projectRoot = args[1];
                 context.projectIdentity = project.identity;
                 context.projectName = project.name;
@@ -2138,6 +2225,11 @@ int main(int argc, char **argv) {
                 std::ifstream netlist(args[1]);
                 if (!netlist)
                     throw ice::ProjectError("cli.file", "Unable to read netlist: " + args[1]);
+                if (std::filesystem::path(args[1]).extension() == ".sv") {
+                    request.simulator = "iverilog";
+                    request.analysis = "digital";
+                    request.workingDirectory = std::filesystem::current_path();
+                }
                 std::string line;
                 while (std::getline(netlist, line))
                     request.netlist.push_back(line);

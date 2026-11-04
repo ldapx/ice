@@ -43,6 +43,7 @@ when `ok` is false, so scripts and agents can fail fast on a broken PDK setup.
 ice-cli schematic-add-cell <project> <name> [pdk]
 ice-cli schematic-add-text <project> <name> [pdk] [spice-file]
 ice-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
+ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
 ice-cli schematic-remove <project> <cell>
@@ -64,6 +65,11 @@ where the PDK is expected, the command accepts it as a file but warns that the
 cell was stored with the generic PDK; pass `--pdk` to preserve the intended PDK.
 The MCP equivalent is `schematic_create` with `kind: "text"` or
 `schematic_add_text`.
+
+`schematic-add-sv` (alias `schematic-add-systemverilog`) creates a
+SystemVerilog source cell. The optional file is stored as its source; without a
+file, ICE inserts a small digital block template. `schematic-info` and
+`schematic-list` report the `systemverilog` flag for these cells.
 
 ## Layout
 
@@ -210,9 +216,10 @@ trailing arguments; both forms are stored as a comma-separated capture list.
 
 `simulation-run` uses the stored simulation definition and writes its result
 under the simulation's build directory, so the GUI can load it as the latest
-run. `simulate` runs a schematic directly without a simulation definition.
-`simulation-remove` deletes the simulation and its graph definitions; stored
-build runs remain on disk.
+run. When the run succeeds, empty capture-signal and graph Y selections are
+filled from the returned traces and the project is saved. `simulate` runs a
+schematic directly without a simulation definition. `simulation-remove` deletes
+the simulation and its graph definitions; stored build runs remain on disk.
 
 `simulation-measure` reads the latest stored run and reports min, max,
 amplitude, mean, RMS, first/last values, zero and rising crossings, period,
@@ -230,10 +237,19 @@ An explicit output path is still accepted but always uses the stored-run
 schema. The result includes the request netlist, simulator provenance, graphs,
 and trace data.
 
-Drawn and text SPICE schematics can both be used. For text schematics the
-stored SPICE source is the circuit netlist; analysis-control directives
-(`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because `simulate`
-supplies the transient analysis.
+Drawn SPICE, text SPICE, and SystemVerilog schematics can all be used. For text
+schematics the stored SPICE source is the circuit netlist; analysis-control
+directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because
+`simulate` supplies the transient analysis.
+
+`simulation-add` on a SystemVerilog cell stores the `iverilog` simulator and
+`digital` analysis automatically. `simulation-run` compiles the source with
+`iverilog`, runs `vvp`, and returns VCD-derived traces. `digital` is accepted as
+an analysis alias when creating a simulation explicitly. Direct `simulate` on a
+SystemVerilog cell, and `simulate-netlist` on a `.sv` file, use the same backend.
+If the source has no `$dumpfile`/`$dumpvars`, ICE adds a wrapper module that
+dumps the design; a testbench that never calls `$finish` is stopped after 10
+seconds and the partial VCD is kept.
 
 Simulation graphs are presentation definitions over captured signals.
 `simulation-add` creates a default **Graph 1** using the captured signals, and

@@ -328,7 +328,8 @@ json schematicJson(const ice::SchematicCell &cell) {
                    {"name", cell.name},
                    {"pdk", cell.pdk},
                    {"text", cell.textSchematic},
-                   {"source", cell.spiceText},
+                   {"systemverilog", cell.systemVerilogSchematic},
+                   {"source", cell.sourceText()},
                    {"symbols", json::array()},
                    {"instances", json::array()},
                    {"nets", json::array()}};
@@ -576,6 +577,25 @@ std::size_t resolveGraphIndex(const ice::SimulationItem &simulation, const json 
     throw ToolError("Expected a graph name or id.");
 }
 
+std::string verilogIdentifier(const std::string &text) {
+    std::string result;
+    result.reserve(text.size());
+    for (const auto character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) || character == '_')
+            result.push_back(character);
+        else if (!result.empty() && result.back() != '_')
+            result.push_back('_');
+    }
+    while (!result.empty() && result.back() == '_')
+        result.pop_back();
+    if (result.empty())
+        result = "digital_block";
+    if (std::isdigit(static_cast<unsigned char>(result.front())))
+        result.insert(result.begin(), '_');
+    return result;
+}
+
 std::vector<std::string> splitCommaList(const std::string &text) {
     std::vector<std::string> values;
     std::string current;
@@ -793,18 +813,19 @@ class IceMcpServer {
                                             {"name", cell.name},
                                             {"pdk", cell.pdk},
                                             {"text", cell.textSchematic},
+                                            {"systemverilog", cell.systemVerilogSchematic},
                                             {"symbols", cell.symbols.size()},
                                             {"instances", cell.instances.size()},
                                             {"nets", cell.nets.size()}});
         }
         for (const auto &[id, layer] : project.layers)
             result["layers"].push_back({{"id", id},
-                                         {"name", layer.name},
-                                         {"number", layer.number},
-                                         {"datatype", layer.datatype},
-                                         {"color", layer.color},
-                                         {"pattern", layer.pattern},
-                                         {"visible", layer.visible}});
+                                        {"name", layer.name},
+                                        {"number", layer.number},
+                                        {"datatype", layer.datatype},
+                                        {"color", layer.color},
+                                        {"pattern", layer.pattern},
+                                        {"visible", layer.visible}});
         for (const auto &[id, cell] : project.layoutCells) {
             result["layouts"].push_back({{"id", id},
                                          {"name", cell.name},
@@ -1200,10 +1221,15 @@ class IceMcpServer {
         }
         if (name == "simulation_create") {
             const auto schematic = resolveSchematic(session.project(), arguments, "schematic");
+            const auto &schematicCell = session.project().schematicCells.at(schematic);
             ice::SimulationItem simulation;
             simulation.name = requiredString(arguments, "name");
             simulation.schematic = schematic;
-            simulation.analysis = optionalString(arguments, "analysis", "transient");
+            if (schematicCell.systemVerilogSchematic) {
+                simulation.simulator = "iverilog";
+                simulation.analysis = "digital";
+            }
+            simulation.analysis = optionalString(arguments, "analysis", simulation.analysis);
             if (const auto value = arguments.find("stop"); value != arguments.end())
                 simulation.stop = numberValue(*value, "stop");
             if (const auto value = arguments.find("step"); value != arguments.end())
@@ -1276,13 +1302,33 @@ class IceMcpServer {
             request.step = simulation.step;
             request.simulator = simulation.simulator;
             request.use_initial_conditions = simulation.use_initial_conditions;
-            request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
-            ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+            request.workingDirectory = projectRootPath();
+            if (schematic->second.systemVerilogSchematic) {
+                request.analysis = "digital";
+                request.simulator = "iverilog";
+                std::istringstream source(schematic->second.systemVerilogText);
+                std::string line;
+                while (std::getline(source, line))
+                    request.netlist.push_back(line);
+            } else {
+                request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
+                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+            }
             request.probeSignals = splitCommaList(simulation.captureSignals);
             const auto timeout = std::chrono::milliseconds(
                 std::max<std::int64_t>(1, optionalInteger(arguments, "timeout_ms").value_or(60000)));
             ice::SimulationRunner runner;
             const auto result = runner.run(request, timeout);
+            if (result.state == ice::JobState::succeeded && !result.traces.empty()) {
+                auto updated = simulation;
+                if (ice::populateSimulationSignalsFromTraces(updated, result.traces)) {
+                    session.execute("mcp populate simulation signals", [&](ice::Project &project) {
+                        auto it = project.simulations.find(id);
+                        if (it != project.simulations.end())
+                            ice::populateSimulationSignalsFromTraces(it->second, result.traces);
+                    });
+                }
+            }
             ice::SimulationRunContext context;
             context.projectRoot = projectRootPath();
             context.projectIdentity = session.project().identity;
@@ -1581,8 +1627,18 @@ class IceMcpServer {
             const auto cellName = requiredString(arguments, "name");
             const auto kind = optionalString(arguments, "kind", "drawn");
             auto text = optionalString(arguments, "text");
-            if (kind != "drawn" && kind != "text")
-                throw ToolError("schematic_create kind must be 'drawn' or 'text'");
+            if (kind != "drawn" && kind != "text" && kind != "systemverilog" && kind != "sv")
+                throw ToolError("schematic_create kind must be 'drawn', 'text', or 'systemverilog'");
+            if (kind == "systemverilog" || kind == "sv") {
+                if (text.empty())
+                    text = "// SystemVerilog block: " + cellName + "\nmodule " + verilogIdentifier(cellName) +
+                           " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
+                           "    assign out = 1'b0;\nendmodule\n";
+                session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                    id = ice::createSystemVerilogCell(project, cellName, pdk, text);
+                });
+                return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
+            }
             if (kind == "text" || !text.empty()) {
                 if (text.empty())
                     text = "* SPICE schematic: " + cellName + "\n.title " + cellName + "\n.end\n";
@@ -1594,6 +1650,20 @@ class IceMcpServer {
             session.execute("mcp schematic-create",
                             [&](ice::Project &project) { id = ice::createSchematicCell(project, cellName, pdk); });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "drawn"}};
+        }
+        if (name == "schematic_create_systemverilog" || name == "schematic_add_systemverilog") {
+            ice::ObjectId id = 0;
+            const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
+            const auto cellName = requiredString(arguments, "name");
+            auto text = optionalString(arguments, "text");
+            if (text.empty())
+                text = "// SystemVerilog block: " + cellName + "\nmodule " + verilogIdentifier(cellName) +
+                       " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
+                       "    assign out = 1'b0;\nendmodule\n";
+            session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                id = ice::createSystemVerilogCell(project, cellName, pdk, text);
+            });
+            return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
         }
         if (name == "schematic_create_text" || name == "schematic_add_text") {
             ice::ObjectId id = 0;
@@ -1609,26 +1679,47 @@ class IceMcpServer {
         }
         if (name == "schematic_set_text") {
             const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
-            auto &cell = session.project().schematicCells.at(id);
-            const bool wasText = cell.textSchematic;
+            const auto &cell = session.project().schematicCells.at(id);
+            const bool systemVerilogCell = cell.systemVerilogSchematic;
+            const auto kind = optionalString(arguments, "kind", systemVerilogCell ? "systemverilog" : "text");
+            const bool systemVerilog = kind == "systemverilog" || kind == "sv";
+            if (kind != "text" && kind != "spice" && !systemVerilog)
+                throw ToolError("schematic_set_text kind must be 'text' or 'systemverilog'");
+            if (cell.isTextSource() && systemVerilogCell != systemVerilog) {
+                throw ToolError("Schematic '" + cell.name + "' is a " +
+                                (systemVerilogCell ? "SystemVerilog" : "text SPICE") +
+                                " cell; use the matching kind instead of converting between source languages");
+            }
+            const bool wasSource = cell.isTextSource();
             const bool convert = optionalBoolean(arguments, "convert", false);
-            if (!cell.textSchematic) {
+            if (!cell.isTextSource()) {
                 const bool empty =
                     cell.symbols.empty() && cell.instances.empty() && cell.nets.empty() && cell.parameters.empty();
                 if (!convert || !empty) {
                     throw ToolError("Schematic '" + cell.name +
-                                    "' is a drawn schematic, not a text SPICE cell. Use schematic_create with "
-                                    "kind='text' or schematic_create_text for a text cell. To convert an empty "
+                                    "' is a drawn schematic, not a source cell. Use schematic_create with "
+                                    "kind='text' or kind='systemverilog' for a new source cell. To convert an empty "
                                     "drawn cell, pass convert=true. Do not edit sch/*.icesch by hand.");
                 }
             }
             const auto text = requiredStringAllowEmpty(arguments, "text");
             session.execute("mcp schematic-set-text", [&](ice::Project &project) {
                 auto &target = project.schematicCells.at(id);
-                target.textSchematic = true;
-                target.spiceText = text;
+                target.textSchematic = !systemVerilog;
+                target.systemVerilogSchematic = systemVerilog;
+                if (systemVerilog) {
+                    target.systemVerilogText = text;
+                    target.spiceText.clear();
+                } else {
+                    target.spiceText = text;
+                    target.systemVerilogText.clear();
+                }
             });
-            return {{"id", id}, {"name", cell.name}, {"text", text}, {"converted", !wasText}};
+            return {{"id", id},
+                    {"name", cell.name},
+                    {"kind", systemVerilog ? "systemverilog" : "text"},
+                    {"text", text},
+                    {"converted", !wasSource}};
         }
         if (name == "schematic_list") {
             json result = json::array();
@@ -1637,6 +1728,7 @@ class IceMcpServer {
                                   {"name", cell.name},
                                   {"pdk", cell.pdk},
                                   {"text", cell.textSchematic},
+                                  {"systemverilog", cell.systemVerilogSchematic},
                                   {"symbols", cell.symbols.size()},
                                   {"instances", cell.instances.size()},
                                   {"nets", cell.nets.size()}});
@@ -2284,11 +2376,11 @@ class IceMcpServer {
                             .with_string_param("schematic", "Schematic name or id")
                             .build());
         tools.push_back(tool_builder("schematic_create")
-                            .with_description("Create a schematic cell; kind='text' creates a SPICE text cell.")
+                            .with_description("Create a drawn, text SPICE, or SystemVerilog schematic cell.")
                             .with_string_param("name", "Schematic name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
-                            .with_string_param("kind", "drawn or text (default drawn)", false)
-                            .with_string_param("text", "Optional SPICE source for kind=text", false)
+                            .with_string_param("kind", "drawn, text, or systemverilog (default drawn)", false)
+                            .with_string_param("text", "Optional source for text/SystemVerilog cells", false)
                             .build());
         tools.push_back(tool_builder("schematic_create_text")
                             .with_description("Create a text SPICE schematic cell.")
@@ -2302,15 +2394,23 @@ class IceMcpServer {
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("text", "Optional SPICE source", false)
                             .build());
+        tools.push_back(tool_builder("schematic_create_systemverilog")
+                            .with_description("Create a SystemVerilog source cell.")
+                            .with_string_param("name", "Schematic name")
+                            .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("text", "Optional initial SystemVerilog source", false)
+                            .build());
         agentsdk::mcp::tool setTextTool;
         setTextTool.name = "schematic_set_text";
         setTextTool.description =
-            "Replace the source of an existing text SPICE schematic, or convert an empty drawn cell.";
+            "Replace the source of an existing text SPICE or SystemVerilog cell, or convert an empty drawn cell.";
         setTextTool.input_schema =
             R"({"type":"object","properties":{"schematic":{"type":["string","integer"],)"
             R"("description":"Schematic name or id"},"cell":{"type":["string","integer"],)"
-            R"("description":"Legacy alias for schematic"},"text":{"type":"string","description":"SPICE source"},)"
-            R"("convert":{"type":"boolean","description":"Convert an empty drawn cell to a text cell"}},)"
+            R"("description":"Legacy alias for schematic"},"text":{"type":"string","description":"Source text"},)"
+            R"("kind":{"type":"string","enum":["text","spice","systemverilog","sv"],)"
+            R"("description":"Source language of the cell; defaults to its existing language"},)"
+            R"("convert":{"type":"boolean","description":"Convert an empty drawn cell to a source cell"}},)"
             R"("anyOf":[{"required":["schematic"]},{"required":["cell"]}],"required":["text"]})";
         tools.push_back(std::move(setTextTool));
         tools.push_back(
@@ -2491,21 +2591,22 @@ class IceMcpServer {
                 .build());
         tools.push_back(
             tool_builder("pex_run")
-                .with_description("Extract placed and PDK-rule polygon devices plus first-order layout parasitics into a text SPICE schematic.")
+                .with_description("Extract placed and PDK-rule polygon devices plus first-order layout parasitics into "
+                                  "a text SPICE schematic.")
                 .with_string_param("layout", "Layout cell name or id")
                 .with_string_param("name", "Optional text schematic name", false)
                 .with_number_param("metal_sheet_resistance", "Optional metal sheet resistance (ohm/square)", false)
                 .with_number_param("poly_sheet_resistance", "Optional poly sheet resistance (ohm/square)", false)
-                .with_number_param("diffusion_sheet_resistance", "Optional diffusion sheet resistance (ohm/square)", false)
+                .with_number_param("diffusion_sheet_resistance", "Optional diffusion sheet resistance (ohm/square)",
+                                   false)
                 .with_number_param("via_resistance", "Optional resistance per via shape (ohm)", false)
                 .with_number_param("area_capacitance", "Optional area capacitance (fF/um^2)", false)
                 .with_number_param("perimeter_capacitance", "Optional perimeter capacitance (fF/um)", false)
                 .with_boolean_param("extract_placed_devices",
                                     "Extract devices from placed layout instances (default true)", false)
-                .with_boolean_param("extract_polygon_devices",
-                                    "Extract polygon devices using PDK rules (default true)", false)
-                .with_string_param("extraction_rules_path",
-                                   "Optional override for layout/extraction.json", false)
+                .with_boolean_param("extract_polygon_devices", "Extract polygon devices using PDK rules (default true)",
+                                    false)
+                .with_string_param("extraction_rules_path", "Optional override for layout/extraction.json", false)
                 .with_boolean_param("include_linked_schematic",
                                     "Fallback to the inferred source schematic netlist (default true)", false)
                 .build());

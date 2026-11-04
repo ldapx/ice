@@ -1,10 +1,14 @@
 # Simulation Contract
 
-ICE provides a deterministic transient-analysis slice through
-`icelib::SimulationRunner`. `NgspiceSimulator` is the backend used by
-tests, CLI smoke tests, and reproducible examples. `NgspiceSimulator` is an
-isolated shared-library adapter that accepts a caller-owned netlist and returns
-the same normalized `SimulationResult` shape.
+ICE provides analog and digital simulation through `icelib::SimulationRunner`.
+The default `AutoSimulator` dispatches to `NgspiceSimulator` for SPICE analyses
+and to `IcarusVerilogSimulator` for SystemVerilog digital tests. Both adapters
+return the same normalized `SimulationResult` shape.
+
+`NgspiceSimulator` is an isolated shared-library adapter that accepts a
+caller-owned netlist. `IcarusVerilogSimulator` writes the SystemVerilog source
+to a temporary directory, compiles it with `iverilog -g2012`, runs `vvp`, and
+parses the generated Value Change Dump (VCD) into time samples and traces.
 
 Simulation jobs have explicit terminal states: `succeeded`, `failed`,
 `cancelled`, and `timed_out`. Results contain schema metadata, simulator
@@ -17,17 +21,46 @@ adjacent **Select** button switches to the schematic so a node, pin, or wire can
 be picked directly; the resulting `v(node)` signal is appended to the list and
 the editor returns to the Simulation tab.
 
-A simulation may point at either a drawn schematic or a text SPICE schematic.
-The schematic's ICE PDK package supplies the model preamble (`.option`,
-`.include`, `.lib`) and OSDI initialization. ICE applies these before the
-schematic netlist and loads OSDI models explicitly through libngspice; a global
-`~/.spiceinit` or `PDK_ROOT`/`PDK` environment is not used for ICE simulations.
-Text source is used directly as the circuit netlist, with analysis-control
-directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` removed because the
-simulation properties supply the analysis. For text schematics the **Build
-Netlist** button and the schematic signal-picker button are hidden; **Run
-Simulation** is available immediately. Drawn schematics keep the build-then-run
-flow and the signal picker.
+A simulation may point at a drawn schematic, a text SPICE schematic, or a
+SystemVerilog source cell. For SPICE schematics the ICE PDK package supplies the
+model preamble (`.option`, `.include`, `.lib`) and OSDI initialization. ICE
+applies these before the schematic netlist and loads OSDI models explicitly
+through libngspice; a global `~/.spiceinit` or `PDK_ROOT`/`PDK` environment is
+not used for ICE simulations. Text source is used directly as the circuit
+netlist, with analysis-control directives (`.tran`, `.dc`, `.ac`, `.op`) and
+`.end` removed because the simulation properties supply the analysis. For text
+schematics and SystemVerilog cells the **Build Netlist** button and the
+schematic signal-picker button are hidden; **Run Simulation** is available
+immediately. Drawn schematics keep the build-then-run flow and the signal
+picker.
+
+## Digital HDL simulation
+
+SystemVerilog cells use the `iverilog` simulator and the `digital` analysis.
+When such a cell is selected in the Simulation tab, ICE selects those defaults
+automatically. Use **Add SystemVerilog Testbench…** in the Simulation panel
+**+** menu to create the testbench source and its simulation together; the
+simulation editor then opens a **Testbench** tab for editing that source. The
+source is compiled with Icarus Verilog 13 (`-g2012`).
+
+If the source already contains `$dumpfile` and `$dumpvars`, ICE runs its inferred
+top module directly. Otherwise ICE generates a wrapper top module that
+instantiates the inferred design top, dumps all signals to a temporary VCD, and
+compiles with `ice_vcd_top` as the top. A testbench named `<name>_tb` is the
+usual source cell. The wrapper allows a plain design block to be simulated too.
+
+The VCD parser converts dump times to seconds using the file's `$timescale`.
+Values are replayed onto every timestamp in the dump. Scalar `x`/`z` values and
+binary `x`/`z` bits are treated as `0` so digital traces remain graphable; the
+run reports parser warnings when a value or requested signal cannot be used.
+Captured signal names match either a full VCD hierarchy path or a unique suffix
+such as `clk`. When no capture list is set, all VCD traces are returned.
+
+After a successful run, ICE fills an empty **Signals to capture** list and
+empty graph Y selections from the first traces. This happens in the GUI, the
+CLI, and MCP so a first `simulation-run` produces a usable stored graph. The
+graph toolbar **Load VCD** action performs the same population from an external
+VCD file without running a simulator.
 
 A drawn schematic that instances another drawn schematic emits a hierarchical
 SPICE netlist. Each referenced schematic appears once as a `.subckt`, with its
@@ -168,3 +201,11 @@ the text source; the current simulation properties provide the transient
 analysis. Capture node voltages as `v(node)` (or just `node`) and device vectors
 as `i(v1)` or `@l1[i]`. Unsupported requested vectors are reported in the run's
 `warnings` array instead of being silently discarded.
+
+SystemVerilog source is compiled and run in the project directory when one is
+known, so relative `` `include `` paths resolve against the project root. The
+simulator has a 10 second `vvp` timeout; if a testbench does not call `$finish`,
+ICE keeps the partial VCD produced before termination and reports a timeout
+warning. `simulation-add` on a SystemVerilog cell defaults to the `iverilog`
+simulator and `digital` analysis, so the same `simulation-run` workflow used for
+SPICE works without extra flags.

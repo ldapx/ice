@@ -179,6 +179,9 @@ std::vector<Diagnostic> Project::validate() const {
     for (const auto &[cellId, cell] : schematicCells) {
         if (cell.pdk.empty() || cell.pdk.find_first_of("/\\") != std::string::npos)
             result.push_back({Diagnostic::Severity::error, "schematic.pdk", "Schematic PDK is invalid", cellId});
+        if (cell.textSchematic && cell.systemVerilogSchematic)
+            result.push_back({Diagnostic::Severity::error, "schematic.source",
+                              "A schematic cell cannot be both SPICE text and SystemVerilog", cellId});
         for (const auto &[instanceId, instance] : cell.instances) {
             if (!cell.symbols.contains(instance.symbol))
                 result.push_back({Diagnostic::Severity::error, "schematic.instance.symbol",
@@ -373,6 +376,10 @@ std::string Project::serialize() const {
             c["text_schematic"] = true;
         if (!cell.spiceText.empty())
             c["spice_text"] = cell.spiceText;
+        if (cell.systemVerilogSchematic)
+            c["systemverilog"] = true;
+        if (!cell.systemVerilogText.empty())
+            c["systemverilog_text"] = cell.systemVerilogText;
         for (const auto &parameter : cell.parameters) {
             json entry;
             put(entry, parameter);
@@ -691,6 +698,8 @@ Project Project::deserialize(const std::string &text) {
                 cell.pdk = genericPdkId;
             cell.textSchematic = c.value("text_schematic", false);
             cell.spiceText = c.value("spice_text", std::string{});
+            cell.systemVerilogSchematic = c.value("systemverilog", false);
+            cell.systemVerilogText = c.value("systemverilog_text", std::string{});
             if (c.contains("parameters")) {
                 for (const auto &parameter : c.at("parameters"))
                     cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
@@ -730,10 +739,9 @@ Project Project::deserialize(const std::string &text) {
         for (const auto &l : j.at("layers")) {
             const auto name = l.at("name").get<std::string>();
             const auto datatype = l.contains("datatype") ? l.value("datatype", 0) : legacyLayerDatatype(name);
-            p.layers.emplace(l.at("id"),
-                             Layer{l.at("id"), name, l.at("number"), l.value("visible", true),
-                                   l.value("layout", ObjectId{0}), l.value("pdk", std::string{}), datatype,
-                                   l.value("color", std::string{}), l.value("pattern", -1)});
+            p.layers.emplace(l.at("id"), Layer{l.at("id"), name, l.at("number"), l.value("visible", true),
+                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{}), datatype,
+                                               l.value("color", std::string{}), l.value("pattern", -1)});
         }
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
@@ -1186,13 +1194,17 @@ std::string generatedAgentsGuidance() {
               "`schematic_add_net`; inspect the result with `schematic_info`. In the CLI use the equivalent "
               "`schematic-add-*` and `schematic-info` commands. `schematic_create` creates a drawn cell; "
               "`schematic_create(kind=\"text\")`, `schematic_create_text`, and `schematic_add_text` "
-              "create a text SPICE cell. Use text SPICE only when the user explicitly asks for text, "
-              "provides an existing SPICE netlist, or the canvas tools are unavailable; state the "
-              "reason. Canvas schematics keep connectivity, layout, LVS, and simulation workflows "
-              "available.\n"
+              "create a text SPICE cell. `schematic_create(kind=\"systemverilog\")` and "
+              "`schematic_create_systemverilog` create a SystemVerilog source cell for digital HDL "
+              "simulation. Use text SPICE or SystemVerilog when the user explicitly asks for it, "
+              "provides existing source, or the canvas tools are unavailable; state the reason. "
+              "Canvas schematics keep connectivity, layout, LVS, and simulation workflows available.\n"
            << "4. Create the simulation and choose the signals to capture. Use `simulation_measure` "
               "(or `ice-cli simulation-measure`) for numerical checks; `simulation_result` and "
-              "`simulation_signals` expose trace statistics and available signals.\n"
+              "`simulation_signals` expose trace statistics and available signals. For a "
+              "SystemVerilog source cell, use the `iverilog` simulator with the `digital` analysis. "
+              "The run generates VCD traces; graph the traces or import an external VCD file in the "
+              "GUI with Load VCD.\n"
            << "5. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
               "response, transfer curves, settling, or other views needed to judge the expectations.\n"
            << "6. Choose the simplest simulation style that fits the task:\n"
@@ -1593,11 +1605,27 @@ BuildInfo buildInfo() {
 #else
     info.buildType = "unknown";
 #endif
-    info.features = {"project_repair",      "project_recovery",    "project_migrate",    "schematic_add_pin",
-                     "text_schematic",      "ngspice_log_capture", "simulation_metrics", "pdk_status",
-                     "pdk_build",           "save_revision_guard", "layout_pins",        "layout_pin_hierarchy",
-                     "layout_connectivity", "layout_lef_def",      "layout_pin_drc",     "layout_pex",
-                     "pex_device_extraction", "polygon_device_extraction"};
+    info.features = {"project_repair",
+                     "project_recovery",
+                     "project_migrate",
+                     "schematic_add_pin",
+                     "text_schematic",
+                     "ngspice_log_capture",
+                     "simulation_metrics",
+                     "pdk_status",
+                     "pdk_build",
+                     "save_revision_guard",
+                     "layout_pins",
+                     "layout_pin_hierarchy",
+                     "layout_connectivity",
+                     "layout_lef_def",
+                     "layout_pin_drc",
+                     "layout_pex",
+                     "pex_device_extraction",
+                     "polygon_device_extraction",
+                     "systemverilog_cells",
+                     "digital_hdl",
+                     "vcd_graphs"};
     return info;
 }
 } // namespace ice

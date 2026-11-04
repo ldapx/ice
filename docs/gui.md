@@ -81,8 +81,9 @@ Project state, view state, and transient job state should be separate:
 | Job state | running simulation, progress, cancellation | runtime and result records |
 
 Schematic and layout file tabs are closable. Their labels include the file
-extension (`.sp` for text SPICE schematics, `.icesch` for drawn schematics, or
-`.icelay` for layouts) and a leading `●` while that file has unsaved edits. If
+extension (`.sp` for text SPICE schematics, `.sv` for SystemVerilog source
+cells, `.icesch` for drawn schematics, or `.icelay` for layouts) and a leading
+`●` while that file has unsaved edits. If
 every schematic or layout file tab is closed, the central editor area shows a
 form to open an existing file or create a new one. Opening a project starts with
 no schematic or layout file tabs open; open files from the hierarchy or the
@@ -152,17 +153,36 @@ The schematic editor should initially provide:
 
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
-The **+** button in Schematic **Hierarchy** offers **Schematic** and **Text
-SPICE Schematic**. Text SPICE schematics use a notebook-text icon, appear in the
-schematic tab bar with a `.sp` extension, and open a plain-text SPICE editor in
-place of the canvas and canvas toolbar. Their source is stored directly in the
-project and saved with it. They are not
-projected into generated hierarchy symbols, but they can be selected as the
-source for a simulation. For a text schematic, simulation uses the stored SPICE
-source minus analysis-control directives such as `.tran`, `.dc`, `.ac`, `.op`,
-and `.end`. The **Build Netlist** button and the schematic signal picker are
-hidden for text schematics; only **Run Simulation** is shown, and it runs
+The **+** button in Schematic **Hierarchy** offers **Schematic**, **Text SPICE
+Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
+notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and
+open a plain-text SPICE editor in place of the canvas and canvas toolbar.
+SystemVerilog cells use a notebook-text icon, appear with a `.sv` extension, and
+open the same source editor with SystemVerilog templates.
+Their source is stored directly in the project and saved with it. Source cells
+are not projected into generated hierarchy symbols, but they can be selected as
+the source for a simulation. For a text schematic, simulation uses the stored
+SPICE source minus analysis-control directives such as `.tran`, `.dc`, `.ac`,
+`.op`, and `.end`. The **Build Netlist** button and the schematic signal picker
+are hidden for source cells; only **Run Simulation** is shown, and it runs
 directly without a separate build step.
+
+The Simulation panel **+** menu offers **Add Simulation…**, **Add SystemVerilog
+Testbench…**, and **Add Simulation Script…**. **Add SystemVerilog Testbench…**
+creates the testbench source cell and a simulation that targets it with the
+**Icarus Verilog (SystemVerilog)** simulator and **Digital / VCD** analysis, then
+opens the **Testbench** tab in the simulation editor. The tab edits the source
+directly and has its own **Run Simulation** button. Selecting a SystemVerilog
+cell created elsewhere in the Simulation tab switches the simulator and analysis
+the same way. The source is compiled with `iverilog`, run with `vvp`, and the
+generated VCD is loaded as the result traces. If the source has no
+`$dumpfile`/`$dumpvars`, ICE adds a small wrapper module that dumps the design.
+The first successful run fills the **Signals to capture** list and any empty
+graph Y selections from the VCD traces.
+
+The graph toolbar has a **Load VCD** action that imports an external VCD file
+into the current simulation. Its traces replace the capture list, populate
+empty graphs, and are shown immediately without running a simulator.
 
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.
@@ -391,8 +411,8 @@ connectivity, LVS reports a warning and compares devices only. Top-level
 schematic ports created with `Input`/`Output` symbols are matched to layout pins
 by name; missing pins, extra pins, direction changes, and net-binding changes
 are reported. Results appear in the **LVS Report** tab with mismatch categories
-and schematic/layout object ids. Text SPICE schematics are not supported by LVS
-yet.
+and schematic/layout object ids. Text SPICE and SystemVerilog source cells are
+not supported by LVS yet.
 
 **Tools → Run PEX** (or right-clicking a layout cell and choosing
 **Extract Parasitics (PEX)**) extracts first-order parasitics from the active
@@ -456,8 +476,9 @@ applied immediately.
 
 ## Simulation scripts
 
-The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation
-Script…**. Simulation scripts are project-level Python files under `scripts/`,
+The Simulation panel **+** menu offers **Add Simulation…**, **Add SystemVerilog
+Testbench…**, and **Add Simulation Script…**. Simulation scripts are
+project-level Python files under `scripts/`,
 recorded in `project.icepro`, and listed as top-level entries in the simulation
 hierarchy alongside simulations. Adding a script does not require an active
 simulation and always creates a new Python file from the built-in template.

@@ -397,7 +397,7 @@ void ProjectPanel::rebuildTree() {
     if (!showLayoutHierarchy_) {
         std::map<ice::ObjectId, std::vector<ice::ObjectId>> children;
         for (const auto &[cellId, cell] : project.schematicCells) {
-            if (cell.textSchematic)
+            if (cell.isTextSource())
                 continue;
             auto &childCells = children[cellId];
             for (const auto &[_, instance] : cell.instances) {
@@ -437,11 +437,12 @@ void ProjectPanel::rebuildTree() {
         for (const auto &[id, cell] : project.schematicCells) {
             auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
-            if (cell.textSchematic) {
+            if (cell.isTextSource()) {
                 cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::textSchematic));
                 cellItem->setIcon(0, hierarchyIcon("notebook-text"));
-                cellItem->setToolTip(0,
-                                     QStringLiteral("Text SPICE schematic: %1").arg(QString::fromStdString(cell.name)));
+                cellItem->setToolTip(0, (cell.systemVerilogSchematic ? QStringLiteral("SystemVerilog source: %1")
+                                                                     : QStringLiteral("Text SPICE schematic: %1"))
+                                            .arg(QString::fromStdString(cell.name)));
                 continue;
             }
             cellItem->setIcon(0, hierarchyIcon("microchip"));
@@ -530,11 +531,11 @@ void ProjectPanel::rebuildTree() {
                 pinItem->setFlags(pinItem->flags() | Qt::ItemIsUserCheckable);
                 pinItem->setCheckState(0, pin->visible ? Qt::Checked : Qt::Unchecked);
                 pinItem->setIcon(0, hierarchyIcon("circle-dot"));
-                QString tooltip = QStringLiteral("%1 pin: %2 (%3, %4)")
-                                      .arg(QString::fromStdString(layoutIt->second.name),
-                                           QString::fromStdString(pin->name),
-                                           QString::fromStdString(ice::portDirectionName(pin->direction)),
-                                           QString::fromStdString(ice::portSideName(pin->side)));
+                QString tooltip =
+                    QStringLiteral("%1 pin: %2 (%3, %4)")
+                        .arg(QString::fromStdString(layoutIt->second.name), QString::fromStdString(pin->name),
+                             QString::fromStdString(ice::portDirectionName(pin->direction)),
+                             QString::fromStdString(ice::portSideName(pin->side)));
                 if (pin->net != 0) {
                     if (const auto net = layoutIt->second.nets.find(pin->net); net != layoutIt->second.nets.end())
                         tooltip += QStringLiteral(" · net %1").arg(QString::fromStdString(net->second.name));
@@ -577,8 +578,7 @@ void ProjectPanel::rebuildTree() {
             shapeItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(shapeId));
             shapeItem->setData(0, kItemKindRole, static_cast<int>(shapeEntryHierarchyKind(kind)));
             shapeItem->setIcon(0, hierarchyIcon(shapeEntryIcon(kind)));
-            auto tooltip =
-                QStringLiteral("%1 shape: %2").arg(QString::fromLatin1(shapeEntryName(kind)), displayName);
+            auto tooltip = QStringLiteral("%1 shape: %2").arg(QString::fromLatin1(shapeEntryName(kind)), displayName);
             if (kind == ShapeEntryKind::textPolygon && !shape->textSource.empty())
                 tooltip += QStringLiteral(" · %1").arg(QString::fromStdString(shape->textSource));
             shapeItem->setToolTip(0, tooltip);
@@ -635,7 +635,7 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             return;
         const auto cellId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
         const auto cell = project_->schematicCells.find(cellId);
-        if (cellId == 0 || cell == project_->schematicCells.end() || cell->second.textSchematic)
+        if (cellId == 0 || cell == project_->schematicCells.end() || cell->second.isTextSource())
             return;
         QMenu menu(this);
         auto *makeLayoutAction = menu.addAction(QStringLiteral("Make Layout from Schematic"));
@@ -790,8 +790,8 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     search_->setClearButtonEnabled(true);
     search_->setAccessibleName(QStringLiteral("Search simulations and simulation scripts"));
     addButton_ = new QPushButton;
-    addButton_->setToolTip(QStringLiteral("Add simulation or simulation script"));
-    addButton_->setAccessibleName(QStringLiteral("Add simulation or simulation script"));
+    addButton_->setToolTip(QStringLiteral("Add simulation, SystemVerilog testbench, or simulation script"));
+    addButton_->setAccessibleName(QStringLiteral("Add simulation, SystemVerilog testbench, or simulation script"));
     addButton_->setFixedWidth(28);
     setLucideIcon(addButton_, QStringLiteral("plus"), 16);
     deleteButton_ = new QPushButton;
@@ -828,10 +828,16 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
     connect(addButton_, &QPushButton::clicked, this, [this] {
         QMenu menu(this);
         auto *simulationAction = menu.addAction(QStringLiteral("Add Simulation…"));
+        setLucideIcon(simulationAction, QStringLiteral("microscope"));
+        auto *testbenchAction = menu.addAction(QStringLiteral("Add SystemVerilog Testbench…"));
+        setLucideIcon(testbenchAction, QStringLiteral("notebook-text"));
         auto *reportAction = menu.addAction(QStringLiteral("Add Simulation Script…"));
+        setLucideIcon(reportAction, QStringLiteral("notebook-text"));
         const auto *chosen = menu.exec(addButton_->mapToGlobal(QPoint(0, addButton_->height())));
         if (chosen == simulationAction && onAdd_) {
             onAdd_();
+        } else if (chosen == testbenchAction && onAddSystemVerilogTestbench_) {
+            onAddSystemVerilogTestbench_();
         } else if (chosen == reportAction && onAddReport_) {
             onAddReport_();
         }
@@ -846,6 +852,10 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
 }
 
 void SimulationPanel::setOnAddClicked(std::function<void()> cb) { onAdd_ = std::move(cb); }
+
+void SimulationPanel::setOnAddSystemVerilogTestbench(std::function<void()> cb) {
+    onAddSystemVerilogTestbench_ = std::move(cb);
+}
 
 void SimulationPanel::setOnAddReport(std::function<void()> cb) { onAddReport_ = std::move(cb); }
 void SimulationPanel::setOnOpenReport(std::function<void(ice::ObjectId)> cb) { onOpenReport_ = std::move(cb); }
@@ -1280,8 +1290,7 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
     tree_->clear();
     const auto styles = layerStylesFor(project);
     const auto styleFor = [&](ice::ObjectId id) {
-        return styles.contains(id) ? styles.at(id)
-                                   : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
+        return styles.contains(id) ? styles.at(id) : LayerStyle{ice::uiColor(ice::UiColor::Border1), Qt::SolidPattern};
     };
 
     // Purpose variants (pin, nofill, noqrc, mask, …) are separate stream
@@ -1326,9 +1335,7 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
         auto *groupItem = new QTreeWidgetItem(tree_, {QStringLiteral("%1 (%2)").arg(title).arg(number)});
         groupItem->setIcon(0, QIcon(layerPreviewIcon(styleFor(entries.front().first))));
         groupItem->setFlags(groupItem->flags() | Qt::ItemIsUserCheckable);
-        groupItem->setToolTip(0, QStringLiteral("GDS layer %1 · %2 purpose variants")
-                                    .arg(number)
-                                    .arg(entries.size()));
+        groupItem->setToolTip(0, QStringLiteral("GDS layer %1 · %2 purpose variants").arg(number).arg(entries.size()));
         int visibleCount = 0;
         QStringList groupIds;
         for (const auto &[id, layer] : entries) {
@@ -1345,10 +1352,10 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
             groupIds << QString::number(static_cast<qulonglong>(id));
         }
         groupItem->setData(0, kLayerGroupIdsRole, groupIds);
-        groupItem->setCheckState(0, visibleCount == 0
-                                        ? Qt::Unchecked
-                                        : (visibleCount == static_cast<int>(entries.size()) ? Qt::Checked
-                                                                                            : Qt::PartiallyChecked));
+        groupItem->setCheckState(
+            0, visibleCount == 0
+                   ? Qt::Unchecked
+                   : (visibleCount == static_cast<int>(entries.size()) ? Qt::Checked : Qt::PartiallyChecked));
         groupItem->setExpanded(true);
     }
     if (search_)
@@ -1423,8 +1430,7 @@ void SymbolsPanel::setSymbols(std::vector<SymbolDefinition> symbols) {
     icons_.clear();
     icons_.reserve(symbols_.size());
     for (const auto &symbol : symbols_)
-        icons_.push_back(symbol.svg.isEmpty() ? QIcon() : ice::symbolArtworkIcon(symbol.svg.toUtf8(),
-                                                                                kDeviceIconSize));
+        icons_.push_back(symbol.svg.isEmpty() ? QIcon() : ice::symbolArtworkIcon(symbol.svg.toUtf8(), kDeviceIconSize));
     rebuildCategories();
     rebuildList(selectedName);
 }

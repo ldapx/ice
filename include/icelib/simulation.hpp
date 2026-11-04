@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <map>
@@ -37,12 +38,20 @@ struct SimulationRequest {
     // Package-provided simulator commands applied before the circuit is loaded.
     // OSDI PDKs use this for `osdi '<path>'`; no global ~/.spiceinit is needed.
     std::vector<std::string> initCommands;
+    // Optional source/include working directory for HDL compilation. The UI
+    // sets this to the project root so `include paths resolve predictably.
+    std::filesystem::path workingDirectory;
 };
 
 struct SimulationTrace {
     std::string name;
     std::vector<double> values;
 };
+
+// Fills an empty capture-signal list and empty graph Y selections from result
+// traces. Full trace names are used so hierarchical VCD paths remain exact.
+// Returns true when the simulation definition changed.
+bool populateSimulationSignalsFromTraces(SimulationItem &simulation, const std::vector<SimulationTrace> &traces);
 
 struct SimulationResult {
     int schema_version = 1;
@@ -86,9 +95,24 @@ class NgspiceSimulator final : public SimulatorAdapter {
                          const ProgressCallback &progress) override;
 };
 
+// Compiles a SystemVerilog testbench with Icarus Verilog, runs vvp, and parses
+// the generated VCD into SimulationResult traces.
+class IcarusVerilogSimulator final : public SimulatorAdapter {
+  public:
+    SimulationResult run(const SimulationRequest &request, const CancellationToken &token,
+                         const ProgressCallback &progress) override;
+};
+
+// Dispatches to ngspice or Icarus Verilog from request.simulator.
+class AutoSimulator final : public SimulatorAdapter {
+  public:
+    SimulationResult run(const SimulationRequest &request, const CancellationToken &token,
+                         const ProgressCallback &progress) override;
+};
+
 class SimulationRunner {
   public:
-    explicit SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter = std::make_shared<NgspiceSimulator>());
+    explicit SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter = std::make_shared<AutoSimulator>());
     SimulationResult run(const SimulationRequest &request, std::chrono::milliseconds timeout,
                          const ProgressCallback &progress = {});
     std::future<SimulationResult> runAsync(SimulationRequest request, std::chrono::milliseconds timeout,

@@ -65,8 +65,7 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     CHECK(name != std::string::npos);
     if (name == std::string::npos)
         return;
-    legacy.replace(name, std::string("\"name\": \"Metal1.pin\"").size(),
-                   "\"name\": \"Metal1 (dt 2)\"");
+    legacy.replace(name, std::string("\"name\": \"Metal1.pin\"").size(), "\"name\": \"Metal1 (dt 2)\"");
     const auto legacyLoaded = ice::Project::deserialize(legacy);
     CHECK(legacyLoaded.layers.at(layer).datatype == 2);
 }
@@ -377,6 +376,42 @@ TEST_CASE("text SPICE schematics survive serialization") {
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.schematicCells.at(cellId).textSchematic);
     CHECK(roundTrip.schematicCells.at(cellId).spiceText == cell.spiceText);
+}
+
+TEST_CASE("SystemVerilog schematics survive serialization") {
+    ice::Project project;
+    project.identity = "systemverilog";
+    project.name = "systemverilog";
+    const std::string source = "module counter(input logic clk, output logic q);\n"
+                               "    always_ff @(posedge clk) q <= ~q;\n"
+                               "endmodule\n";
+    const auto cellId = ice::createSystemVerilogCell(project, "counter", "ihp.sg13g2", source);
+    const auto &cell = project.schematicCells.at(cellId);
+    CHECK(cell.systemVerilogSchematic);
+    CHECK(!cell.textSchematic);
+    CHECK(cell.isTextSource());
+    CHECK(cell.sourceText() == source);
+    CHECK(project.validate().empty());
+    CHECK_THROWS_AS(ice::createSystemVerilogCell(project, "counter"), ice::ProjectError);
+    CHECK_THROWS_AS(ice::buildSimulationNetlist(project, cellId), ice::ProjectError);
+
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK(roundTrip.serialize() == serialized);
+    CHECK(roundTrip.schematicCells.at(cellId).systemVerilogSchematic);
+    CHECK(roundTrip.schematicCells.at(cellId).systemVerilogText == source);
+    CHECK(roundTrip.schematicCells.at(cellId).sourceText() == source);
+}
+
+TEST_CASE("a cell cannot be both SPICE text and SystemVerilog") {
+    ice::Project project;
+    project.identity = "mixed-source";
+    project.name = "mixed-source";
+    const auto cellId = ice::createTextSchematicCell(project, "mixed", ice::genericPdkId, ".title mixed\n.end\n");
+    project.schematicCells.at(cellId).systemVerilogSchematic = true;
+    const auto diagnostics = project.validate();
+    CHECK(std::any_of(diagnostics.begin(), diagnostics.end(),
+                      [](const ice::Diagnostic &diagnostic) { return diagnostic.code == "schematic.source"; }));
 }
 
 TEST_CASE("symbol default parameters are seeded without duplicates") {

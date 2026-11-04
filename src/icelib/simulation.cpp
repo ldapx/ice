@@ -1,14 +1,25 @@
 #include "icelib/simulation.hpp"
 
+#include "icelib/vcd.hpp"
+
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iomanip>
 #include <mutex>
 #include <ngspice/sharedspice.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 namespace ice {
 using json = nlohmann::ordered_json;
@@ -142,7 +153,254 @@ std::string fingerprintRequest(const SimulationRequest &request) {
     text << std::hex << std::setw(16) << std::setfill('0') << hash;
     return "fnv1a64:" + text.str();
 }
+
+std::string shellQuote(const std::string &value) {
+    std::string result = "'";
+    for (const char character : value) {
+        if (character == '\'')
+            result += "'\\''";
+        else
+            result += character;
+    }
+    return result + "'";
+}
+
+std::string readTextFile(const std::filesystem::path &path, std::size_t limit = 2 * 1024 * 1024) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        return {};
+    std::string text;
+    text.resize(limit);
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<std::size_t>(input.gcount()));
+    return text;
+}
+
+std::string tailText(std::string text, std::size_t limit = 4000) {
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
+        text.pop_back();
+    if (text.size() > limit)
+        text = "..." + text.substr(text.size() - limit);
+    return text;
+}
+
+bool identifierCharacter(char character) {
+    return std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '$';
+}
+
+std::vector<std::string> verilogModules(const std::string &source) {
+    std::vector<std::string> modules;
+    std::size_t position = 0;
+    while ((position = source.find("module", position)) != std::string::npos) {
+        const bool leftBoundary = position == 0 || !identifierCharacter(source[position - 1]);
+        const auto after = position + 6;
+        const bool rightBoundary = after >= source.size() || !identifierCharacter(source[after]);
+        if (!leftBoundary || !rightBoundary) {
+            position = after;
+            continue;
+        }
+        auto cursor = after;
+        while (cursor < source.size() && std::isspace(static_cast<unsigned char>(source[cursor])))
+            ++cursor;
+        std::string name;
+        while (cursor < source.size() && identifierCharacter(source[cursor]))
+            name.push_back(source[cursor++]);
+        if (!name.empty())
+            modules.push_back(std::move(name));
+        position = cursor;
+    }
+    return modules;
+}
+
+std::size_t identifierOccurrences(const std::string &source, const std::string &identifier) {
+    std::size_t count = 0;
+    std::size_t position = 0;
+    while ((position = source.find(identifier, position)) != std::string::npos) {
+        const bool leftBoundary = position == 0 || !identifierCharacter(source[position - 1]);
+        const auto after = position + identifier.size();
+        const bool rightBoundary = after >= source.size() || !identifierCharacter(source[after]);
+        if (leftBoundary && rightBoundary)
+            ++count;
+        position = after;
+    }
+    return count;
+}
+
+std::string verilogModuleWithDump(const std::string &source) {
+    for (const auto &moduleName : verilogModules(source)) {
+        std::size_t position = 0;
+        while ((position = source.find(moduleName, position)) != std::string::npos) {
+            auto keywordEnd = position;
+            while (keywordEnd > 0 && std::isspace(static_cast<unsigned char>(source[keywordEnd - 1])))
+                --keywordEnd;
+            const bool precededByModule = keywordEnd >= 6 && source.compare(keywordEnd - 6, 6, "module") == 0;
+            const bool keywordBoundary = keywordEnd == 6 || !identifierCharacter(source[keywordEnd - 7]);
+            const auto afterName = position + moduleName.size();
+            const bool nameBoundary = afterName >= source.size() || !identifierCharacter(source[afterName]);
+            if (precededByModule && keywordBoundary && nameBoundary) {
+                const auto end = source.find("endmodule", position + moduleName.size());
+                const auto bodyEnd = end == std::string::npos ? source.size() : end;
+                const auto body = source.substr(position + moduleName.size(), bodyEnd - position - moduleName.size());
+                if (body.find("$dumpfile") != std::string::npos || body.find("$dumpvars") != std::string::npos)
+                    return moduleName;
+                break;
+            }
+            position += moduleName.size();
+        }
+    }
+    return {};
+}
+
+std::string inferVerilogTop(const std::string &source, bool preferLast) {
+    const auto modules = verilogModules(source);
+    if (modules.empty())
+        return {};
+    if (preferLast) {
+        // A source cell may hold both a design and its testbench. Prefer the
+        // module that actually contains the dump commands; otherwise keep the
+        // historical last-module fallback.
+        const auto dumpTop = verilogModuleWithDump(source);
+        return dumpTop.empty() ? modules.back() : dumpTop;
+    }
+    std::string best;
+    for (const auto &moduleName : modules) {
+        if (identifierOccurrences(source, moduleName) == 1)
+            best = moduleName;
+    }
+    return best.empty() ? modules.back() : best;
+}
+
+std::vector<std::filesystem::path> vcdFiles(const std::filesystem::path &directory) {
+    std::vector<std::filesystem::path> files;
+    std::error_code status;
+    for (std::filesystem::recursive_directory_iterator it(directory, status), end; !status && it != end;
+         it.increment(status)) {
+        if (!it->is_regular_file())
+            continue;
+        if (it->path().extension() == ".vcd")
+            files.push_back(it->path());
+    }
+    return files;
+}
+
+std::filesystem::path parseVerilogDumpFile(const std::string &source, const std::filesystem::path &relativeBase) {
+    auto position = source.find("$dumpfile");
+    if (position == std::string::npos)
+        return {};
+    position = source.find('"', position);
+    if (position == std::string::npos)
+        return {};
+    const auto end = source.find('"', position + 1);
+    if (end == std::string::npos)
+        return {};
+    const std::filesystem::path path = source.substr(position + 1, end - position - 1);
+    if (path.empty())
+        return {};
+    return path.is_absolute() ? path : relativeBase / path;
+}
+
+std::filesystem::path newestVcd(const std::filesystem::path &directory) {
+    const auto files = vcdFiles(directory);
+    if (files.empty())
+        return {};
+    auto newest = files.front();
+    for (const auto &file : files) {
+        std::error_code status;
+        if (std::filesystem::last_write_time(file, status) > std::filesystem::last_write_time(newest, status) &&
+            !status)
+            newest = file;
+    }
+    return newest;
+}
+
+std::vector<SimulationTrace> filterVcdTraces(const VcdData &data, const std::vector<std::string> &wanted,
+                                             std::vector<std::string> &warnings) {
+    if (wanted.empty())
+        return data.traces;
+    const auto normalize = [](std::string text) {
+        for (auto &character : text)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        return text;
+    };
+    std::vector<SimulationTrace> traces;
+    std::vector<std::string> missing;
+    for (const auto &name : wanted) {
+        const auto normalized = normalize(name);
+        bool found = false;
+        for (const auto &trace : data.traces) {
+            const auto full = normalize(trace.name);
+            if (full == normalized || full.ends_with("." + normalized) || normalized.ends_with("." + full)) {
+                if (std::none_of(traces.begin(), traces.end(),
+                                 [&](const auto &entry) { return entry.name == trace.name; }))
+                    traces.push_back(trace);
+                found = true;
+            }
+        }
+        if (!found)
+            missing.push_back(name);
+    }
+    if (traces.empty()) {
+        warnings.push_back("Requested VCD signals were not found; returning all VCD traces");
+        return data.traces;
+    }
+    for (const auto &name : missing)
+        warnings.push_back("VCD signal not found: " + name);
+    return traces;
+}
+
+int processExitCode(int status) {
+#ifndef _WIN32
+    if (status != -1 && WIFEXITED(status))
+        return WEXITSTATUS(status);
+#endif
+    return status;
+}
+
+std::string verilogStringLiteral(const std::filesystem::path &path) {
+    auto text = path.string();
+    std::string result;
+    result.reserve(text.size() + 2);
+    for (const char character : text) {
+        if (character == '\\' || character == '"')
+            result.push_back('\\');
+        result.push_back(character);
+    }
+    return result;
+}
+
 } // namespace
+
+bool populateSimulationSignalsFromTraces(SimulationItem &simulation, const std::vector<SimulationTrace> &traces) {
+    if (traces.empty())
+        return false;
+    std::vector<std::string> traceNames;
+    traceNames.reserve(traces.size());
+    for (const auto &trace : traces)
+        traceNames.push_back(trace.name);
+    bool changed = false;
+    if (simulation.captureSignals.empty()) {
+        std::string capture;
+        for (std::size_t index = 0; index < traceNames.size(); ++index) {
+            if (index)
+                capture += ",";
+            capture += traceNames[index];
+        }
+        simulation.captureSignals = std::move(capture);
+        changed = true;
+    }
+    for (auto &graph : simulation.graphs) {
+        if (graph.ySignals.empty()) {
+            const auto count = std::min<std::size_t>(4, traceNames.size());
+            graph.ySignals.assign(traceNames.begin(), traceNames.begin() + static_cast<std::ptrdiff_t>(count));
+            changed = true;
+        }
+        if (graph.xAxis.empty()) {
+            graph.xAxis = "time";
+            changed = true;
+        }
+    }
+    return changed;
+}
 
 void CancellationToken::cancel() noexcept { cancelled_.store(true); }
 bool CancellationToken::cancelled() const noexcept { return cancelled_.load(); }
@@ -299,6 +557,210 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         progress({1.0, "ngspice transient analysis complete"});
     result.state = JobState::succeeded;
     return result;
+}
+
+SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, const CancellationToken &token,
+                                             const ProgressCallback &progress) {
+    SimulationResult result{1, JobState::running, "digital", {}, {}, "iverilog", "Icarus Verilog", {}, {}};
+    result.input_fingerprint = fingerprintRequest(request);
+    std::ostringstream sourceStream;
+    for (std::size_t index = 0; index < request.netlist.size(); ++index) {
+        if (index)
+            sourceStream << "\n";
+        sourceStream << request.netlist[index];
+    }
+    const auto source = sourceStream.str();
+    if (source.find_first_not_of(" \t\r\n") == std::string::npos) {
+        result.state = JobState::failed;
+        result.error = "SystemVerilog simulation requires source text";
+        return result;
+    }
+    const auto modules = verilogModules(source);
+    if (modules.empty()) {
+        result.state = JobState::failed;
+        result.error = "SystemVerilog source contains no module declaration";
+        return result;
+    }
+    if (token.cancelled()) {
+        result.state = JobState::cancelled;
+        result.error = "simulation cancelled";
+        return result;
+    }
+
+    static std::atomic<std::uint64_t> counter{0};
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto temp = std::filesystem::temp_directory_path() /
+                      ("ice-hdl-" + std::to_string(stamp) + "-" + std::to_string(counter.fetch_add(1)));
+    std::error_code status;
+    std::filesystem::create_directories(temp, status);
+    if (status) {
+        result.state = JobState::failed;
+        result.error = "Unable to create an HDL simulation directory: " + status.message();
+        return result;
+    }
+    const auto cleanup = [&] {
+        std::error_code ignored;
+        std::filesystem::remove_all(temp, ignored);
+    };
+
+    const auto sourcePath = temp / "design.sv";
+    const auto wrapperPath = temp / "ice_wrapper.sv";
+    const auto executablePath = temp / "sim.vvp";
+    const auto compileLogPath = temp / "iverilog.log";
+    const auto runLogPath = temp / "vvp.log";
+    {
+        std::ofstream output(sourcePath);
+        output << source;
+        if (!output) {
+            cleanup();
+            result.state = JobState::failed;
+            result.error = "Unable to write the SystemVerilog source file";
+            return result;
+        }
+    }
+
+    const bool sourceHasDump =
+        source.find("$dumpfile") != std::string::npos || source.find("$dumpvars") != std::string::npos;
+    const auto sourceTop = inferVerilogTop(source, sourceHasDump);
+    if (sourceTop.empty()) {
+        cleanup();
+        result.state = JobState::failed;
+        result.error = "Unable to determine the SystemVerilog top module";
+        return result;
+    }
+    std::filesystem::path vcdPath;
+    if (sourceHasDump)
+        vcdPath = parseVerilogDumpFile(source, temp);
+    std::string sources = " " + shellQuote(sourcePath.string());
+    std::string compileTop = sourceTop;
+    if (!sourceHasDump) {
+        vcdPath = temp / "ice_trace.vcd";
+        std::ofstream wrapper(wrapperPath);
+        wrapper << "`timescale 1ns/1ps\n"
+                << "module ice_vcd_top;\n"
+                << "  " << sourceTop << " ice_dut();\n"
+                << "  initial begin\n"
+                << "    $dumpfile(\"" << verilogStringLiteral(vcdPath) << "\");\n"
+                << "    $dumpvars(0, ice_vcd_top);\n"
+                << "  end\n"
+                << "endmodule\n";
+        if (!wrapper) {
+            cleanup();
+            result.state = JobState::failed;
+            result.error = "Unable to write the SystemVerilog VCD wrapper";
+            return result;
+        }
+        sources += " " + shellQuote(wrapperPath.string());
+        compileTop = "ice_vcd_top";
+    }
+
+    auto compileDirectory = temp;
+    if (!request.workingDirectory.empty()) {
+        std::error_code workingStatus;
+        if (std::filesystem::is_directory(request.workingDirectory, workingStatus) && !workingStatus)
+            compileDirectory = request.workingDirectory;
+    }
+    if (progress)
+        progress({0.1, "compiling SystemVerilog testbench"});
+    std::string compileCommand;
+#ifdef _WIN32
+    compileCommand = "cd /d " + shellQuote(compileDirectory.string()) + " && ";
+#else
+    compileCommand = "cd " + shellQuote(compileDirectory.string()) + " && ";
+#endif
+    compileCommand += "iverilog -g2012 -s " + shellQuote(compileTop) + " -o " + shellQuote(executablePath.string()) +
+                      sources + " >" + shellQuote(compileLogPath.string()) + " 2>&1";
+    const auto compileStatus = processExitCode(std::system(compileCommand.c_str()));
+    if (token.cancelled()) {
+        cleanup();
+        result.state = JobState::cancelled;
+        result.error = "simulation cancelled";
+        return result;
+    }
+    if (compileStatus != 0) {
+        auto details = tailText(readTextFile(compileLogPath));
+        cleanup();
+        result.state = JobState::failed;
+        result.error = "iverilog could not compile the SystemVerilog source";
+        if (!details.empty())
+            result.error += ": " + details;
+        return result;
+    }
+
+    if (progress)
+        progress({0.45, "running SystemVerilog testbench"});
+    std::string runCommand;
+#ifdef _WIN32
+    runCommand = "cd /d " + shellQuote(temp.string()) + " && vvp " + shellQuote(executablePath.string());
+#else
+    runCommand = "cd " + shellQuote(temp.string()) + " && timeout 10s vvp " + shellQuote(executablePath.string());
+#endif
+    runCommand += " >" + shellQuote(runLogPath.string()) + " 2>&1";
+    const auto runStatus = processExitCode(std::system(runCommand.c_str()));
+    if (token.cancelled()) {
+        cleanup();
+        result.state = JobState::cancelled;
+        result.error = "simulation cancelled";
+        return result;
+    }
+    const bool timedOut = runStatus == 124;
+    if (runStatus != 0 && !timedOut) {
+        auto details = tailText(readTextFile(runLogPath));
+        cleanup();
+        result.state = JobState::failed;
+        result.error = "vvp failed while running the SystemVerilog testbench";
+        if (!details.empty())
+            result.error += ": " + details;
+        return result;
+    }
+
+    auto actualVcd = vcdPath;
+    if (actualVcd.empty() || !std::filesystem::is_regular_file(actualVcd, status) || status)
+        actualVcd = newestVcd(temp);
+    if (actualVcd.empty()) {
+        auto details = tailText(readTextFile(runLogPath));
+        cleanup();
+        result.state = timedOut ? JobState::timed_out : JobState::failed;
+        result.error = timedOut ? "SystemVerilog testbench timed out without producing a VCD"
+                                : "SystemVerilog testbench produced no VCD file";
+        if (!details.empty())
+            result.error += ": " + details;
+        return result;
+    }
+
+    auto vcd = parseVcdFile(actualVcd);
+    cleanup();
+    if (vcd.traces.empty()) {
+        result.state = JobState::failed;
+        result.error = "The generated VCD contains no graphable traces";
+        for (const auto &warning : vcd.warnings)
+            result.warnings.push_back(warning);
+        return result;
+    }
+    result.time = std::move(vcd.time);
+    result.traces = filterVcdTraces(vcd, request.probeSignals, result.warnings);
+    for (const auto &warning : vcd.warnings) {
+        if (std::find(result.warnings.begin(), result.warnings.end(), warning) == result.warnings.end())
+            result.warnings.push_back(warning);
+    }
+    if (timedOut)
+        result.warnings.push_back("vvp timed out; using the partial VCD produced before termination");
+    if (result.traces.empty()) {
+        result.state = JobState::failed;
+        result.error = "No VCD traces matched the requested signals";
+        return result;
+    }
+    if (progress)
+        progress({1.0, "SystemVerilog simulation complete"});
+    result.state = JobState::succeeded;
+    return result;
+}
+
+SimulationResult AutoSimulator::run(const SimulationRequest &request, const CancellationToken &token,
+                                    const ProgressCallback &progress) {
+    if (request.simulator == "iverilog" || request.simulator == "icarus" || request.simulator == "verilog")
+        return IcarusVerilogSimulator().run(request, token, progress);
+    return NgspiceSimulator().run(request, token, progress);
 }
 
 SimulationRunner::SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter) : adapter_(std::move(adapter)) {}

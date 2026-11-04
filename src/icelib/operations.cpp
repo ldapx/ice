@@ -212,6 +212,13 @@ ObjectId createTextSchematicCell(Project &project, std::string name, std::string
     cell.spiceText = std::move(spiceText);
     return id;
 }
+ObjectId createSystemVerilogCell(Project &project, std::string name, std::string pdk, std::string source) {
+    const auto id = createSchematicCell(project, std::move(name), std::move(pdk));
+    auto &cell = project.schematicCells.at(id);
+    cell.systemVerilogSchematic = true;
+    cell.systemVerilogText = std::move(source);
+    return id;
+}
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork, ObjectId sourceCell) {
     if (name.empty())
         throw ProjectError("schematic.symbol", "Symbol name must not be empty");
@@ -799,6 +806,8 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes) {
     const auto &topCell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    if (topCell.textSchematic || topCell.systemVerilogSchematic)
+        throw ProjectError("schematic.netlist", "SPICE netlisting requires a drawn schematic");
     auto note = [notes](std::string message) {
         if (notes)
             notes->push_back(std::move(message));
@@ -1178,8 +1187,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         const auto child = project.schematicCells.find(childId);
         if (child == project.schematicCells.end())
             return;
-        if (child->second.textSchematic) {
-            note("text schematic cannot be used as a drawn hierarchical block: " + child->second.name);
+        if (child->second.isTextSource()) {
+            note("source schematic cannot be used as a drawn hierarchical block: " + child->second.name);
             return;
         }
 
@@ -1215,6 +1224,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
 std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId cellId,
                                                 std::vector<std::string> *notes) {
     const auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    if (cell.systemVerilogSchematic)
+        throw ProjectError("simulation.hdl", "SystemVerilog cells must be simulated with the iverilog simulator");
     if (!cell.textSchematic)
         return buildSchematicNetlist(project, cellId, notes);
 

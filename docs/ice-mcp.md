@@ -22,14 +22,15 @@ After building, run the MCP tool smoke test:
 python3 tests/mcp_tools_smoke.py
 ```
 
-It exercises drawn-schematic creation with pins and nets, text-schematic
-editing, simulation diagnostics, and doctor/PDK discovery.
+It exercises drawn-schematic creation with pins and nets, text-schematic and
+SystemVerilog source editing, digital simulation, simulation diagnostics, and
+doctor/PDK discovery.
 
 The MCP server exposes `simulation_create`, `simulation_update`, and
 `simulation_run`, so a client can create, configure, and run a simulation
 without switching to `ice-cli`. `project_reload` explicitly refreshes an open
 project; the server also detects changes made by another ICE client before a
-mutation. Existing text SPICE schematics can be edited with
+mutation. Existing text SPICE and SystemVerilog cells can be edited with
 `schematic_set_text`.
 
 Or open a project at startup:
@@ -74,10 +75,11 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `project_migrate` | Refresh the generated `AGENTS.md` guidance while preserving user text. |
 | `project_undo` / `project_redo` | Move through project history. |
 | `ice_doctor` | Inspect Python, ngspice, PDK readiness, model libraries, and optional schematic/simulation model includes. |
-| `schematic_create` | Create a schematic cell; use `kind="text"` for a SPICE text cell. |
+| `schematic_create` | Create a schematic cell; use `kind="text"` for SPICE text or `kind="systemverilog"` for a digital source cell. |
 | `schematic_list` | List schematic cells and their symbol/instance/net counts. |
 | `schematic_info` | Read symbols, pins, instances, parameters, and nets. |
 | `schematic_create_text` | Create a text SPICE schematic. |
+| `schematic_create_systemverilog` | Create a SystemVerilog source cell for digital HDL simulation. |
 | `schematic_delete` | Delete a schematic, blocked when simulations or symbols use it. |
 | `schematic_add_symbol` | Add a symbol definition, optionally with a `pins` array. |
 | `schematic_add_pin` | Add a pin to an existing symbol. |
@@ -146,7 +148,10 @@ result and `schematic_netlist` to check the generated SPICE. Duplicate symbol
 names and duplicate pin names are rejected.
 
 `simulation_run` returns the state, error, netlist context, trace statistics,
-and available signal names. If ngspice or a PDK library cannot initialize, run
+and available signal names. A simulation that points at a SystemVerilog cell
+uses the `iverilog` simulator and `digital` analysis automatically; the result
+traces come from the generated VCD, and empty capture/graph selections are
+filled from the first traces and saved. If ngspice or a PDK library cannot initialize, run
 `ice_doctor` with the schematic or simulation name to validate model includes
 and PDK readiness before editing the circuit. `simulation_result` and
 `simulation_signals` read the latest stored run without requiring shell access
@@ -195,13 +200,24 @@ not `.include cornerMOSlv.lib`. Sky130 and GF180 use different layouts
 example device names. Use `pdk_info` with `probe: true` for an explicit
 transistor-level load check.
 
-## Text schematics
+## Source schematics
 
 Use `schematic_create` with `kind: "text"` (or the `schematic_create_text` /
-`schematic_add_text` aliases) when a text SPICE cell is intended. Do not create a
-drawn cell and then write its sidecar by hand. `schematic_set_text` can convert
-an empty drawn cell when called with `convert: true`; non-empty drawn cells are
-rejected.
+`schematic_add_text` aliases) when a text SPICE cell is intended. Use
+`kind: "systemverilog"` or `schematic_create_systemverilog` for a digital HDL
+cell. Do not create a drawn cell and then write its sidecar by hand.
+
+`schematic_set_text` replaces the source of an existing text SPICE or
+SystemVerilog cell; pass `kind` only when its language must be explicit. It can
+also convert an empty drawn cell when called with `convert: true`; non-empty
+drawn cells are rejected. A source cell cannot switch between SPICE and
+SystemVerilog in place.
+
+SystemVerilog cells are simulated with Icarus Verilog and the `digital`
+analysis. `simulation_create` selects those defaults for such a cell, and
+`simulation_run` returns VCD-derived traces. If the testbench does not create a
+VCD, ICE adds a wrapper that dumps the design. Source-level `$dumpfile` and
+`$dumpvars` calls are respected.
 
 Project sidecar files are not an editing interface. Do not write
 `sch/*.icesch`, `lay/*.icelay`, or `sim/*.icesim` by hand; use the tools instead.

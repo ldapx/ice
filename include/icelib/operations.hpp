@@ -14,6 +14,10 @@ ObjectId createSchematicCell(Project &project, std::string name, std::string pdk
 // still participates in the schematic hierarchy and project serialization.
 ObjectId createTextSchematicCell(Project &project, std::string name, std::string pdk = genericPdkId,
                                  std::string spiceText = {});
+// Creates a schematic cell whose source is SystemVerilog. It appears in the
+// schematic hierarchy and in the simulation selector.
+ObjectId createSystemVerilogCell(Project &project, std::string name, std::string pdk = genericPdkId,
+                                 std::string source = {});
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {},
                    ObjectId sourceCell = 0);
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,

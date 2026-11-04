@@ -109,6 +109,7 @@ def main() -> int:
                 "pdk_build",
                 "project_migrate",
                 "schematic_add_text",
+                "schematic_create_systemverilog",
                 "layout_add_instance",
                 "layout_add_port",
                 "layout_list_ports",
@@ -134,6 +135,9 @@ def main() -> int:
             assert "layout_pex" in version.get("features", []), version
             assert "pex_device_extraction" in version.get("features", []), version
             assert "polygon_device_extraction" in version.get("features", []), version
+            assert "systemverilog_cells" in version.get("features", []), version
+            assert "digital_hdl" in version.get("features", []), version
+            assert "vcd_graphs" in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -276,6 +280,64 @@ def main() -> int:
                 convert=True,
             )
             assert converted["converted"] is True, converted
+
+            sv_source = (
+                "`timescale 1ns/1ps\n"
+                "module sv_smoke_tb;\n"
+                "    logic clk = 1'b0;\n"
+                "    logic q = 1'b0;\n"
+                "    always #5 clk = ~clk;\n"
+                "    always_ff @(posedge clk) q <= ~q;\n"
+                "    initial #40 $finish;\n"
+                "endmodule\n"
+            )
+            sv_cell = mcp.tool(
+                "schematic_create_systemverilog",
+                name="sv_smoke",
+                text=sv_source,
+            )
+            assert sv_cell["kind"] == "systemverilog", sv_cell
+            sv_info = mcp.tool("schematic_info", schematic="sv_smoke")
+            assert sv_info["systemverilog"] is True, sv_info
+            assert "module sv_smoke_tb" in sv_info["source"], sv_info
+            updated_sv = mcp.tool(
+                "schematic_set_text",
+                schematic="sv_smoke",
+                kind="systemverilog",
+                text=sv_source + "// updated through schematic_set_text\n",
+            )
+            assert updated_sv["kind"] == "systemverilog", updated_sv
+            sv_kind = mcp.tool(
+                "schematic_create",
+                name="sv_kind",
+                kind="systemverilog",
+                text="module sv_kind(input logic clk);\nendmodule\n",
+            )
+            assert sv_kind["kind"] == "systemverilog", sv_kind
+
+            mcp.tool(
+                "simulation_create",
+                name="sv_sim",
+                schematic="sv_smoke",
+            )
+            sv_run = mcp.tool("simulation_run", simulation="sv_sim")
+            assert sv_run["state"] == "succeeded", sv_run
+            assert sv_run["trace_count"] >= 2, sv_run
+            sv_signals = set(sv_run["available_signals"])
+            assert any(name == "clk" or name.endswith(".clk") for name in sv_signals), (
+                sv_run
+            )
+            assert any(name == "q" or name.endswith(".q") for name in sv_signals), (
+                sv_run
+            )
+            sv_graphs = mcp.tool("simulation_graph_list", simulation="sv_sim")
+            assert sv_graphs and sv_graphs[0]["y_signals"], sv_graphs
+            assert any(name.endswith(".clk") for name in sv_graphs[0]["y_signals"]), (
+                sv_graphs
+            )
+            sv_stored = mcp.tool("simulation_result", simulation="sv_sim")
+            assert sv_stored["state"] == "succeeded", sv_stored
+            assert sv_stored["time_points"] > 1, sv_stored
 
             mcp.tool(
                 "simulation_create",
