@@ -482,6 +482,12 @@ std::string Project::serialize() const {
                 s["text"] = shape.text;
             if (!shape.name.empty())
                 s["name"] = shape.name;
+            if (shape.textPolygon)
+                s["text_polygon"] = true;
+            if (shape.textGroup != 0)
+                s["text_group"] = shape.textGroup;
+            if (!shape.textSource.empty())
+                s["text_source"] = shape.textSource;
             c["shapes"].push_back(s);
         }
         for (const auto &[pid, port] : cell.ports) {
@@ -767,6 +773,9 @@ Project Project::deserialize(const std::string &text) {
                 shape.width = s.value("path_width", Coordinate{0});
                 shape.text = s.value("text", std::string{});
                 shape.name = s.value("name", std::string{});
+                shape.textPolygon = s.value("text_polygon", false);
+                shape.textGroup = s.value("text_group", ObjectId{0});
+                shape.textSource = s.value("text_source", std::string{});
                 cell.shapes.emplace(shape.id, shape);
             }
             for (const auto &net : c.at("nets"))
@@ -1587,7 +1596,8 @@ BuildInfo buildInfo() {
     info.features = {"project_repair",      "project_recovery",    "project_migrate",    "schematic_add_pin",
                      "text_schematic",      "ngspice_log_capture", "simulation_metrics", "pdk_status",
                      "pdk_build",           "save_revision_guard", "layout_pins",        "layout_pin_hierarchy",
-                     "layout_connectivity", "layout_lef_def",      "layout_pin_drc"};
+                     "layout_connectivity", "layout_lef_def",      "layout_pin_drc",     "layout_pex",
+                     "pex_device_extraction", "polygon_device_extraction"};
     return info;
 }
 } // namespace ice

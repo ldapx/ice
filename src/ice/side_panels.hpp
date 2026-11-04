@@ -39,6 +39,7 @@ class ProjectPanel : public QWidget {
     void setOnActivatePin(PinCallback callback);
     void setOnPinVisibilityChanged(PinVisibilityCallback callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
+    void setOnRunPex(std::function<void(ice::ObjectId)> callback);
     using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
     using RenameChildCallback = std::function<void(ice::ObjectId parentId, ice::ObjectId id, const std::string &name)>;
     void setOnRenameLayout(RenameCallback callback);
@@ -76,6 +77,7 @@ class ProjectPanel : public QWidget {
     PinCallback onActivatePin_;
     PinVisibilityCallback onPinVisibilityChanged_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
+    std::function<void(ice::ObjectId)> onRunPex_;
     RenameCallback onRenameLayout_;
     RenameCallback onRenameProceduralLayout_;
     RenameChildCallback onRenameInstance_;
@@ -138,16 +140,20 @@ class LayersPanel : public QWidget {
     void setOnLayerGroupVisibilityChanged(
         std::function<void(const std::vector<ice::ObjectId> &, bool)> callback);
     void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
+    void setOnLayerVisibilityFilter(std::function<void(bool pinOnly)> callback);
 
   private:
     void applyFilter(const QString &text);
     void showContextMenu(const QPoint &pos);
+    void updateVisibilityButton();
 
     QTreeWidget *tree_ = nullptr;
     QLineEdit *search_ = nullptr;
+    QPushButton *visibilityButton_ = nullptr;
     std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
     std::function<void(const std::vector<ice::ObjectId> &, bool)> onLayerGroupVisibilityChanged_;
     std::function<void(bool)> onAllLayersVisibilityChanged_;
+    std::function<void(bool)> onLayerVisibilityFilter_;
     std::function<void()> onCreateLayer_;
     std::function<void(ice::ObjectId)> onLayerSelected_;
 };

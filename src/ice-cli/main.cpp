@@ -4,6 +4,7 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/pex.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -812,7 +813,8 @@ void printHelp() {
               << "  layout-import-def <input.def> <project>\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
-              << "  lvs-auto <project> <layout>\n\n"
+              << "  lvs-auto <project> <layout>\n"
+              << "  pex <project> <layout> [schematic-name]\n\n"
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
                  "[signals...]\n"
@@ -995,6 +997,19 @@ int main(int argc, char **argv) {
             const auto report = ice::runLvs(project, schematic, layout);
             std::cout << ice::serializeLvsReport(report);
             return report.matched() ? 0 : 1;
+        }
+
+        if (command == "pex") {
+            expectArguments(args, 3, 4, "pex <project> <layout> [schematic-name]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto layout = resolveLayout(session.project(), args[2]);
+            ice::PexOptions options;
+            if (args.size() == 4)
+                options.schematicName = args[3];
+            const auto report = ice::runPex(session.project(), layout, options);
+            session.save(args[1]);
+            std::cout << ice::serializePexReport(report);
+            return 0;
         }
 
         if (command == "project-repair") {

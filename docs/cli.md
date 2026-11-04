@@ -117,6 +117,7 @@ nets.
 ```sh
 ice-cli lvs <project> <schematic> <layout>
 ice-cli lvs-auto <project> <layout>
+ice-cli pex <project> <layout> [schematic-name]
 ```
 
 `project-repair` loads a project with recovery enabled: malformed sidecar files
@@ -138,6 +139,16 @@ device types, shared device parameters, net topology from planned connections,
 and top-level pins matched by name, direction, and bound net. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.
+
+`pex` extracts placed device-library instances, PDK-rule polygon devices, and
+first-order per-net resistance and capacitance from layout geometry, then
+creates or updates a text SPICE schematic in the project hierarchy. Polygon
+device rules come from the installed package's `layout/extraction.json`. When no
+layout devices are recognized it falls back to the inferred source schematic
+device netlist. The report JSON
+includes the layout and schematic ids, per-net area, perimeter, resistance,
+capacitance, extracted devices, and the complete generated SPICE source. An
+optional third argument overrides the generated cell name.
 
 ## PDK setup
 

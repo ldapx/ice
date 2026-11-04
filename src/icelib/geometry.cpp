@@ -186,6 +186,32 @@ MultiPolygon GeometryKernel::offset(const MultiPolygon &subject, Coordinate delt
     return cleanup(result);
 }
 
+MultiPolygon GeometryKernel::fillEvenOdd(const MultiPolygon &contours) const {
+    const auto subjects = toClipperPaths(contours);
+    if (subjects.empty())
+        return {};
+    Clipper2Lib::Clipper64 clipper;
+    clipper.AddSubject(subjects);
+    Clipper2Lib::PolyTree64 tree;
+    clipper.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::EvenOdd, tree);
+    bool hasHoles = false;
+    for (const auto &child : tree) {
+        if (child->Count() > 0) {
+            hasHoles = true;
+            break;
+        }
+    }
+    if (hasHoles)
+        return decomposeHoledResult(tree);
+    MultiPolygon result;
+    for (const auto &child : tree) {
+        auto polygon = fromClipperPath(child->Polygon());
+        if (valid(polygon))
+            result.push_back(std::move(polygon));
+    }
+    return cleanup(result);
+}
+
 MultiPolygon GeometryKernel::cleanup(const MultiPolygon &subject) const {
     MultiPolygon result;
     for (const auto &polygon : subject) {

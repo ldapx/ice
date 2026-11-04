@@ -71,6 +71,32 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     CHECK(legacyLoaded.layers.at(layer).datatype == 2);
 }
 
+TEST_CASE("text polygon shape groups survive serialization") {
+    ice::Project project;
+    project.identity = "text-polygon";
+    project.name = "text-polygon";
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto first = ice::addPolygon(project, cell, layer, {{0, 0}, {100, 0}, {100, 100}, {0, 100}});
+    const auto second = ice::addPolygon(project, cell, layer, {{100, 0}, {200, 0}, {200, 100}, {100, 100}});
+    auto &cellData = project.layoutCells.at(cell);
+    for (const auto id : {first, second}) {
+        auto &shape = cellData.shapes.at(id);
+        shape.name = "Text Polygon 1";
+        shape.textPolygon = true;
+        shape.textGroup = first;
+        shape.textSource = "AB";
+    }
+
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto &restored = roundTrip.layoutCells.at(cell).shapes;
+    CHECK(restored.at(first).textPolygon);
+    CHECK(restored.at(first).textGroup == first);
+    CHECK(restored.at(first).textSource == "AB");
+    CHECK(!restored.at(first).isText());
+    CHECK(restored.at(second).textGroup == first);
+}
+
 TEST_CASE("project serialization and transactions are deterministic") {
     ice::Project project;
     project.identity = "demo";
@@ -1368,6 +1394,22 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(project.proceduralLayouts.at(secondId).name == "generated_second");
     CHECK(project.proceduralLayouts.at(secondId).generatedCell != procedural.generatedCell);
     CHECK(project.validate().empty());
+}
+
+TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {
+    ice::GeometryKernel kernel;
+    const ice::MultiPolygon contours = {
+        {{0, 0}, {100, 0}, {100, 100}, {0, 100}},
+        {{25, 25}, {75, 25}, {75, 75}, {25, 75}},
+    };
+    const auto filled = kernel.fillEvenOdd(contours);
+    CHECK(filled.size() > 1);
+    long double area = 0.0L;
+    for (const auto &polygon : filled) {
+        CHECK(ice::GeometryKernel::valid(polygon));
+        area += std::abs(polygonArea(polygon));
+    }
+    CHECK(area == 7500.0L);
 }
 
 TEST_CASE("layout shape boolean operations replace their operands") {

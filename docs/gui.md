@@ -193,10 +193,13 @@ groups GDS purpose variants under their base layer number: for example
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
 checkbox. Creating a custom layer opens a form with the layer name, assigned
-GDS number, color picker, fill pattern, and a live style preview. Layout entries
-use a notebook-pen icon. Each layout node lists its child layout/device
-instances, planned devices, rectangles, polygons, paths, and texts directly,
-with a distinct icon for each entry type. Right-click an entry and choose
+GDS number, color picker, fill pattern, and a live style preview. The toolbar
+next to the search field can show only drawing layers or only pin layers. Its
+single eye button shows all layers when any layer is hidden and switches to
+hide all when every layer is visible. Layout entries use a notebook-pen icon.
+Each layout node lists its child layout/device instances, planned devices,
+rectangles, polygons, paths, and texts directly, with a distinct icon for each
+entry type. Right-click an entry and choose
 **Rename…** to rename a layout, script, instance, planned device, or shape. Right-click a layout entry
 and toggle **Flatten Layout for DRC** to control whether **Run DRC** exports the
 flattened instance geometry instead of only the layout cell's own shapes.
@@ -336,10 +339,22 @@ The **Ruler** tool measures between two clicked points. The ruler line keeps a
 constant screen width as you zoom, and shows minor and major tick marks with
 distance labels along its length.
 
-The **Draw Text** tool places a text label on the currently selected layer.
-Click the canvas, enter the string, and ICE creates a movable text object with
-a 1 um nominal height. Text is stored in the project and exported as GDSII
-TEXT records.
+The **Draw Text Label** tool places an annotation on the currently selected
+layer. Click the canvas, enter the string, and ICE creates a movable text
+object with a 1 um nominal height. It is stored in the project and exported as
+GDSII TEXT records, but it does not create conductive geometry.
+
+The **Draw Text Polygon** tool is available from the dropdown attached to the
+**Create Polygon** toolbar button. It converts the glyph outlines into actual
+filled polygon shapes on the selected layer. Glyph contours are simplified to
+45- and 90-degree edges, and each connected glyph component becomes one polygon
+with counters represented by a keyhole cut. Letters with disconnected parts,
+such as `i` and `j`, use one polygon per component. The click position becomes
+the lower-left corner of the glyph bounds. All components appear as one
+**Text Polygon** entry in the Hierarchy and select, move, rename, and delete as
+a single object, while still participating in connectivity, DRC, and GDSII
+BOUNDARY export like ordinary layout polygons. Text polygons are excluded from
+Boolean operations.
 
 The **Create Pin** tool places a named layout pin on the currently selected
 layer. Drag from one corner to the other to define the pin rectangle; the
@@ -379,6 +394,28 @@ are reported. Results appear in the **LVS Report** tab with mismatch categories
 and schematic/layout object ids. Text SPICE schematics are not supported by LVS
 yet.
 
+**Tools → Run PEX** (or right-clicking a layout cell and choosing
+**Extract Parasitics (PEX)**) extracts first-order parasitics from the active
+user layout cell. It groups geometry into nets with the same connectivity used by the
+layout connectivity view, recognizes `Metal*`, `GatPoly`/`Poly*`,
+`Activ`/diffusion, and via/contact layers, and reports each net's area,
+perimeter, total resistance, and capacitance in the generated SPICE text
+schematic. A text SPICE cell named `<layout> PEX` is created — or updated on a
+later run — and selected in the Schematic tab, so it appears in the project
+hierarchy. Single-terminal nets use a series resistance with the capacitance to
+ground; multi-terminal nets use a resistance star between pins. Placed
+device-library instances are extracted first: their terminal pin rectangles are
+transformed into parent coordinates, matched to the parent nets they overlap,
+and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
+placed devices are recognized, PEX falls back to copying the inferred source
+schematic's device netlist. Devices drawn purely as polygons are recognized
+through the PDK package's `layout/extraction.json` rules: PEX cuts active under
+gates, finds source/drain terminal nets, and emits MOS devices with geometric
+W/L. The same rules can describe simple resistors and capacitors. Use LVS to
+verify the result before relying on it. The generated deck records the
+coefficients used, and the API/MCP surfaces can override them for a
+process-specific first pass.
+
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database
 precision.
@@ -407,7 +444,7 @@ Common defaults:
 - **Schematic place device**: R resistor, X NMOS, I input, O output, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
 - **Schematic comment**: Shift+C
 - **Layout rotate / flips**: Ctrl+R / H / J
-- **Layout rectangle / polygon / path / text / pin / ruler**: R / G / W / T / N / L
+- **Layout rectangle / polygon / path / text label / text polygon / pin / ruler**: R / G / W / T / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
 
 Use **Settings → Keyboard Shortcuts…** (Ctrl+Shift+K) to reassign commands,

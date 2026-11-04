@@ -25,6 +25,9 @@ class GeometryKernel {
     MultiPolygon booleanOp(const MultiPolygon &subject, const MultiPolygon &clip, BooleanOperation operation) const;
     MultiPolygon offset(const MultiPolygon &subject, Coordinate delta) const;
     MultiPolygon cleanup(const MultiPolygon &subject) const;
+    // Fills overlapping contours with the even-odd rule and splits any holes
+    // into independently fillable polygons.
+    MultiPolygon fillEvenOdd(const MultiPolygon &contours) const;
     static bool valid(const Polygon &polygon);
     static Rect bounds(const Polygon &polygon);
 };

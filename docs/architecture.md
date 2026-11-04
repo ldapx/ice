@@ -1564,6 +1564,35 @@ Post-layout results
 
 The extracted representation should be usable directly by the ICE simulation/benchmarking environment.
 
+The current implementation is a first-order lumped extractor. It groups layout
+geometry with the same connectivity rules as the layout connectivity view,
+recognizes conducting layers by name (`Metal*`, `GatPoly`/`Poly*`,
+`Activ`/diffusion, and via/contact layers), and creates or updates a text SPICE
+schematic named `<layout> PEX` in the project hierarchy. The generated deck
+reports area, perimeter, total resistance, and total capacitance to ground for
+each net. Single-terminal nets model the extracted resistance in series with
+their capacitance to ground; multi-terminal nets use a resistance star between
+their layout pins. Placed device-library instances are extracted when their
+child cells provide terminal pins and model parameters; each terminal is
+matched to the parent net that overlaps its transformed pin geometry, and the
+device is emitted as a SPICE primitive or PDK subcircuit. If no placed devices
+are recognized, the extractor falls back to copying the inferred source
+schematic's device netlist before the parasitics.
+
+Polygon devices are recognized through per-PDK rules in
+`layout/extraction.json`. The rule engine intersects active/gate layers, cuts
+active under gates so source and drain are not shorted, matches terminal layers
+to the resulting regions, and emits MOS devices with geometric W/L. The same
+rule file can declare two-terminal resistors and plate-overlap capacitors. This
+is the Netgen/Magic-style extraction layer; PDK packages own their layer names,
+models, and extraction requirements. Verify the result with LVS before treating
+it as sign-off data.
+
+Use the GUI action **Tools → Run PEX** (F9), `ice-cli pex`, the MCP
+`pex_run` tool, or the Python `icepy.run_pex` helper. Coefficients are
+configurable through the API/MCP surfaces and are recorded in the generated
+deck so results remain traceable.
+
 ---
 
 ## 37. Manual + Automated Design
