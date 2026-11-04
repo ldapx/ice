@@ -28,7 +28,9 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     auto *layout = new QVBoxLayout(this);
     auto *headerRow = new QHBoxLayout;
     headerRow->setContentsMargins(0, 0, 0, 0);
-    headerRow->addWidget(heading(QStringLiteral("Properties")));
+    title_ = heading(QStringLiteral("Properties"));
+    title_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    headerRow->addWidget(title_, 1);
     headerRow->addStretch();
     editButton_ = new QPushButton;
     editButton_->setFixedWidth(24);
@@ -63,9 +65,6 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     auto *detailsLayout = new QVBoxLayout(details);
     detailsLayout->setContentsMargins(0, 0, 0, 0);
     detailsLayout->setSpacing(layout->spacing());
-    auto *form = new QFormLayout;
-    selection_ = addRow(form, QStringLiteral("Selection"));
-    detailsLayout->addLayout(form);
 
     gridOptions_ = new QGroupBox(QStringLiteral("Grid"));
     auto *gridForm = new QFormLayout(gridOptions_);
@@ -186,7 +185,7 @@ void PropertiesPanel::clearSelection() {
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(false);
-    selection_->setText(QStringLiteral("Nothing selected"));
+    setTitle(QStringLiteral("Properties"));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
@@ -195,6 +194,7 @@ void PropertiesPanel::clearSelection() {
 
 void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
                                   const std::string &symbolSvg) {
+    (void)symbolName;
     instanceId_ = instance.id;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -206,8 +206,7 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
-    selection_->setText(QStringLiteral("%1 (%2)").arg(QString::fromStdString(instance.name), type));
+    setTitle(QString::fromStdString(instance.name));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(QByteArray::fromStdString(symbolSvg));
     previewFrame_->setVisible(!symbolSvg.empty());
@@ -227,7 +226,7 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    selection_->setText(QStringLiteral("%1 (Schematic)").arg(QString::fromStdString(cell.name)));
+    setTitle(QString::fromStdString(cell.name));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(symbolSvg.toUtf8());
     previewFrame_->setVisible(!symbolSvg.isEmpty());
@@ -254,13 +253,7 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
-                                                                       : QString::fromStdString(cell.pdk);
-    const auto kind = cell.device.empty() ? QStringLiteral("Layout") : QStringLiteral("Device");
-    auto text = QStringLiteral("%1 (%2 · %3)").arg(QString::fromStdString(cell.name), kind, pdk);
-    if (cell.library)
-        text += QStringLiteral(" · Read-only geometry");
-    selection_->setText(text);
+    setTitle(QString::fromStdString(cell.name));
     layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
     layoutDevicePreview_->setModel(model);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
@@ -282,14 +275,14 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
         gridOptions_->setVisible(false);
     setParametersVisible(cell != nullptr);
     if (!cell) {
-        selection_->setText(QStringLiteral("No device selected"));
+        setTitle(QStringLiteral("Properties"));
         previewFrame_->setVisible(false);
         populateParameters({});
         updateParameterButtons();
         return;
     }
     layoutDeviceName_ = cell->name;
-    selection_->setText(QStringLiteral("%1 (Device)").arg(QString::fromStdString(cell->name)));
+    setTitle(QString::fromStdString(cell->name));
     layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
     layoutDevicePreview_->setCell(cell);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
@@ -312,7 +305,7 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     setParametersVisible(true);
     pathWidth_ = std::max(1, width);
     pathLayerName_ = layerName;
-    selection_->setText(QStringLiteral("Path tool"));
+    setTitle(QStringLiteral("Path tool"));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
@@ -352,8 +345,7 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    selection_->setText(
-        QStringLiteral("%1 (%2)").arg(QString::fromStdString(displayName), QString::fromStdString(typeName)));
+    setTitle(QString::fromStdString(displayName));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
@@ -405,7 +397,7 @@ void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &la
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    selection_->setText(QStringLiteral("%1 (Pin)").arg(QString::fromStdString(port.name)));
+    setTitle(QString::fromStdString(port.name));
     previewFrame_->setVisible(false);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
@@ -454,9 +446,7 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     layoutDevicePreview_->setModel(model);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
     previewFrame_->setVisible(!model.empty());
-    const auto pdk = cell.pdk.empty() || cell.pdk == ice::genericPdkId ? QStringLiteral("Generic PDK")
-                                                                       : QString::fromStdString(cell.pdk);
-    selection_->setText(QStringLiteral("%1 (Layout · %2)").arg(QString::fromStdString(cell.name), pdk));
+    setTitle(QString::fromStdString(cell.name));
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
     if (gridOptions_) {
@@ -467,11 +457,12 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     updateParameterButtons();
 }
 
-QLabel *PropertiesPanel::addRow(QFormLayout *form, const QString &label) {
-    auto *value = new QLabel(QStringLiteral("—"));
-    value->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow(label, value);
-    return value;
+void PropertiesPanel::setTitle(const QString &title) {
+    if (!title_)
+        return;
+    const auto text = title.trimmed().isEmpty() ? QStringLiteral("Properties") : title;
+    title_->setText(text);
+    title_->setToolTip(text);
 }
 
 void PropertiesPanel::populateParameters(const std::vector<ice::Parameter> &parameters) {
@@ -580,7 +571,7 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
         } else {
             return;
         }
-        selection_->setText(QStringLiteral("%1 (Pin)").arg(QString::fromStdString(layoutPort_.name)));
+        setTitle(QString::fromStdString(layoutPort_.name));
         if (onLayoutPortChanged_)
             onLayoutPortChanged_(layoutPort_, layoutPortNetName_);
         return;

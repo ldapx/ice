@@ -71,7 +71,7 @@ class PropertiesPanel : public QWidget {
     void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model, int spacing);
 
   private:
-    static QLabel *addRow(QFormLayout *form, const QString &label);
+    void setTitle(const QString &title);
     void populateParameters(const std::vector<ice::Parameter> &parameters);
     void setParametersVisible(bool visible);
     void populateLayoutDeviceParameters(const std::vector<ice::LayoutDeviceParameter> &parameters);
@@ -80,7 +80,7 @@ class PropertiesPanel : public QWidget {
     void addParameter();
     void removeParameters();
 
-    QLabel *selection_ = nullptr;
+    QLabel *title_ = nullptr;
     QPushButton *editButton_ = nullptr;
     QStackedWidget *previewStack_ = nullptr;
     SymbolPreview *symbolPreview_ = nullptr;
