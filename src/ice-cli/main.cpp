@@ -190,10 +190,20 @@ ice::ObjectId resolvePin(const ice::SchematicCell &cell, const std::string &text
     }
     const auto dot = text.find('.');
     if (dot != std::string::npos) {
-        const auto symbolName = text.substr(0, dot);
+        const auto ownerName = text.substr(0, dot);
         const auto pinName = text.substr(dot + 1);
+        for (const auto &[_, instance] : cell.instances) {
+            if (instance.name != ownerName)
+                continue;
+            const auto symbol = cell.symbols.find(instance.symbol);
+            if (symbol == cell.symbols.end())
+                continue;
+            for (const auto &pin : symbol->second.pins)
+                if (pin.name == pinName)
+                    return pin.id;
+        }
         for (const auto &[_, symbol] : cell.symbols) {
-            if (symbol.name != symbolName)
+            if (symbol.name != ownerName)
                 continue;
             for (const auto &pin : symbol.pins)
                 if (pin.name == pinName)
@@ -511,7 +521,9 @@ json schematicInfo(const ice::SchematicCell &cell) {
                             {"name", pin.name},
                             {"x", pin.x},
                             {"y", pin.y},
-                            {"direction", pinDirectionName(pin.direction)}});
+                            {"direction", pinDirectionName(pin.direction)},
+                            {"width", pin.width},
+                            {"width_known", pin.widthKnown}});
         result["symbols"].push_back(
             {{"id", id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}});
     }
@@ -807,7 +819,11 @@ void printHelp() {
               << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
               << "  schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]\n"
               << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
+              << "  schematic-set-parameter <project> <cell> <instance> <name> <value>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
+              << "  schematic-hdl-ports <project> <cell>\n"
+              << "  schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>\n"
+              << "  schematic-validate-hierarchy <project> <cell>\n"
               << "  schematic-netlist <project> <cell>\n\n"
               << "Layout:\n"
               << "  layout-add-cell <project> <name> [pdk]\n"
@@ -852,7 +868,8 @@ void printHelp() {
               << "  simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]\n"
               << "  simulation-graph-delete <project> <simulation> <graph>\n"
               << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
-              << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n\n"
+              << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n"
+              << "  (drawn schematics with SystemVerilog blocks use the mixed simulator automatically)\n\n"
               << "Simulation scripts:\n"
               << "  script-add <project> <name> [source-file]\n"
               << "  script-list <project>\n"
@@ -1166,6 +1183,121 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-hdl-ports") {
+            expectArguments(args, 3, 3, "schematic-hdl-ports <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto &cell = project.schematicCells.at(id);
+            if (!cell.systemVerilogSchematic)
+                throw ice::ProjectError("schematic.hdl", "Schematic cell is not a SystemVerilog source cell");
+            const auto parsed = ice::parseSystemVerilogModule(cell);
+            if (!parsed.ok)
+                throw ice::ProjectError("schematic.hdl.parse", parsed.error);
+            const auto directionName = [](ice::HdlPortDirection direction) {
+                switch (direction) {
+                case ice::HdlPortDirection::input:
+                    return "input";
+                case ice::HdlPortDirection::output:
+                    return "output";
+                case ice::HdlPortDirection::inout:
+                    return "inout";
+                }
+                return "input";
+            };
+            json ports = json::array();
+            for (const auto &port : parsed.module.ports)
+                ports.push_back({{"name", port.name},
+                                 {"direction", directionName(port.direction)},
+                                 {"width", port.width},
+                                 {"width_known", port.widthKnown}});
+            printJson({{"id", id},
+                       {"schematic", cell.name},
+                       {"module", parsed.module.name},
+                       {"ports", std::move(ports)},
+                       {"warnings", parsed.warnings}});
+            return 0;
+        }
+
+        if (command == "schematic-add-hdl-instance") {
+            expectArguments(args, 7, 7, "schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>");
+            auto project = ice::Project::load(args[1]);
+            const auto parent = resolveSchematic(project, args[2]);
+            const auto source = resolveSchematic(project, args[3]);
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            ice::ProjectSession session(project);
+            ice::ObjectId instance = 0;
+            ice::ObjectId symbol = 0;
+            session.execute("schematic-add-hdl-instance", [&](ice::Project &p) {
+                instance = ice::addSystemVerilogInstance(p, parent, source, args[4], x, y, &symbol);
+            });
+            session.save(args[1]);
+            json pins = json::array();
+            const auto &symbolRef = session.project().schematicCells.at(parent).symbols.at(symbol);
+            for (const auto &pin : symbolRef.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            printJson({{"id", instance},
+                       {"cell", parent},
+                       {"source_cell", source},
+                       {"symbol", symbol},
+                       {"symbol_name", symbolRef.name},
+                       {"name", args[4]},
+                       {"x", x},
+                       {"y", y},
+                       {"pins", std::move(pins)}});
+            return 0;
+        }
+
+        if (command == "schematic-validate-hierarchy") {
+            expectArguments(args, 3, 3, "schematic-validate-hierarchy <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto plan = ice::buildMixedSignalPlan(project, id);
+            const auto diagnostics = ice::validateHdlHierarchy(project, id);
+            json checked = json::array();
+            for (const auto &diagnostic : diagnostics) {
+                json item = {
+                    {"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                    {"code", diagnostic.code},
+                    {"message", diagnostic.message}};
+                if (diagnostic.object)
+                    item["object"] = *diagnostic.object;
+                checked.push_back(std::move(item));
+            }
+            json blocks = json::array();
+            for (const auto &binding : plan.hdlInstances) {
+                json ports = json::array();
+                for (const auto &port : binding.ports) {
+                    const auto node = binding.portNodes.find(port.name);
+                    ports.push_back({{"name", port.name},
+                                     {"width", port.width},
+                                     {"node", node == binding.portNodes.end() ? json(nullptr) : json(node->second)}});
+                }
+                blocks.push_back({{"instance", binding.instanceName},
+                                  {"module", binding.moduleName},
+                                  {"source_cell", binding.sourceCell},
+                                  {"ports", std::move(ports)}});
+            }
+            json result = {{"schematic", project.schematicCells.at(id).name},
+                           {"ok", plan.ok()},
+                           {"diagnostics", std::move(checked)},
+                           {"hdl_instances", std::move(blocks)},
+                           {"analog_inputs", plan.analogInputNodes},
+                           {"digital_outputs", plan.digitalOutputNodes},
+                           {"warnings", plan.warnings}};
+            if (plan.ok())
+                result["analog_netlist"] = plan.analogNetlist;
+            else
+                result["error"] = plan.error;
+            printJson(result);
+            return 0;
+        }
+
         if (command == "schematic-list") {
             expectArguments(args, 2, 2, "schematic-list <project>");
             const auto project = ice::Project::load(args[1]);
@@ -1256,6 +1388,33 @@ int main(int argc, char **argv) {
                             [&](ice::Project &p) { id = ice::addSchematicInstance(p, cell, symbol, args[4], x, y); });
             session.save(args[1]);
             printJson({{"id", id}, {"cell", cell}, {"symbol", symbol}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "schematic-set-parameter") {
+            expectArguments(args, 6, 6, "schematic-set-parameter <project> <cell> <instance> <name> <value>");
+            auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto &cellRef = project.schematicCells.at(cell);
+            ice::ObjectId instanceId = 0;
+            if (const auto id = parseUnsigned(args[3]); id && cellRef.instances.contains(*id)) {
+                instanceId = *id;
+            } else {
+                for (const auto &[id, instance] : cellRef.instances) {
+                    if (instance.name == args[3]) {
+                        instanceId = id;
+                        break;
+                    }
+                }
+            }
+            if (instanceId == 0)
+                throw ice::ProjectError("schematic.instance", "Unknown instance: " + args[3]);
+            ice::ProjectSession session(project);
+            session.execute("schematic-set-parameter", [&](ice::Project &p) {
+                ice::setSchematicParameter(p, cell, instanceId, args[4], args[5]);
+            });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"instance", instanceId}, {"name", args[4]}, {"value", args[5]}});
             return 0;
         }
 
@@ -1724,14 +1883,21 @@ int main(int argc, char **argv) {
             const auto project = ice::Project::load(args[1]);
             const auto schematic = resolveSchematic(project, args[3]);
             const auto &schematicCell = project.schematicCells.at(schematic);
+            const bool mixedSignal =
+                !schematicCell.systemVerilogSchematic && ice::schematicContainsHdl(project, schematic);
             ice::SimulationItem simulation;
             simulation.name = args[2];
             simulation.schematic = schematic;
             if (schematicCell.systemVerilogSchematic) {
                 simulation.simulator = "iverilog";
                 simulation.analysis = "digital";
+            } else if (mixedSignal) {
+                simulation.simulator = "mixed";
+                simulation.analysis = "transient";
+                simulation.stop = 1.0e-6;
+                simulation.step = 1.0e-9;
             }
-            if (args.size() >= 5)
+            if (args.size() >= 5 && !mixedSignal)
                 simulation.analysis = normalizeAnalysisName(args[4]);
             if (args.size() >= 6)
                 simulation.stop = parseDouble(args[5], "stop time");
@@ -1763,6 +1929,8 @@ int main(int argc, char **argv) {
             printJson({{"id", simulation.id},
                        {"name", simulation.name},
                        {"schematic", schematic},
+                       {"simulator", simulation.simulator},
+                       {"analysis", simulation.analysis},
                        {"signals", simulation.captureSignals},
                        {"graph", graphId}});
             return 0;
@@ -1814,17 +1982,9 @@ int main(int argc, char **argv) {
             request.use_initial_conditions = simulation.use_initial_conditions;
             request.workingDirectory = projectRootForCli(args[1]);
             std::vector<std::string> notes;
-            if (schematic->second.systemVerilogSchematic) {
-                request.analysis = "digital";
-                request.simulator = "iverilog";
-                std::istringstream source(schematic->second.systemVerilogText);
-                std::string line;
-                while (std::getline(source, line))
-                    request.netlist.push_back(line);
-            } else {
-                request.analysis = normalizeAnalysisName(simulation.analysis);
-                request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
-                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+            const bool mixedSignal =
+                !schematic->second.systemVerilogSchematic && ice::schematicContainsHdl(project, simulation.schematic);
+            const auto appendDirectives = [&] {
                 std::istringstream directives(simulation.directives);
                 std::string directive;
                 while (std::getline(directives, directive)) {
@@ -1832,6 +1992,26 @@ int main(int argc, char **argv) {
                     if (!trimmed.empty() && !isAnalysisDirective(trimmed))
                         request.netlist.push_back(trimmed);
                 }
+            };
+            if (mixedSignal) {
+                std::string error;
+                if (!ice::prepareMixedSignalRequest(request, project, simulation.schematic, &error))
+                    throw ice::ProjectError("simulation.mixed", error);
+                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+                appendDirectives();
+            } else if (schematic->second.systemVerilogSchematic) {
+                request.analysis = "digital";
+                request.simulator = "iverilog";
+                std::istringstream source(schematic->second.systemVerilogText);
+                std::string line;
+                while (std::getline(source, line))
+                    request.netlist.push_back(line);
+            } else {
+                request.simulator = "ngspice";
+                request.analysis = normalizeAnalysisName(simulation.analysis);
+                request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
+                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+                appendDirectives();
             }
             request.probeSignals = splitSignals(simulation.captureSignals);
 
@@ -2202,14 +2382,19 @@ int main(int argc, char **argv) {
                 const auto project = ice::Project::load(args[1]);
                 const auto schematicId = resolveSchematic(project, args[2]);
                 const auto &schematic = project.schematicCells.at(schematicId);
+                request.workingDirectory = projectRootForCli(args[1]);
                 if (schematic.systemVerilogSchematic) {
                     request.simulator = "iverilog";
                     request.analysis = "digital";
-                    request.workingDirectory = projectRootForCli(args[1]);
                     std::istringstream source(schematic.systemVerilogText);
                     std::string line;
                     while (std::getline(source, line))
                         request.netlist.push_back(line);
+                } else if (ice::schematicContainsHdl(project, schematicId)) {
+                    std::string error;
+                    if (!ice::prepareMixedSignalRequest(request, project, schematicId, &error))
+                        throw ice::ProjectError("simulation.mixed", error);
+                    ice::applyPdkSimulationSetup(schematic.pdk, request);
                 } else {
                     request.netlist = ice::buildSimulationNetlist(project, schematicId);
                     ice::applyPdkSimulationSetup(schematic.pdk, request);

@@ -22,6 +22,15 @@ ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::str
                    ObjectId sourceCell = 0);
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y);
+// Sets or creates an instance parameter. Names are matched case-insensitively.
+void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name, std::string value);
+// Creates a symbol whose pins come from the SystemVerilog module ports and
+// places one instance in the parent schematic. A fresh symbol is created per
+// instance so net names remain unambiguous.
+ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
+                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId = nullptr);
+// SPICE node name used by the schematic netlister for a net in a drawn cell.
+std::string schematicNetNodeName(const SchematicCell &cell, const Net &net);
 ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x = 0,
                 Coordinate y = 0);
 ObjectId addSchematicComment(Project &project, ObjectId cellId, std::string text, Coordinate x, Coordinate y);
@@ -117,8 +126,16 @@ bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
 // Limitation: pins are identified at symbol level, so a symbol instantiated
 // more than once in the same cell cannot be resolved to a unique instance for
 // netlisting. Such ambiguous instances are skipped and reported via notes.
+enum class SchematicNetlistMode {
+    // Pure SPICE: SystemVerilog blocks are an error.
+    analog,
+    // Mixed-signal base netlist: top-level SystemVerilog blocks are omitted so
+    // the co-simulation adapter can add their interface sources.
+    mixed,
+};
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
-                                               std::vector<std::string> *notes = nullptr);
+                                               std::vector<std::string> *notes = nullptr,
+                                               SchematicNetlistMode mode = SchematicNetlistMode::analog);
 
 // Builds a simulation netlist from either a drawn schematic or a text SPICE
 // schematic. Analysis-control directives that the simulation properties own

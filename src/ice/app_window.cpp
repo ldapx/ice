@@ -5663,6 +5663,10 @@ class DocumentWindow : public QMainWindow {
             // Default to first schematic if available.
             if (!project.schematicCells.empty())
                 sim.schematic = project.schematicCells.begin()->first;
+            if (sim.schematic != 0 && ice::schematicContainsHdl(project, sim.schematic)) {
+                sim.stop = 1.0e-6;
+                sim.step = 1.0e-9;
+            }
             // Add one default graph. nextId() still returns newId here because
             // the simulation is not in the map yet, so allocate newId + 1.
             ice::SimulationGraph graph;
@@ -6557,7 +6561,14 @@ class DocumentWindow : public QMainWindow {
                 while (std::getline(source, line))
                     request.netlist.push_back(line);
                 netlistNotes << QStringLiteral("SystemVerilog source cell");
+            } else if (ice::schematicContainsHdl(project, cellId)) {
+                std::string error;
+                if (!ice::prepareMixedSignalRequest(request, project, cellId, &error))
+                    throw ice::ProjectError("simulation.mixed", error);
+                ice::applyPdkSimulationSetup(cell.pdk, request);
+                netlistNotes << QStringLiteral("Mixed-signal co-simulation (ngspice + Icarus Verilog)");
             } else {
+                request.simulator = "ngspice";
                 std::vector<std::string> notes;
                 const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
                 request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
@@ -6706,6 +6717,8 @@ class DocumentWindow : public QMainWindow {
         const auto id = selectedSimulationSchematicId();
         const auto cell = project_->project().schematicCells.find(id);
         const bool hdl = cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
+        const bool mixed = cell != project_->project().schematicCells.end() && !hdl &&
+                           ice::schematicContainsHdl(project_->project(), id);
         QSignalBlocker simulatorBlocker(simulatorSelector_);
         QSignalBlocker analysisBlocker(analysisSelector_);
         if (hdl) {
@@ -6715,8 +6728,16 @@ class DocumentWindow : public QMainWindow {
             const auto analysis = analysisSelector_->findData(QStringLiteral("digital"));
             if (analysis >= 0)
                 analysisSelector_->setCurrentIndex(analysis);
+        } else if (mixed) {
+            const auto simulator = simulatorSelector_->findData(QStringLiteral("mixed"));
+            if (simulator >= 0)
+                simulatorSelector_->setCurrentIndex(simulator);
+            const auto analysis = analysisSelector_->findData(QStringLiteral("transient"));
+            if (analysis >= 0)
+                analysisSelector_->setCurrentIndex(analysis);
         } else {
-            if (simulatorSelector_->currentData().toString() == QStringLiteral("iverilog")) {
+            if (simulatorSelector_->currentData().toString() == QStringLiteral("iverilog") ||
+                simulatorSelector_->currentData().toString() == QStringLiteral("mixed")) {
                 const auto simulator = simulatorSelector_->findData(QStringLiteral("ngspice"));
                 if (simulator >= 0)
                     simulatorSelector_->setCurrentIndex(simulator);
@@ -6943,8 +6964,15 @@ class DocumentWindow : public QMainWindow {
         QApplication::processEvents();
 
         QStringList netlistNotes;
-        const auto request = buildSimulationRequest(sim, netlistNotes);
-        auto result = ice::SimulationRunner().run(request, std::chrono::seconds(10));
+        ice::SimulationRequest request;
+        try {
+            request = buildSimulationRequest(sim, netlistNotes);
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Run Simulation"), QString::fromStdString(error.what()));
+            return;
+        }
+        const auto timeout = request.simulator == "mixed" ? std::chrono::seconds(120) : std::chrono::seconds(10);
+        auto result = ice::SimulationRunner().run(request, timeout);
 
         // Populate empty capture and graph fields from the generated traces so
         // the first run produces a usable plot, including for digital VCDs.
@@ -9015,6 +9043,7 @@ class DocumentWindow : public QMainWindow {
         simulatorSelector_ = new QComboBox;
         simulatorSelector_->addItem(QStringLiteral("ngspice"), QStringLiteral("ngspice"));
         simulatorSelector_->addItem(QStringLiteral("Icarus Verilog (SystemVerilog)"), QStringLiteral("iverilog"));
+        simulatorSelector_->addItem(QStringLiteral("Mixed-signal (ngspice + Icarus)"), QStringLiteral("mixed"));
         analysisSelector_ = new QComboBox;
         analysisSelector_->addItem(QStringLiteral("Transient"), QStringLiteral("transient"));
         analysisSelector_->addItem(QStringLiteral("DC sweep"), QStringLiteral("dc"));

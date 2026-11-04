@@ -180,6 +180,13 @@ generated VCD is loaded as the result traces. If the source has no
 The first successful run fills the **Signals to capture** list and any empty
 graph Y selections from the VCD traces.
 
+A drawn schematic with SystemVerilog instances is detected as mixed-signal.
+The simulator selector then defaults to **Mixed-signal (ngspice + Icarus)** and
+the analysis to **Transient**. The resulting graph contains both the analog
+node traces and the digital `<instance>.<port>` traces. HDL instances are placed
+by MCP/CLI with a generated symbol whose pins match the module ports; the same
+symbols render and wire normally in the schematic canvas.
+
 The graph toolbar has a **Load VCD** action that imports an external VCD file
 into the current simulation. Its traces replace the capture list, populate
 empty graphs, and are shown immediately without running a simulator.

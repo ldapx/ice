@@ -22,9 +22,9 @@ After building, run the MCP tool smoke test:
 python3 tests/mcp_tools_smoke.py
 ```
 
-It exercises drawn-schematic creation with pins and nets, text-schematic and
-SystemVerilog source editing, digital simulation, simulation diagnostics, and
-doctor/PDK discovery.
+It exercises drawn-schematic creation with pins and nets, parameter editing,
+SystemVerilog source and port inspection, mixed-signal co-simulation, simulation
+diagnostics, and doctor/PDK discovery.
 
 The MCP server exposes `simulation_create`, `simulation_update`, and
 `simulation_run`, so a client can create, configure, and run a simulation
@@ -80,12 +80,16 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `schematic_info` | Read symbols, pins, instances, parameters, and nets. |
 | `schematic_create_text` | Create a text SPICE schematic. |
 | `schematic_create_systemverilog` | Create a SystemVerilog source cell for digital HDL simulation. |
+| `schematic_hdl_ports` | Parse a SystemVerilog cell and return its module name, port directions, and widths. |
 | `schematic_delete` | Delete a schematic, blocked when simulations or symbols use it. |
 | `schematic_add_symbol` | Add a symbol definition, optionally with a `pins` array. |
 | `schematic_add_pin` | Add a pin to an existing symbol. |
 | `schematic_add_net` | Connect two or more pin ids or `<instance>.<pin>` names into a net. |
 | `schematic_netlist` | Return the SPICE netlist generated from a schematic. |
 | `schematic_add_instance` | Place a symbol instance by id or symbol name. |
+| `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. |
+| `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
+| `schematic_validate_hierarchy` | Validate HDL instances, pin/port mapping, nets, buses, and mixed-signal support. |
 | `layout_create` | Create a static layout cell. |
 | `layout_create_from_schematic` | Generate a layout from a schematic. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
@@ -218,6 +222,32 @@ analysis. `simulation_create` selects those defaults for such a cell, and
 `simulation_run` returns VCD-derived traces. If the testbench does not create a
 VCD, ICE adds a wrapper that dumps the design. Source-level `$dumpfile` and
 `$dumpvars` calls are respected.
+
+## Mixed-signal schematics
+
+`kind: "systemverilog"` cells are digital blocks. Place one in a drawn
+schematic with `schematic_add_hdl_instance`; ICE parses the module ports and
+generates a box symbol with matching pins. `schematic_add_symbol` also
+auto-generates pins and artwork when it is given a SystemVerilog `source_cell`
+without an explicit `pins` array. Connect pins with readable names such as
+`U1.in` and `U1.out` via `schematic_add_net`. Set analog instance values with
+`schematic_set_parameter`, for example `resistance="1k"` or
+`value="PULSE(0 1 5n 1n 1n 20n 40n)"`.
+
+Call `schematic_hdl_ports` to inspect the parsed module and
+`schematic_validate_hierarchy` to check pin/port names, missing nets, bus
+widths, `inout` ports, and duplicate output drivers. Pure SPICE netlisting
+(`schematic_netlist`, or analog `simulation_run`) rejects hierarchical
+SystemVerilog blocks explicitly instead of silently dropping them.
+
+A drawn schematic containing HDL blocks is detected as mixed-signal.
+`simulation_create` selects `simulator="mixed"` and `transient` analysis
+automatically. Mixed simulation iterates ngspice and Icarus Verilog:
+digital outputs drive PWL sources in the analog deck, analog input nodes are
+sampled through a logic threshold, and the loop stops when sampled input bits
+stabilize. Results contain analog node traces plus `<instance>.<port>` digital
+traces. The current implementation supports top-level HDL instances with scalar
+`input`/`output` ports.
 
 Project sidecar files are not an editing interface. Do not write
 `sch/*.icesch`, `lay/*.icelay`, or `sim/*.icesim` by hand; use the tools instead.

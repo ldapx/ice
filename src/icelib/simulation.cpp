@@ -758,6 +758,8 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
 
 SimulationResult AutoSimulator::run(const SimulationRequest &request, const CancellationToken &token,
                                     const ProgressCallback &progress) {
+    if (request.simulator == "mixed" || request.simulator == "mixed-signal" || request.simulator == "ngspice+iverilog")
+        return MixedSignalSimulator().run(request, token, progress);
     if (request.simulator == "iverilog" || request.simulator == "icarus" || request.simulator == "verilog")
         return IcarusVerilogSimulator().run(request, token, progress);
     return NgspiceSimulator().run(request, token, progress);

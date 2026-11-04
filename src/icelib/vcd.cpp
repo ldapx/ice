@@ -124,7 +124,10 @@ double valueForChange(const VcdSignal &signal, const std::string &value, bool &o
 VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
     VcdData data;
     std::vector<std::string> scope;
-    std::map<std::string, std::size_t> signalById;
+    // A VCD identifier can be aliased by several $var declarations (for
+    // example a testbench wire and the module port it drives). Keep every
+    // declaration so either hierarchical name is available as a trace.
+    std::map<std::string, std::vector<std::size_t>> signalById;
     std::map<std::string, std::vector<std::pair<double, std::string>>> events;
     std::set<double> times;
     std::set<double> eventTimes;
@@ -164,11 +167,7 @@ VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
                 reference = full.str();
             }
             signal.name = reference;
-            if (signalById.contains(id)) {
-                data.warnings.push_back("VCD signal id declared more than once: " + id);
-                continue;
-            }
-            signalById.emplace(id, data.signalDeclarations.size());
+            signalById[id].push_back(data.signalDeclarations.size());
             data.signalDeclarations.push_back(std::move(signal));
         } else if (line.starts_with("$scope")) {
             const auto tokens = splitTokens(line);
@@ -241,32 +240,35 @@ VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
     for (const auto time : times)
         data.time.push_back(time * data.timescaleSeconds);
 
-    // Rebuild events by id and replay them in time order.
-    for (const auto &[id, signalIndex] : signalById) {
-        const auto &signal = data.signalDeclarations[signalIndex];
+    // Rebuild events by id and replay them in time order. Every alias gets its
+    // own trace with the same waveform.
+    for (const auto &[id, signalIndices] : signalById) {
         auto event = events.find(id);
-        SimulationTrace trace;
-        trace.name = signal.name;
-        trace.values.reserve(times.size());
-        double currentValue = 0.0;
-        std::size_t eventIndex = 0;
         if (event != events.end()) {
             std::sort(event->second.begin(), event->second.end(),
                       [](const auto &left, const auto &right) { return left.first < right.first; });
         }
-        for (const auto time : times) {
-            if (event != events.end()) {
-                while (eventIndex < event->second.size() && event->second[eventIndex].first <= time + 1.0e-15) {
-                    bool ok = true;
-                    currentValue = valueForChange(signal, event->second[eventIndex].second, ok);
-                    if (!ok)
-                        data.warnings.push_back("Unsupported VCD value for signal " + signal.name);
-                    ++eventIndex;
+        for (const auto signalIndex : signalIndices) {
+            const auto &signal = data.signalDeclarations[signalIndex];
+            SimulationTrace trace;
+            trace.name = signal.name;
+            trace.values.reserve(times.size());
+            double currentValue = 0.0;
+            std::size_t eventIndex = 0;
+            for (const auto time : times) {
+                if (event != events.end()) {
+                    while (eventIndex < event->second.size() && event->second[eventIndex].first <= time + 1.0e-15) {
+                        bool ok = true;
+                        currentValue = valueForChange(signal, event->second[eventIndex].second, ok);
+                        if (!ok)
+                            data.warnings.push_back("Unsupported VCD value for signal " + signal.name);
+                        ++eventIndex;
+                    }
                 }
+                trace.values.push_back(currentValue);
             }
-            trace.values.push_back(currentValue);
+            data.traces.push_back(std::move(trace));
         }
-        data.traces.push_back(std::move(trace));
     }
     if (!sourceName.empty() && data.traces.empty())
         data.warnings.push_back("No traces found in " + sourceName);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "icelib/core.hpp"
+#include "icelib/hdl.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -41,12 +42,22 @@ struct SimulationRequest {
     // Optional source/include working directory for HDL compilation. The UI
     // sets this to the project root so `include paths resolve predictably.
     std::filesystem::path workingDirectory;
+    // Configuration for the iterative ngspice + Icarus mixed-signal adapter.
+    // `netlist` is the analog base netlist; HDL blocks are added from this
+    // interface description.
+    MixedSignalInterface mixedSignal;
 };
 
 struct SimulationTrace {
     std::string name;
     std::vector<double> values;
 };
+
+// Populates a SimulationRequest from a drawn schematic that instantiates
+// SystemVerilog blocks. The caller is responsible for applying PDK setup and
+// user directives afterwards. Returns false and sets `error` on failure.
+bool prepareMixedSignalRequest(SimulationRequest &request, const Project &project, ObjectId schematicId,
+                               std::string *error = nullptr);
 
 // Fills an empty capture-signal list and empty graph Y selections from result
 // traces. Full trace names are used so hierarchical VCD paths remain exact.
@@ -103,7 +114,18 @@ class IcarusVerilogSimulator final : public SimulatorAdapter {
                          const ProgressCallback &progress) override;
 };
 
-// Dispatches to ngspice or Icarus Verilog from request.simulator.
+// Iterative mixed-signal co-simulation. The analog base netlist is solved with
+// ngspice while a generated Icarus testbench evaluates the HDL blocks. Digital
+// outputs drive PWL sources in the analog deck and analog input nodes are
+// sampled through a logic threshold on each pass.
+class MixedSignalSimulator final : public SimulatorAdapter {
+  public:
+    SimulationResult run(const SimulationRequest &request, const CancellationToken &token,
+                         const ProgressCallback &progress) override;
+};
+
+// Dispatches to ngspice, Icarus Verilog, or the mixed-signal adapter from
+// request.simulator.
 class AutoSimulator final : public SimulatorAdapter {
   public:
     SimulationResult run(const SimulationRequest &request, const CancellationToken &token,

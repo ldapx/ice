@@ -1,5 +1,7 @@
 #include "icelib/operations.hpp"
 
+#include "icelib/hdl.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -238,6 +240,90 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
     cell.instances.emplace(id, SchematicInstance{id, symbolId, std::move(name), x, y});
     return id;
 }
+void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name,
+                           std::string value) {
+    if (name.empty())
+        throw ProjectError("schematic.parameter.name", "Parameter name must not be empty");
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    auto instance = cell.instances.find(instanceId);
+    if (instance == cell.instances.end())
+        throw ProjectError("schematic.parameter.instance", "Instance does not exist");
+    for (auto &parameter : instance->second.parameters) {
+        if (lower(parameter.name) == lower(name)) {
+            parameter.value = std::move(value);
+            return;
+        }
+    }
+    instance->second.parameters.push_back({project.nextId(), std::move(name), std::move(value)});
+}
+
+ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
+                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId) {
+    if (instanceName.empty())
+        throw ProjectError("schematic.instance", "Instance name must not be empty");
+    auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    if (parent.isTextSource())
+        throw ProjectError("schematic.hdl.parent", "A SystemVerilog block can only be placed in a drawn schematic");
+    const auto &source = require(project.schematicCells, sourceCellId, "schematic.hdl.source",
+                                 "SystemVerilog source cell does not exist");
+    if (!source.systemVerilogSchematic)
+        throw ProjectError("schematic.hdl.source", "Source cell is not a SystemVerilog cell");
+    const auto parsed = parseSystemVerilogModule(source);
+    if (!parsed.ok)
+        throw ProjectError("schematic.hdl.parse", parsed.error);
+    const auto tmpl = makeHdlSymbolTemplate(parsed.module);
+    if (tmpl.pins.empty())
+        throw ProjectError("schematic.hdl.ports", "SystemVerilog block has no ports");
+
+    auto next = project.nextId();
+    const auto symbolIdValue = next++;
+    std::string symbolName = source.name + " HDL";
+    if (std::any_of(parent.symbols.begin(), parent.symbols.end(),
+                    [&](const auto &entry) { return entry.second.name == symbolName; })) {
+        const auto base = symbolName;
+        for (int suffix = 2;; ++suffix) {
+            symbolName = base + " " + std::to_string(suffix);
+            if (std::none_of(parent.symbols.begin(), parent.symbols.end(),
+                             [&](const auto &entry) { return entry.second.name == symbolName; }))
+                break;
+        }
+    }
+    Symbol symbol;
+    symbol.id = symbolIdValue;
+    symbol.name = symbolName;
+    symbol.artwork = tmpl.artwork;
+    symbol.sourceCell = sourceCellId;
+    symbol.label = SymbolLabel{0, tmpl.labelY};
+    for (auto pin : tmpl.pins) {
+        pin.id = next++;
+        symbol.pins.push_back(std::move(pin));
+    }
+    parent.symbols.emplace(symbolIdValue, std::move(symbol));
+
+    const auto instanceId = next++;
+    parent.instances.emplace(instanceId, SchematicInstance{instanceId, symbolIdValue, std::move(instanceName), x, y});
+    if (symbolId)
+        *symbolId = symbolIdValue;
+    return instanceId;
+}
+
+std::string schematicNetNodeName(const SchematicCell &cell, const Net &net) {
+    for (const auto pinId : net.pins) {
+        for (const auto &[_, instance] : cell.instances) {
+            const auto symbol = cell.symbols.find(instance.symbol);
+            if (symbol == cell.symbols.end())
+                continue;
+            const bool ownsPin = std::any_of(symbol->second.pins.begin(), symbol->second.pins.end(),
+                                             [&](const Pin &pin) { return pin.id == pinId; });
+            if (ownsPin && spiceElementForSymbol(symbol->second.name) == 'G')
+                return "0";
+        }
+    }
+    if (!net.name.empty())
+        return net.name;
+    return "n" + std::to_string(net.id);
+}
+
 ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x,
                 Coordinate y) {
     if (pins.size() < 2)
@@ -803,8 +889,8 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
     return resultIds;
 }
 
-std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
-                                               std::vector<std::string> *notes) {
+std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId, std::vector<std::string> *notes,
+                                               SchematicNetlistMode mode) {
     const auto &topCell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     if (topCell.textSchematic || topCell.systemVerilogSchematic)
         throw ProjectError("schematic.netlist", "SPICE netlisting requires a drawn schematic");
@@ -886,10 +972,10 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
     std::ostringstream subcircuits;
     std::set<ObjectId> emittedSubcircuits;
     std::set<ObjectId> visiting;
-    std::function<std::string(const SchematicCell &, const std::map<ObjectId, std::string> &)> emitBody;
+    std::function<std::string(const SchematicCell &, const std::map<ObjectId, std::string> &, bool)> emitBody;
     std::function<void(ObjectId)> emitSubcircuit;
 
-    emitBody = [&](const SchematicCell &cell, const std::map<ObjectId, std::string> &portNodeNames) {
+    emitBody = [&](const SchematicCell &cell, const std::map<ObjectId, std::string> &portNodeNames, bool topLevel) {
         // A symbol is reusable, so placing it twice duplicates its pin ids.
         // Detect symbols used by more than one instance; their pins cannot be
         // resolved to a unique instance for netlisting.
@@ -952,19 +1038,41 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             if (symbol->second.sourceCell != 0) {
                 const auto child = project.schematicCells.find(symbol->second.sourceCell);
                 if (child == project.schematicCells.end()) {
-                    note("hierarchical symbol references a missing schematic: " + symbol->second.name + " (" +
+                    throw ProjectError("schematic.netlist.hierarchy", "Hierarchical symbol '" + symbol->second.name +
+                                                                          "' (" + instance.name +
+                                                                          ") references a missing schematic");
+                }
+                if (child->second.systemVerilogSchematic) {
+                    if (mode != SchematicNetlistMode::mixed) {
+                        throw ProjectError("schematic.netlist.hdl",
+                                           "Schematic contains SystemVerilog block '" + child->second.name + "' (" +
+                                               instance.name +
+                                               "); use mixed-signal simulation instead of a pure SPICE netlist");
+                    }
+                    if (!topLevel) {
+                        throw ProjectError("schematic.netlist.hdl_nested",
+                                           "Nested SystemVerilog block '" + child->second.name + "' (" + instance.name +
+                                               ") is not supported; place the HDL instance in the top-level "
+                                               "schematic");
+                    }
+                    note("SystemVerilog block omitted from analog base netlist: " + child->second.name + " (" +
                          instance.name + ")");
-                    body << "* missing schematic: " << instance.name << " " << symbol->second.name << "\n";
+                    body << "* SystemVerilog block: " << instance.name << " " << child->second.name << "\n";
                     continue;
+                }
+                if (child->second.textSchematic) {
+                    throw ProjectError("schematic.netlist.text", "Text SPICE schematic '" + child->second.name + "' (" +
+                                                                     instance.name +
+                                                                     ") cannot be used as a hierarchical block");
                 }
                 if (visiting.contains(child->first)) {
-                    note("hierarchical schematic cycle skipped: " + child->second.name + " (" + instance.name + ")");
-                    body << "* hierarchical cycle: " << instance.name << " " << child->second.name << "\n";
-                    continue;
+                    throw ProjectError("schematic.netlist.cycle", "Hierarchical schematic cycle at '" +
+                                                                      child->second.name + "' (" + instance.name + ")");
                 }
                 if (symbolUseCount[instance.symbol] > 1) {
-                    note("symbol instantiated more than once, cannot resolve pins: " + symbol->second.name);
-                    continue;
+                    throw ProjectError("schematic.netlist.ambiguous_symbol",
+                                       "Symbol '" + symbol->second.name +
+                                           "' is instantiated more than once; create one symbol per instance");
                 }
                 emitSubcircuit(child->first);
                 if (!emittedSubcircuits.contains(child->first)) {
@@ -1188,14 +1296,14 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         if (child == project.schematicCells.end())
             return;
         if (child->second.isTextSource()) {
-            note("source schematic cannot be used as a drawn hierarchical block: " + child->second.name);
-            return;
+            throw ProjectError("schematic.netlist.source_child", "Source schematic '" + child->second.name +
+                                                                     "' cannot be used as a drawn hierarchical block");
         }
 
         visiting.insert(childId);
         const auto ports = portInstances(child->second);
         const auto portNodeNames = portNodes(child->second);
-        const auto body = emitBody(child->second, portNodeNames);
+        const auto body = emitBody(child->second, portNodeNames, false);
 
         std::ostringstream definition;
         definition << ".subckt " << spiceIdentifier(child->second.name);
@@ -1208,7 +1316,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
     };
 
     visiting.insert(cellId);
-    const auto topBody = emitBody(topCell, {});
+    const auto topBody = emitBody(topCell, {}, true);
     visiting.erase(cellId);
     out << subcircuits.str() << topBody;
 

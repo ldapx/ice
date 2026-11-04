@@ -56,6 +56,39 @@ run reports parser warnings when a value or requested signal cannot be used.
 Captured signal names match either a full VCD hierarchy path or a unique suffix
 such as `clk`. When no capture list is set, all VCD traces are returned.
 
+## Mixed-signal simulation
+
+A drawn schematic that instantiates SystemVerilog blocks is simulated with the
+`mixed` simulator. ICE parses each block's ports, generates a symbol with
+matching pins, and records the analog net attached to every input and output.
+Use `schematic_add_hdl_instance` (MCP) or `schematic-add-hdl-instance` (CLI) to
+create the instance, then wire it like any other symbol.
+
+`MixedSignalSimulator` alternates between a generated Icarus Verilog testbench
+and ngspice:
+
+1. Digital inputs are initialized to zero.
+2. The generated testbench reads one bit per input per time step, evaluates all
+   HDL blocks, and dumps their outputs to VCD.
+3. Digital outputs drive PWL voltage sources in the analog deck. Analog nodes
+   connected to HDL inputs are probed, with a 1 GΩ bleed resistor so floating
+   input nets still have a DC path.
+4. Sampled analog input bits are compared with the previous pass. The loop
+   stops when they match, or reports a non-convergence warning after the
+   configured iteration count.
+5. Analog and digital traces are resampled onto the shared time grid and
+   returned together. Digital traces are named `<instance>.<port>`.
+
+The current mixed-signal interface is intentionally strict and scalar:
+top-level HDL instances only, one-bit `input`/`output` ports, no `inout` ports,
+no buses, and no multiple digital drivers on one analog node. Use
+`schematic_validate_hierarchy` / `schematic-validate-hierarchy` to inspect those
+conditions before running. A pure SPICE netlist of a mixed schematic is rejected
+with an explicit error instead of silently omitting the HDL block. Mixed
+simulations created without explicit timing default to a 1 µs stop time and a
+1 ns step so a typical digital waveform is not simulated over an unnecessarily
+long interval.
+
 After a successful run, ICE fills an empty **Signals to capture** list and
 empty graph Y selections from the first traces. This happens in the GUI, the
 CLI, and MCP so a first `simulation-run` produces a usable stored graph. The

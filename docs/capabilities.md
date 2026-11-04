@@ -14,6 +14,8 @@ CLI invokes the same operations through `ProjectSession`.
 | Generate package PCell geometry | Yes | Devices panel | Core API | `icepy.pcells.generate_cell`, `icepy.pcells.generate_package_geometry` |
 | Polygon Boolean/offset | Yes | Layout toolbar (Boolean) | Core API | Core API |
 | Layout-versus-schematic check | Yes | Tools → Run LVS | `ice-cli lvs` | `icepy.run_lvs` |
+| Mixed-signal HDL capture | Yes | Schematic + Simulation surfaces | `schematic-add-hdl-instance`, `simulation-run` | Core API |
+| Mixed-signal co-simulation | Yes | Mixed-signal simulator | `simulation-run` | Core API |
 | Spatial query | Yes | Layout integration | Core API | Core API |
 
 Python bindings are an optional `icepy` build surface because nanobind and

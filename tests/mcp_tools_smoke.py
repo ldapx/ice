@@ -110,6 +110,10 @@ def main() -> int:
                 "project_migrate",
                 "schematic_add_text",
                 "schematic_create_systemverilog",
+                "schematic_hdl_ports",
+                "schematic_add_hdl_instance",
+                "schematic_set_parameter",
+                "schematic_validate_hierarchy",
                 "layout_add_instance",
                 "layout_add_port",
                 "layout_list_ports",
@@ -138,6 +142,8 @@ def main() -> int:
             assert "systemverilog_cells" in version.get("features", []), version
             assert "digital_hdl" in version.get("features", []), version
             assert "vcd_graphs" in version.get("features", []), version
+            assert "hdl_hierarchy" in version.get("features", []), version
+            assert "mixed_signal" in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -338,6 +344,136 @@ def main() -> int:
             sv_stored = mcp.tool("simulation_result", simulation="sv_sim")
             assert sv_stored["state"] == "succeeded", sv_stored
             assert sv_stored["time_points"] > 1, sv_stored
+
+            mixed_source = (
+                "module mixed_buffer(input logic in, output logic out);\n"
+                "    assign out = in;\n"
+                "endmodule\n"
+            )
+            mcp.tool(
+                "schematic_create_systemverilog",
+                name="mixed_buffer",
+                text=mixed_source,
+            )
+            mcp.tool("schematic_create", name="auto_symbol_top")
+            auto_symbol = mcp.tool(
+                "schematic_add_symbol",
+                cell="auto_symbol_top",
+                name="auto_buffer_symbol",
+                source_cell="mixed_buffer",
+            )
+            assert {pin["name"] for pin in auto_symbol["pins"]} == {"in", "out"}, auto_symbol
+            assert all(pin["width"] == 1 for pin in auto_symbol["pins"]), auto_symbol
+            mcp.tool("schematic_create", name="mixed_top")
+            mcp.tool(
+                "schematic_add_hdl_instance",
+                cell="mixed_top",
+                source_cell="mixed_buffer",
+                name="U1",
+                x=0,
+                y=0,
+            )
+            mcp.tool(
+                "schematic_add_symbol",
+                cell="mixed_top",
+                name="Voltage Source",
+                pins=[
+                    {"name": "+", "x": -100, "y": 0, "direction": "right"},
+                    {"name": "-", "x": 100, "y": 0, "direction": "right"},
+                ],
+            )
+            mcp.tool(
+                "schematic_add_instance",
+                cell="mixed_top",
+                symbol="Voltage Source",
+                name="V1",
+                x=0,
+                y=0,
+            )
+            mcp.tool(
+                "schematic_set_parameter",
+                cell="mixed_top",
+                instance="V1",
+                name="value",
+                value="PULSE(0 1 5n 1n 1n 20n 40n)",
+            )
+            mcp.tool(
+                "schematic_add_symbol",
+                cell="mixed_top",
+                name="Resistor",
+                pins=[
+                    {"name": "1", "x": -100, "y": 0, "direction": "right"},
+                    {"name": "2", "x": 100, "y": 0, "direction": "right"},
+                ],
+            )
+            mcp.tool(
+                "schematic_add_instance",
+                cell="mixed_top",
+                symbol="Resistor",
+                name="R1",
+                x=200,
+                y=0,
+            )
+            mcp.tool(
+                "schematic_set_parameter",
+                cell="mixed_top",
+                instance="R1",
+                name="resistance",
+                value="1k",
+            )
+            mcp.tool(
+                "schematic_add_symbol",
+                cell="mixed_top",
+                name="Ground",
+                pins=[{"name": "G", "x": 0, "y": 0, "direction": "right"}],
+            )
+            mcp.tool(
+                "schematic_add_instance",
+                cell="mixed_top",
+                symbol="Ground",
+                name="GND1",
+                x=0,
+                y=200,
+            )
+            mcp.tool(
+                "schematic_add_net",
+                cell="mixed_top",
+                name="in",
+                pins=["U1.in", "V1.+"],
+            )
+            mcp.tool(
+                "schematic_add_net",
+                cell="mixed_top",
+                name="0",
+                pins=["V1.-", "R1.2", "GND1.G"],
+            )
+            mcp.tool(
+                "schematic_add_net",
+                cell="mixed_top",
+                name="out",
+                pins=["U1.out", "R1.1"],
+            )
+            hdl_ports = mcp.tool("schematic_hdl_ports", schematic="mixed_buffer")
+            assert hdl_ports["module"] == "mixed_buffer", hdl_ports
+            assert {port["name"] for port in hdl_ports["ports"]} == {"in", "out"}, hdl_ports
+            mixed_validation = mcp.tool("schematic_validate_hierarchy", schematic="mixed_top")
+            assert mixed_validation["ok"] is True, mixed_validation
+            assert mixed_validation["hdl_instances"][0]["instance"] == "U1", mixed_validation
+
+            mcp.tool(
+                "simulation_create",
+                name="mixed_sim",
+                schematic="mixed_top",
+                stop=20e-9,
+                step=1e-9,
+                signals="v(out)",
+            )
+            mixed_run = mcp.tool("simulation_run", simulation="mixed_sim")
+            assert mixed_run["state"] == "succeeded", mixed_run
+            assert mixed_run["analysis"] == "mixed", mixed_run
+            mixed_signals = set(mixed_run["available_signals"])
+            assert any(name == "U1.out" or name.endswith(".U1.out") for name in mixed_signals), mixed_run
+            assert any(name.lower() in {"v(out)", "out"} for name in mixed_signals), mixed_run
 
             mcp.tool(
                 "simulation_create",

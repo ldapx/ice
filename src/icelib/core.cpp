@@ -349,7 +349,13 @@ static const char *pinDirectionName(PinDirection direction);
 static PinDirection parsePinDirection(const std::string &value);
 
 static void put(json &j, const Pin &v) {
-    j = {{"id", v.id}, {"name", v.name}, {"x", v.x}, {"y", v.y}, {"direction", pinDirectionName(v.direction)}};
+    j = {{"id", v.id},
+         {"name", v.name},
+         {"x", v.x},
+         {"y", v.y},
+         {"direction", pinDirectionName(v.direction)},
+         {"width", v.width},
+         {"width_known", v.widthKnown}};
 }
 static void put(json &j, const Parameter &v) { j = {{"id", v.id}, {"name", v.name}, {"value", v.value}}; }
 static void put(json &j, const Rect &v) { j = {{"x", v.x}, {"y", v.y}, {"width", v.width}, {"height", v.height}}; }
@@ -711,9 +717,13 @@ Project Project::deserialize(const std::string &text) {
                     const auto &label = s.at("label");
                     symbol.label = SymbolLabel{label.value("x", Coordinate{0}), label.value("y", Coordinate{0})};
                 }
-                for (const auto &pin : s.at("pins"))
-                    symbol.pins.push_back({pin.at("id"), pin.at("name"), pin.at("x"), pin.at("y"),
-                                           parsePinDirection(pin.value("direction", "right"))});
+                for (const auto &pin : s.at("pins")) {
+                    Pin parsedPin{pin.at("id"), pin.at("name"), pin.at("x"), pin.at("y"),
+                                  parsePinDirection(pin.value("direction", "right"))};
+                    parsedPin.width = pin.value("width", 1);
+                    parsedPin.widthKnown = pin.value("width_known", true);
+                    symbol.pins.push_back(std::move(parsedPin));
+                }
                 cell.symbols.emplace(symbol.id, std::move(symbol));
             }
             for (const auto &i : c.at("instances")) {
@@ -1196,7 +1206,11 @@ std::string generatedAgentsGuidance() {
               "`schematic_create(kind=\"text\")`, `schematic_create_text`, and `schematic_add_text` "
               "create a text SPICE cell. `schematic_create(kind=\"systemverilog\")` and "
               "`schematic_create_systemverilog` create a SystemVerilog source cell for digital HDL "
-              "simulation. Use text SPICE or SystemVerilog when the user explicitly asks for it, "
+              "simulation. Use `schematic_hdl_ports` to inspect its module ports and "
+              "`schematic_add_hdl_instance` to place it in a drawn schematic; a symbol with matching "
+              "pins is generated automatically. Set analog values with `schematic_set_parameter`, wire "
+              "HDL pins with names such as `U1.in`, and run `schematic_validate_hierarchy` before "
+              "simulating. Use text SPICE or SystemVerilog when the user explicitly asks for it, "
               "provides existing source, or the canvas tools are unavailable; state the reason. "
               "Canvas schematics keep connectivity, layout, LVS, and simulation workflows available.\n"
            << "4. Create the simulation and choose the signals to capture. Use `simulation_measure` "
@@ -1204,7 +1218,10 @@ std::string generatedAgentsGuidance() {
               "`simulation_signals` expose trace statistics and available signals. For a "
               "SystemVerilog source cell, use the `iverilog` simulator with the `digital` analysis. "
               "The run generates VCD traces; graph the traces or import an external VCD file in the "
-              "GUI with Load VCD.\n"
+              "GUI with Load VCD. A drawn schematic containing SystemVerilog instances uses the "
+              "`mixed` simulator automatically; its result contains analog node traces and "
+              "`<instance>.<port>` digital traces. Mixed mode supports top-level scalar input/output "
+              "ports; resolve validation errors before claiming success.\n"
            << "5. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
               "response, transfer curves, settling, or other views needed to judge the expectations.\n"
            << "6. Choose the simplest simulation style that fits the task:\n"
@@ -1625,7 +1642,11 @@ BuildInfo buildInfo() {
                      "polygon_device_extraction",
                      "systemverilog_cells",
                      "digital_hdl",
-                     "vcd_graphs"};
+                     "vcd_graphs",
+                     "hdl_hierarchy",
+                     "hdl_instance_symbols",
+                     "mixed_signal",
+                     "mixed_signal_validation"};
     return info;
 }
 } // namespace ice

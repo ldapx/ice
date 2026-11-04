@@ -50,13 +50,19 @@ ice-cli schematic-remove <project> <cell>
 ice-cli schematic-add-symbol <project> <cell> <name> [source-cell]
 ice-cli schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]
 ice-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
+ice-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
 ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
+ice-cli schematic-hdl-ports <project> <cell>
+ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>
+ice-cli schematic-validate-hierarchy <project> <cell>
 ice-cli schematic-netlist <project> <cell>
 ```
 
-Cells, symbols, and pins may be referenced by name or id. Pins can also use the
-`<symbol>.<pin>` form. `schematic-add-pin` adds a pin to an existing symbol;
-direction accepts `left`, `right`, `up`, or `down`. `schematic-remove` is blocked
+Cells, symbols, pins, and instances may be referenced by name or id. Pins can
+use the `<instance>.<pin>` or `<symbol>.<pin>` form. `schematic-add-pin` adds a
+pin to an existing symbol; direction accepts `left`, `right`, `up`, or `down`.
+`schematic-set-parameter` creates or updates an instance parameter such as
+`resistance`, `capacitance`, or a source `value`. `schematic-remove` is blocked
 when the cell is used by a simulation or a hierarchical symbol.
 
 `schematic-add-text` accepts either the positional `[pdk] [spice-file]` form or
@@ -70,6 +76,17 @@ The MCP equivalent is `schematic_create` with `kind: "text"` or
 SystemVerilog source cell. The optional file is stored as its source; without a
 file, ICE inserts a small digital block template. `schematic-info` and
 `schematic-list` report the `systemverilog` flag for these cells.
+
+`schematic-hdl-ports` parses a SystemVerilog cell and returns its module name,
+port directions, and widths. `schematic-add-hdl-instance` generates a symbol
+whose pins match those ports and places it in a drawn schematic; use
+`schematic-add-net` with names such as `U1.in` and `U1.out` to wire it.
+`schematic-validate-hierarchy` checks the resulting hierarchy, port mapping,
+nets, buses, and mixed-signal support before simulation.
+
+A pure SPICE netlist rejects hierarchical SystemVerilog blocks with an explicit
+error instead of silently skipping them. Use mixed-signal simulation for drawn
+schematics that contain HDL instances.
 
 ## Layout
 
@@ -250,6 +267,17 @@ SystemVerilog cell, and `simulate-netlist` on a `.sv` file, use the same backend
 If the source has no `$dumpfile`/`$dumpvars`, ICE adds a wrapper module that
 dumps the design; a testbench that never calls `$finish` is stopped after 10
 seconds and the partial VCD is kept.
+
+A drawn schematic that instantiates SystemVerilog blocks is a mixed-signal
+schematic. `simulation-add` automatically stores the `mixed` simulator and
+`transient` analysis for it, with 1 µs stop and 1 ns step defaults when no explicit
+times are given. `simulation-run` then iterates between ngspice and Icarus
+Verilog: digital outputs drive PWL sources in the analog deck, analog input
+nodes are sampled through a logic threshold, and the loop stops when the sampled
+input bits stabilize. Results contain both analog node traces and
+`<instance>.<port>` digital traces. Mixed mode currently requires top-level HDL
+instances with scalar `input`/`output` ports; `schematic-validate-hierarchy`
+reports buses, `inout` ports, missing connections, and duplicate output drivers.
 
 Simulation graphs are presentation definitions over captured signals.
 `simulation-add` creates a default **Graph 1** using the captured signals, and

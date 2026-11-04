@@ -222,6 +222,29 @@ const char *pinDirectionName(ice::PinDirection direction) {
     return "right";
 }
 
+const char *hdlPortDirectionName(ice::HdlPortDirection direction) {
+    switch (direction) {
+    case ice::HdlPortDirection::input:
+        return "input";
+    case ice::HdlPortDirection::output:
+        return "output";
+    case ice::HdlPortDirection::inout:
+        return "inout";
+    }
+    return "input";
+}
+
+json hdlPortsJson(const ice::HdlModule &module) {
+    json ports = json::array();
+    for (const auto &port : module.ports) {
+        ports.push_back({{"name", port.name},
+                         {"direction", hdlPortDirectionName(port.direction)},
+                         {"width", port.width},
+                         {"width_known", port.widthKnown}});
+    }
+    return ports;
+}
+
 ice::PinDirection parsePinDirection(const std::string &text) {
     static const std::map<std::string, ice::PinDirection> values = {
         {"left", ice::PinDirection::left},
@@ -318,7 +341,9 @@ json symbolJson(const ice::Symbol &symbol) {
                         {"name", pin.name},
                         {"x", pin.x},
                         {"y", pin.y},
-                        {"direction", pinDirectionName(pin.direction)}});
+                        {"direction", pinDirectionName(pin.direction)},
+                        {"width", pin.width},
+                        {"width_known", pin.widthKnown}});
     }
     return {{"id", symbol.id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}};
 }
@@ -1222,14 +1247,27 @@ class IceMcpServer {
         if (name == "simulation_create") {
             const auto schematic = resolveSchematic(session.project(), arguments, "schematic");
             const auto &schematicCell = session.project().schematicCells.at(schematic);
+            const bool mixedSignal =
+                !schematicCell.systemVerilogSchematic && ice::schematicContainsHdl(session.project(), schematic);
             ice::SimulationItem simulation;
             simulation.name = requiredString(arguments, "name");
             simulation.schematic = schematic;
             if (schematicCell.systemVerilogSchematic) {
                 simulation.simulator = "iverilog";
                 simulation.analysis = "digital";
+            } else if (mixedSignal) {
+                simulation.simulator = "mixed";
+                simulation.analysis = "transient";
+                simulation.stop = 1.0e-6;
+                simulation.step = 1.0e-9;
             }
             simulation.analysis = optionalString(arguments, "analysis", simulation.analysis);
+            if (const auto simulator = optionalString(arguments, "simulator"); !simulator.empty())
+                simulation.simulator = simulator;
+            if (simulation.simulator == "mixed" && !mixedSignal)
+                throw ToolError("simulator='mixed' requires a drawn schematic with SystemVerilog blocks");
+            if (simulation.simulator == "iverilog" && !schematicCell.systemVerilogSchematic)
+                throw ToolError("simulator='iverilog' requires a SystemVerilog source cell");
             if (const auto value = arguments.find("stop"); value != arguments.end())
                 simulation.stop = numberValue(*value, "stop");
             if (const auto value = arguments.find("step"); value != arguments.end())
@@ -1260,6 +1298,8 @@ class IceMcpServer {
             return {{"id", simulationId},
                     {"name", simulation.name},
                     {"schematic", schematic},
+                    {"simulator", simulation.simulator},
+                    {"analysis", simulation.analysis},
                     {"signals", simulation.captureSignals},
                     {"graph", graphId}};
         }
@@ -1268,6 +1308,15 @@ class IceMcpServer {
             auto updated = session.project().simulations.at(id);
             if (arguments.contains("analysis"))
                 updated.analysis = requiredString(arguments, "analysis");
+            if (arguments.contains("simulator"))
+                updated.simulator = requiredString(arguments, "simulator");
+            const auto &updatedSchematic = session.project().schematicCells.at(updated.schematic);
+            const bool updatedMixed = !updatedSchematic.systemVerilogSchematic &&
+                                      ice::schematicContainsHdl(session.project(), updated.schematic);
+            if (updated.simulator == "mixed" && !updatedMixed)
+                throw ToolError("simulator='mixed' requires a drawn schematic with SystemVerilog blocks");
+            if (updated.simulator == "iverilog" && !updatedSchematic.systemVerilogSchematic)
+                throw ToolError("simulator='iverilog' requires a SystemVerilog source cell");
             if (arguments.contains("stop"))
                 updated.stop = numberValue(arguments.at("stop"), "stop");
             if (arguments.contains("step"))
@@ -1285,6 +1334,7 @@ class IceMcpServer {
                             [&](ice::Project &project) { project.simulations.at(id) = updated; });
             return {{"id", id},
                     {"name", updated.name},
+                    {"simulator", updated.simulator},
                     {"analysis", updated.analysis},
                     {"stop", updated.stop},
                     {"step", updated.step},
@@ -1303,7 +1353,26 @@ class IceMcpServer {
             request.simulator = simulation.simulator;
             request.use_initial_conditions = simulation.use_initial_conditions;
             request.workingDirectory = projectRootPath();
-            if (schematic->second.systemVerilogSchematic) {
+            const auto appendDirectives = [&] {
+                std::istringstream directives(simulation.directives);
+                std::string directive;
+                while (std::getline(directives, directive)) {
+                    const auto trimmed = directive.find_first_not_of(" \t\r\n") == std::string::npos
+                                             ? std::string{}
+                                             : directive.substr(directive.find_first_not_of(" \t\r\n"));
+                    if (!trimmed.empty())
+                        request.netlist.push_back(trimmed);
+                }
+            };
+            const bool mixedSignal = !schematic->second.systemVerilogSchematic &&
+                                     ice::schematicContainsHdl(session.project(), simulation.schematic);
+            if (mixedSignal) {
+                std::string error;
+                if (!ice::prepareMixedSignalRequest(request, session.project(), simulation.schematic, &error))
+                    throw ToolError("Mixed-signal plan failed: " + error);
+                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
+                appendDirectives();
+            } else if (schematic->second.systemVerilogSchematic) {
                 request.analysis = "digital";
                 request.simulator = "iverilog";
                 std::istringstream source(schematic->second.systemVerilogText);
@@ -1311,6 +1380,7 @@ class IceMcpServer {
                 while (std::getline(source, line))
                     request.netlist.push_back(line);
             } else {
+                request.simulator = "ngspice";
                 request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
                 ice::applyPdkSimulationSetup(schematic->second.pdk, request);
             }
@@ -1739,11 +1809,25 @@ class IceMcpServer {
             const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
             return schematicJson(session.project().schematicCells.at(id));
         }
+        if (name == "schematic_hdl_ports") {
+            const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
+            const auto &cell = session.project().schematicCells.at(id);
+            if (!cell.systemVerilogSchematic)
+                throw ToolError("Schematic '" + cell.name + "' is not a SystemVerilog source cell");
+            const auto parsed = ice::parseSystemVerilogModule(cell);
+            if (!parsed.ok)
+                throw ToolError("SystemVerilog parse failed: " + parsed.error);
+            return {{"id", id},
+                    {"schematic", cell.name},
+                    {"module", parsed.module.name},
+                    {"ports", hdlPortsJson(parsed.module)},
+                    {"warnings", parsed.warnings}};
+        }
         if (name == "schematic_add_symbol") {
             ice::ObjectId id = 0;
             const auto cell = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
             const auto symbolName = requiredString(arguments, "name");
-            const auto artwork = optionalString(arguments, "artwork");
+            auto artwork = optionalString(arguments, "artwork");
             ice::ObjectId sourceCell = 0;
             const auto source = arguments.find("source_cell");
             if (source != arguments.end() && !source->is_null())
@@ -1761,6 +1845,8 @@ class IceMcpServer {
                 ice::Coordinate x = 0;
                 ice::Coordinate y = 0;
                 ice::PinDirection direction = ice::PinDirection::right;
+                int width = 1;
+                bool widthKnown = true;
             };
             std::vector<PinInput> pinInputs;
             const auto pinsValue = arguments.find("pins");
@@ -1780,7 +1866,22 @@ class IceMcpServer {
                     if (pin.contains("y"))
                         input.y = coordinateValue(pin.at("y"), "pin y");
                     input.direction = parsePinDirection(optionalString(pin, "direction", "right"));
+                    input.width = optionalInteger(pin, "width").value_or(1);
+                    input.widthKnown = optionalBoolean(pin, "width_known", true);
                     pinInputs.push_back(std::move(input));
+                }
+            }
+            if (sourceCell != 0 && pinInputs.empty()) {
+                const auto &sourceCellRef = session.project().schematicCells.at(sourceCell);
+                if (sourceCellRef.systemVerilogSchematic) {
+                    const auto parsed = ice::parseSystemVerilogModule(sourceCellRef);
+                    if (!parsed.ok)
+                        throw ToolError("SystemVerilog parse failed: " + parsed.error);
+                    const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
+                    if (artwork.empty())
+                        artwork = templ.artwork;
+                    for (const auto &pin : templ.pins)
+                        pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
                 }
             }
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
@@ -1788,7 +1889,8 @@ class IceMcpServer {
                 auto &symbol = project.schematicCells.at(cell).symbols.at(id);
                 for (auto &input : pinInputs) {
                     const auto pinId = project.nextId();
-                    symbol.pins.push_back({pinId, input.name, input.x, input.y, input.direction});
+                    symbol.pins.push_back(
+                        {pinId, input.name, input.x, input.y, input.direction, input.width, input.widthKnown});
                 }
             });
             auto result = symbolJson(session.project().schematicCells.at(cell).symbols.at(id));
@@ -1859,6 +1961,49 @@ class IceMcpServer {
                     {"netlist", netlist},
                     {"notes", notes}};
         }
+        if (name == "schematic_validate_hierarchy") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto plan = ice::buildMixedSignalPlan(session.project(), cellId);
+            const auto diagnostics = ice::validateHdlHierarchy(session.project(), cellId);
+            json checked = json::array();
+            for (const auto &diagnostic : diagnostics) {
+                json item = {
+                    {"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                    {"code", diagnostic.code},
+                    {"message", diagnostic.message}};
+                if (diagnostic.object)
+                    item["object"] = *diagnostic.object;
+                checked.push_back(std::move(item));
+            }
+            json blocks = json::array();
+            for (const auto &binding : plan.hdlInstances) {
+                json ports = json::array();
+                for (const auto &port : binding.ports) {
+                    const auto node = binding.portNodes.find(port.name);
+                    ports.push_back({{"name", port.name},
+                                     {"direction", hdlPortDirectionName(port.direction)},
+                                     {"width", port.width},
+                                     {"node", node == binding.portNodes.end() ? json(nullptr) : json(node->second)}});
+                }
+                blocks.push_back({{"instance", binding.instanceName},
+                                  {"module", binding.moduleName},
+                                  {"source_cell", binding.sourceCell},
+                                  {"ports", std::move(ports)}});
+            }
+            json result = {{"id", cellId},
+                           {"schematic", session.project().schematicCells.at(cellId).name},
+                           {"ok", plan.ok()},
+                           {"diagnostics", std::move(checked)},
+                           {"hdl_instances", std::move(blocks)},
+                           {"analog_inputs", plan.analogInputNodes},
+                           {"digital_outputs", plan.digitalOutputNodes},
+                           {"warnings", plan.warnings}};
+            if (plan.ok())
+                result["analog_netlist"] = plan.analogNetlist;
+            else
+                result["error"] = plan.error;
+            return result;
+        }
         if (name == "schematic_add_instance") {
             ice::ObjectId id = 0;
             const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
@@ -1884,6 +2029,49 @@ class IceMcpServer {
                     {"name", instanceName},
                     {"symbol", symbolId},
                     {"symbol_name", cell.symbols.at(symbolId).name}};
+        }
+        if (name == "schematic_set_parameter") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto &cell = session.project().schematicCells.at(cellId);
+            const auto instanceId = lookupByIdOrName(cell.instances, requiredValue(arguments, "instance"), "instance");
+            const auto parameterName = requiredString(arguments, "name");
+            const auto value = requiredStringAllowEmpty(arguments, "value");
+            session.execute("mcp schematic-set-parameter", [&](ice::Project &project) {
+                ice::setSchematicParameter(project, cellId, instanceId, parameterName, value);
+            });
+            return {{"cell", cellId}, {"instance", instanceId}, {"name", parameterName}, {"value", value}};
+        }
+        if (name == "schematic_add_hdl_instance") {
+            const auto parentCell = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto sourceText = requiredValue(arguments, "source_cell");
+            const auto sourceCell = lookupByIdOrName(session.project().schematicCells, sourceText, "schematic");
+            const auto instanceName = requiredString(arguments, "name");
+            const auto x = requiredInteger(arguments, "x");
+            const auto y = requiredInteger(arguments, "y");
+            ice::ObjectId instanceId = 0;
+            ice::ObjectId symbolId = 0;
+            session.execute("mcp schematic-add-hdl-instance", [&](ice::Project &project) {
+                instanceId =
+                    ice::addSystemVerilogInstance(project, parentCell, sourceCell, instanceName, x, y, &symbolId);
+            });
+            json pins = json::array();
+            const auto &symbol = session.project().schematicCells.at(parentCell).symbols.at(symbolId);
+            for (const auto &pin : symbol.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            return {{"id", instanceId},
+                    {"cell", parentCell},
+                    {"source_cell", sourceCell},
+                    {"symbol", symbolId},
+                    {"symbol_name", symbol.name},
+                    {"name", instanceName},
+                    {"x", x},
+                    {"y", y},
+                    {"pins", std::move(pins)}};
         }
         if (name == "layout_delete") {
             const auto id = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
@@ -2266,6 +2454,7 @@ class IceMcpServer {
                             .with_string_param("name", "Simulation name")
                             .with_string_param("schematic", "Schematic name or id")
                             .with_string_param("analysis", "Analysis type", false)
+                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
                             .with_number_param("stop", "Stop time", false)
                             .with_number_param("step", "Time step", false)
                             .with_string_param("signals", "Signals to capture", false)
@@ -2275,6 +2464,7 @@ class IceMcpServer {
                             .with_description("Update simulation settings and capture signals.")
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("analysis", "Analysis type", false)
+                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
                             .with_number_param("stop", "Stop time", false)
                             .with_number_param("step", "Time step", false)
                             .with_string_param("signals", "Signals to capture", false)
@@ -2375,6 +2565,10 @@ class IceMcpServer {
                             .with_description("Return symbols, pins, instances, and nets for a schematic.")
                             .with_string_param("schematic", "Schematic name or id")
                             .build());
+        tools.push_back(tool_builder("schematic_hdl_ports")
+                            .with_description("Parse a SystemVerilog cell and return its module name and ports.")
+                            .with_string_param("schematic", "SystemVerilog schematic name or id")
+                            .build());
         tools.push_back(tool_builder("schematic_create")
                             .with_description("Create a drawn, text SPICE, or SystemVerilog schematic cell.")
                             .with_string_param("name", "Schematic name")
@@ -2426,6 +2620,7 @@ class IceMcpServer {
             R"("name":{"type":"string","description":"Symbol name"},"artwork":{"type":"string"},)"
             R"("source_cell":{"type":"string"},"pins":{"type":"array","items":{"type":"object","properties":{)"
             R"("name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},)"
+            R"("width":{"type":"integer"},"width_known":{"type":"boolean"},)"
             R"("direction":{"type":"string","enum":["left","right","up","down"]}},"required":["name"]}}},)"
             R"("required":["cell","name"]})";
         tools.push_back(std::move(symbolTool));
@@ -2452,6 +2647,11 @@ class IceMcpServer {
                             .with_description("Return the SPICE netlist generated from a schematic cell.")
                             .with_string_param("schematic", "Schematic name or id")
                             .build());
+        tools.push_back(
+            tool_builder("schematic_validate_hierarchy")
+                .with_description("Validate SystemVerilog instances, ports, nets, and mixed-signal support.")
+                .with_string_param("schematic", "Schematic name or id")
+                .build());
         tools.push_back(tool_builder("schematic_add_instance")
                             .with_description("Place a symbol instance in a schematic.")
                             .with_string_param("cell", "Schematic name or id")
@@ -2460,6 +2660,21 @@ class IceMcpServer {
                             .with_string_param("name", "Instance name")
                             .with_integer_param("x", "X coordinate")
                             .with_integer_param("y", "Y coordinate")
+                            .build());
+        tools.push_back(tool_builder("schematic_add_hdl_instance")
+                            .with_description("Create a symbol from a SystemVerilog module's ports and place it.")
+                            .with_string_param("cell", "Parent schematic name or id")
+                            .with_string_param("source_cell", "SystemVerilog source cell name or id")
+                            .with_string_param("name", "Instance name")
+                            .with_integer_param("x", "X coordinate")
+                            .with_integer_param("y", "Y coordinate")
+                            .build());
+        tools.push_back(tool_builder("schematic_set_parameter")
+                            .with_description("Set or create an instance parameter such as resistance or value.")
+                            .with_string_param("cell", "Schematic name or id")
+                            .with_string_param("instance", "Instance name or id")
+                            .with_string_param("name", "Parameter name")
+                            .with_string_param("value", "Parameter value")
                             .build());
         tools.push_back(tool_builder("layout_create")
                             .with_description("Create a static layout cell.")

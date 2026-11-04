@@ -50,6 +50,10 @@ struct Pin {
     Coordinate x = 0;
     Coordinate y = 0;
     PinDirection direction = PinDirection::right;
+    // Bus width metadata for pins generated from HDL module ports. Primitive
+    // and manually drawn symbols default to a scalar pin.
+    int width = 1;
+    bool widthKnown = true;
 };
 
 struct Parameter {
