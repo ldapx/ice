@@ -100,7 +100,7 @@ class LayoutCanvas : public QGraphicsView {
     // canvas interaction.
     virtual void highlightLayoutNet(const std::vector<ice::ObjectId> &shapeIds,
                                     const std::vector<ice::ObjectId> &connectionIds,
-                                    const std::vector<ice::ObjectId> &plannedDeviceIds, const std::string &label) = 0;
+                                    const std::vector<ice::ObjectId> &plannedDeviceIds) = 0;
     virtual void clearLayoutNetHighlight() = 0;
     virtual void refreshInteractionState() = 0;
 };

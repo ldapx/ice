@@ -3083,7 +3083,7 @@ class DocumentWindow : public QMainWindow {
         layoutCanvas_->highlightLayoutNet(
             std::vector<ice::ObjectId>(trace.shapes.begin(), trace.shapes.end()),
             std::vector<ice::ObjectId>(trace.connections.begin(), trace.connections.end()),
-            std::vector<ice::ObjectId>(trace.devices.begin(), trace.devices.end()), label);
+            std::vector<ice::ObjectId>(trace.devices.begin(), trace.devices.end()));
 
         const auto layerName = [&](ice::ObjectId layerId) -> std::string {
             const auto layer = project_->project().layers.find(layerId);

@@ -983,48 +983,37 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void highlightLayoutNet(const std::vector<ice::ObjectId> &shapeIds, const std::vector<ice::ObjectId> &connectionIds,
-                            const std::vector<ice::ObjectId> &plannedDeviceIds, const std::string &label) override {
+                            const std::vector<ice::ObjectId> &plannedDeviceIds) override {
         clearLayoutNetHighlight();
         if (!scene())
             return;
 
-        const auto accent = ice::uiColor(ice::UiColor::Accent2);
-        QPen shapePen(accent);
+        const QColor highlightColor(Qt::white);
+        QPen shapePen(highlightColor);
         shapePen.setCosmetic(true);
         shapePen.setWidthF(2.0);
-        QColor shapeFill = accent;
-        shapeFill.setAlpha(36);
-        const QBrush shapeBrush(shapeFill);
-        QPen devicePen(accent);
+        QPen devicePen(highlightColor);
         devicePen.setCosmetic(true);
         devicePen.setWidthF(1.5);
         devicePen.setStyle(Qt::DashLine);
-        QColor deviceFill = accent;
+        QColor deviceFill = highlightColor;
         deviceFill.setAlpha(24);
         const QBrush deviceBrush(deviceFill);
-        QPen connectionPen(accent);
+        QPen connectionPen(highlightColor);
         connectionPen.setCosmetic(true);
         connectionPen.setWidthF(3.0);
 
         const std::set<ice::ObjectId> shapeSet(shapeIds.begin(), shapeIds.end());
         const std::set<ice::ObjectId> connectionSet(connectionIds.begin(), connectionIds.end());
         const std::set<ice::ObjectId> deviceSet(plannedDeviceIds.begin(), plannedDeviceIds.end());
-        QRectF bounds;
-        bool haveBounds = false;
-        const auto accumulate = [&](const QRectF &rect) {
-            if (!rect.isValid())
-                return;
-            bounds = haveBounds ? bounds.united(rect) : rect;
-            haveBounds = true;
-        };
         const auto addOverlay = [&](QGraphicsItem *item, qreal z) {
             item->setData(0, QStringLiteral("net-highlight"));
             item->setZValue(z);
             item->setAcceptedMouseButtons(Qt::NoButton);
             scene()->addItem(item);
-            accumulate(item->sceneBoundingRect());
         };
 
+        QPainterPath netPath;
         for (auto *item : scene()->items()) {
             if (!item->data(0).isValid())
                 continue;
@@ -1054,39 +1043,28 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
             if (!shapeSet.contains(id) || item->data(1).toString() == QStringLiteral("layout-instance"))
                 continue;
+            QPainterPath path;
             if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(item)) {
-                auto *overlay = new QGraphicsRectItem(item->mapRectToScene(rectItem->rect()));
-                overlay->setPen(shapePen);
-                overlay->setBrush(shapeBrush);
-                addOverlay(overlay, 15.0);
+                path.addRect(item->mapRectToScene(rectItem->rect()));
             } else if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item)) {
                 QPolygonF polygon;
                 for (const auto &point : polygonItem->polygon())
                     polygon << item->mapToScene(point);
-                auto *overlay = new QGraphicsPolygonItem(polygon);
-                overlay->setPen(shapePen);
-                overlay->setBrush(shapeBrush);
-                addOverlay(overlay, 15.0);
+                path.addPolygon(polygon);
+                path.closeSubpath();
             } else if (auto *pathItem = dynamic_cast<LayoutPathItem *>(item)) {
-                auto *overlay = new QGraphicsPathItem(pathItem->sceneTransform().map(pathItem->highlightPath()));
-                overlay->setPen(shapePen);
-                overlay->setBrush(Qt::NoBrush);
-                addOverlay(overlay, 15.0);
+                path = pathItem->sceneTransform().map(pathItem->highlightPath());
             }
+            if (!path.isEmpty())
+                netPath = netPath.isEmpty() ? path : netPath.united(path);
         }
 
-        if (!haveBounds || label.empty())
-            return;
-        auto *text = new QGraphicsSimpleTextItem(QString::fromStdString(label));
-        QFont font = text->font();
-        font.setPointSize(9);
-        font.setBold(true);
-        text->setFont(font);
-        text->setBrush(accent);
-        text->setFlag(QGraphicsItem::ItemIgnoresTransformations);
-        const auto offset = 10.0 / std::max<qreal>(zoom_, 1.0e-6);
-        text->setPos(bounds.topLeft() + QPointF(offset, -offset));
-        addOverlay(text, 17.0);
+        if (!netPath.isEmpty()) {
+            auto *outline = new QGraphicsPathItem(netPath);
+            outline->setPen(shapePen);
+            outline->setBrush(Qt::NoBrush);
+            addOverlay(outline, 15.0);
+        }
     }
 
     void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
