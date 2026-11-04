@@ -1686,22 +1686,49 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 selectedLayoutInstance_ = 0;
                 applyLayoutInstanceSelection();
             }
-            if (tool_ == Tool::select && clicked && clicked->isSelected() &&
-                !event->modifiers().testFlag(Qt::ControlModifier) &&
-                (dynamic_cast<QGraphicsRectItem *>(clicked) || dynamic_cast<QGraphicsPolygonItem *>(clicked))) {
-                const auto id = static_cast<ice::ObjectId>(clicked->data(0).toULongLong());
+            auto *clickedFigure = layoutFigureOwner(clicked);
+            const bool plainClick =
+                !event->modifiers().testFlag(Qt::ControlModifier) && !event->modifiers().testFlag(Qt::ShiftModifier);
+            if (tool_ == Tool::select && plainClick) {
+                const auto figures = layoutFiguresAt(event->pos());
+                const bool repeatedClick =
+                    hasLastFigureClick_ && (event->pos() - lastFigureClickPosition_).manhattanLength() <= 4;
+                if (repeatedClick) {
+                    // Step down from the selected figure to the one directly
+                    // beneath it in the stack at this position.
+                    for (std::size_t index = 0; index + 1 < figures.size(); ++index) {
+                        if (!figures[index]->isSelected())
+                            continue;
+                        selectLayoutFigure(figures[index + 1]);
+                        lastFigureClickPosition_ = event->pos();
+                        hasLastFigureClick_ = true;
+                        event->accept();
+                        return;
+                    }
+                }
+                hasLastFigureClick_ = clickedFigure != nullptr;
+                if (hasLastFigureClick_)
+                    lastFigureClickPosition_ = event->pos();
+            }
+            if (tool_ == Tool::select && plainClick && clickedFigure && clickedFigure->isSelected() &&
+                (dynamic_cast<QGraphicsRectItem *>(clickedFigure) ||
+                 dynamic_cast<QGraphicsPolygonItem *>(clickedFigure))) {
+                const auto id = static_cast<ice::ObjectId>(clickedFigure->data(0).toULongLong());
                 if (id != 0 && shapeActivated_) {
                     shapeActivated_(id);
                     event->accept();
                     return;
                 }
             }
-            if (tool_ == Tool::move && (!clicked || !(clicked->flags() & QGraphicsItem::ItemIsSelectable))) {
+            if (tool_ == Tool::move &&
+                (!clickedFigure || !(clickedFigure->flags() & QGraphicsItem::ItemIsSelectable))) {
                 scene()->clearSelection();
                 event->accept();
                 return;
             }
-            movingItem_ = clicked;
+            // Move the owning figure even when the press lands on a child item
+            // such as a pin caption, which itself is not movable.
+            movingItem_ = clickedFigure ? clickedFigure : clicked;
             if (movingItem_)
                 movingStartPosition_ = movingItem_->pos();
         }
@@ -2265,6 +2292,56 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
+    // Figures are the top-level selectable layout objects (shapes, pins,
+    // paths, planned devices). Children such as pin captions and handles must
+    // resolve to the figure that owns them.
+    QGraphicsItem *layoutFigureOwner(QGraphicsItem *item) const {
+        QGraphicsItem *owner = nullptr;
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            const auto kind = cursor->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                kind == QStringLiteral("instance-pin"))
+                return nullptr;
+            if (cursor->data(1).toString() == QStringLiteral("layout-instance"))
+                return nullptr;
+            if (!cursor->parentItem() && cursor->data(0).isValid() &&
+                (cursor->flags() & QGraphicsItem::ItemIsSelectable))
+                owner = cursor;
+        }
+        return owner;
+    }
+
+    // Figures stacked under one cursor position, topmost first. Repeated
+    // clicks walk this list so covered figures stay reachable.
+    std::vector<QGraphicsItem *> layoutFiguresAt(const QPoint &position) const {
+        std::vector<QGraphicsItem *> figures;
+        std::vector<ice::ObjectId> ids;
+        for (auto *candidate : scene()->items(mapToScene(position))) {
+            auto *figure = layoutFigureOwner(candidate);
+            if (!figure)
+                continue;
+            const auto id = figure->data(0).toULongLong();
+            if (id == 0 || std::find(ids.begin(), ids.end(), id) != ids.end())
+                continue;
+            ids.push_back(id);
+            figures.push_back(figure);
+        }
+        return figures;
+    }
+
+    void selectLayoutFigure(QGraphicsItem *figure) {
+        if (!figure)
+            return;
+        if (selectedLayoutInstance_ != 0) {
+            selectedLayoutInstance_ = 0;
+            applyLayoutInstanceSelection();
+        }
+        draggingInstance_ = nullptr;
+        movingItem_ = nullptr;
+        scene()->clearSelection();
+        figure->setSelected(true);
+    }
+
     void applyLayoutInstanceSelection() {
         if (readOnly_)
             selectedLayoutInstance_ = 0;
@@ -2394,6 +2471,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QGraphicsRectItem *drawPreview_ = nullptr;
     QGraphicsRectItem *pinDrawPreview_ = nullptr;
     QGraphicsItem *movingItem_ = nullptr;
+    // Remembers the last plain figure click so repeated clicks at the same
+    // spot cycle through stacked figures instead of reselecting the top one.
+    QPoint lastFigureClickPosition_;
+    bool hasLastFigureClick_ = false;
     ice::ObjectId manualPathDragId_ = 0;
     int manualPathDragHandle_ = -1;
     QGraphicsPolygonItem *polygonDragItem_ = nullptr;
