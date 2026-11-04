@@ -121,6 +121,7 @@ def main() -> int:
                 "layout_export_gds",
                 "layout_export_lef",
                 "layout_export_def",
+                "pex_run",
             }:
                 if required not in tools:
                     raise RuntimeError(f"Missing MCP tool: {required}")
@@ -130,6 +131,9 @@ def main() -> int:
             assert version.get("build_time"), version
             assert "project_repair" in version.get("features", []), version
             assert "pdk_build" in version.get("features", []), version
+            assert "layout_pex" in version.get("features", []), version
+            assert "pex_device_extraction" in version.get("features", []), version
+            assert "polygon_device_extraction" in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -203,6 +207,13 @@ def main() -> int:
             )
             connectivity = mcp.tool("layout_connectivity", cell="pin_test")
             assert connectivity["nets"], connectivity
+            pex = mcp.tool("pex_run", layout="pin_test")
+            assert pex["schematic"], pex
+            assert pex["nets"], pex
+            assert "devices" in pex and not pex["devices"], pex
+            assert pex["devices_from_layout"] is False, pex
+            assert "RPEX1 VIN PEXRC1" in pex["source"], pex
+            assert "CPEX1 PEXRC1 0" in pex["source"], pex
             exports = Path(temporary) / "exports"
             exports.mkdir()
             for tool_name, suffix, marker in (

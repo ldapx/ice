@@ -666,10 +666,13 @@ nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
                    {"example_devices", info.exampleDevices}};
     const auto layoutLibrary = info.packageRoot / "layout" / "devices.json";
     const auto layoutGenerator = info.packageRoot / "layout" / "device_generator.py";
+    const auto layoutExtraction = info.packageRoot / "layout" / "extraction.json";
     result["layout_library"] =
         std::filesystem::is_regular_file(layoutLibrary) ? json(layoutLibrary.string()) : json(nullptr);
     result["layout_generator"] =
         std::filesystem::is_regular_file(layoutGenerator) ? json(layoutGenerator.string()) : json(nullptr);
+    result["layout_extraction"] =
+        std::filesystem::is_regular_file(layoutExtraction) ? json(layoutExtraction.string()) : json(nullptr);
     if (includeFiles) {
         json files = json::array();
         for (const auto &file : info.modelFiles)

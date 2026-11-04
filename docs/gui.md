@@ -394,6 +394,28 @@ are reported. Results appear in the **LVS Report** tab with mismatch categories
 and schematic/layout object ids. Text SPICE schematics are not supported by LVS
 yet.
 
+**Tools → Run PEX** (or right-clicking a layout cell and choosing
+**Extract Parasitics (PEX)**) extracts first-order parasitics from the active
+user layout cell. It groups geometry into nets with the same connectivity used by the
+layout connectivity view, recognizes `Metal*`, `GatPoly`/`Poly*`,
+`Activ`/diffusion, and via/contact layers, and reports each net's area,
+perimeter, total resistance, and capacitance in the generated SPICE text
+schematic. A text SPICE cell named `<layout> PEX` is created — or updated on a
+later run — and selected in the Schematic tab, so it appears in the project
+hierarchy. Single-terminal nets use a series resistance with the capacitance to
+ground; multi-terminal nets use a resistance star between pins. Placed
+device-library instances are extracted first: their terminal pin rectangles are
+transformed into parent coordinates, matched to the parent nets they overlap,
+and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
+placed devices are recognized, PEX falls back to copying the inferred source
+schematic's device netlist. Devices drawn purely as polygons are recognized
+through the PDK package's `layout/extraction.json` rules: PEX cuts active under
+gates, finds source/drain terminal nets, and emits MOS devices with geometric
+W/L. The same rules can describe simple resistors and capacitors. Use LVS to
+verify the result before relying on it. The generated deck records the
+coefficients used, and the API/MCP surfaces can override them for a
+process-specific first pass.
+
 The editor must support integer database coordinates and a clear display-unit
 conversion. It should never use display precision as a substitute for database
 precision.

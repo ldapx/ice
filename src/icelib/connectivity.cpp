@@ -18,6 +18,10 @@ struct ObjectRecord {
     ObjectId net = 0;
     Rect rectangle;
     bool viaLayer = false;
+    // Electrical layer identity. A pin-purpose variant of a drawing layer
+    // (for example Metal1.pin) must connect to the drawing layer it belongs
+    // to, while marker/keepout purposes remain separate.
+    std::string connectKey;
 };
 
 bool isConnectLayer(const std::string &name) {
@@ -57,6 +61,27 @@ void unite(std::vector<std::size_t> &parents, std::size_t left, std::size_t righ
 
 } // namespace
 
+std::string layoutLayerConnectivityKey(const Layer &layer) {
+    std::string base = layer.name;
+    std::string purpose;
+    if (const auto dot = layer.name.rfind('.'); dot != std::string::npos) {
+        base = layer.name.substr(0, dot);
+        purpose = layer.name.substr(dot + 1);
+    }
+    for (auto &character : base)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    for (auto &character : purpose)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+
+    std::string key = base + "#" + std::to_string(layer.number);
+    if (!purpose.empty() && purpose != "drawing" && purpose != "pin") {
+        key += ":";
+        key += purpose;
+        key += ":" + std::to_string(layer.datatype);
+    }
+    return key;
+}
+
 std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId cellId) {
     const auto cell = project.layoutCells.find(cellId);
     if (cell == project.layoutCells.end())
@@ -69,15 +94,19 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
             continue;
         const auto layer = project.layers.find(shape.layer);
         const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name);
+        const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(shape.layer)
+                                                              : layoutLayerConnectivityKey(layer->second);
         objects.push_back(
-            {ObjectRecord::Kind::shape, id, shape.layer, shape.net.value_or(0), shape.rectangle, viaLayer});
+            {ObjectRecord::Kind::shape, id, shape.layer, shape.net.value_or(0), shape.rectangle, viaLayer, connectKey});
     }
     for (const auto &[id, port] : cell->second.ports) {
         if (!port.visible)
             continue;
         const auto layer = project.layers.find(port.layer);
         const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name);
-        objects.push_back({ObjectRecord::Kind::port, id, port.layer, port.net, port.rectangle, viaLayer});
+        const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(port.layer)
+                                                              : layoutLayerConnectivityKey(layer->second);
+        objects.push_back({ObjectRecord::Kind::port, id, port.layer, port.net, port.rectangle, viaLayer, connectKey});
     }
 
     std::vector<std::size_t> parents(objects.size());
@@ -100,7 +129,7 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
     // a short between distinct logical nets remains visible as a conflict.
     for (std::size_t left = 0; left < objects.size(); ++left) {
         for (std::size_t right = left + 1; right < objects.size(); ++right) {
-            const bool sameLayer = objects[left].layer == objects[right].layer;
+            const bool sameLayer = objects[left].connectKey == objects[right].connectKey;
             const bool connectedByVia = objects[left].viaLayer || objects[right].viaLayer;
             if (!sameLayer && !connectedByVia)
                 continue;

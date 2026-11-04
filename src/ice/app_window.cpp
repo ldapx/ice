@@ -7,6 +7,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/pex.hpp"
 #include "icelib/routing.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
@@ -6867,6 +6868,64 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    void runPex() {
+        if (!project_) {
+            QMessageBox::information(this, QStringLiteral("Run PEX"),
+                                     QStringLiteral("Create or open a project first."));
+            return;
+        }
+        const auto &project = project_->project();
+        if (project.layoutCells.empty()) {
+            QMessageBox::information(this, QStringLiteral("Run PEX"),
+                                     QStringLiteral("Create or import a layout cell first."));
+            return;
+        }
+
+        auto layoutId = activeLayoutId_;
+        if (const auto procedural = project.proceduralLayouts.find(layoutId);
+            procedural != project.proceduralLayouts.end() &&
+            project.layoutCells.contains(procedural->second.generatedCell))
+            layoutId = procedural->second.generatedCell;
+        if (!project.layoutCells.contains(layoutId)) {
+            const auto candidate = std::find_if(project.layoutCells.begin(), project.layoutCells.end(),
+                                                [](const auto &entry) { return !entry.second.library; });
+            if (candidate == project.layoutCells.end()) {
+                QMessageBox::information(this, QStringLiteral("Run PEX"),
+                                         QStringLiteral("PEX requires a user layout cell, not a library cell."));
+                return;
+            }
+            layoutId = candidate->first;
+        }
+        if (project.layoutCells.at(layoutId).library) {
+            QMessageBox::information(this, QStringLiteral("Run PEX"),
+                                     QStringLiteral("PEX extracts user layout cells, not library cells."));
+            return;
+        }
+
+        try {
+            ice::PexReport report;
+            project_->execute("extract layout parasitics",
+                              [&](ice::Project &mutableProject) { report = ice::runPex(mutableProject, layoutId); });
+            project_->setLastHistoryLabel("Extracted parasitics from " + report.layout);
+            activeSchematicId_ = report.schematicCell;
+            refreshProject();
+            selectSchematicTab(report.schematicCell);
+            if (documents_ && schematicPage_)
+                documents_->setCurrentWidget(schematicPage_);
+            statusBar()->showMessage(
+                QStringLiteral("PEX created %1: %2 net(s), %3 device(s), R=%4 ohm, C=%5 fF")
+                    .arg(QString::fromStdString(report.schematic))
+                    .arg(report.nets.size())
+                    .arg(report.devices.size())
+                    .arg(QString::number(report.totalResistance, 'g', 4))
+                    .arg(QString::number(report.totalCapacitance, 'g', 4)));
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Run PEX"), QString::fromStdString(error.what()));
+        } catch (const std::exception &error) {
+            QMessageBox::critical(this, QStringLiteral("Run PEX"), QString::fromUtf8(error.what()));
+        }
+    }
+
     void refreshProject() {
         if (!project_)
             return;
@@ -7840,6 +7899,8 @@ class DocumentWindow : public QMainWindow {
         toolsMenu->addAction(drcAction);
         auto *lvsAction = addCommand(QStringLiteral("Run LVS"), QKeySequence(QStringLiteral("F8")));
         toolsMenu->addAction(lvsAction);
+        auto *pexAction = addCommand(QStringLiteral("Run PEX"), QKeySequence(QStringLiteral("F9")));
+        toolsMenu->addAction(pexAction);
         auto *netStackAction = addCommand(QStringLiteral("Net Trace Layer Stack"));
         toolsMenu->addAction(netStackAction);
 
@@ -7919,6 +7980,7 @@ class DocumentWindow : public QMainWindow {
         connect(simulationAction, &QAction::triggered, this, &DocumentWindow::runSimulation);
         connect(drcAction, &QAction::triggered, this, &DocumentWindow::runDrc);
         connect(lvsAction, &QAction::triggered, this, &DocumentWindow::runLvs);
+        connect(pexAction, &QAction::triggered, this, &DocumentWindow::runPex);
         connect(netStackAction, &QAction::triggered, this, &DocumentWindow::showNetTraceStack);
         connect(systemAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::System); });
@@ -7940,6 +8002,10 @@ class DocumentWindow : public QMainWindow {
         projectPanel_ = new ProjectPanel;
         projectPanel_->setLayoutFlattenState(flattenedLayouts_);
         projectPanel_->setOnFlattenChanged([this] { refreshEmbeddedPanels(); });
+        projectPanel_->setOnRunPex([this](ice::ObjectId id) {
+            activeLayoutId_ = id;
+            runPex();
+        });
         dock->setWidget(projectPanel_);
         addDockWidget(Qt::LeftDockWidgetArea, dock);
     }
@@ -8284,6 +8350,10 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_->setOnAddClicked([this] { showAddLayoutMenu(); });
         layoutHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeLayoutItem(id); });
         layoutHierarchy_->setOnActivateLayout([this](ice::ObjectId id) { selectLayoutTab(id); });
+        layoutHierarchy_->setOnRunPex([this](ice::ObjectId id) {
+            activeLayoutId_ = id;
+            runPex();
+        });
         layoutHierarchy_->setOnInstanceSelected([this](ice::ObjectId ownerId, ice::ObjectId instanceId) {
             selectLayoutInstanceFromHierarchy(ownerId, instanceId);
         });

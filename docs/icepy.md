@@ -95,6 +95,25 @@ LVS compares device presence, reference names, device types, shared parameters
 on placed device instances, and net topology from planned connections. Text
 SPICE schematics are not supported yet.
 
+`icepy.run_pex(project, layout, options)` extracts first-order per-net
+parasitics from a layout and creates or updates a text SPICE schematic in the
+project. `run_pex_named(project, layout_name, options)` is the name-based
+convenience form. The returned `PexReport` exposes `schematic_cell`, `spice_text`,
+`total_resistance`, `total_capacitance`, per-net `PexNet` entries, extracted
+`PexDevice` entries, `devices_from_layout`, `devices_from_schematic`, and notes.
+`PexOptions` controls sheet resistances, capacitance coefficients, whether
+placed layout devices are extracted, whether polygon devices are extracted from
+the PDK rules, an optional extraction-rule path override, whether the linked
+schematic netlist is used as a fallback, and the generated cell name.
+`pex_report_json(report)` serializes the report.
+
+```python
+options = icepy.PexOptions()
+options.metal_sheet_resistance = 0.08
+report = icepy.run_pex(project, layout_id, options)
+print(report.schematic, report.total_resistance, report.total_capacitance)
+```
+
 ## Simulation metrics
 
 Simulation result loading and metrics live in the pure-Python `icepy_sim`

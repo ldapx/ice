@@ -347,6 +347,8 @@ void ProjectPanel::setOnRegenerateProceduralLayout(std::function<void(ice::Objec
     onRegenerateProceduralLayout_ = std::move(callback);
 }
 
+void ProjectPanel::setOnRunPex(std::function<void(ice::ObjectId)> callback) { onRunPex_ = std::move(callback); }
+
 void ProjectPanel::setOnRenameLayout(RenameCallback callback) { onRenameLayout_ = std::move(callback); }
 
 void ProjectPanel::setOnRenameProceduralLayout(RenameCallback callback) {
@@ -648,6 +650,7 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
     QAction *regenerateAction = nullptr;
     QAction *openAction = nullptr;
     QAction *flattenAction = nullptr;
+    QAction *pexAction = nullptr;
     QAction *renameAction = nullptr;
     std::function<void(const std::string &)> renameHandler;
 
@@ -689,6 +692,8 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             flattenAction = menu.addAction(QStringLiteral("Flatten Layout for DRC"));
             flattenAction->setCheckable(true);
             flattenAction->setChecked(flattenedLayouts_->contains(id));
+            if (isCell && !project_->layoutCells.at(id).library && onRunPex_)
+                pexAction = menu.addAction(QStringLiteral("Extract Parasitics (PEX)"));
         }
     } else if (kind == static_cast<int>(HierarchyItemKind::device)) {
         const auto *parent = item->parent();
@@ -732,6 +737,8 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         else
             flattenedLayouts_->insert(id);
         rebuildTree();
+    } else if (chosen == pexAction && onRunPex_) {
+        onRunPex_(id);
     } else if (chosen == renameAction) {
         bool ok = false;
         const auto current = item->text(0);

@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pex.hpp"
 #include "icelib/verification.hpp"
 
 #include <nanobind/nanobind.h>
@@ -482,6 +483,78 @@ NB_MODULE(icepy, module) {
         .def_rw("mismatches", &LvsReport::mismatches)
         .def_prop_ro("matched", &LvsReport::matched);
 
+    nb::class_<PexOptions>(module, "PexOptions")
+        .def(nb::init<>())
+        .def_rw("metal_sheet_resistance", &PexOptions::metalSheetResistance)
+        .def_rw("poly_sheet_resistance", &PexOptions::polySheetResistance)
+        .def_rw("diffusion_sheet_resistance", &PexOptions::diffusionSheetResistance)
+        .def_rw("via_resistance", &PexOptions::viaResistance)
+        .def_rw("area_capacitance", &PexOptions::areaCapacitance)
+        .def_rw("perimeter_capacitance", &PexOptions::perimeterCapacitance)
+        .def_rw("extract_placed_devices", &PexOptions::extractPlacedDevices)
+        .def_rw("extract_polygon_devices", &PexOptions::extractPolygonDevices)
+        .def_rw("extraction_rules_path", &PexOptions::extractionRulesPath)
+        .def_rw("include_linked_schematic", &PexOptions::includeLinkedSchematic)
+        .def_rw("schematic_name", &PexOptions::schematicName);
+
+    nb::class_<PexNet>(module, "PexNet")
+        .def(nb::init<>())
+        .def_rw("schema_version", &PexNet::schemaVersion)
+        .def_rw("net", &PexNet::net)
+        .def_rw("name", &PexNet::name)
+        .def_rw("node", &PexNet::node)
+        .def_rw("ports", &PexNet::ports)
+        .def_rw("area", &PexNet::area)
+        .def_rw("perimeter", &PexNet::perimeter)
+        .def_rw("resistance", &PexNet::resistance)
+        .def_rw("capacitance", &PexNet::capacitance)
+        .def_rw("via_count", &PexNet::viaCount);
+
+    nb::class_<PexDevice>(module, "PexDevice")
+        .def(nb::init<>())
+        .def_rw("schema_version", &PexDevice::schemaVersion)
+        .def_rw("instance", &PexDevice::instance)
+        .def_rw("name", &PexDevice::name)
+        .def_rw("type", &PexDevice::type)
+        .def_rw("model", &PexDevice::model)
+        .def_rw("pins", &PexDevice::pins)
+        .def_rw("nodes", &PexDevice::nodes)
+        .def_rw("spice_line", &PexDevice::spiceLine);
+
+    nb::class_<PexReport>(module, "PexReport")
+        .def(nb::init<>())
+        .def_rw("schema_version", &PexReport::schemaVersion)
+        .def_rw("layout_cell", &PexReport::layoutCell)
+        .def_rw("layout", &PexReport::layout)
+        .def_rw("pdk", &PexReport::pdk)
+        .def_rw("schematic_cell", &PexReport::schematicCell)
+        .def_rw("schematic", &PexReport::schematic)
+        .def_rw("spice_text", &PexReport::spiceText)
+        .def_rw("nets", &PexReport::nets)
+        .def_rw("devices", &PexReport::devices)
+        .def_rw("notes", &PexReport::notes)
+        .def_rw("devices_from_layout", &PexReport::devicesFromLayout)
+        .def_rw("devices_from_schematic", &PexReport::devicesFromSchematic)
+        .def_rw("total_resistance", &PexReport::totalResistance)
+        .def_rw("total_capacitance", &PexReport::totalCapacitance);
+
+    module.def("run_pex", &runPex, nb::arg("project"), nb::arg("layout"), nb::arg("options") = PexOptions{});
+    module.def(
+        "run_pex_named",
+        [](Project &project, const std::string &layoutName, const PexOptions &options) {
+            ObjectId layout = 0;
+            for (const auto &[id, cell] : project.layoutCells) {
+                if (cell.name == layoutName) {
+                    layout = id;
+                    break;
+                }
+            }
+            if (layout == 0)
+                throw ProjectError("icepy.layout", "Unknown layout: " + layoutName);
+            return runPex(project, layout, options);
+        },
+        nb::arg("project"), nb::arg("layout"), nb::arg("options") = PexOptions{});
+    module.def("pex_report_json", &serializePexReport, nb::arg("report"));
     module.def("schematic_for_layout", &schematicForLayout, nb::arg("project"), nb::arg("layout"));
     module.def("run_lvs", &runLvs, nb::arg("project"), nb::arg("schematic"), nb::arg("layout"),
                nb::arg("options") = LvsOptions{});

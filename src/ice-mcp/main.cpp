@@ -4,6 +4,7 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/pex.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -2067,6 +2068,36 @@ class IceMcpServer {
             return {{"cell", cell}, {"path", path}};
         }
 
+        if (name == "pex_run") {
+            const auto layout = resolveLayoutCell(session.project(), arguments, "layout");
+            ice::PexOptions options;
+            const auto optionalNumber = [&](const char *key, double &target) {
+                const auto it = arguments.find(key);
+                if (it == arguments.end() || it->is_null())
+                    return;
+                const auto value = numberValue(*it, key);
+                if (value < 0.0)
+                    throw ToolError(std::string("Argument must be non-negative: ") + key);
+                target = value;
+            };
+            optionalNumber("metal_sheet_resistance", options.metalSheetResistance);
+            optionalNumber("poly_sheet_resistance", options.polySheetResistance);
+            optionalNumber("diffusion_sheet_resistance", options.diffusionSheetResistance);
+            optionalNumber("via_resistance", options.viaResistance);
+            optionalNumber("area_capacitance", options.areaCapacitance);
+            optionalNumber("perimeter_capacitance", options.perimeterCapacitance);
+            options.extractPlacedDevices = optionalBoolean(arguments, "extract_placed_devices", true);
+            options.extractPolygonDevices = optionalBoolean(arguments, "extract_polygon_devices", true);
+            options.includeLinkedSchematic = optionalBoolean(arguments, "include_linked_schematic", true);
+            const auto extractionRulesPath = optionalString(arguments, "extraction_rules_path");
+            if (!extractionRulesPath.empty())
+                options.extractionRulesPath = extractionRulesPath;
+            options.schematicName = optionalString(arguments, "name");
+            ice::PexReport report;
+            session.execute("mcp pex-run",
+                            [&](ice::Project &project) { report = ice::runPex(project, layout, options); });
+            return json::parse(ice::serializePexReport(report));
+        }
         if (name == "lvs_run") {
             const auto layout = resolveLayoutCell(session.project(), arguments, "layout");
             ice::ObjectId schematic = 0;
@@ -2457,6 +2488,26 @@ class IceMcpServer {
                 .with_description("Compare a layout against its schematic and report mismatches.")
                 .with_string_param("layout", "Layout cell name or id")
                 .with_string_param("schematic", "Optional schematic name or id; inferred when omitted", false)
+                .build());
+        tools.push_back(
+            tool_builder("pex_run")
+                .with_description("Extract placed and PDK-rule polygon devices plus first-order layout parasitics into a text SPICE schematic.")
+                .with_string_param("layout", "Layout cell name or id")
+                .with_string_param("name", "Optional text schematic name", false)
+                .with_number_param("metal_sheet_resistance", "Optional metal sheet resistance (ohm/square)", false)
+                .with_number_param("poly_sheet_resistance", "Optional poly sheet resistance (ohm/square)", false)
+                .with_number_param("diffusion_sheet_resistance", "Optional diffusion sheet resistance (ohm/square)", false)
+                .with_number_param("via_resistance", "Optional resistance per via shape (ohm)", false)
+                .with_number_param("area_capacitance", "Optional area capacitance (fF/um^2)", false)
+                .with_number_param("perimeter_capacitance", "Optional perimeter capacitance (fF/um)", false)
+                .with_boolean_param("extract_placed_devices",
+                                    "Extract devices from placed layout instances (default true)", false)
+                .with_boolean_param("extract_polygon_devices",
+                                    "Extract polygon devices using PDK rules (default true)", false)
+                .with_string_param("extraction_rules_path",
+                                   "Optional override for layout/extraction.json", false)
+                .with_boolean_param("include_linked_schematic",
+                                    "Fallback to the inferred source schematic netlist (default true)", false)
                 .build());
 
         agentsdk::mcp::tool polygon;

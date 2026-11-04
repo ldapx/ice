@@ -187,6 +187,7 @@ Each PDK package owns its layout device library:
 
 ```text
 <pdk-root>/layout/devices.json
+<pdk-root>/layout/extraction.json    # polygon device extraction rules
 <pdk-root>/layout/device_generator.py
 <pdk-root>/layout/pcells.py          # ICE-native packages
 <pdk-root>/layout/generate_devices.py
@@ -210,7 +211,50 @@ and do not require KLayout, gdsfactory, Volare, CIEL, or `PDK_ROOT`. Their
 `layout/generate_devices.py`, so the default geometry shown in **Devices** and
 the geometry produced after a parameter edit share one implementation.
 
-`ice-cli pdk-info <pdk>` reports the resolved `layout_library` and
-`layout_generator` paths for each installed package.
+`ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
+`layout_generator`, and `layout_extraction` paths for each installed package.
+
+### Polygon extraction rules
+
+`layout/extraction.json` declares how PEX recognizes devices drawn directly as
+polygons. The rule engine is intentionally declarative so every PDK package
+owns its layer names, models, and terminal layers:
+
+```json
+{
+  "format": "ice-device-extraction",
+  "schema_version": 1,
+  "pdk": "ihp-sg13g2",
+  "devices": [
+    {
+      "name": "nmos",
+      "type": "mos",
+      "model": "sg13_lv_nmos",
+      "element": "X",
+      "active": "Activ",
+      "gate": "GatPoly",
+      "exclude_layers": ["NWell", "ThickGateOx"],
+      "terminal_layers": ["Contact", "Metal1"],
+      "substrate": "0",
+      "length_axis": "auto"
+    }
+  ]
+}
+```
+
+Supported rule types are:
+
+- `mos`: intersect `active` and `gate`, split the active region at the gate,
+  and find source/drain nets from `terminal_layers`. `require_layers` and
+  `exclude_layers` distinguish NMOS/PMOS and voltage variants. `body_layer`
+  supplies the bulk net when present.
+- `resistor`: use a `body` layer, `sheet_resistance`, and terminal layers.
+- `capacitor`: intersect two `plates` and apply `capacitance_per_area` in
+  fF/um^2.
+
+PEX first cuts active layers under MOS gates so source and drain do not appear
+as one shorted diffusion net. It then emits a SPICE device per channel. Device
+dimensions are derived from the channel geometry: the gate aspect ratio chooses
+the length axis unless `length_axis` is explicitly `x` or `y`.
 
 Building `icepy` is required for PDK device regeneration.

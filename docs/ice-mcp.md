@@ -104,6 +104,7 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `layout_export_lef` | Export pins as a minimal LEF macro. |
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
+| `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
 | `simulation_signals` | List available signals and trace sizes from the latest stored run. |
 | `simulation_measure` | Measure crossings, frequency, amplitude, RMS, and settling time. |
@@ -124,6 +125,18 @@ Cells, layers, simulations, graphs, and simulation scripts may be referenced by
 name or numeric id. Coordinates are integer database units. `lvs_run` accepts a
 layout name or id and an optional schematic; when the schematic is omitted, ICE
 infers it from planned-device links or matching layout/schematic names.
+`pex_run` accepts a layout plus optional coefficient overrides
+(`metal_sheet_resistance`, `poly_sheet_resistance`,
+`diffusion_sheet_resistance`, `via_resistance`, `area_capacitance`,
+`perimeter_capacitance`) and an optional `name` for the generated text cell.
+It extracts placed device-library instances by default; set
+`extract_placed_devices=false` to skip them. It also recognizes polygon devices
+through the PDK's `layout/extraction.json`; set `extract_polygon_devices=false`
+to disable that pass, or `extraction_rules_path` to override the package file.
+If no layout devices are recognized, it copies the inferred source schematic
+netlist by default; set `include_linked_schematic=false` to emit only the
+extracted RC network. The response includes `devices`, `devices_from_layout`,
+and `devices_from_schematic`.
 
 A drawn schematic can be created and connected entirely through MCP:
 `schematic_add_symbol` can create a symbol with its pins, `schematic_add_instance`

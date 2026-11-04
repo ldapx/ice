@@ -39,6 +39,7 @@ class ProjectPanel : public QWidget {
     void setOnActivatePin(PinCallback callback);
     void setOnPinVisibilityChanged(PinVisibilityCallback callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
+    void setOnRunPex(std::function<void(ice::ObjectId)> callback);
     using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
     using RenameChildCallback = std::function<void(ice::ObjectId parentId, ice::ObjectId id, const std::string &name)>;
     void setOnRenameLayout(RenameCallback callback);
@@ -76,6 +77,7 @@ class ProjectPanel : public QWidget {
     PinCallback onActivatePin_;
     PinVisibilityCallback onPinVisibilityChanged_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
+    std::function<void(ice::ObjectId)> onRunPex_;
     RenameCallback onRenameLayout_;
     RenameCallback onRenameProceduralLayout_;
     RenameChildCallback onRenameInstance_;
