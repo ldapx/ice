@@ -25,3 +25,5 @@ Thumbs.db
 
 # Tooling output
 compile_commands.json
+
+training_data/runs
