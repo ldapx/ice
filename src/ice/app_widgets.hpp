@@ -1,10 +1,12 @@
 #pragma once
 
+#include "agent_transcript.hpp"
 #include "icelib/core.hpp"
 
 #include <QAction>
 #include <QColor>
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QSize>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -69,15 +71,17 @@ class ActivityPanel : public QWidget {
         QString command;
         QString output;
         QString path;
+        QVector<AgentQuestion> questions;
     };
     struct AgentSession {
         std::string acpSessionId;
         QString label;
-        QString transcript;
+        AgentTranscriptView *transcript = nullptr;
         QString configOptionsJson;
         QString modelConfigId;
-        QString lastUserMessageId;
+        QString pendingUserText;
         std::map<std::string, AgentToolCall> toolCalls;
+        QElapsedTimer turnTimer;
         int pendingReads = 0;
         qint64 used = 0;
         qint64 size = 0;
@@ -91,6 +95,7 @@ class ActivityPanel : public QWidget {
         QString updatedAt;
     };
 
+    void applyAgentSelection();
     void connectAgent();
     void disconnectAgent();
     void sendPrompt();
@@ -104,23 +109,20 @@ class ActivityPanel : public QWidget {
     void setAgentStatus(const QString &text);
     void populateModelSelector();
     void applyModelSelection();
-    void showAgentSetupPage();
-    void showAgentSessionPage();
     AgentSession *activeAgentSession();
     AgentSession *findAgentSession(const std::string &acpSessionId);
     int findAgentSessionIndex(const std::string &acpSessionId) const;
-    void addAgentSession(const std::string &acpSessionId, const QString &configOptionsJson,
-                         const QString &initialTranscript = {});
+    void addAgentSession(const std::string &acpSessionId, const QString &configOptionsJson);
     void removeAgentSession(const std::string &acpSessionId);
     void refreshSessionSelector();
     void switchAgentSession(int index);
     void showSessionTranscript();
     void appendSessionTranscript(const std::string &acpSessionId, const QString &text);
     void flushPendingReads(AgentSession &session);
-    void handleToolCallUpdate(AgentSession &session, const std::string &toolCallId, const QString &title,
-                              const QString &kind, const QString &status, const QString &command, const QString &output,
-                              const QString &path);
+    void handleToolCallUpdate(AgentSession &session, const AgentToolUpdate &update);
     void setSessionPromptRunning(const std::string &acpSessionId, bool running);
+    QString agentModeLabel(const AgentSession &session) const;
+    QString agentModelLabel(const AgentSession &session) const;
     void newAgentSession();
     void closeActiveAgentSession();
     void refreshPastAgentSessions();
@@ -130,6 +132,7 @@ class ActivityPanel : public QWidget {
     QTableWidget *drcTable_ = nullptr;
     QTabWidget *tabs_ = nullptr;
     QPlainTextEdit *messages_ = nullptr;
+    QLabel *lvsSummary_ = nullptr;
     QPlainTextEdit *lvsReport_ = nullptr;
     int drcTabIndex_ = -1;
     int lvsTabIndex_ = -1;
@@ -142,13 +145,9 @@ class ActivityPanel : public QWidget {
     QLabel *agentStatus_ = nullptr;
     QLabel *tokens_ = nullptr;
     QProgressBar *contextUsage_ = nullptr;
-    QPlainTextEdit *transcript_ = nullptr;
+    QStackedWidget *agentTranscriptStack_ = nullptr;
+    AgentTranscriptView *agentTranscriptPlaceholder_ = nullptr;
     QLineEdit *prompt_ = nullptr;
-    QStackedWidget *agentStack_ = nullptr;
-    QPushButton *agentConnectButton_ = nullptr;
-    QPushButton *agentSessionButton_ = nullptr;
-    QPushButton *agentBackButton_ = nullptr;
-    QPushButton *agentDisconnectButton_ = nullptr;
     QPushButton *newSessionButton_ = nullptr;
     QPushButton *closeSessionButton_ = nullptr;
     QPushButton *sendButton_ = nullptr;
@@ -159,6 +158,7 @@ class ActivityPanel : public QWidget {
     std::vector<AgentSession> agentSessions_;
     std::vector<AgentSessionSummary> pastAgentSessions_;
     QString projectPath_;
+    QString connectedAgentCommand_;
     int activeAgentSession_ = -1;
     int nextAgentSessionNumber_ = 1;
     bool agentConnected_ = false;

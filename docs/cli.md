@@ -48,7 +48,7 @@ ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
 ice-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
-ice-cli schematic-add-symbol <project> <cell> <name> [source-cell]
+ice-cli schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]
 ice-cli schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]
 ice-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
 ice-cli schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]
@@ -68,7 +68,10 @@ Cells, symbols, pins, and instances may be referenced by name or id. Pins can
 use the `<instance>.<pin>` or `<symbol>.<pin>` form. `schematic-add-pin` adds a
 pin to an existing symbol; direction accepts `left`, `right`, `up`, or `down`.
 `schematic-set-parameter` creates or updates an instance parameter such as
-`resistance`, `capacitance`, or a source `value`.
+`resistance`, `capacitance`, or a source `value`. `schematic-add-symbol` loads
+real artwork and pins for known library names (`RES`, `NMOS`, `VDD`, `GND`,
+`IDC`, ...). Use `--blank` only for a custom symbol whose pins you will add with
+`schematic-add-pin`.
 
 `schematic-add-component` creates a primitive with a generated symbol and
 returns its pin ids. `schematic-list-symbols` lists primitive and PDK symbols.

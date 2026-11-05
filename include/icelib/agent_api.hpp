@@ -48,6 +48,10 @@ struct CircuitPlacement {
 // name in a drawn schematic.
 ObjectId resolveSchematicPin(const SchematicCell &cell, const std::string &text);
 
+// Resolves a component/symbol alias against the built-in and PDK libraries.
+// Throws ProjectError with available symbol suggestions when no match exists.
+FileSymbol resolveSchematicSymbol(const std::string &pdk, const std::string &name);
+
 // Creates the symbol and instance for a common component and returns stable pin
 // handles for immediate wiring.
 ComponentPlacement addSchematicComponent(Project &project, ObjectId cellId, const ComponentRequest &request);

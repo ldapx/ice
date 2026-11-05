@@ -1656,6 +1656,7 @@ BuildInfo buildInfo() {
                      "hdl_real_ports",
                      "hdl_bus_flatten",
                      "agent_authoring",
+                     "symbol_library_autofill",
                      "schematic_validation",
                      "spice_import",
                      "simulation_trace",

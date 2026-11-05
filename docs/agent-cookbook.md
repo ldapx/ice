@@ -204,6 +204,8 @@ them and cleans the removed HDL symbol pins from parent nets. Use
 | `schematic.pin.unconnected` | A symbol pin is not in any net. | `schematic_add_net` or remove the unused pin/instance. |
 | `schematic.net.single` | A net has fewer than two pins. | Connect the other end or delete the net. |
 | `schematic.component.value` | R/C/L/source has no value. | `schematic_set_parameter` with `resistance`, `capacitance`, `inductance`, or `value`. |
+| `schematic.symbol.pins` | A symbol has no pins; it cannot be wired or drawn usefully. | Recreate it with `schematic_add_component` or `schematic_add_hdl_instance`, or add pins explicitly. |
+| `schematic.symbol.artwork` | A symbol has no artwork and renders as a white placeholder. | Recreate it with `schematic_add_component`; known names auto-load library artwork. |
 | `schematic.pdk.missing` | The cell PDK is not installed. | `pdk_info`, install the ICE package, then `pdk_build` if OSDI is needed. |
 | `schematic.spice.pdk_manual` | Text SPICE contains manual `.include`/`.lib` setup. | Remove it; ICE applies the package setup from the cell PDK. |
 | `hdl.mixed` | Mixed port/bit mapping is invalid. | Run `schematic_validate_hierarchy`; use `bus_mode="flatten"` or fix pin names. |

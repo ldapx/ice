@@ -376,7 +376,11 @@ json symbolJson(const ice::Symbol &symbol) {
                         {"width", pin.width},
                         {"width_known", pin.widthKnown}});
     }
-    return {{"id", symbol.id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}};
+    return {{"id", symbol.id},
+            {"name", symbol.name},
+            {"source_cell", symbol.sourceCell},
+            {"artwork", !symbol.artwork.empty()},
+            {"pins", std::move(pins)}};
 }
 
 std::vector<ice::Parameter> parseParameters(const json *value, const char *name) {
@@ -2332,6 +2336,10 @@ class IceMcpServer {
                 if (diagnostic.code.starts_with("schematic.pdk")) {
                     suggestions.push_back({{"tool", "pdk_info"},
                                            {"arguments", {{"pdk", session.project().schematicCells.at(cellId).pdk}}}});
+                } else if (diagnostic.code.starts_with("schematic.symbol")) {
+                    suggestions.push_back(
+                        {{"tool", "schematic_info"},
+                         {"arguments", {{"schematic", session.project().schematicCells.at(cellId).name}}}});
                 } else if (diagnostic.code.starts_with("hdl.")) {
                     suggestions.push_back(
                         {{"tool", "schematic_validate_hierarchy"},
@@ -2446,6 +2454,27 @@ class IceMcpServer {
                         pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
                 }
             }
+            if (sourceCell == 0) {
+                try {
+                    const auto definition = ice::resolveSchematicSymbol(cellRef.pdk, symbolName);
+                    if (artwork.empty())
+                        artwork = definition.svg;
+                    if (pinInputs.empty()) {
+                        for (const auto &pin : definition.pins)
+                            pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
+                    }
+                } catch (const ice::ProjectError &error) {
+                    if (pinInputs.empty()) {
+                        throw ToolError(std::string(error.what()) +
+                                        ". Use schematic_add_component, or provide explicit pins and artwork. "
+                                        "Use schematic_list_symbols to inspect available symbols.");
+                    }
+                }
+            }
+            if (pinInputs.empty())
+                throw ToolError("Symbol '" + symbolName +
+                                "' would have no pins. Use schematic_add_component, schematic_add_hdl_instance, "
+                                "or provide a non-empty pins array.");
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
                 id = ice::addSymbol(project, cell, symbolName, artwork, sourceCell);
                 auto &symbol = project.schematicCells.at(cell).symbols.at(id);
@@ -2583,6 +2612,12 @@ class IceMcpServer {
             const auto instanceName = requiredString(arguments, "name");
             const auto x = requiredInteger(arguments, "x");
             const auto y = requiredInteger(arguments, "y");
+            const auto &symbol = cell.symbols.at(symbolId);
+            if (symbol.pins.empty()) {
+                throw ToolError("Symbol '" + symbol.name +
+                                "' has no pins and cannot be wired. Recreate it with schematic_add_component "
+                                "or schematic_add_hdl_instance, or add pins explicitly with schematic_add_pin.");
+            }
             session.execute("mcp schematic-add-instance", [&](ice::Project &project) {
                 id = ice::addSchematicInstance(project, cellId, symbolId, instanceName, x, y);
             });
@@ -3223,7 +3258,9 @@ class IceMcpServer {
                             .build());
         agentsdk::mcp::tool symbolTool;
         symbolTool.name = "schematic_add_symbol";
-        symbolTool.description = "Add a symbol definition, optionally with its pins, to a schematic cell.";
+        symbolTool.description =
+            "Add a symbol definition; known library names auto-load artwork and pins. Custom symbols may "
+            "provide explicit pins and artwork.";
         symbolTool.input_schema =
             R"({"type":"object","properties":{"cell":{"type":"string","description":"Schematic name or id"},)"
             R"("name":{"type":"string","description":"Symbol name"},"artwork":{"type":"string"},)"

@@ -878,7 +878,7 @@ void printHelp() {
               << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
-              << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
+              << "  schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]\n"
               << "  schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]\n"
               << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
               << "  schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]\n"
@@ -1412,6 +1412,9 @@ int main(int argc, char **argv) {
                 if (diagnostic.code.starts_with("schematic.pdk")) {
                     suggestions.push_back(
                         {{"command", "pdk-info"}, {"arguments", json::array({project.schematicCells.at(cell).pdk})}});
+                } else if (diagnostic.code.starts_with("schematic.symbol")) {
+                    suggestions.push_back(
+                        {{"command", "schematic-info"}, {"arguments", json::array({args[1], args[2]})}});
                 } else if (diagnostic.code.starts_with("hdl.")) {
                     suggestions.push_back(
                         {{"command", "schematic-validate-hierarchy"}, {"arguments", json::array({args[1], args[2]})}});
@@ -1686,16 +1689,63 @@ int main(int argc, char **argv) {
         }
 
         if (command == "schematic-add-symbol") {
-            expectArguments(args, 4, 5, "schematic-add-symbol <project> <cell> <name> [source-cell]");
+            expectArguments(args, 4, 6, "schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]");
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveSchematic(project, args[2]);
-            const auto source = args.size() == 5 ? resolveSchematic(project, args[4]) : ice::ObjectId{0};
+            bool blank = false;
+            ice::ObjectId source = 0;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                if (args[index] == "--blank")
+                    blank = true;
+                else if (source == 0)
+                    source = resolveSchematic(project, args[index]);
+                else
+                    argumentError("Unexpected schematic-add-symbol argument: " + args[index]);
+            }
+            std::string artwork;
+            std::vector<ice::Pin> templatePins;
+            if (source != 0) {
+                const auto &sourceCell = project.schematicCells.at(source);
+                if (sourceCell.systemVerilogSchematic) {
+                    const auto parsed = ice::parseSystemVerilogModule(sourceCell);
+                    if (!parsed.ok)
+                        throw ice::ProjectError("schematic.hdl.parse", parsed.error);
+                    const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
+                    artwork = templ.artwork;
+                    templatePins = templ.pins;
+                }
+            } else if (!blank) {
+                try {
+                    const auto definition = ice::resolveSchematicSymbol(project.schematicCells.at(cell).pdk, args[3]);
+                    artwork = definition.svg;
+                    templatePins = definition.pins;
+                } catch (const ice::ProjectError &error) {
+                    throw ice::ProjectError("schematic.symbol",
+                                            std::string(error.what()) +
+                                                ". Use schematic-add-component, or pass --blank and add pins "
+                                                "explicitly with schematic-add-pin.");
+                }
+            }
             ice::ProjectSession session(project);
             ice::ObjectId id = 0;
-            session.execute("schematic-add-symbol",
-                            [&](ice::Project &p) { id = ice::addSymbol(p, cell, args[3], {}, source); });
+            session.execute("schematic-add-symbol", [&](ice::Project &p) {
+                id = ice::addSymbol(p, cell, args[3], artwork, source);
+                auto &symbol = p.schematicCells.at(cell).symbols.at(id);
+                for (auto pin : templatePins) {
+                    pin.id = p.nextId();
+                    symbol.pins.push_back(std::move(pin));
+                }
+            });
             session.save(args[1]);
-            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}});
+            const auto &symbol = session.project().schematicCells.at(cell).symbols.at(id);
+            json pins = json::array();
+            for (const auto &pin : symbol.pins)
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"pins", std::move(pins)}});
             return 0;
         }
 
@@ -1729,6 +1779,11 @@ int main(int argc, char **argv) {
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveSchematic(project, args[2]);
             const auto symbol = resolveSymbol(project.schematicCells.at(cell), args[3]);
+            const auto &symbolRef = project.schematicCells.at(cell).symbols.at(symbol);
+            if (symbolRef.pins.empty())
+                throw ice::ProjectError("schematic.symbol.pins",
+                                        "Symbol '" + symbolRef.name +
+                                            "' has no pins; use schematic-add-component or add pins explicitly");
             const auto x = parseInteger(args[5], "x");
             const auto y = parseInteger(args[6], "y");
             ice::ProjectSession session(project);

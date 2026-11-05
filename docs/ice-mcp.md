@@ -90,7 +90,7 @@ and ask the user to rebuild/restart ICE.
 | `schematic_validate` | Validate connectivity, values, PDK setup, and mixed-signal hierarchy. |
 | `schematic_import_spice` | Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from SPICE. |
 | `schematic_delete` | Inspect or delete a schematic; `dry_run` lists dependencies and `cascade` removes them. |
-| `schematic_add_symbol` | Add a symbol definition, optionally with a `pins` array. |
+| `schematic_add_symbol` | Add a symbol; known library names auto-load artwork and pins. Custom symbols may pass `pins`/`artwork`. |
 | `schematic_add_pin` | Add a pin to an existing symbol. |
 | `schematic_add_net` | Connect two or more pin ids or `<instance>.<pin>` names into a net. |
 | `schematic_netlist` | Return the SPICE netlist generated from a schematic. |
@@ -277,6 +277,12 @@ hint tells you to use `U1.pwm_out` instead.
 `schematic_validate` returns diagnostics with suggested calls, and
 `schematic_delete(dry_run=true)` lists simulation and hierarchy dependencies
 before deletion.
+
+`schematic_add_symbol` with a known library name (`RES`, `NMOS`, `VDD`, `GND`,
+`IDC`, ...) auto-loads real artwork and pins. If a symbol is unknown and no pins
+are supplied it is rejected instead of creating a blank placeholder. Recreate a
+blank symbol with `schematic_add_component` or `schematic_add_hdl_instance`
+rather than carrying an empty symbol forward.
 
 Project discovery is self-service: `project_summary` returns candidate
 `project.icepro` files and `project_open` without a `path` opens the single

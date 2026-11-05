@@ -372,6 +372,21 @@ def main() -> int:
             symbols = mcp.tool("schematic_list_symbols", query="resistor")
             assert any(symbol["name"] == "Resistor" for symbol in symbols["symbols"]), symbols
 
+            mcp.tool("schematic_create", name="alias_symbols")
+            alias_symbol = mcp.tool("schematic_add_symbol", cell="alias_symbols", name="RES")
+            assert alias_symbol["artwork"] is True, alias_symbol
+            assert {pin["name"] for pin in alias_symbol["pins"]} == {"1", "2"}, alias_symbol
+            mcp.tool(
+                "schematic_add_instance",
+                cell="alias_symbols",
+                symbol="RES",
+                name="R1",
+                x=0,
+                y=0,
+            )
+            alias_validation = mcp.tool("schematic_validate", schematic="alias_symbols")
+            assert alias_validation["ok"] is True, alias_validation
+
             mcp.tool("schematic_create", name="agent_rc")
             circuit = mcp.tool(
                 "schematic_add_circuit",

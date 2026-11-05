@@ -8462,8 +8462,17 @@ class DocumentWindow : public QMainWindow {
     void showWorkspace() {
         if (workspaceStack_ && documents_)
             workspaceStack_->setCurrentWidget(documents_);
-        if (activityDock_)
+        if (activityDock_) {
             activityDock_->show();
+            if (!activityDockSizeInitialized_) {
+                activityDockSizeInitialized_ = true;
+                QTimer::singleShot(0, this, [this] {
+                    if (!activityDock_ || !activityDock_->isVisible())
+                        return;
+                    resizeDocks({activityDock_}, {activityDock_->minimumSizeHint().height()}, Qt::Vertical);
+                });
+            }
+        }
     }
 
     void activateSchematicPlaceSymbolTool(const SymbolDefinition &definition, bool clearPanelSelection = false) {
@@ -10458,6 +10467,7 @@ class DocumentWindow : public QMainWindow {
     StartupView *startupView_ = nullptr;
     QDockWidget *activityDock_ = nullptr;
     ActivityPanel *activityPanel_ = nullptr;
+    bool activityDockSizeInitialized_ = false;
     QProcess *drcProcess_ = nullptr;
     std::unique_ptr<QTemporaryDir> drcTempDir_;
     QString drcReportPath_;

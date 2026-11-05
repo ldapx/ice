@@ -117,6 +117,7 @@ const FileSymbol *findComponentSymbol(const std::vector<FileSymbol> &symbols, co
 
     static const std::map<std::string, std::string> aliases = {
         {"r", "resistor"},
+        {"res", "resistor"},
         {"resistor", "resistor"},
         {"c", "capacitor"},
         {"cap", "capacitor"},
@@ -127,9 +128,15 @@ const FileSymbol *findComponentSymbol(const std::vector<FileSymbol> &symbols, co
         {"diode", "diode"},
         {"v", "voltage source"},
         {"vsource", "voltage source"},
+        {"vdd", "voltage source"},
+        {"vcc", "voltage source"},
+        {"vsup", "voltage source"},
+        {"supply", "voltage source"},
         {"voltage source", "voltage source"},
         {"voltage", "voltage source"},
         {"i", "current source"},
+        {"idc", "current source"},
+        {"iref", "current source"},
         {"isource", "current source"},
         {"current source", "current source"},
         {"current", "current source"},
@@ -369,6 +376,19 @@ std::vector<Diagnostic> validateSchematic(const Project &project, ObjectId cellI
                           "Instance references a missing symbol", instanceId);
             continue;
         }
+        if (symbol->second.pins.empty()) {
+            addDiagnostic(diagnostics, Diagnostic::Severity::error, "schematic.symbol.pins",
+                          "Symbol '" + symbol->second.name +
+                              "' has no pins; recreate it with schematic_add_component or "
+                              "schematic_add_hdl_instance, or add pins explicitly",
+                          symbol->first);
+            continue;
+        }
+        if (symbol->second.artwork.empty()) {
+            addDiagnostic(diagnostics, Diagnostic::Severity::warning, "schematic.symbol.artwork",
+                          "Symbol '" + symbol->second.name + "' has no artwork and will render as a placeholder",
+                          symbol->first);
+        }
         const auto element = spiceElementForSymbol(symbol->second.name);
         const auto lowerSymbol = lowerCopy(symbol->second.name);
         if (element == 'G' || lowerSymbol == "input" || lowerSymbol == "output" || symbol->second.sourceCell != 0)
@@ -518,6 +538,14 @@ bool spiceNetlistSupportsDrawn(const std::string &source) {
         hasComponent = true;
     }
     return hasComponent;
+}
+
+FileSymbol resolveSchematicSymbol(const std::string &pdk, const std::string &name) {
+    auto symbols = availableSymbols(pdk);
+    ComponentRequest request;
+    request.type = name;
+    const auto *found = findComponentSymbol(symbols, request);
+    return *found;
 }
 
 SpiceImportResult createSchematicFromSpice(Project &project, std::string name, std::string pdk,
