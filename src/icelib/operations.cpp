@@ -258,7 +258,8 @@ void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceI
 }
 
 ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
-                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId) {
+                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId,
+                                  bool flattenBuses) {
     if (instanceName.empty())
         throw ProjectError("schematic.instance", "Instance name must not be empty");
     auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
@@ -271,7 +272,7 @@ ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, Objec
     const auto parsed = parseSystemVerilogModule(source);
     if (!parsed.ok)
         throw ProjectError("schematic.hdl.parse", parsed.error);
-    const auto tmpl = makeHdlSymbolTemplate(parsed.module);
+    const auto tmpl = makeHdlSymbolTemplate(parsed.module, flattenBuses);
     if (tmpl.pins.empty())
         throw ProjectError("schematic.hdl.ports", "SystemVerilog block has no ports");
 

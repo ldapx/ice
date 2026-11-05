@@ -8,7 +8,7 @@ to stdout; diagnostics and logs go to stderr.
 
 ```sh
 ice-cli project-create <folder|project.icepro> [name]
-ice-cli project-info <folder|project.icepro>
+ice-cli project-info [folder|project.icepro]
 ice-cli project-validate <folder|project.icepro>
 ice-cli project-repair <folder|project.icepro>
 ice-cli project-migrate <folder|project.icepro>
@@ -19,7 +19,8 @@ ice-cli pdk-info [pdk] [--probe]
 `project-create` initializes `project.icepro`, `sch/`, `lay/`, `sim/`,
 `scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. `project-migrate` refreshes
 the versioned generated section of `AGENTS.md` and preserves user text outside
-the markers.
+the markers. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
+the current directory and its parents for a single `project.icepro`.
 
 `ice-cli --version` prints the build fingerprint as JSON, including the git
 commit, build time, executable path, and feature flags.
@@ -46,14 +47,19 @@ ice-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
 ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
-ice-cli schematic-remove <project> <cell>
+ice-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
 ice-cli schematic-add-symbol <project> <cell> <name> [source-cell]
 ice-cli schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]
 ice-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
+ice-cli schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]
+ice-cli schematic-list-symbols [pdk] [query]
+ice-cli schematic-add-circuit <project> <cell> <json-file|->
 ice-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
 ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
+ice-cli schematic-validate <project> <cell>
+ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
 ice-cli schematic-hdl-ports <project> <cell>
-ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>
+ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> [--flatten-buses]
 ice-cli schematic-validate-hierarchy <project> <cell>
 ice-cli schematic-netlist <project> <cell>
 ```
@@ -62,8 +68,20 @@ Cells, symbols, pins, and instances may be referenced by name or id. Pins can
 use the `<instance>.<pin>` or `<symbol>.<pin>` form. `schematic-add-pin` adds a
 pin to an existing symbol; direction accepts `left`, `right`, `up`, or `down`.
 `schematic-set-parameter` creates or updates an instance parameter such as
-`resistance`, `capacitance`, or a source `value`. `schematic-remove` is blocked
-when the cell is used by a simulation or a hierarchical symbol.
+`resistance`, `capacitance`, or a source `value`.
+
+`schematic-add-component` creates a primitive with a generated symbol and
+returns its pin ids. `schematic-list-symbols` lists primitive and PDK symbols.
+`schematic-add-circuit` takes a JSON object such as
+`{"components":[{"type":"resistor","name":"R1","parameters":{"resistance":"1k"}}],
+"nets":[{"name":"out","pins":["R1.1","C1.1"]}]}`
+and commits the whole circuit atomically. `schematic-validate` checks
+connectivity, component values, PDK setup, and mixed-signal hierarchy.
+
+`schematic-import-spice` creates a text SPICE cell, or a drawn R/C/L/V/I/D
+schematic with `--mode drawn`. `--mode auto` chooses drawn only when the source
+is a flat supported netlist. `schematic-remove --dry-run` lists dependencies;
+`--cascade` removes dependent simulations and hierarchical symbols too.
 
 `schematic-add-text` accepts either the positional `[pdk] [spice-file]` form or
 the unambiguous `--pdk <pdk> --file <spice-file>` form. If a file path is passed
@@ -212,6 +230,7 @@ ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [si
 ice-cli simulation-list <project>
 ice-cli simulation-remove <project> <simulation>
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+ice-cli simulation-trace <project> <simulation> [signals] [max-points]
 ice-cli simulation-measure <project> <simulation> [signal] [threshold]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
@@ -278,6 +297,12 @@ input bits stabilize. Results contain both analog node traces and
 `<instance>.<port>` digital traces. Mixed mode currently requires top-level HDL
 instances with scalar `input`/`output` ports; `schematic-validate-hierarchy`
 reports buses, `inout` ports, missing connections, and duplicate output drivers.
+Use `schematic-add-hdl-instance ... --flatten-buses` for scalar mixed simulation
+of a bus; pins become `data[0]`, `data[1]`, … and are concatenated in the
+generated testbench. `real` ports are bridged without logic thresholding.
+
+`simulation-trace` returns decimated waveform samples for the latest stored run,
+which avoids writing a script just to inspect `v(out)` or a digital port.
 
 Simulation graphs are presentation definitions over captured signals.
 `simulation-add` creates a default **Graph 1** using the captured signals, and

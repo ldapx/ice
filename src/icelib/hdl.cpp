@@ -422,6 +422,8 @@ std::vector<HdlPort> parsePortsFromHeader(const std::string &header, bool &hasDi
         port.direction = direction;
         port.width = segmentHasDirection ? segmentWidth.width : inheritedWidth.width;
         port.widthKnown = segmentHasDirection ? segmentWidth.known : inheritedWidth.known;
+        port.real =
+            containsWord(lowered, "real") || containsWord(lowered, "realtime") || containsWord(lowered, "shortreal");
         ports.push_back(std::move(port));
     }
     return ports;
@@ -457,12 +459,16 @@ void applyBodyDeclarations(const std::string &body, std::vector<HdlPort> &ports)
                 continue;
             auto existing = std::find_if(ports.begin(), ports.end(),
                                          [&](const HdlPort &port) { return lowerCopy(port.name) == lowerCopy(name); });
+            const auto loweredPart = lowerCopy(part);
+            const bool realPort = containsWord(loweredPart, "real") || containsWord(loweredPart, "realtime") ||
+                                  containsWord(loweredPart, "shortreal");
             if (existing != ports.end()) {
                 existing->direction = *direction;
                 existing->width = inheritedWidth.width;
                 existing->widthKnown = inheritedWidth.known;
+                existing->real = realPort;
             } else {
-                ports.push_back({name, *direction, inheritedWidth.width, inheritedWidth.known});
+                ports.push_back({name, *direction, inheritedWidth.width, inheritedWidth.known, realPort});
             }
         }
     }
@@ -590,10 +596,25 @@ HdlParseResult parseSystemVerilogModule(const SchematicCell &cell) {
     return parseSystemVerilogModule(cell.systemVerilogText, cell.name);
 }
 
-HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module) {
+HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module, bool flattenBuses) {
+    HdlModule flattened;
+    if (flattenBuses) {
+        flattened.name = module.name;
+        for (const auto &port : module.ports) {
+            if (port.width > 1 && port.widthKnown && !port.real) {
+                for (int bit = 0; bit < port.width; ++bit)
+                    flattened.ports.push_back(
+                        {port.name + "[" + std::to_string(bit) + "]", port.direction, 1, true, false});
+            } else {
+                flattened.ports.push_back(port);
+            }
+        }
+    }
+    const auto &symbolModule = flattenBuses ? flattened : module;
+
     std::vector<HdlPort> inputs;
     std::vector<HdlPort> outputs;
-    for (const auto &port : module.ports) {
+    for (const auto &port : symbolModule.ports) {
         if (port.direction == HdlPortDirection::input)
             inputs.push_back(port);
         else

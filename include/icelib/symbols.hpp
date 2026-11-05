@@ -71,6 +71,12 @@ class SymbolLibrary {
                                         const std::filesystem::path &genericArtworkDirectory);
 };
 
+// Locates the built-in primitive symbol directory and loads it. `availableSymbols`
+// merges the built-in library with symbols from an installed ICE PDK package.
+std::filesystem::path builtinSymbolDirectory();
+std::vector<FileSymbol> builtinSymbols();
+std::vector<FileSymbol> availableSymbols(const std::string &pdk = genericPdkId);
+
 // Derives the physical pin side from a symbol-relative position using the
 // same rule as interactive placement: negative/positive x wins over y.
 PinDirection pinSideFromPosition(Coordinate x, Coordinate y);

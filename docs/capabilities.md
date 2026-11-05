@@ -16,6 +16,10 @@ CLI invokes the same operations through `ProjectSession`.
 | Layout-versus-schematic check | Yes | Tools → Run LVS | `ice-cli lvs` | `icepy.run_lvs` |
 | Mixed-signal HDL capture | Yes | Schematic + Simulation surfaces | `schematic-add-hdl-instance`, `simulation-run` | Core API |
 | Mixed-signal co-simulation | Yes | Mixed-signal simulator | `simulation-run` | Core API |
+| High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
+| Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
+| SPICE import | Yes | Schematic import | `schematic-import-spice` | Core API |
+| Stored waveform sampling | Yes | Graph/result inspection | `simulation-trace` | Core API |
 | Spatial query | Yes | Layout integration | Core API | Core API |
 
 Python bindings are an optional `icepy` build surface because nanobind and

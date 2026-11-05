@@ -17,13 +17,17 @@ ICE_CLI = ROOT / "build/linux/x86_64/release/ice-cli"
 
 
 class MCP:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path | None = None, cwd: Path | None = None):
+        command = [str(ICE_MCP)]
+        if project is not None:
+            command += ["--project", str(project)]
         self.process = subprocess.Popen(
-            [str(ICE_MCP), "--project", str(project)],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=cwd,
         )
         self.next_id = 1
         self.call(
@@ -51,7 +55,12 @@ class MCP:
                 raise RuntimeError(
                     "ice-mcp closed unexpectedly:\n" + self.process.stderr.read()
                 )
-            message = json.loads(line)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"Invalid JSON-RPC response for {method}: {error}: {line[:500]!r}"
+                ) from error
             if message.get("id") != self.next_id:
                 continue
             if "error" in message:
@@ -63,7 +72,12 @@ class MCP:
         text = result["content"][0]["text"]
         if result.get("isError"):
             raise RuntimeError(text)
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Invalid JSON from {tool_name}: {error}: {text[:500]!r}"
+            ) from error
 
     def close(self):
         self.process.terminate()
@@ -114,6 +128,13 @@ def main() -> int:
                 "schematic_add_hdl_instance",
                 "schematic_set_parameter",
                 "schematic_validate_hierarchy",
+                "schematic_add_component",
+                "schematic_list_symbols",
+                "schematic_add_circuit",
+                "schematic_validate",
+                "schematic_import_spice",
+                "simulation_trace",
+                "ice_help",
                 "layout_add_instance",
                 "layout_add_port",
                 "layout_list_ports",
@@ -144,6 +165,8 @@ def main() -> int:
             assert "vcd_graphs" in version.get("features", []), version
             assert "hdl_hierarchy" in version.get("features", []), version
             assert "mixed_signal" in version.get("features", []), version
+            assert "agent_authoring" in version.get("features", []), version
+            assert "simulation_trace" in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -344,6 +367,67 @@ def main() -> int:
             sv_stored = mcp.tool("simulation_result", simulation="sv_sim")
             assert sv_stored["state"] == "succeeded", sv_stored
             assert sv_stored["time_points"] > 1, sv_stored
+            help_result = mcp.tool("ice_help", topic="mixed-signal")
+            assert "help" in help_result, help_result
+            symbols = mcp.tool("schematic_list_symbols", query="resistor")
+            assert any(symbol["name"] == "Resistor" for symbol in symbols["symbols"]), symbols
+
+            mcp.tool("schematic_create", name="agent_rc")
+            circuit = mcp.tool(
+                "schematic_add_circuit",
+                cell="agent_rc",
+                components=[
+                    {"type": "resistor", "name": "R1", "parameters": {"resistance": "10k"}},
+                    {"type": "capacitor", "name": "C1", "parameters": {"capacitance": "1n"}},
+                    {
+                        "type": "voltage source",
+                        "name": "V1",
+                        "parameters": {"value": "PULSE(0 1 1n 1n 1n 10n 20n)"},
+                    },
+                ],
+                nets=[
+                    {"name": "out", "pins": ["R1.1", "C1.1", "V1.+"]},
+                    {"name": "0", "pins": ["R1.2", "C1.2", "V1.-"]},
+                ],
+            )
+            assert len(circuit["components"]) == 3, circuit
+            assert len(circuit["nets"]) == 2, circuit
+            agent_validation = mcp.tool("schematic_validate", schematic="agent_rc")
+            assert agent_validation["ok"] is True, agent_validation
+
+            imported = mcp.tool(
+                "schematic_import_spice",
+                name="agent_import_rc",
+                mode="drawn",
+                source="* RC\nV1 in 0 PULSE(0 1 1n 1n 1n 10n 20n)\nR1 in out 1k\nC1 out 0 1n\n.end\n",
+            )
+            assert imported["mode"] == "drawn", imported
+            dry_delete = mcp.tool("schematic_delete", schematic="agent_import_rc", dry_run=True)
+            assert dry_delete["dry_run"] is True and dry_delete["blocked"] is False, dry_delete
+
+            mcp.tool(
+                "schematic_create_systemverilog",
+                name="bus_buffer",
+                text=(
+                    "module bus_buffer(input logic [1:0] in, output logic [1:0] out);\n"
+                    "    assign out = in;\n"
+                    "endmodule\n"
+                ),
+            )
+            mcp.tool("schematic_create", name="bus_top")
+            bus_instance = mcp.tool(
+                "schematic_add_hdl_instance",
+                cell="bus_top",
+                source_cell="bus_buffer",
+                name="U1",
+                x=0,
+                y=0,
+                bus_mode="flatten",
+            )
+            bus_pins = {pin["name"] for pin in bus_instance["pins"]}
+            assert {"in[0]", "in[1]", "out[0]", "out[1]"}.issubset(bus_pins), bus_instance
+            bus_ports = mcp.tool("schematic_hdl_ports", schematic="bus_buffer")
+            assert bus_ports["ports"][0]["width"] == 2, bus_ports
 
             mixed_source = (
                 "module mixed_buffer(input logic in, output logic out);\n"
@@ -474,6 +558,22 @@ def main() -> int:
             mixed_signals = set(mixed_run["available_signals"])
             assert any(name == "U1.out" or name.endswith(".U1.out") for name in mixed_signals), mixed_run
             assert any(name.lower() in {"v(out)", "out"} for name in mixed_signals), mixed_run
+            sampled = mcp.tool(
+                "simulation_trace", simulation="mixed_sim", signals=["U1.out"], max_points=16
+            )
+            assert sampled["returned_points"] <= 16, sampled
+            assert sampled["signals"][0]["name"].endswith("U1.out"), sampled
+            mcp.tool(
+                "simulation_create",
+                name="mixed_bad_probe",
+                schematic="mixed_top",
+                stop=20e-9,
+                step=1e-9,
+                signals="v(U1.out)",
+            )
+            bad_probe = mcp.tool("simulation_run", simulation="mixed_bad_probe")
+            assert bad_probe["state"] == "succeeded", bad_probe
+            assert any("without v(" in hint for hint in bad_probe.get("hints", [])), bad_probe
 
             mcp.tool(
                 "simulation_create",
@@ -539,6 +639,18 @@ def main() -> int:
             bad_doctor = mcp.tool("ice_doctor", simulation="bad_sim")
             assert bad_doctor["model_paths_ok"] is False, bad_doctor
             assert any(not check["exists"] for check in bad_doctor["model_checks"])
+
+            # A server started without --project can discover and open the
+            # project in its working directory.
+            auto_mcp = MCP(cwd=project)
+            try:
+                status = auto_mcp.tool("project_summary")
+                assert status["open"] is False, status
+                assert status["candidates"], status
+                opened = auto_mcp.tool("project_open")
+                assert opened["open"] is True, opened
+            finally:
+                auto_mcp.close()
 
             print("ice-mcp tool smoke tests passed")
             return 0

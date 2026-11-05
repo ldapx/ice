@@ -179,62 +179,103 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
         binding.ports = parsed.module.ports;
 
         std::set<std::string> modulePorts;
+        const auto registerNode = [&](const HdlPort &port, const std::string &signalName, const std::string &node,
+                                      const Net *net) {
+            if (port.direction == HdlPortDirection::input) {
+                if (node != "0")
+                    inputNodes.insert(node);
+                return;
+            }
+            if (node == "0") {
+                addError(plan,
+                         "SystemVerilog block '" + instance.name + "' output '" + signalName + "' cannot drive ground");
+                return;
+            }
+            const auto entry = instance.name + "." + signalName;
+            const auto previous = outputDrivers.find(node);
+            if (previous != outputDrivers.end()) {
+                addError(plan,
+                         "Analog node '" + node + "' is driven by both '" + previous->second + "' and '" + entry + "'");
+            } else {
+                outputDrivers[node] = entry;
+            }
+            for (const auto netPin : net->pins) {
+                const Symbol *ownerSymbol = nullptr;
+                const auto owner = instanceForPin(cell->second, netPin, &ownerSymbol);
+                if (!owner || !ownerSymbol || owner->id == instanceId)
+                    continue;
+                if (spiceElementForSymbol(ownerSymbol->name) == 'V') {
+                    addError(plan, "Analog node '" + node + "' is driven by SystemVerilog output '" + entry +
+                                       "' and by voltage source '" + owner->name + "'");
+                    break;
+                }
+            }
+            outputNodes.insert(node);
+        };
+
         for (const auto &port : binding.ports) {
-            modulePorts.insert(lowerCopy(port.name));
             if (port.direction == HdlPortDirection::inout) {
                 addError(plan, "SystemVerilog block '" + moduleName + "' port '" + port.name +
                                    "' is inout; mixed-signal interfaces support input and output only");
                 continue;
             }
-            if (!port.widthKnown || port.width != 1) {
+            if (!port.widthKnown) {
                 addError(plan, "SystemVerilog block '" + moduleName + "' port '" + port.name +
-                                   "' is a bus; mixed-signal interfaces currently support scalar ports only");
+                                   "' has a parameterized width that cannot be resolved");
                 continue;
             }
-            const auto pin = pinForPort(symbol->second, port.name);
-            if (!pin) {
-                addError(plan, "Symbol '" + symbol->second.name + "' is missing pin '" + port.name +
-                                   "' for SystemVerilog module '" + moduleName + "'");
+            if (port.real && port.width != 1) {
+                addError(plan, "SystemVerilog block '" + moduleName + "' real port '" + port.name + "' must be scalar");
                 continue;
             }
-            const auto net = netForPin(cell->second, pin->id);
-            if (!net) {
-                addError(plan, "SystemVerilog block '" + instance.name + "' port '" + port.name +
-                                   "' is not connected to a net");
-                continue;
-            }
-            const auto node = schematicNetNodeName(cell->second, *net);
-            binding.portNodes[port.name] = node;
-            if (port.direction == HdlPortDirection::input) {
-                if (node != "0")
-                    inputNodes.insert(node);
-            } else {
-                if (node == "0") {
-                    addError(plan, "SystemVerilog block '" + instance.name + "' output '" + port.name +
-                                       "' cannot drive ground");
+            if (port.width == 1 || port.real) {
+                modulePorts.insert(lowerCopy(port.name));
+                const auto pin = pinForPort(symbol->second, port.name);
+                if (!pin) {
+                    addError(plan, "Symbol '" + symbol->second.name + "' is missing pin '" + port.name +
+                                       "' for SystemVerilog module '" + moduleName + "'");
                     continue;
                 }
-                const auto previous = outputDrivers.find(node);
-                if (previous != outputDrivers.end()) {
-                    addError(plan, "Analog node '" + node + "' is driven by both '" + previous->second + "' and '" +
-                                       instance.name + "." + port.name + "'");
-                } else {
-                    outputDrivers[node] = instance.name + "." + port.name;
+                const auto net = netForPin(cell->second, pin->id);
+                if (!net) {
+                    addError(plan, "SystemVerilog block '" + instance.name + "' port '" + port.name +
+                                       "' is not connected to a net");
+                    continue;
                 }
-                for (const auto netPin : net->pins) {
-                    const Symbol *ownerSymbol = nullptr;
-                    const auto owner = instanceForPin(cell->second, netPin, &ownerSymbol);
-                    if (!owner || !ownerSymbol || owner->id == instanceId)
-                        continue;
-                    if (spiceElementForSymbol(ownerSymbol->name) == 'V') {
-                        addError(plan, "Analog node '" + node + "' is driven by SystemVerilog output '" +
-                                           instance.name + "." + port.name + "' and by voltage source '" + owner->name +
-                                           "'");
-                        break;
-                    }
-                }
-                outputNodes.insert(node);
+                const auto node = schematicNetNodeName(cell->second, *net);
+                binding.portNodes[port.name] = node;
+                binding.portBits[port.name] = {node};
+                registerNode(port, port.name, node, net);
+                continue;
             }
+
+            std::vector<std::string> bits;
+            bits.reserve(static_cast<std::size_t>(port.width));
+            bool complete = true;
+            for (int bit = 0; bit < port.width; ++bit) {
+                const auto bitName = port.name + "[" + std::to_string(bit) + "]";
+                modulePorts.insert(lowerCopy(bitName));
+                const auto pin = pinForPort(symbol->second, bitName);
+                if (!pin) {
+                    addError(plan, "SystemVerilog bus '" + moduleName + "." + port.name +
+                                       "' is not flattened; create the instance with bus_mode=flatten or add pin '" +
+                                       bitName + "'");
+                    complete = false;
+                    break;
+                }
+                const auto net = netForPin(cell->second, pin->id);
+                if (!net) {
+                    addError(plan, "SystemVerilog block '" + instance.name + "' bus bit '" + bitName +
+                                       "' is not connected to a net");
+                    complete = false;
+                    break;
+                }
+                const auto node = schematicNetNodeName(cell->second, *net);
+                bits.push_back(node);
+                registerNode(port, bitName, node, net);
+            }
+            if (complete)
+                binding.portBits[port.name] = bits;
         }
         for (const auto &pin : symbol->second.pins) {
             if (!modulePorts.contains(lowerCopy(pin.name))) {

@@ -17,6 +17,8 @@ struct HdlPort {
     // parameterized range that cannot be resolved without elaboration.
     int width = 1;
     bool widthKnown = true;
+    // True for SystemVerilog real/realtime/shortreal ports.
+    bool real = false;
 };
 
 struct HdlModule {
@@ -48,7 +50,7 @@ HdlParseResult parseSystemVerilogModule(const SchematicCell &cell);
 
 // Builds a simple box symbol whose pins match the module ports. Pin ids are
 // left at zero so the caller can assign project-stable ids.
-HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module);
+HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module, bool flattenBuses = false);
 
 // One HDL block instantiated in a drawn schematic. `portNodes` maps the
 // original module port name to the SPICE node connected to its symbol pin.
@@ -60,7 +62,10 @@ struct HdlInstanceBinding {
     std::string moduleName;
     std::string source;
     std::vector<HdlPort> ports;
+    // Scalar ports map to one node. portBits also contains one entry per bus
+    // bit when the instance was created with bus_mode="flatten".
     std::map<std::string, std::string> portNodes;
+    std::map<std::string, std::vector<std::string>> portBits;
 };
 
 struct MixedSignalPlan {

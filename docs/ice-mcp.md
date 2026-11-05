@@ -58,17 +58,20 @@ a long-lived server keeps the binary code it loaded at process start, even when
 
 At the start of a session, call `ice_version` and confirm features such as
 `project_repair`, `project_migrate`, `simulation_metrics`, and `pdk_status`.
-If a required feature is missing, stop and ask the user to rebuild/restart ICE.
+Call `ice_help(topic="overview")` or one of its topic variants to discover the
+current workflow and exact tool names. If a required feature is missing, stop
+and ask the user to rebuild/restart ICE.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `ice_version` | Return the ICE build fingerprint and feature flags. |
+| `ice_help` | Return workflow topics, common tools, and example payloads. |
 | `pdk_info` | Inspect ICE PDK packages, ngspice models, OSDI setup, sections, and optional transistor probe. |
 | `pdk_build` | Build an ICE PDK package's Verilog-A sources into the OSDI cache. |
 | `project_create` | Create and open a project file. |
-| `project_open` | Open an existing project; optional `recover` quarantines malformed sidecar files. |
+| `project_open` | Open a project; without `path`, search cwd/parents for exactly one `project.icepro`. Optional `recover` quarantines malformed sidecar files. |
 | `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
 | `project_validate` | Return validation diagnostics. |
 | `project_repair` | Recover a project and save it after quarantining invalid files. |
@@ -80,14 +83,19 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `schematic_info` | Read symbols, pins, instances, parameters, and nets. |
 | `schematic_create_text` | Create a text SPICE schematic. |
 | `schematic_create_systemverilog` | Create a SystemVerilog source cell for digital HDL simulation. |
-| `schematic_hdl_ports` | Parse a SystemVerilog cell and return its module name, port directions, and widths. |
-| `schematic_delete` | Delete a schematic, blocked when simulations or symbols use it. |
+| `schematic_hdl_ports` | Parse a SystemVerilog cell and return its module name, port directions, widths, and real flags. |
+| `schematic_add_component` | Create a resistor, capacitor, source, ground, or device with a generated symbol and pins. |
+| `schematic_list_symbols` | List primitive and PDK symbols with pins and defaults. |
+| `schematic_add_circuit` | Add multiple components and nets atomically. |
+| `schematic_validate` | Validate connectivity, values, PDK setup, and mixed-signal hierarchy. |
+| `schematic_import_spice` | Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from SPICE. |
+| `schematic_delete` | Inspect or delete a schematic; `dry_run` lists dependencies and `cascade` removes them. |
 | `schematic_add_symbol` | Add a symbol definition, optionally with a `pins` array. |
 | `schematic_add_pin` | Add a pin to an existing symbol. |
 | `schematic_add_net` | Connect two or more pin ids or `<instance>.<pin>` names into a net. |
 | `schematic_netlist` | Return the SPICE netlist generated from a schematic. |
 | `schematic_add_instance` | Place a symbol instance by id or symbol name. |
-| `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. |
+| `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. Use `bus_mode="flatten"` for buses. |
 | `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
 | `schematic_validate_hierarchy` | Validate HDL instances, pin/port mapping, nets, buses, and mixed-signal support. |
 | `layout_create` | Create a static layout cell. |
@@ -111,6 +119,8 @@ If a required feature is missing, stop and ask the user to rebuild/restart ICE.
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
+| `simulation_create` | Create a simulation and its first graph; supports `template="tran"`, `"mixed"`, `"pwm_dac"`, or `"digital"`. |
+| `simulation_trace` | Return decimated waveform samples for named signals. |
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
 | `simulation_signals` | List available signals and trace sizes from the latest stored run. |
 | `simulation_measure` | Measure crossings, frequency, amplitude, RMS, and settling time. |
@@ -246,8 +256,32 @@ automatically. Mixed simulation iterates ngspice and Icarus Verilog:
 digital outputs drive PWL sources in the analog deck, analog input nodes are
 sampled through a logic threshold, and the loop stops when sampled input bits
 stabilize. Results contain analog node traces plus `<instance>.<port>` digital
-traces. The current implementation supports top-level HDL instances with scalar
-`input`/`output` ports.
+traces. `real` input/output ports are bridged without thresholding, and buses
+can be flattened into pins such as `data[0]` with `bus_mode="flatten"`. Mixed
+mode still requires top-level HDL instances; `inout` ports and unflattened buses
+are rejected explicitly.
+
+`simulation_run` returns `analog_signals`, `digital_signals`, the applied
+`pdk_setup`, current `graphs`, `hints`, and `suggested_calls`. If a requested
+probe uses analog syntax for a digital port, for example `v(U1.pwm_out)`, the
+hint tells you to use `U1.pwm_out` instead.
+
+## Agent authoring shortcuts
+
+`ice_help(topic)` exposes common workflows and exact tool names:
+`overview`, `project`, `schematic`, `mixed-signal`, `simulation`, and `pdk`.
+
+`schematic_add_component` creates a primitive and returns its pin handles.
+`schematic_add_circuit` accepts components and nets in one atomic call.
+`schematic_list_symbols` shows valid PDK symbols, pin names, and defaults.
+`schematic_validate` returns diagnostics with suggested calls, and
+`schematic_delete(dry_run=true)` lists simulation and hierarchy dependencies
+before deletion.
+
+Project discovery is self-service: `project_summary` returns candidate
+`project.icepro` files and `project_open` without a `path` opens the single
+project found in the current directory or its parents. `ICE_PROJECT` overrides
+the search.
 
 Project sidecar files are not an editing interface. Do not write
 `sch/*.icesch`, `lay/*.icelay`, or `sim/*.icesim` by hand; use the tools instead.

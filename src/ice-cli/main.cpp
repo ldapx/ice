@@ -1,3 +1,4 @@
+#include "icelib/agent_api.hpp"
 #include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
 #include "icelib/interchange.hpp"
@@ -8,6 +9,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
@@ -380,6 +382,25 @@ std::filesystem::path projectRootForCli(const std::filesystem::path &path) {
     return path;
 }
 
+std::filesystem::path defaultProjectPath() {
+    if (const auto *configured = std::getenv("ICE_PROJECT"); configured && *configured)
+        return configured;
+    std::error_code status;
+    auto directory = std::filesystem::current_path(status);
+    if (status)
+        return {};
+    for (int depth = 0; depth < 4 && !directory.empty(); ++depth) {
+        const auto candidate = directory / "project.icepro";
+        if (std::filesystem::is_regular_file(candidate, status) && !status)
+            return candidate;
+        const auto parent = directory.parent_path();
+        if (parent == directory)
+            break;
+        directory = parent;
+    }
+    return {};
+}
+
 std::string projectNameForPath(const std::filesystem::path &path) {
     const auto root = projectRootForCli(path);
     auto name = root.filename().string();
@@ -539,6 +560,48 @@ json schematicInfo(const ice::SchematicCell &cell) {
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
     }
     return result;
+}
+
+json diagnosticJson(const ice::Diagnostic &diagnostic) {
+    json item = {{"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                 {"code", diagnostic.code},
+                 {"message", diagnostic.message}};
+    if (diagnostic.object)
+        item["object"] = *diagnostic.object;
+    return item;
+}
+
+json fileSymbolJson(const ice::FileSymbol &symbol) {
+    json pins = json::array();
+    for (const auto &pin : symbol.pins)
+        pins.push_back({{"name", pin.name},
+                        {"direction", pinDirectionName(pin.direction)},
+                        {"x", pin.x},
+                        {"y", pin.y},
+                        {"width", pin.width},
+                        {"width_known", pin.widthKnown}});
+    json defaults = json::array();
+    for (const auto &parameter : symbol.defaultParameters)
+        defaults.push_back({{"name", parameter.name}, {"value", parameter.value}});
+    return {{"name", symbol.name},
+            {"category", symbol.category},
+            {"pins", std::move(pins)},
+            {"defaults", std::move(defaults)}};
+}
+
+json componentPlacementJson(const ice::ComponentPlacement &placement) {
+    json pins = json::array();
+    for (const auto &pin : placement.pins)
+        pins.push_back({{"id", pin.id},
+                        {"name", pin.name},
+                        {"direction", pinDirectionName(pin.direction)},
+                        {"width", pin.width},
+                        {"width_known", pin.widthKnown}});
+    return {{"instance", placement.instance},
+            {"symbol", placement.symbol},
+            {"symbol_name", placement.symbolName},
+            {"name", placement.instanceName},
+            {"pins", std::move(pins)}};
 }
 
 json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
@@ -802,7 +865,7 @@ void printHelp() {
               << "Usage: ice-cli <command> [arguments]\n\n"
               << "Project:\n"
               << "  project-create <folder|project.icepro> [name]\n"
-              << "  project-info <folder|project.icepro>\n"
+              << "  project-info [folder|project.icepro]  (ICE_PROJECT or cwd search when omitted)\n"
               << "  project-validate <folder|project.icepro>\n"
               << "  project-repair <folder|project.icepro>\n"
               << "  project-migrate <folder|project.icepro>\n"
@@ -815,14 +878,20 @@ void printHelp() {
               << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
-              << "  schematic-remove <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell]\n"
               << "  schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]\n"
               << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
+              << "  schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]\n"
+              << "  schematic-list-symbols [pdk] [query]\n"
+              << "  schematic-add-circuit <project> <cell> <json-file|->\n"
               << "  schematic-set-parameter <project> <cell> <instance> <name> <value>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
+              << "  schematic-validate <project> <cell>\n"
+              << "  schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->\n"
+              << "  schematic-remove <project> <cell> [--dry-run] [--cascade]\n"
               << "  schematic-hdl-ports <project> <cell>\n"
-              << "  schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>\n"
+              << "  schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> "
+                 "[--flatten-buses]\n"
               << "  schematic-validate-hierarchy <project> <cell>\n"
               << "  schematic-netlist <project> <cell>\n\n"
               << "Layout:\n"
@@ -860,6 +929,7 @@ void printHelp() {
               << "  simulation-list <project>\n"
               << "  simulation-remove <project> <simulation>\n"
               << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
+              << "  simulation-trace <project> <simulation> [signals] [max-points]\n"
               << "  simulation-measure <project> <simulation> [signal] [threshold]\n"
               << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
               << "  simulation-graph-list <project> <simulation>\n"
@@ -1002,9 +1072,13 @@ int main(int argc, char **argv) {
         }
 
         if (command == "project-info") {
-            expectArguments(args, 2, 2, "project-info <folder|project.icepro>");
-            const auto project = ice::Project::load(args[1]);
-            printJson(projectSummary(project, args[1]));
+            expectArguments(args, 1, 2, "project-info [folder|project.icepro]");
+            const auto path = args.size() == 2 ? std::filesystem::path(args[1]) : defaultProjectPath();
+            if (path.empty())
+                argumentError("No project path was given and no project.icepro was found; pass a path or set "
+                              "ICE_PROJECT");
+            const auto project = ice::Project::load(path);
+            printJson(projectSummary(project, path.string()));
             return 0;
         }
 
@@ -1183,6 +1257,213 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-add-component") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-add-component <project> <cell> <type> [name] [x] [y] "
+                            "[--symbol <name>] [param=value ...]");
+            auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            ice::ComponentRequest request;
+            request.type = args[3];
+            std::vector<std::string> positional;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                if (args[index] == "--symbol" && index + 1 < args.size()) {
+                    request.symbol = args[++index];
+                    continue;
+                }
+                const auto equals = args[index].find('=');
+                if (equals != std::string::npos) {
+                    request.parameters.push_back({0, args[index].substr(0, equals), args[index].substr(equals + 1)});
+                } else {
+                    positional.push_back(args[index]);
+                }
+            }
+            if (!positional.empty())
+                request.name = positional[0];
+            if (positional.size() > 1)
+                request.x = parseInteger(positional[1], "x");
+            if (positional.size() > 2)
+                request.y = parseInteger(positional[2], "y");
+            if (positional.size() > 3)
+                argumentError("Too many positional arguments for schematic-add-component");
+            ice::ProjectSession session(project);
+            ice::ComponentPlacement placement;
+            session.execute("schematic-add-component",
+                            [&](ice::Project &p) { placement = ice::addSchematicComponent(p, cell, request); });
+            session.save(args[1]);
+            auto result = componentPlacementJson(placement);
+            result["cell"] = cell;
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-list-symbols") {
+            expectArguments(args, 1, 3, "schematic-list-symbols [pdk] [query]");
+            const auto pdk = args.size() >= 2 ? args[1] : std::string(ice::genericPdkId);
+            const auto query = args.size() >= 3 ? args[2] : std::string{};
+            const auto symbols = ice::availableSymbols(pdk);
+            const auto loweredQuery = [&] {
+                auto value = query;
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                return value;
+            }();
+            json result = json::array();
+            for (const auto &symbol : symbols) {
+                const auto lowerName = [&] {
+                    auto value = symbol.name;
+                    std::transform(value.begin(), value.end(), value.begin(),
+                                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                    return value;
+                }();
+                const auto lowerCategory = [&] {
+                    auto value = symbol.category;
+                    std::transform(value.begin(), value.end(), value.begin(),
+                                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                    return value;
+                }();
+                if (!loweredQuery.empty() && lowerName.find(loweredQuery) == std::string::npos &&
+                    lowerCategory.find(loweredQuery) == std::string::npos)
+                    continue;
+                result.push_back(fileSymbolJson(symbol));
+            }
+            printJson({{"pdk", pdk}, {"symbols", std::move(result)}});
+            return 0;
+        }
+
+        if (command == "schematic-add-circuit") {
+            expectArguments(args, 4, 4, "schematic-add-circuit <project> <cell> <json-file|->");
+            auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto text = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            const auto document = json::parse(text, nullptr, false);
+            if (document.is_discarded() || !document.is_object())
+                argumentError("Circuit JSON must be an object with components and optional nets");
+            ice::CircuitRequest request;
+            const auto &components = document.at("components");
+            if (!components.is_array())
+                argumentError("Circuit JSON 'components' must be an array");
+            for (const auto &entry : components) {
+                ice::ComponentRequest component;
+                component.type = entry.value("type", std::string{});
+                component.symbol = entry.value("symbol", std::string{});
+                component.name = entry.value("name", std::string{});
+                component.x = entry.value("x", ice::Coordinate{0});
+                component.y = entry.value("y", ice::Coordinate{0});
+                const auto addParameters = [&](const json &parameters) {
+                    for (const auto &[name, value] : parameters.items()) {
+                        if (value.is_string())
+                            component.parameters.push_back({0, name, value.get<std::string>()});
+                        else if (value.is_number() || value.is_boolean())
+                            component.parameters.push_back({0, name, value.dump()});
+                        else
+                            argumentError("Component parameter values must be strings, numbers, or booleans");
+                    }
+                };
+                if (entry.contains("parameters"))
+                    addParameters(entry.at("parameters"));
+                else if (entry.contains("params"))
+                    addParameters(entry.at("params"));
+                request.components.push_back(std::move(component));
+            }
+            if (document.contains("nets")) {
+                for (const auto &entry : document.at("nets")) {
+                    ice::CircuitNetRequest net;
+                    net.name = entry.value("name", std::string{});
+                    net.x = entry.value("x", ice::Coordinate{0});
+                    net.y = entry.value("y", ice::Coordinate{0});
+                    for (const auto &pin : entry.at("pins")) {
+                        if (pin.is_string())
+                            net.pins.push_back(pin.get<std::string>());
+                        else if (pin.is_number_integer())
+                            net.pins.push_back(std::to_string(pin.get<std::int64_t>()));
+                        else if (pin.is_number_unsigned())
+                            net.pins.push_back(std::to_string(pin.get<std::uint64_t>()));
+                        else
+                            argumentError("Circuit net pins must be strings or integer pin ids");
+                    }
+                    request.nets.push_back(std::move(net));
+                }
+            }
+            ice::ProjectSession session(project);
+            ice::CircuitPlacement placement;
+            session.execute("schematic-add-circuit",
+                            [&](ice::Project &p) { placement = ice::addSchematicCircuit(p, cell, request); });
+            session.save(args[1]);
+            json componentsJson = json::array();
+            for (const auto &component : placement.components)
+                componentsJson.push_back(componentPlacementJson(component));
+            printJson({{"cell", cell}, {"components", std::move(componentsJson)}, {"nets", placement.nets}});
+            return 0;
+        }
+
+        if (command == "schematic-validate") {
+            expectArguments(args, 3, 3, "schematic-validate <project> <cell>");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto diagnostics = ice::validateSchematic(project, cell);
+            json items = json::array();
+            bool ok = true;
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == ice::Diagnostic::Severity::error)
+                    ok = false;
+                auto item = diagnosticJson(diagnostic);
+                json suggestions = json::array();
+                if (diagnostic.code.starts_with("schematic.pdk")) {
+                    suggestions.push_back(
+                        {{"command", "pdk-info"}, {"arguments", json::array({project.schematicCells.at(cell).pdk})}});
+                } else if (diagnostic.code.starts_with("hdl.")) {
+                    suggestions.push_back(
+                        {{"command", "schematic-validate-hierarchy"}, {"arguments", json::array({args[1], args[2]})}});
+                } else {
+                    suggestions.push_back(
+                        {{"command", "schematic-info"}, {"arguments", json::array({args[1], args[2]})}});
+                }
+                item["suggested_calls"] = std::move(suggestions);
+                items.push_back(std::move(item));
+            }
+            printJson(
+                {{"schematic", project.schematicCells.at(cell).name}, {"ok", ok}, {"diagnostics", std::move(items)}});
+            return 0;
+        }
+
+        if (command == "schematic-import-spice") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-import-spice <project> <name> [--pdk <pdk>] "
+                            "[--mode text|drawn|auto] <source-file|->");
+            auto pdk = std::string(ice::genericPdkId);
+            auto mode = std::string{"text"};
+            std::string file;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--pdk" && index + 1 < args.size())
+                    pdk = args[++index];
+                else if (args[index] == "--mode" && index + 1 < args.size())
+                    mode = args[++index];
+                else if (file.empty())
+                    file = args[index];
+                else
+                    argumentError("Too many schematic-import-spice arguments");
+            }
+            if (file.empty())
+                argumentError("A SPICE source file or '-' is required");
+            if (mode != "text" && mode != "drawn" && mode != "auto")
+                argumentError("--mode must be text, drawn, or auto");
+            const auto source = file == "-" ? readStdin() : readTextFile(file);
+            const bool drawn = mode == "drawn" || (mode == "auto" && ice::spiceNetlistSupportsDrawn(source));
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            ice::SpiceImportResult imported;
+            session.execute("schematic-import-spice", [&](ice::Project &project) {
+                imported = ice::createSchematicFromSpice(project, args[2], pdk, source, drawn);
+            });
+            session.save(args[1]);
+            printJson({{"id", imported.cell},
+                       {"name", args[2]},
+                       {"pdk", pdk},
+                       {"mode", drawn ? "drawn" : "text"},
+                       {"warnings", imported.warnings}});
+            return 0;
+        }
+
         if (command == "schematic-hdl-ports") {
             expectArguments(args, 3, 3, "schematic-hdl-ports <project> <cell>");
             const auto project = ice::Project::load(args[1]);
@@ -1209,7 +1490,8 @@ int main(int argc, char **argv) {
                 ports.push_back({{"name", port.name},
                                  {"direction", directionName(port.direction)},
                                  {"width", port.width},
-                                 {"width_known", port.widthKnown}});
+                                 {"width_known", port.widthKnown},
+                                 {"real", port.real}});
             printJson({{"id", id},
                        {"schematic", cell.name},
                        {"module", parsed.module.name},
@@ -1219,17 +1501,31 @@ int main(int argc, char **argv) {
         }
 
         if (command == "schematic-add-hdl-instance") {
-            expectArguments(args, 7, 7, "schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y>");
+            expectArguments(args, 7, 9,
+                            "schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> "
+                            "[--flatten-buses]");
             auto project = ice::Project::load(args[1]);
             const auto parent = resolveSchematic(project, args[2]);
             const auto source = resolveSchematic(project, args[3]);
             const auto x = parseInteger(args[5], "x");
             const auto y = parseInteger(args[6], "y");
+            bool flattenBuses = false;
+            for (std::size_t index = 7; index < args.size(); ++index) {
+                if (args[index] == "--flatten-buses")
+                    flattenBuses = true;
+                else if (args[index] == "--bus-mode" && index + 1 < args.size()) {
+                    const auto mode = args[++index];
+                    if (mode != "scalar" && mode != "flatten")
+                        argumentError("--bus-mode must be scalar or flatten");
+                    flattenBuses = mode == "flatten";
+                } else if (args[index] != "scalar")
+                    argumentError("Expected --flatten-buses or --bus-mode <scalar|flatten>");
+            }
             ice::ProjectSession session(project);
             ice::ObjectId instance = 0;
             ice::ObjectId symbol = 0;
             session.execute("schematic-add-hdl-instance", [&](ice::Project &p) {
-                instance = ice::addSystemVerilogInstance(p, parent, source, args[4], x, y, &symbol);
+                instance = ice::addSystemVerilogInstance(p, parent, source, args[4], x, y, &symbol, flattenBuses);
             });
             session.save(args[1]);
             json pins = json::array();
@@ -1320,19 +1616,72 @@ int main(int argc, char **argv) {
             expectArguments(args, 3, 3, "schematic-info <project> <cell>");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveSchematic(project, args[2]);
-            printJson(schematicInfo(project.schematicCells.at(id)));
+            const auto &cell = project.schematicCells.at(id);
+            auto result = schematicInfo(cell);
+            try {
+                const auto setup = ice::pdkSimulationSetupFor(cell.pdk);
+                result["pdk_setup"] = {
+                    {"pdk", cell.pdk}, {"lines", setup.netlistLines}, {"init_commands", setup.initCommands}};
+            } catch (const ice::ProjectError &error) {
+                result["pdk_setup"] = {{"pdk", cell.pdk}, {"warning", error.what()}};
+            }
+            printJson(result);
             return 0;
         }
 
         if (command == "schematic-remove" || command == "schematic-delete") {
-            expectArguments(args, 3, 3, "schematic-remove <project> <cell>");
+            expectArguments(args, 3, 5, "schematic-remove <project> <cell> [--dry-run] [--cascade]");
+            bool dryRun = false;
+            bool cascade = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--dry-run")
+                    dryRun = true;
+                else if (args[index] == "--cascade")
+                    cascade = true;
+                else
+                    argumentError("Expected --dry-run or --cascade");
+            }
             auto project = ice::Project::load(args[1]);
             const auto id = resolveSchematic(project, args[2]);
-            const auto name = project.schematicCells.at(id).name;
+            const auto plan = ice::planSchematicDeletion(project, id);
+            json simulations = json::array();
+            for (const auto &simulation : plan.simulations)
+                simulations.push_back({{"id", simulation.id}, {"name", simulation.name}});
+            json symbols = json::array();
+            for (const auto &dependency : plan.symbols)
+                symbols.push_back({{"parent_cell", dependency.parentCell},
+                                   {"parent_name", dependency.parentName},
+                                   {"symbol", dependency.symbol},
+                                   {"symbol_name", dependency.symbolName},
+                                   {"instances", dependency.instances}});
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", plan.name},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"blocked", plan.blocked()},
+                           {"simulations", std::move(simulations)},
+                           {"symbols", std::move(symbols)}});
+                return 0;
+            }
+            if (plan.blocked() && !cascade) {
+                printJson({{"id", id},
+                           {"name", plan.name},
+                           {"deleted", false},
+                           {"blocked", true},
+                           {"simulations", std::move(simulations)},
+                           {"symbols", std::move(symbols)}});
+                return 0;
+            }
             ice::ProjectSession session(project);
-            session.execute("remove schematic", [&](ice::Project &p) { ice::removeSchematicCell(p, id); });
+            session.execute("remove schematic", [&](ice::Project &p) {
+                if (cascade)
+                    ice::removeSchematicCascade(p, id);
+                else
+                    ice::removeSchematicCell(p, id);
+            });
             session.save(args[1]);
-            printJson({{"id", id}, {"name", name}, {"deleted", true}});
+            printJson({{"id", id}, {"name", plan.name}, {"deleted", true}, {"cascaded", cascade}});
             return 0;
         }
 
@@ -2066,6 +2415,69 @@ int main(int argc, char **argv) {
             printJson(summary);
             if (result.state != ice::JobState::succeeded)
                 throw ice::ProjectError("simulation." + ice::jobStateName(result.state), result.error);
+            return 0;
+        }
+
+        if (command == "simulation-trace") {
+            expectArguments(args, 3, 5, "simulation-trace <project> <simulation> [signals] [max-points]");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto stored = ice::latestSimulationRun(projectRootForCli(args[1]), simulationId);
+            if (!stored)
+                throw ice::ProjectError("simulation.result", "No stored run was found for this simulation");
+            if (stored->result.time.empty() || stored->result.traces.empty())
+                throw ice::ProjectError("simulation.result", "The stored run has no time vector or traces");
+            const auto wanted = args.size() >= 4 ? splitSignals(args[3]) : std::vector<std::string>{};
+            const auto maxPoints = args.size() >= 5 ? parseInteger(args[4], "max-points") : 2000;
+            std::vector<const ice::SimulationTrace *> selected;
+            for (const auto &trace : stored->result.traces) {
+                if (wanted.empty())
+                    continue;
+                for (const auto &name : wanted) {
+                    if (trace.name == name || trace.name.ends_with("." + name)) {
+                        selected.push_back(&trace);
+                        break;
+                    }
+                }
+            }
+            if (selected.empty() && wanted.empty()) {
+                for (const auto &trace : stored->result.traces) {
+                    selected.push_back(&trace);
+                    if (selected.size() >= 8)
+                        break;
+                }
+            }
+            if (selected.empty())
+                throw ice::ProjectError("simulation.result", "No stored trace matched the requested signals");
+            const auto totalPoints = std::min(stored->result.time.size(), selected.front()->values.size());
+            const auto limit = static_cast<std::size_t>(std::max<std::int64_t>(2, maxPoints));
+            std::vector<std::size_t> indices;
+            if (totalPoints <= limit) {
+                for (std::size_t index = 0; index < totalPoints; ++index)
+                    indices.push_back(index);
+            } else {
+                for (std::size_t index = 0; index + 1 < limit; ++index)
+                    indices.push_back(index * (totalPoints - 1) / (limit - 1));
+                indices.push_back(totalPoints - 1);
+            }
+            const bool decimated = indices.size() < totalPoints;
+            json time = json::array();
+            for (const auto index : indices)
+                time.push_back(stored->result.time[index]);
+            json traces = json::array();
+            for (const auto *trace : selected) {
+                json values = json::array();
+                for (const auto index : indices)
+                    values.push_back(index < trace->values.size() ? json(trace->values[index]) : json(nullptr));
+                traces.push_back({{"name", trace->name}, {"values", std::move(values)}});
+            }
+            printJson({{"simulation", stored->simulationName},
+                       {"run_id", stored->runId},
+                       {"time_points", totalPoints},
+                       {"returned_points", indices.size()},
+                       {"decimated", decimated},
+                       {"time", std::move(time)},
+                       {"signals", std::move(traces)}});
             return 0;
         }
 

@@ -28,7 +28,8 @@ void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceI
 // places one instance in the parent schematic. A fresh symbol is created per
 // instance so net names remain unambiguous.
 ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
-                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId = nullptr);
+                                  std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId = nullptr,
+                                  bool flattenBuses = false);
 // SPICE node name used by the schematic netlister for a net in a drawn cell.
 std::string schematicNetNodeName(const SchematicCell &cell, const Net &net);
 ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x = 0,

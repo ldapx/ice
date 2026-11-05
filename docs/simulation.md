@@ -79,15 +79,23 @@ and ngspice:
 5. Analog and digital traces are resampled onto the shared time grid and
    returned together. Digital traces are named `<instance>.<port>`.
 
-The current mixed-signal interface is intentionally strict and scalar:
-top-level HDL instances only, one-bit `input`/`output` ports, no `inout` ports,
-no buses, and no multiple digital drivers on one analog node. Use
-`schematic_validate_hierarchy` / `schematic-validate-hierarchy` to inspect those
-conditions before running. A pure SPICE netlist of a mixed schematic is rejected
-with an explicit error instead of silently omitting the HDL block. Mixed
-simulations created without explicit timing default to a 1 µs stop time and a
-1 ns step so a typical digital waveform is not simulated over an unnecessarily
-long interval.
+The current mixed-signal interface requires top-level HDL instances only and
+rejects `inout` ports, unflattened buses, and multiple digital drivers on one
+analog node. Scalar logic ports use threshold sampling and PWL 0/1 outputs.
+`real` input/output ports are bridged directly: analog values are written to the
+digital input file and real VCD outputs drive the analog PWL source. Buses can be
+flattened with `bus_mode="flatten"`; pins become `data[0]`, `data[1]`, …
+(assumed LSB-first, matching `[width-1:0]`) and the generated testbench
+concatenates them. Use `schematic_validate_hierarchy` /
+`schematic-validate-hierarchy` to inspect those conditions before running. A
+pure SPICE netlist of a mixed schematic is rejected with an explicit error
+instead of silently omitting the HDL block. Mixed simulations created without
+explicit timing default to a 1 µs stop time and a 1 ns step so a typical digital
+waveform is not simulated over an unnecessarily long interval.
+
+`simulation_trace` returns decimated samples for named analog or digital
+signals. `simulation_run` also reports `analog_signals`, `digital_signals`,
+applied PDK setup, graph definitions, hints, and suggested follow-up calls.
 
 After a successful run, ICE fills an empty **Signals to capture** list and
 empty graph Y selections from the first traces. This happens in the GUI, the

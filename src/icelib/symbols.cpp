@@ -1,7 +1,12 @@
 #include "icelib/symbols.hpp"
 
+#include "icelib/pdk.hpp"
+
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string_view>
 
@@ -194,6 +199,47 @@ std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
     return symbols;
 }
 } // namespace
+
+std::filesystem::path builtinSymbolDirectory() {
+    std::vector<std::filesystem::path> candidates;
+    if (const auto *configured = std::getenv("ICE_SYMBOL_DIR"); configured && *configured)
+        candidates.emplace_back(configured);
+#ifdef ICE_SOURCE_DIR
+    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "symbols");
+#endif
+    candidates.emplace_back(std::filesystem::current_path() / "symbols");
+    candidates.emplace_back("/usr/share/ice/symbols");
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        if (std::filesystem::is_directory(candidate, status) && !status)
+            return candidate;
+    }
+    throw ProjectError("symbol.library", "Built-in symbol library directory was not found");
+}
+
+std::vector<FileSymbol> builtinSymbols() { return SymbolLibrary::load(builtinSymbolDirectory()); }
+
+std::vector<FileSymbol> availableSymbols(const std::string &pdk) {
+    std::map<std::string, FileSymbol> merged;
+    for (auto symbol : builtinSymbols())
+        merged.emplace(symbol.name, std::move(symbol));
+    if (!pdk.empty() && pdk != genericPdkId) {
+        const auto pdks = findPdks(pdk);
+        if (pdks.empty())
+            throw ProjectError("symbol.pdk", "Unknown or uninstalled PDK: " + pdk);
+        const auto symbolDirectory = pdks.front().packageRoot / "symbols";
+        std::error_code status;
+        if (std::filesystem::is_directory(symbolDirectory, status) && !status) {
+            for (auto symbol : SymbolLibrary::load(symbolDirectory, builtinSymbolDirectory()))
+                merged[symbol.name] = std::move(symbol);
+        }
+    }
+    std::vector<FileSymbol> symbols;
+    symbols.reserve(merged.size());
+    for (auto &[_, symbol] : merged)
+        symbols.push_back(std::move(symbol));
+    return symbols;
+}
 
 std::vector<FileSymbol> SymbolLibrary::load(const std::filesystem::path &directory) {
     return loadSymbols(directory, {});

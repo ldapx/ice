@@ -197,35 +197,43 @@ struct TempDirectory {
 struct InputPortBinding {
     std::size_t block = 0;
     std::size_t port = 0;
+    int bit = 0;
     std::string node;
+    bool real = false;
+    std::string signalName;
+    std::string tbSignal;
 };
 
 struct OutputPortBinding {
     std::size_t block = 0;
     std::size_t port = 0;
+    int bit = 0;
     std::string node;
     std::string tbInstance;
+    bool real = false;
+    std::string signalName;
+    std::string tbWire;
 };
 
-const SimulationTrace *findDigitalOutputTrace(const SimulationResult &result, const OutputPortBinding &output,
-                                              const std::string &portName) {
-    if (const auto *trace = findTraceForPort(result, output.tbInstance, portName))
+const SimulationTrace *findDigitalOutputTrace(const SimulationResult &result, const OutputPortBinding &output) {
+    if (const auto *trace = findTraceEndingWith(result, output.tbWire))
         return trace;
-    // Some simulators dump only the testbench wire that drives the module
-    // output. Accept that name as a fallback.
-    return findTraceEndingWith(result, "ice_b" + std::to_string(output.block) + "_out_" + std::to_string(output.port));
+    if (const auto *trace = findTraceForPort(result, output.tbInstance, output.signalName))
+        return trace;
+    return findTraceForPort(result, output.tbInstance, output.signalName + "[0]");
 }
 
-std::string pwlValue(const std::vector<double> &time, const std::vector<double> &values, double high, double low) {
+std::string pwlValue(const std::vector<double> &time, const std::vector<double> &values, double high, double low,
+                     bool realValues) {
     std::ostringstream output;
     output << std::setprecision(17);
     if (time.empty() || values.empty())
         return std::to_string(low);
     std::vector<std::pair<double, double>> points;
-    double previous = values.front() > 0.5 ? high : low;
+    double previous = realValues ? values.front() : (values.front() > 0.5 ? high : low);
     points.emplace_back(time.front(), previous);
     for (std::size_t index = 1; index < values.size() && index < time.size(); ++index) {
-        const auto value = values[index] > 0.5 ? high : low;
+        const auto value = realValues ? values[index] : (values[index] > 0.5 ? high : low);
         if (value == previous)
             continue;
         points.emplace_back(time[index], value);
@@ -293,18 +301,27 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
         const auto &block = request.mixedSignal.blocks[blockIndex];
         for (std::size_t portIndex = 0; portIndex < block.ports.size(); ++portIndex) {
             const auto &port = block.ports[portIndex];
-            const auto node = block.portNodes.find(port.name);
-            if (node == block.portNodes.end()) {
+            const auto bits = block.portBits.find(port.name);
+            if (bits == block.portBits.end()) {
                 result.state = JobState::failed;
                 result.error =
                     "Mixed-signal block '" + block.instanceName + "' port '" + port.name + "' has no connected net";
                 return result;
             }
-            if (port.direction == HdlPortDirection::input) {
-                blockInputs[blockIndex].push_back(inputs.size());
-                inputs.push_back({blockIndex, portIndex, node->second});
-            } else if (port.direction == HdlPortDirection::output) {
-                outputs.push_back({blockIndex, portIndex, node->second, "ice_blk_" + std::to_string(blockIndex)});
+            for (std::size_t bit = 0; bit < bits->second.size(); ++bit) {
+                const auto signalName =
+                    bits->second.size() == 1 ? port.name : port.name + "[" + std::to_string(bit) + "]";
+                const auto tbSignal = "ice_b" + std::to_string(blockIndex) +
+                                      (port.direction == HdlPortDirection::input ? "_in_" : "_out_") +
+                                      std::to_string(portIndex) + "_" + std::to_string(bit);
+                if (port.direction == HdlPortDirection::input) {
+                    blockInputs[blockIndex].push_back(inputs.size());
+                    inputs.push_back({blockIndex, portIndex, static_cast<int>(bit), bits->second[bit], port.real,
+                                      signalName, tbSignal});
+                } else if (port.direction == HdlPortDirection::output) {
+                    outputs.push_back({blockIndex, portIndex, static_cast<int>(bit), bits->second[bit],
+                                       "ice_blk_" + std::to_string(blockIndex), port.real, signalName, tbSignal});
+                }
             }
         }
     }
@@ -332,19 +349,25 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
     };
     const auto vcdPath = temp.path / "ice_mixed.vcd";
 
-    using InputBitStreams = std::vector<std::vector<int>>;
-    const auto writeInputs = [&](const InputBitStreams &values) {
+    using InputStreams = std::vector<std::vector<double>>;
+    const auto writeInputs = [&](const InputStreams &values) {
         for (std::size_t blockIndex = 0; blockIndex < request.mixedSignal.blocks.size(); ++blockIndex) {
             std::ofstream output(inputPath(blockIndex), std::ios::trunc);
             if (!output)
                 return false;
+            output << std::setprecision(17);
             const auto found = blockInputs.find(blockIndex);
             for (int point = 0; point < points; ++point) {
                 if (found != blockInputs.end()) {
                     for (std::size_t index = 0; index < found->second.size(); ++index) {
                         if (index)
                             output << " ";
-                        output << values[found->second[index]][static_cast<std::size_t>(point)];
+                        const auto inputIndex = found->second[index];
+                        const auto value = values[inputIndex][static_cast<std::size_t>(point)];
+                        if (inputs[inputIndex].real)
+                            output << value;
+                        else
+                            output << (value > 0.5 ? 1 : 0);
                     }
                 }
                 output << "\n";
@@ -371,14 +394,19 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
             const auto &block = request.mixedSignal.blocks[blockIndex];
             for (std::size_t portIndex = 0; portIndex < block.ports.size(); ++portIndex) {
                 const auto &port = block.ports[portIndex];
+                const auto bits = block.portBits.at(port.name).size();
                 const auto prefix = port.direction == HdlPortDirection::input ? "in" : "out";
-                source << "    " << (port.direction == HdlPortDirection::input ? "logic" : "wire") << " ice_b"
-                       << blockIndex << "_" << prefix << "_" << portIndex << ";\n";
+                for (std::size_t bit = 0; bit < bits; ++bit) {
+                    const auto type =
+                        port.real ? "real" : (port.direction == HdlPortDirection::input ? "logic" : "wire");
+                    source << "    " << type << " ice_b" << blockIndex << "_" << prefix << "_" << portIndex << "_"
+                           << bit << ";\n";
+                }
             }
             if (blockInputs.contains(blockIndex))
                 source << "    integer fd_" << blockIndex << ";\n";
             for (const auto inputIndex : blockInputs[blockIndex])
-                source << "    integer v_" << inputIndex << ";\n";
+                source << "    " << (inputs[inputIndex].real ? "real" : "integer") << " v_" << inputIndex << ";\n";
         }
         for (std::size_t blockIndex = 0; blockIndex < request.mixedSignal.blocks.size(); ++blockIndex) {
             const auto &block = request.mixedSignal.blocks[blockIndex];
@@ -388,7 +416,20 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
                     source << ", ";
                 const auto &port = block.ports[portIndex];
                 const auto prefix = port.direction == HdlPortDirection::input ? "in" : "out";
-                source << "." << port.name << "(ice_b" << blockIndex << "_" << prefix << "_" << portIndex << ")";
+                const auto bits = block.portBits.at(port.name).size();
+                source << "." << port.name << "(";
+                if (!port.real && bits > 1) {
+                    source << "{";
+                    for (std::size_t bit = bits; bit > 0; --bit) {
+                        if (bit != bits)
+                            source << ", ";
+                        source << "ice_b" << blockIndex << "_" << prefix << "_" << portIndex << "_" << (bit - 1);
+                    }
+                    source << "}";
+                } else {
+                    source << "ice_b" << blockIndex << "_" << prefix << "_" << portIndex << "_0";
+                }
+                source << ")";
             }
             source << ");\n";
         }
@@ -412,16 +453,18 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
                 continue;
             for (std::size_t index = 0; index < found->second.size(); ++index) {
                 const auto inputIndex = found->second[index];
-                source << "            if ($fscanf(fd_" << blockIndex << ", \"%d\", v_" << inputIndex
-                       << ") != 1) begin\n";
+                source << "            if ($fscanf(fd_" << blockIndex << ", \""
+                       << (inputs[inputIndex].real ? "%f" : "%d") << "\", v_" << inputIndex << ") != 1) begin\n";
                 source << "                $display(\"ICE mixed-signal input underflow\");\n";
                 source << "                $finish;\n";
                 source << "            end\n";
             }
             for (std::size_t index = 0; index < found->second.size(); ++index) {
                 const auto inputIndex = found->second[index];
-                source << "            ice_b" << blockIndex << "_in_" << inputs[inputIndex].port << " = v_"
-                       << inputIndex << "[0];\n";
+                if (inputs[inputIndex].real)
+                    source << "            " << inputs[inputIndex].tbSignal << " = v_" << inputIndex << ";\n";
+                else
+                    source << "            " << inputs[inputIndex].tbSignal << " = v_" << inputIndex << "[0];\n";
             }
         }
         source << "            #(ICE_STEP_PS);\n";
@@ -432,8 +475,8 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
         return source.str();
     };
 
-    InputBitStreams currentInputs(inputs.size(), std::vector<int>(static_cast<std::size_t>(points), 0));
-    InputBitStreams sampledInputs(inputs.size(), std::vector<int>(static_cast<std::size_t>(points), 0));
+    InputStreams currentInputs(inputs.size(), std::vector<double>(static_cast<std::size_t>(points), 0.0));
+    InputStreams sampledInputs(inputs.size(), std::vector<double>(static_cast<std::size_t>(points), 0.0));
     SimulationResult finalDigital;
     SimulationResult finalAnalog;
     bool converged = false;
@@ -491,18 +534,18 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
         }
         for (std::size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
             const auto &block = request.mixedSignal.blocks[outputs[outputIndex].block];
-            const auto &port = block.ports[outputs[outputIndex].port];
-            const auto trace = findDigitalOutputTrace(finalDigital, outputs[outputIndex], port.name);
+            const auto trace = findDigitalOutputTrace(finalDigital, outputs[outputIndex]);
             if (!trace) {
                 result.state = JobState::failed;
-                result.error = "Mixed-signal digital output '" + block.instanceName + "." + port.name +
-                               "' was not found in the generated VCD";
+                result.error = "Mixed-signal digital output '" + block.instanceName + "." +
+                               outputs[outputIndex].signalName + "' was not found in the generated VCD";
                 return result;
             }
             const auto values = sampleHold(finalDigital.time, trace->values, grid);
+            const auto &sourcePort = block.ports[outputs[outputIndex].port];
             analogRequest.netlist.push_back(
                 "VICE_HDL_OUT_" + std::to_string(outputIndex) + " " + outputs[outputIndex].node + " 0 " +
-                pwlValue(grid, values, request.mixedSignal.outputHigh, request.mixedSignal.outputLow));
+                pwlValue(grid, values, request.mixedSignal.outputHigh, request.mixedSignal.outputLow, sourcePort.real));
         }
         for (const auto &node : inputNodes) {
             if (!requestContainsSignal(analogRequest.probeSignals, node))
@@ -535,7 +578,7 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
 
         for (std::size_t index = 0; index < inputs.size(); ++index) {
             if (inputs[index].node == "0") {
-                std::fill(sampledInputs[index].begin(), sampledInputs[index].end(), 0);
+                std::fill(sampledInputs[index].begin(), sampledInputs[index].end(), 0.0);
                 continue;
             }
             const auto trace = findAnalogTrace(finalAnalog, inputs[index].node);
@@ -546,10 +589,28 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
                 return result;
             }
             const auto values = sampleLinear(finalAnalog.time, trace->values, grid);
-            for (std::size_t point = 0; point < values.size(); ++point)
-                sampledInputs[index][point] = values[point] > request.mixedSignal.logicThreshold ? 1 : 0;
+            for (std::size_t point = 0; point < values.size(); ++point) {
+                sampledInputs[index][point] = inputs[index].real
+                                                  ? values[point]
+                                                  : (values[point] > request.mixedSignal.logicThreshold ? 1.0 : 0.0);
+            }
         }
-        if (sampledInputs == currentInputs) {
+        bool same = sampledInputs.size() == currentInputs.size();
+        for (std::size_t index = 0; same && index < sampledInputs.size(); ++index) {
+            if (sampledInputs[index].size() != currentInputs[index].size()) {
+                same = false;
+                break;
+            }
+            for (std::size_t point = 0; point < sampledInputs[index].size(); ++point) {
+                const auto left = sampledInputs[index][point];
+                const auto right = currentInputs[index][point];
+                if (std::abs(left - right) > 1.0e-9 * std::max({1.0, std::abs(left), std::abs(right)})) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        if (same) {
             converged = true;
             break;
         }
@@ -581,25 +642,23 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
     }
     for (std::size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
         const auto &block = request.mixedSignal.blocks[outputs[outputIndex].block];
-        const auto &port = block.ports[outputs[outputIndex].port];
-        const auto trace = findDigitalOutputTrace(finalDigital, outputs[outputIndex], port.name);
+        const auto trace = findDigitalOutputTrace(finalDigital, outputs[outputIndex]);
         if (!trace)
             continue;
-        const auto name = block.instanceName + "." + port.name;
+        const auto name = block.instanceName + "." + outputs[outputIndex].signalName;
         if (!traceNames.insert(name).second)
             continue;
         result.traces.push_back({name, sampleHold(finalDigital.time, trace->values, grid)});
     }
     for (std::size_t inputIndex = 0; inputIndex < inputs.size(); ++inputIndex) {
         const auto &block = request.mixedSignal.blocks[inputs[inputIndex].block];
-        const auto &port = block.ports[inputs[inputIndex].port];
-        const auto name = block.instanceName + "." + port.name;
+        const auto name = block.instanceName + "." + inputs[inputIndex].signalName;
         if (!traceNames.insert(name).second)
             continue;
         std::vector<double> values;
         values.reserve(static_cast<std::size_t>(points));
         for (const auto value : currentInputs[inputIndex])
-            values.push_back(static_cast<double>(value));
+            values.push_back(value);
         result.traces.push_back({name, std::move(values)});
     }
     appendWarnings(result.warnings, finalDigital.warnings);

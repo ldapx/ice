@@ -52,6 +52,7 @@ packages
 cli
 icepy
 ice-mcp
+agent-cookbook
 plugins
 ```
 

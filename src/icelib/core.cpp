@@ -1199,10 +1199,13 @@ std::string generatedAgentsGuidance() {
               "whether to install/build a PDK or use an explicitly labeled behavioral model. If the "
               "user asked for transistor-level simulation, do not silently replace it with a "
               "behavioral model.\n"
-           << "3. Prefer a drawn canvas schematic over a text SPICE schematic. In MCP use "
-              "`schematic_create`, `schematic_add_symbol` with pins, `schematic_add_instance`, and "
-              "`schematic_add_net`; inspect the result with `schematic_info`. In the CLI use the equivalent "
-              "`schematic-add-*` and `schematic-info` commands. `schematic_create` creates a drawn cell; "
+           << "3. Prefer a drawn canvas schematic over a text SPICE schematic. Use `ice_help` for the "
+              "current workflow and common tool names. In MCP use `schematic_create` and "
+              "`schematic_add_component` for common primitives, or `schematic_add_circuit` for a small "
+              "batch of components and nets. `schematic_list_symbols` shows valid PDK symbols and pin "
+              "names. `schematic_validate` checks connectivity and values before simulation. The lower-level "
+              "`schematic_add_symbol`, `schematic_add_instance`, and `schematic_add_net` calls remain "
+              "available for explicit control. `schematic_create` creates a drawn cell; "
               "`schematic_create(kind=\"text\")`, `schematic_create_text`, and `schematic_add_text` "
               "create a text SPICE cell. `schematic_create(kind=\"systemverilog\")` and "
               "`schematic_create_systemverilog` create a SystemVerilog source cell for digital HDL "
@@ -1213,9 +1216,12 @@ std::string generatedAgentsGuidance() {
               "simulating. Use text SPICE or SystemVerilog when the user explicitly asks for it, "
               "provides existing source, or the canvas tools are unavailable; state the reason. "
               "Canvas schematics keep connectivity, layout, LVS, and simulation workflows available.\n"
-           << "4. Create the simulation and choose the signals to capture. Use `simulation_measure` "
-              "(or `ice-cli simulation-measure`) for numerical checks; `simulation_result` and "
-              "`simulation_signals` expose trace statistics and available signals. For a "
+           << "4. Create the simulation with `simulation_create` and optionally a `template` such as "
+              "`tran`, `mixed`, `pwm_dac`, or `digital`. Use `simulation_measure` "
+              "(or `ice-cli simulation-measure`) for numerical checks; `simulation_trace` returns "
+              "decimated waveform samples, and `simulation_result` / `simulation_signals` expose trace "
+              "statistics and available signals. `simulation_run` reports the applied `pdk_setup` and "
+              "suggested follow-up calls. For a "
               "SystemVerilog source cell, use the `iverilog` simulator with the `digital` analysis. "
               "The run generates VCD traces; graph the traces or import an external VCD file in the "
               "GUI with Load VCD. A drawn schematic containing SystemVerilog instances uses the "
@@ -1646,7 +1652,15 @@ BuildInfo buildInfo() {
                      "hdl_hierarchy",
                      "hdl_instance_symbols",
                      "mixed_signal",
-                     "mixed_signal_validation"};
+                     "mixed_signal_validation",
+                     "hdl_real_ports",
+                     "hdl_bus_flatten",
+                     "agent_authoring",
+                     "schematic_validation",
+                     "spice_import",
+                     "simulation_trace",
+                     "dependency_delete",
+                     "simulation_templates"};
     return info;
 }
 } // namespace ice
