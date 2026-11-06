@@ -11,6 +11,7 @@
 
 #include <QAbstractButton>
 #include <QAbstractItemView>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColorDialog>
@@ -2449,13 +2450,45 @@ bool CreateProjectDialog::createFolder() const { return createFolder_->isChecked
 
 EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
-    layout->addStretch(1);
-    auto *card = new QGroupBox(QStringLiteral("Create a schematic"));
-    card->setMaximumWidth(520);
-    auto *cardLayout = new QVBoxLayout(card);
-    description_ = new QLabel(QStringLiteral("This project has no schematics yet. Create one to start drawing."));
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setSpacing(12);
+
+    layout->addWidget(heading(QStringLiteral("Create a schematic")));
+    description_ = new QLabel(
+        QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
     description_->setWordWrap(true);
-    cardLayout->addWidget(description_);
+    description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    layout->addWidget(description_);
+
+    auto *kindRow = new QHBoxLayout;
+    kindRow->setSpacing(10);
+    kindGroup_ = new QButtonGroup(this);
+    kindGroup_->setExclusive(true);
+    const auto addKind = [&](Kind kind, const QString &label, const QString &icon, const QString &tooltip) {
+        auto *button = new QPushButton(label);
+        button->setCheckable(true);
+        button->setMinimumHeight(72);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setLucideIcon(button, icon, 20);
+        button->setToolTip(tooltip);
+        kindGroup_->addButton(button, static_cast<int>(kind));
+        kindRow->addWidget(button, 1);
+    };
+    addKind(Kind::SchematicDrawing, QStringLiteral("Schematic Drawing"), QStringLiteral("microchip"),
+            QStringLiteral("Draw a schematic with symbols and wires on the canvas."));
+    addKind(Kind::TextSpice, QStringLiteral("Text Schematic"), QStringLiteral("notebook-text"),
+            QStringLiteral("Create a SPICE netlist cell and edit its source directly."));
+    addKind(Kind::SystemVerilog, QStringLiteral("SV Block"), QStringLiteral("circuit-board"),
+            QStringLiteral("Create a SystemVerilog block with a starter module."));
+    layout->addLayout(kindRow, 2);
+
+    kindDescription_ = new QLabel;
+    kindDescription_->setWordWrap(true);
+    kindDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    layout->addWidget(kindDescription_);
+
+    auto *detailsCard = new QGroupBox(QStringLiteral("Details"));
+    auto *detailsLayout = new QVBoxLayout(detailsCard);
 
     openSection_ = new QWidget;
     auto *openSectionLayout = new QHBoxLayout(openSection_);
@@ -2465,7 +2498,7 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     openSectionLayout->addWidget(open_, 1);
     auto *openButton = new QPushButton(QStringLiteral("Open"));
     openSectionLayout->addWidget(openButton);
-    cardLayout->addWidget(openSection_);
+    detailsLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("Schematic01"));
@@ -2475,25 +2508,56 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     pdk_->setAccessibleName(QStringLiteral("Schematic PDK"));
     form->addRow(QStringLiteral("Schematic name"), name_);
     form->addRow(QStringLiteral("PDK"), pdk_);
-    cardLayout->addLayout(form);
+    detailsLayout->addLayout(form);
     auto *buttonRow = new QHBoxLayout;
     buttonRow->addStretch();
-    auto *createButton = new QPushButton(QStringLiteral("Create Schematic"));
-    createButton->setDefault(true);
-    buttonRow->addWidget(createButton);
-    cardLayout->addLayout(buttonRow);
-    layout->addWidget(card, 0, Qt::AlignHCenter);
-    layout->addStretch(1);
+    createButton_ = new QPushButton(QStringLiteral("Create Schematic"));
+    createButton_->setDefault(true);
+    buttonRow->addWidget(createButton_);
+    detailsLayout->addLayout(buttonRow);
+    layout->addWidget(detailsCard, 0);
 
     refreshPdks(configuredPackageInstallDirectory());
     setOpenCandidates({});
-    connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
+    connect(kindGroup_, qOverload<int>(&QButtonGroup::idClicked), this,
+            [this](int id) { selectKind(static_cast<Kind>(id)); });
+    connect(createButton_, &QPushButton::clicked, this, [this] { submit(); });
     connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
     connect(openButton, &QPushButton::clicked, this, [this] {
         const auto id = static_cast<ice::ObjectId>(open_->currentData().toULongLong());
         if (id != 0 && onOpen_)
             onOpen_(id);
     });
+    if (auto *button = kindGroup_->button(static_cast<int>(Kind::SchematicDrawing)))
+        button->setChecked(true);
+    updateKindUi();
+}
+
+void EmptySchematicPanel::selectKind(Kind kind) {
+    kind_ = kind;
+    updateKindUi();
+}
+
+void EmptySchematicPanel::updateKindUi() {
+    if (!kindDescription_ || !createButton_)
+        return;
+    switch (kind_) {
+    case Kind::SchematicDrawing:
+        kindDescription_->setText(
+            QStringLiteral("Draw a schematic on the canvas using symbols, wires, and ports."));
+        createButton_->setText(QStringLiteral("Create Schematic"));
+        break;
+    case Kind::TextSpice:
+        kindDescription_->setText(
+            QStringLiteral("Create a text SPICE schematic and edit the netlist source directly."));
+        createButton_->setText(QStringLiteral("Create Text Schematic"));
+        break;
+    case Kind::SystemVerilog:
+        kindDescription_->setText(
+            QStringLiteral("Create a SystemVerilog block with a starter module for digital logic."));
+        createButton_->setText(QStringLiteral("Create SV Block"));
+        break;
+    }
 }
 
 void EmptySchematicPanel::setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
@@ -2509,9 +2573,10 @@ void EmptySchematicPanel::setOpenCandidates(const std::vector<std::pair<ice::Obj
     openSection_->setVisible(hasCandidates);
     if (description_)
         description_->setText(hasCandidates
-                                  ? QStringLiteral("All schematics are closed. Open an existing file or create a "
-                                                   "new schematic.")
-                                  : QStringLiteral("This project has no schematics yet. Create one to start drawing."));
+                                  ? QStringLiteral("All schematics are closed. Open an existing file or choose a "
+                                                   "schematic type below to create a new one.")
+                                  : QStringLiteral("This project has no schematics yet. Choose a schematic type "
+                                                   "below to start."));
 }
 
 void EmptySchematicPanel::refreshPdks(const std::filesystem::path &installDirectory) {
@@ -2552,18 +2617,48 @@ void EmptySchematicPanel::submit() {
         return;
     }
     if (onCreate_)
-        onCreate_(name, pdk_->currentData().toString().toStdString());
+        onCreate_(kind_, name, pdk_->currentData().toString().toStdString());
 }
 
 EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
-    layout->addStretch(1);
-    auto *card = new QGroupBox(QStringLiteral("Create a layout cell"));
-    card->setMaximumWidth(520);
-    auto *cardLayout = new QVBoxLayout(card);
-    description_ = new QLabel(QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setSpacing(12);
+
+    layout->addWidget(heading(QStringLiteral("Create a layout")));
+    description_ = new QLabel(
+        QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
     description_->setWordWrap(true);
-    cardLayout->addWidget(description_);
+    description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    layout->addWidget(description_);
+
+    auto *kindRow = new QHBoxLayout;
+    kindRow->setSpacing(10);
+    kindGroup_ = new QButtonGroup(this);
+    kindGroup_->setExclusive(true);
+    const auto addKind = [&](Kind kind, const QString &label, const QString &icon, const QString &tooltip) {
+        auto *button = new QPushButton(label);
+        button->setCheckable(true);
+        button->setMinimumHeight(72);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setLucideIcon(button, icon, 20);
+        button->setToolTip(tooltip);
+        kindGroup_->addButton(button, static_cast<int>(kind));
+        kindRow->addWidget(button, 1);
+    };
+    addKind(Kind::StaticLayout, QStringLiteral("Static Layout"), QStringLiteral("notebook-pen"),
+            QStringLiteral("Create a static layout cell and draw geometry on the canvas."));
+    addKind(Kind::ProceduralLayout, QStringLiteral("Procedural Layout"), QStringLiteral("notebook-text"),
+            QStringLiteral("Create a layout from an editable procedural Python script."));
+    layout->addLayout(kindRow, 2);
+
+    kindDescription_ = new QLabel;
+    kindDescription_->setWordWrap(true);
+    kindDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    layout->addWidget(kindDescription_);
+
+    auto *detailsCard = new QGroupBox(QStringLiteral("Details"));
+    auto *detailsLayout = new QVBoxLayout(detailsCard);
 
     openSection_ = new QWidget;
     auto *openSectionLayout = new QHBoxLayout(openSection_);
@@ -2573,7 +2668,7 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     openSectionLayout->addWidget(open_, 1);
     auto *openButton = new QPushButton(QStringLiteral("Open"));
     openSectionLayout->addWidget(openButton);
-    cardLayout->addWidget(openSection_);
+    detailsLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("Layout01"));
@@ -2583,25 +2678,51 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     pdk_->setAccessibleName(QStringLiteral("Layout PDK"));
     form->addRow(QStringLiteral("Layout cell name"), name_);
     form->addRow(QStringLiteral("PDK"), pdk_);
-    cardLayout->addLayout(form);
+    detailsLayout->addLayout(form);
     auto *buttonRow = new QHBoxLayout;
     buttonRow->addStretch();
-    auto *createButton = new QPushButton(QStringLiteral("Create Layout Cell"));
-    createButton->setDefault(true);
-    buttonRow->addWidget(createButton);
-    cardLayout->addLayout(buttonRow);
-    layout->addWidget(card, 0, Qt::AlignHCenter);
-    layout->addStretch(1);
+    createButton_ = new QPushButton(QStringLiteral("Create Static Layout"));
+    createButton_->setDefault(true);
+    buttonRow->addWidget(createButton_);
+    detailsLayout->addLayout(buttonRow);
+    layout->addWidget(detailsCard, 0);
 
     refreshPdks(configuredPackageInstallDirectory());
     setOpenCandidates({});
-    connect(createButton, &QPushButton::clicked, this, [this] { submit(); });
+    connect(kindGroup_, qOverload<int>(&QButtonGroup::idClicked), this,
+            [this](int id) { selectKind(static_cast<Kind>(id)); });
+    connect(createButton_, &QPushButton::clicked, this, [this] { submit(); });
     connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
     connect(openButton, &QPushButton::clicked, this, [this] {
         const auto id = static_cast<ice::ObjectId>(open_->currentData().toULongLong());
         if (id != 0 && onOpen_)
             onOpen_(id);
     });
+    if (auto *button = kindGroup_->button(static_cast<int>(Kind::StaticLayout)))
+        button->setChecked(true);
+    updateKindUi();
+}
+
+void EmptyLayoutPanel::selectKind(Kind kind) {
+    kind_ = kind;
+    updateKindUi();
+}
+
+void EmptyLayoutPanel::updateKindUi() {
+    if (!kindDescription_ || !createButton_)
+        return;
+    switch (kind_) {
+    case Kind::StaticLayout:
+        kindDescription_->setText(
+            QStringLiteral("Create a static layout cell and draw geometry directly on the canvas."));
+        createButton_->setText(QStringLiteral("Create Static Layout"));
+        break;
+    case Kind::ProceduralLayout:
+        kindDescription_->setText(
+            QStringLiteral("Create a layout from an editable Python script and regenerate it on demand."));
+        createButton_->setText(QStringLiteral("Create Procedural Layout"));
+        break;
+    }
 }
 
 void EmptyLayoutPanel::setOnCreate(CreateCallback callback) { onCreate_ = std::move(callback); }
@@ -2616,10 +2737,11 @@ void EmptyLayoutPanel::setOpenCandidates(const std::vector<std::pair<ice::Object
     const bool hasCandidates = !candidates.empty();
     openSection_->setVisible(hasCandidates);
     if (description_)
-        description_->setText(
-            hasCandidates ? QStringLiteral("All layout files are closed. Open an existing file or create a "
-                                           "new layout.")
-                          : QStringLiteral("This project has no layout cells yet. Create one to start drawing."));
+        description_->setText(hasCandidates
+                                  ? QStringLiteral("All layout files are closed. Open an existing file or choose a "
+                                                   "layout type below to create a new one.")
+                                  : QStringLiteral("This project has no layout cells yet. Choose a layout type "
+                                                   "below to start."));
 }
 
 void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory) {
@@ -2660,7 +2782,7 @@ void EmptyLayoutPanel::submit() {
         return;
     }
     if (onCreate_)
-        onCreate_(name, pdk_->currentData().toString().toStdString());
+        onCreate_(kind_, name, pdk_->currentData().toString().toStdString());
 }
 
 CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirectory, const QString &defaultName,

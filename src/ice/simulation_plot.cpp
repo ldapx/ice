@@ -281,6 +281,9 @@ void SimulationPlot::ensureDisplayCache() const {
     cache_.plot = plot;
     cache_.traceArea = traceArea;
     cache_.xLabelRect = QRectF(plot.left(), plot.bottom() + 26, plot.width(), 16);
+    // Defaults are replaced with metrics-derived positions once the ticks are
+    // known. Keep them valid for the no-data early return below.
+    cache_.yTickLabelRect = QRectF(plot.left() - 58, 0, 52, 0);
     cache_.yLabelRect = QRectF(4, plot.center().y() - plot.height() / 2.0, 16, plot.height());
 
     std::size_t maxCount = 0;
@@ -372,6 +375,19 @@ void SimulationPlot::ensureDisplayCache() const {
     cache_.xTicks = axisTicks(xMin, xMax, xIntervals);
     cache_.yTicks = axisTicks(yMin, yMax, yIntervals);
 
+    // Reserve only as much width as the Y tick labels actually need. Placing
+    // the rotated axis title just left of that area keeps it close to the
+    // graph instead of pinning it to the widget edge.
+    qreal widestYTick = 0.0;
+    for (const double value : cache_.yTicks)
+        widestYTick = std::max(widestYTick, metrics.horizontalAdvance(formatTick(value)));
+    const qreal yTickWidth = std::max<qreal>(24.0, widestYTick + 6.0);
+    const qreal yTickRight = plot.left() - 6.0;
+    cache_.yTickLabelRect = QRectF(yTickRight - yTickWidth, 0, yTickWidth, 0);
+    const qreal yLabelWidth = std::max<qreal>(12.0, metrics.height());
+    const qreal yLabelLeft = std::max<qreal>(4.0, cache_.yTickLabelRect.left() - 8.0 - yLabelWidth);
+    cache_.yLabelRect = QRectF(yLabelLeft, plot.center().y() - plot.height() / 2.0, yLabelWidth, plot.height());
+
     // Keep at most two display points per horizontal pixel column. The
     // min/max envelope preserves short spikes while making the painter path
     // independent of the number of stored simulation samples.
@@ -441,7 +457,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     painter.setPen(QPen(plotFrame, 1));
     painter.drawRect(plot);
     painter.setPen(QPen(axisText, 1));
-    painter.drawText(QRectF(8, 6, width() - 16, 20), Qt::AlignCenter, cache_.title);
+    painter.drawText(QRectF(plot.left(), 6, plot.width(), 20), Qt::AlignCenter, cache_.title);
 
     // Legend entries sit above the plot frame, left-aligned with it, so the
     // labels never overlap the traces. Each entry is a white-outlined box
@@ -466,9 +482,11 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
 
     painter.setPen(QPen(axisText, 1));
     painter.save();
-    painter.translate(12, plot.center().y());
+    painter.translate(cache_.yLabelRect.center().x(), cache_.yLabelRect.center().y());
     painter.rotate(-90);
-    painter.drawText(QRectF(-plot.height() / 2.0, -8, plot.height(), 16), Qt::AlignCenter, cache_.yLabel);
+    painter.drawText(QRectF(-cache_.yLabelRect.height() / 2.0, -cache_.yLabelRect.width() / 2.0,
+                            cache_.yLabelRect.height(), cache_.yLabelRect.width()),
+                     Qt::AlignCenter, cache_.yLabel);
     painter.restore();
     painter.drawText(cache_.xLabelRect, Qt::AlignHCenter, cache_.xLabel);
 
@@ -507,7 +525,8 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     painter.setPen(QPen(tickText, 1));
     for (const double value : cache_.yTicks) {
         const auto y = mapY(value);
-        painter.drawText(QRectF(24, y - 8, 52, 16), Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
+        painter.drawText(QRectF(cache_.yTickLabelRect.left(), y - 8, cache_.yTickLabelRect.width(), 16),
+                         Qt::AlignRight | Qt::AlignVCenter, formatTick(value));
     }
     for (const double value : cache_.xTicks) {
         const auto x = mapX(value);

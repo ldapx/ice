@@ -63,6 +63,7 @@ class SimulationPlot : public QWidget {
         std::vector<std::string> legendSignals;
         QRectF xLabelRect;
         QRectF yLabelRect;
+        QRectF yTickLabelRect;
         std::string xSignal;
         std::vector<double> xTicks;
         std::vector<double> yTicks;

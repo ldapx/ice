@@ -583,7 +583,7 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
 }
 
 LayoutDevicePreview::LayoutDevicePreview(QWidget *parent) : QWidget(parent) {
-    setMinimumHeight(160);
+    setMinimumSize(0, 0);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setAccessibleName(QStringLiteral("Layout device preview"));
 }

@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+class QButtonGroup;
 class QComboBox;
 class QCheckBox;
 class QLabel;
@@ -243,7 +244,8 @@ class CreateProjectDialog : public QDialog {
 
 class EmptySchematicPanel : public QWidget {
   public:
-    using CreateCallback = std::function<void(const QString &name, const std::string &pdk)>;
+    enum class Kind { SchematicDrawing, TextSpice, SystemVerilog };
+    using CreateCallback = std::function<void(Kind kind, const QString &name, const std::string &pdk)>;
     using OpenCallback = std::function<void(ice::ObjectId)>;
     explicit EmptySchematicPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
@@ -257,12 +259,18 @@ class EmptySchematicPanel : public QWidget {
 
   private:
     void submit();
+    void selectKind(Kind kind);
+    void updateKindUi();
 
     QLabel *description_ = nullptr;
     QWidget *openSection_ = nullptr;
     QComboBox *open_ = nullptr;
+    QLabel *kindDescription_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QButtonGroup *kindGroup_ = nullptr;
+    Kind kind_ = Kind::SchematicDrawing;
     bool nameEdited_ = false;
     CreateCallback onCreate_;
     OpenCallback onOpen_;
@@ -270,7 +278,8 @@ class EmptySchematicPanel : public QWidget {
 
 class EmptyLayoutPanel : public QWidget {
   public:
-    using CreateCallback = std::function<void(const QString &name, const std::string &pdk)>;
+    enum class Kind { StaticLayout, ProceduralLayout };
+    using CreateCallback = std::function<void(Kind kind, const QString &name, const std::string &pdk)>;
     using OpenCallback = std::function<void(ice::ObjectId)>;
     explicit EmptyLayoutPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
@@ -284,12 +293,18 @@ class EmptyLayoutPanel : public QWidget {
 
   private:
     void submit();
+    void selectKind(Kind kind);
+    void updateKindUi();
 
     QLabel *description_ = nullptr;
     QWidget *openSection_ = nullptr;
     QComboBox *open_ = nullptr;
+    QLabel *kindDescription_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QButtonGroup *kindGroup_ = nullptr;
+    Kind kind_ = Kind::StaticLayout;
     bool nameEdited_ = false;
     CreateCallback onCreate_;
     OpenCallback onOpen_;

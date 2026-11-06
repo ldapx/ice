@@ -8726,7 +8726,19 @@ class DocumentWindow : public QMainWindow {
         schematicEditorLayout->addWidget(schematicViewStack_, 1);
         schematicEmptyPanel_ = new EmptySchematicPanel;
         schematicEmptyPanel_->setOnCreate(
-            [this](const QString &name, const std::string &pdk) { createSchematic(name, pdk); });
+            [this](EmptySchematicPanel::Kind kind, const QString &name, const std::string &pdk) {
+                switch (kind) {
+                case EmptySchematicPanel::Kind::SchematicDrawing:
+                    createSchematic(name, pdk);
+                    break;
+                case EmptySchematicPanel::Kind::TextSpice:
+                    createTextSchematic(name, pdk);
+                    break;
+                case EmptySchematicPanel::Kind::SystemVerilog:
+                    createSystemVerilogCell(name, pdk, false);
+                    break;
+                }
+            });
         schematicEmptyPanel_->setOnOpen([this](ice::ObjectId id) { openSchematicFile(id); });
         schematicEditorStack_ = new QStackedWidget;
         schematicEditorStack_->addWidget(schematicEmptyPanel_);
@@ -8838,7 +8850,16 @@ class DocumentWindow : public QMainWindow {
         layoutEditorLayout->addWidget(layoutViewStack_, 1);
         layoutEmptyPanel_ = new EmptyLayoutPanel;
         layoutEmptyPanel_->setOnCreate(
-            [this](const QString &name, const std::string &pdk) { createLayoutCell(name, pdk); });
+            [this](EmptyLayoutPanel::Kind kind, const QString &name, const std::string &pdk) {
+                switch (kind) {
+                case EmptyLayoutPanel::Kind::StaticLayout:
+                    createLayoutCell(name, pdk);
+                    break;
+                case EmptyLayoutPanel::Kind::ProceduralLayout:
+                    createProceduralLayout(name, pdk);
+                    break;
+                }
+            });
         layoutEmptyPanel_->setOnOpen([this](ice::ObjectId id) { openLayoutFile(id); });
         layoutEditorStack_ = new QStackedWidget;
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
@@ -9139,10 +9160,12 @@ class DocumentWindow : public QMainWindow {
         // Graph tabs area
         auto *graphsPage = new QWidget;
         simulationGraphsPage_ = graphsPage;
-        auto *graphsLayout = new QVBoxLayout(graphsPage);
+        auto *graphsLayout = new QHBoxLayout(graphsPage);
         graphsLayout->setContentsMargins(0, 0, 0, 0);
+        graphsLayout->setSpacing(4);
         auto *graphControls = new QWidget;
-        auto *graphControlsLayout = new QHBoxLayout(graphControls);
+        graphControls->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        auto *graphControlsLayout = new QVBoxLayout(graphControls);
         graphControlsLayout->setContentsMargins(0, 0, 0, 0);
         graphControlsLayout->setSpacing(2);
         simulationAddGraphButton_ = new QPushButton;
@@ -9177,18 +9200,20 @@ class DocumentWindow : public QMainWindow {
         simulationLoadVcdButton_->setFixedWidth(32);
         simulationLoadVcdButton_->setEnabled(false);
         setLucideIcon(simulationLoadVcdButton_, QStringLiteral("notebook-text"), 16);
+        graphControlsLayout->addStretch(1);
         graphControlsLayout->addWidget(simulationAddGraphButton_);
         graphControlsLayout->addWidget(simulationDeleteGraphButton_);
         graphControlsLayout->addWidget(simulationEditGraphButton_);
         graphControlsLayout->addWidget(simulationGridButton_);
         graphControlsLayout->addWidget(simulationLoadVcdButton_);
+        graphControlsLayout->addStretch(1);
 
         graphTabs_ = new QTabWidget;
         graphTabs_->setDocumentMode(true);
         graphTabs_->setTabsClosable(false);
-        graphTabs_->setCornerWidget(graphControls, Qt::TopRightCorner);
         simulationPlot_ = createGraphPlot();
         graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
+        graphsLayout->addWidget(graphControls, 0);
         graphsLayout->addWidget(graphTabs_, 1);
         simulationTabs_->addTab(graphsPage, QStringLiteral("Graphs"));
 

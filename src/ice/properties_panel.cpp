@@ -47,18 +47,20 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     splitter->setHandleWidth(6);
     previewFrame_ = new QFrame;
     previewFrame_->setObjectName(QStringLiteral("propertiesSymbolPreview"));
-    previewFrame_->setMinimumHeight(80);
+    previewFrame_->setMinimumHeight(75);
     previewFrame_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto *previewLayout = new QVBoxLayout(previewFrame_);
+    previewLayout->setContentsMargins(4, 4, 4, 4);
     previewStack_ = new QStackedWidget;
+    previewStack_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     symbolPreview_ = new SymbolPreview;
-    symbolPreview_->setMinimumSize(160, 80);
+    symbolPreview_->setMinimumSize(0, 0);
     symbolPreview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     layoutDevicePreview_ = new LayoutDevicePreview;
     previewStack_->addWidget(symbolPreview_);
     previewStack_->addWidget(layoutDevicePreview_);
     previewLayout->addWidget(previewStack_);
-    previewFrame_->setVisible(false);
+    previewFrame_->setVisible(true);
     splitter->addWidget(previewFrame_);
 
     auto *details = new QWidget;
@@ -113,7 +115,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     splitter->addWidget(details);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({180, 420});
+    splitter->setSizes({75, 500});
     layout->addWidget(splitter, 1);
     connect(parameters_, &QTableWidget::itemChanged, this,
             [this](QTableWidgetItem *item) { handleParameterEdit(item); });
@@ -186,7 +188,7 @@ void PropertiesPanel::clearSelection() {
         gridOptions_->setVisible(false);
     setParametersVisible(false);
     setTitle(QStringLiteral("Properties"));
-    previewFrame_->setVisible(false);
+    previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
     updateParameterButtons();
@@ -209,7 +211,7 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     setTitle(QString::fromStdString(instance.name));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(QByteArray::fromStdString(symbolSvg));
-    previewFrame_->setVisible(!symbolSvg.empty());
+    previewFrame_->setVisible(true);
     populateParameters(instance.parameters);
     updateParameterButtons();
 }
@@ -229,7 +231,7 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     setTitle(QString::fromStdString(cell.name));
     previewStack_->setCurrentWidget(symbolPreview_);
     symbolPreview_->load(symbolSvg.toUtf8());
-    previewFrame_->setVisible(!symbolSvg.isEmpty());
+    previewFrame_->setVisible(true);
     populateParameters(cell.parameters);
     updateParameterButtons();
 }
@@ -257,7 +259,7 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
     layoutDevicePreview_->setModel(model);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
-    previewFrame_->setVisible(!model.empty());
+    previewFrame_->setVisible(true);
     populateParameters(cell.parameters);
     updateParameterButtons();
 }
@@ -276,7 +278,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     setParametersVisible(cell != nullptr);
     if (!cell) {
         setTitle(QStringLiteral("Properties"));
-        previewFrame_->setVisible(false);
+        previewFrame_->setVisible(true);
         populateParameters({});
         updateParameterButtons();
         return;
@@ -306,7 +308,7 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     pathWidth_ = std::max(1, width);
     pathLayerName_ = layerName;
     setTitle(QStringLiteral("Path tool"));
-    previewFrame_->setVisible(false);
+    previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
     const int layerRow = parameters_->rowCount();
@@ -346,7 +348,7 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
         gridOptions_->setVisible(false);
     setParametersVisible(true);
     setTitle(QString::fromStdString(displayName));
-    previewFrame_->setVisible(false);
+    previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
     const auto addReadOnlyRow = [&](const QString &name, const QString &value) {
@@ -398,7 +400,7 @@ void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &la
         gridOptions_->setVisible(false);
     setParametersVisible(true);
     setTitle(QString::fromStdString(port.name));
-    previewFrame_->setVisible(false);
+    previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
     const auto addRow = [&](const QString &name, const QString &value, bool editable) {
@@ -445,7 +447,7 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
     layoutDevicePreview_->setModel(model);
     previewStack_->setCurrentWidget(layoutDevicePreview_);
-    previewFrame_->setVisible(!model.empty());
+    previewFrame_->setVisible(true);
     setTitle(QString::fromStdString(cell.name));
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
