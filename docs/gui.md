@@ -348,6 +348,15 @@ not rounded. Layer-change vias are stored with the path and move with it.
 Segments adjacent to a via extend by half the via size so the copper fully
 overlaps the via on both layers.
 
+The **Create Rectangle** tool is click-move-click: the first click anchors the
+corner, moving the mouse previews the rectangle and shows its live `width x
+height`, and the next click finishes it. The size field at the bottom right of
+the canvas accepts exact dimensions while the rectangle is previewed; type
+`width,height` (for example `281,2875`) and the rectangle is created with those
+dimensions once typing pauses, or press Enter to finish immediately. Dimensions
+follow the layout **Spacing** setting when snap-to-grid is enabled. Escape
+cancels the pending rectangle.
+
 Select a rectangle to show square point handles at its four corners and at the
 midpoints of its left, right, top, and bottom edges. Drag a handle to resize
 from that corner or side while the opposite side stays fixed. The handles use
@@ -366,9 +375,9 @@ The **Ruler** tool measures between two clicked points. The ruler line keeps a
 constant screen width as you zoom, and shows minor and major tick marks with
 distance labels along its length.
 
-The **Draw Text Label** tool places an annotation on the currently selected
-layer. Click the canvas, enter the string, and ICE creates a movable text
-object with a 1 um nominal height. It is stored in the project and exported as
+The **Comment** tool (Shift+C, layout text labels) places an annotation on the
+currently selected layer. Click the canvas, enter the string, and ICE creates a
+movable text object with a 1 um nominal height. It is stored in the project and exported as
 GDSII TEXT records, but it does not create conductive geometry.
 
 The **Draw Text Polygon** tool is available from the dropdown attached to the
@@ -470,8 +479,8 @@ Common defaults:
 - **Schematic rotate / flip**: Shift+R / H
 - **Schematic place device**: R resistor, X NMOS, I input, O output, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
 - **Schematic comment**: Shift+C
-- **Layout rotate / flips**: Ctrl+R / H / J
-- **Layout rectangle / polygon / path / text label / text polygon / pin / ruler**: R / G / W / T / Shift+T / N / L
+- **Layout rotate / flips**: Shift+R / H / J
+- **Layout rectangle / polygon / path / comment (text label) / text polygon / pin / ruler**: R / G / W / Shift+C / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
 
 Use **Settings → Keyboard Shortcuts…** (Ctrl+Shift+K) to reassign commands,

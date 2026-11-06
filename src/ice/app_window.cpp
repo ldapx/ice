@@ -2523,18 +2523,24 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
         const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
-        project_->execute("move layout path point", [&](ice::Project &project) {
-            const auto cell = project.layoutCells.find(activeLayoutId_);
-            if (cell == project.layoutCells.end() || cell->second.library)
-                return;
-            const auto shape = cell->second.shapes.find(shapeId);
-            if (shape == cell->second.shapes.end() || !shape->second.isPath())
-                return;
-            if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
-                return;
-            shape->second.centerline[static_cast<std::size_t>(index)] = {x, y};
-            rebuildLayoutPathGeometry(shape->second);
-        });
+        try {
+            project_->execute("move layout path point", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto shape = cell->second.shapes.find(shapeId);
+                if (shape == cell->second.shapes.end() || !shape->second.isPath())
+                    return;
+                if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                    return;
+                shape->second.centerline[static_cast<std::size_t>(index)] = {x, y};
+                rebuildLayoutPathGeometry(shape->second);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Move path point: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
         refreshProject();
     }
 
@@ -2543,53 +2549,72 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
         const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
-        project_->execute("insert layout path point", [&](ice::Project &project) {
-            const auto cell = project.layoutCells.find(activeLayoutId_);
-            if (cell == project.layoutCells.end() || cell->second.library)
-                return;
-            const auto shape = cell->second.shapes.find(shapeId);
-            if (shape == cell->second.shapes.end() || !shape->second.isPath())
-                return;
-            if (index <= 0 || index >= static_cast<int>(shape->second.centerline.size()))
-                return;
-            auto &path = shape->second;
-            if (path.segmentLayers.empty() && path.centerline.size() > 1)
-                path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
-            if (!path.segmentLayers.empty() && index - 1 < static_cast<int>(path.segmentLayers.size()))
-                path.segmentLayers.insert(path.segmentLayers.begin() + index - 1, path.segmentLayers[index - 1]);
-            if (path.pointVias.size() == path.centerline.size())
-                path.pointVias.insert(path.pointVias.begin() + index, {});
-            path.centerline.insert(path.centerline.begin() + index, {x, y});
-            rebuildLayoutPathGeometry(path);
-        });
+        try {
+            project_->execute("insert layout path point", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto shape = cell->second.shapes.find(shapeId);
+                if (shape == cell->second.shapes.end() || !shape->second.isPath())
+                    return;
+                if (index <= 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                    return;
+                auto &path = shape->second;
+                if (path.segmentLayers.empty() && path.centerline.size() > 1)
+                    path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+                if (path.pointVias.empty())
+                    path.pointVias.assign(path.centerline.size(), std::vector<ice::ObjectId>{});
+                if (!path.segmentLayers.empty() && index - 1 < static_cast<int>(path.segmentLayers.size()))
+                    path.segmentLayers.insert(path.segmentLayers.begin() + index - 1, path.segmentLayers[index - 1]);
+                // Insert an explicit empty vector: `insert(pos, {})` selects the
+                // initializer-list overload and adds nothing, which would leave
+                // the via count out of step with the centerline and make the
+                // project invalid (and the next edit throw).
+                if (path.pointVias.size() == path.centerline.size())
+                    path.pointVias.insert(path.pointVias.begin() + index, std::vector<ice::ObjectId>{});
+                path.centerline.insert(path.centerline.begin() + index, {x, y});
+                rebuildLayoutPathGeometry(path);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Insert path point: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
         refreshProject();
     }
 
     void deleteLayoutPathPoint(ice::ObjectId shapeId, int index) {
         if (!project_ || activeLayoutId_ == 0)
             return;
-        project_->execute("delete layout path point", [&](ice::Project &project) {
-            const auto cell = project.layoutCells.find(activeLayoutId_);
-            if (cell == project.layoutCells.end() || cell->second.library)
-                return;
-            const auto shape = cell->second.shapes.find(shapeId);
-            if (shape == cell->second.shapes.end() || !shape->second.isPath() || shape->second.centerline.size() <= 2)
-                return;
-            if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
-                return;
-            auto &path = shape->second;
-            if (path.segmentLayers.empty() && path.centerline.size() > 1)
-                path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
-            if (!path.segmentLayers.empty()) {
-                const auto removeIndex =
-                    std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentLayers.size() - 1);
-                path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
-            }
-            if (index < static_cast<int>(path.pointVias.size()))
-                path.pointVias.erase(path.pointVias.begin() + index);
-            path.centerline.erase(path.centerline.begin() + index);
-            rebuildLayoutPathGeometry(path);
-        });
+        try {
+            project_->execute("delete layout path point", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto shape = cell->second.shapes.find(shapeId);
+                if (shape == cell->second.shapes.end() || !shape->second.isPath() ||
+                    shape->second.centerline.size() <= 2)
+                    return;
+                if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                    return;
+                auto &path = shape->second;
+                if (path.segmentLayers.empty() && path.centerline.size() > 1)
+                    path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+                if (!path.segmentLayers.empty()) {
+                    const auto removeIndex =
+                        std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentLayers.size() - 1);
+                    path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
+                }
+                if (index < static_cast<int>(path.pointVias.size()))
+                    path.pointVias.erase(path.pointVias.begin() + index);
+                path.centerline.erase(path.centerline.begin() + index);
+                rebuildLayoutPathGeometry(path);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Delete path point: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
         refreshProject();
     }
 
@@ -9922,6 +9947,9 @@ class DocumentWindow : public QMainWindow {
 
             auto *rectangleTool = addTool(QStringLiteral("square"), QStringLiteral("Create Rectangle"));
             rectangleTool->setCheckable(true);
+            rectangleTool->setToolTip(
+                QStringLiteral("Create rectangle (R) · click to start, click to finish, or type width,height"));
+            rectangleTool->setStatusTip(rectangleTool->toolTip());
             layoutRectangleTool_ = rectangleTool;
             addShortcut(rectangleTool, QStringLiteral("layout.rectangle"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("R")));
@@ -9948,13 +9976,13 @@ class DocumentWindow : public QMainWindow {
             addShortcut(pathTool, QStringLiteral("layout.path"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("W")));
 
-            auto *textTool = addTool(QStringLiteral("message-square"), QStringLiteral("Draw Text Label"));
+            auto *textTool = addTool(QStringLiteral("message-square"), QStringLiteral("Comment"));
             textTool->setCheckable(true);
-            textTool->setToolTip(QStringLiteral("Draw text label (T)"));
-            textTool->setStatusTip(QStringLiteral("Draw text label (T)"));
+            textTool->setToolTip(QStringLiteral("Comment / text label (Shift+C)"));
+            textTool->setStatusTip(textTool->toolTip());
             layoutTextTool_ = textTool;
             addShortcut(textTool, QStringLiteral("layout.text"), ice::ShortcutScope::layout,
-                        QKeySequence(QStringLiteral("T")));
+                        QKeySequence(QStringLiteral("Shift+C")));
 
             // Keep the polygon tools together: the main toolbar button creates
             // a normal polygon, while the dropdown also offers text polygons.
@@ -10005,7 +10033,7 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setTool(LayoutCanvas::Tool::text);
                     layoutCanvas_->setFocus();
                 }
-                QString message = QStringLiteral("Text label: click to place an annotation");
+                QString message = QStringLiteral("Comment: click to place a text annotation");
                 if (project_ && activeLayoutLayerId_ != 0) {
                     if (const auto layer = project_->project().layers.find(activeLayoutLayerId_);
                         layer != project_->project().layers.end())
@@ -10075,6 +10103,8 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setFocus();
                 }
                 refreshLayoutProperties(false);
+                statusBar()->showMessage(QStringLiteral(
+                    "Rectangle: click to start, move to size, click to finish · or type width,height in the size field"));
             });
             connect(pathTool, &QAction::triggered, this, [this, pathTool] {
                 if (!pathTool->isChecked() || !layoutCanvas_ || layoutCanvas_->isReadOnly())
@@ -10353,9 +10383,9 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *rotateTool = addTool(QStringLiteral("rotate-cw"), QStringLiteral("Rotate"));
-        rotateTool->setToolTip(QStringLiteral("Rotate selected device (Ctrl+R)"));
-        rotateTool->setStatusTip(QStringLiteral("Rotate selected device (Ctrl+R)"));
-        addShortcut(rotateTool, QStringLiteral("layout.rotate"), QKeySequence(QStringLiteral("Ctrl+R")));
+        rotateTool->setToolTip(QStringLiteral("Rotate selected device (Shift+R)"));
+        rotateTool->setStatusTip(QStringLiteral("Rotate selected device (Shift+R)"));
+        addShortcut(rotateTool, QStringLiteral("layout.rotate"), QKeySequence(QStringLiteral("Shift+R")));
         connect(rotateTool, &QAction::triggered, this, [this] { rotateSelectedLayoutFigures(); });
         auto *flipHorizontalTool = addTool(QStringLiteral("flip-horizontal-2"), QStringLiteral("Flip Horizontally"));
         flipHorizontalTool->setToolTip(QStringLiteral("Flip selected device horizontally (H)"));
