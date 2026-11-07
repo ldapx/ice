@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -112,8 +113,7 @@ void paintPolygon(QPainter &painter, const QPolygonF &polygon, const LayerStyle 
     painter.drawPolygon(polygon);
 }
 
-void drawHaloText(QPainter &painter, const QRectF &rectangle, int alignment, const QString &text,
-                  const QColor &color) {
+void drawHaloText(QPainter &painter, const QRectF &rectangle, int alignment, const QString &text, const QColor &color) {
     auto halo = uiColor(UiColor::Background2);
     halo.setAlpha(225);
     QPen haloPen(halo, 2.0);
@@ -121,7 +121,7 @@ void drawHaloText(QPainter &painter, const QRectF &rectangle, int alignment, con
     painter.save();
     painter.setBrush(Qt::NoBrush);
     painter.setPen(haloPen);
-    static const QPointF offsets[] = {{-1.5, 0.0}, {1.5, 0.0},  {0.0, -1.5}, {0.0, 1.5},
+    static const QPointF offsets[] = {{-1.5, 0.0},  {1.5, 0.0},  {0.0, -1.5}, {0.0, 1.5},
                                       {-1.0, -1.0}, {1.0, -1.0}, {-1.0, 1.0}, {1.0, 1.0}};
     for (const auto &offset : offsets)
         painter.drawText(rectangle.translated(offset), alignment, text);
@@ -420,15 +420,77 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 includeRect(bounds, valid, preview.rectangle);
                 model.plannedDevices.push_back(std::move(preview));
             }
+
+            const auto endpointPoint = [&](ObjectId endpoint, ObjectId port) -> std::optional<Point> {
+                if (const auto device = current.plannedDevices.find(endpoint); device != current.plannedDevices.end())
+                    return Point{device->second.x + device->second.width / 2,
+                                 device->second.y + device->second.height / 2};
+                if (const auto pin = current.ports.find(endpoint); pin != current.ports.end())
+                    return Point{pin->second.rectangle.x + pin->second.rectangle.width / 2,
+                                 pin->second.rectangle.y + pin->second.rectangle.height / 2};
+                const auto instance = current.instances.find(endpoint);
+                if (instance == current.instances.end())
+                    return std::nullopt;
+                const auto child = project.layoutCells.find(instance->second.cell);
+                if (child == project.layoutCells.end())
+                    return std::nullopt;
+                const Transform transform{instance->second.x, instance->second.y, instance->second.orientation};
+                if (port != 0) {
+                    const auto childPort = child->second.ports.find(port);
+                    if (childPort != child->second.ports.end()) {
+                        const auto center =
+                            transform.apply({childPort->second.rectangle.x + childPort->second.rectangle.width / 2,
+                                             childPort->second.rectangle.y + childPort->second.rectangle.height / 2});
+                        return Point{center.x, center.y};
+                    }
+                }
+
+                bool havePoint = false;
+                Point minimum;
+                Point maximum;
+                const auto add = [&](Point point) {
+                    const auto mapped = transform.apply(point);
+                    if (!havePoint) {
+                        minimum = maximum = mapped;
+                        havePoint = true;
+                        return;
+                    }
+                    minimum.x = std::min(minimum.x, mapped.x);
+                    minimum.y = std::min(minimum.y, mapped.y);
+                    maximum.x = std::max(maximum.x, mapped.x);
+                    maximum.y = std::max(maximum.y, mapped.y);
+                };
+                for (const auto &[_, shape] : child->second.shapes) {
+                    if (shape.isPath()) {
+                        for (const auto &point : shape.centerline)
+                            add({point.x, point.y});
+                    } else if (!shape.polygon.empty()) {
+                        for (const auto &point : shape.polygon)
+                            add({point.x, point.y});
+                    } else {
+                        add({shape.rectangle.x, shape.rectangle.y});
+                        add({shape.rectangle.x + shape.rectangle.width, shape.rectangle.y + shape.rectangle.height});
+                    }
+                }
+                for (const auto &[_, childPort] : child->second.ports) {
+                    add({childPort.rectangle.x, childPort.rectangle.y});
+                    add({childPort.rectangle.x + childPort.rectangle.width,
+                         childPort.rectangle.y + childPort.rectangle.height});
+                }
+                if (!havePoint)
+                    return Point{instance->second.x, instance->second.y};
+                return Point{(minimum.x + maximum.x) / 2, (minimum.y + maximum.y) / 2};
+            };
+
             for (const auto &[_, connection] : current.plannedConnections) {
-                const auto from = current.plannedDevices.find(connection.from);
-                const auto to = current.plannedDevices.find(connection.to);
-                if (from == current.plannedDevices.end() || to == current.plannedDevices.end())
+                if (connection.routed)
+                    continue;
+                const auto from = endpointPoint(connection.from, connection.fromPort);
+                const auto to = endpointPoint(connection.to, connection.toPort);
+                if (!from || !to)
                     continue;
                 LayoutPreviewConnection preview;
-                preview.line =
-                    QLineF(from->second.x + from->second.width * 0.5, from->second.y + from->second.height * 0.5,
-                           to->second.x + to->second.width * 0.5, to->second.y + to->second.height * 0.5);
+                preview.line = QLineF(from->x, from->y, to->x, to->y);
                 if (const auto net = current.nets.find(connection.net); net != current.nets.end())
                     preview.net = QString::fromStdString(net->second.name);
                 model.plannedConnections.push_back(std::move(preview));

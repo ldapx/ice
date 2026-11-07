@@ -6,6 +6,7 @@
 #include "ui_helpers.hpp"
 
 #include <QApplication>
+#include <QContextMenuEvent>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGraphicsItemGroup>
@@ -21,6 +22,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QPen>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -169,16 +171,78 @@ class PlannedDeviceItem : public QGraphicsItem {
     QSizeF size_;
 };
 
+class PlannedConnectionItem : public QGraphicsItem {
+  public:
+    PlannedConnectionItem(ice::ObjectId id, QLineF line, QColor color)
+        : id_(id), line_(std::move(line)), color_(std::move(color)) {
+        setData(0, QVariant::fromValue<qulonglong>(id_));
+        setData(2, QStringLiteral("planned-connection"));
+        setFlag(QGraphicsItem::ItemIsSelectable);
+        setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+        setZValue(-5.0);
+    }
+
+    QRectF boundingRect() const override {
+        const auto bounds = QRectF(line_.p1(), line_.p2()).normalized();
+        const auto margin = std::max(hitWidth() * 0.5, 8.0 / viewScale()) + 2.0 / viewScale();
+        return bounds.adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.moveTo(line_.p1());
+        path.lineTo(line_.p2());
+        QPainterPathStroker stroker;
+        stroker.setWidth(hitWidth());
+        stroker.setCapStyle(Qt::RoundCap);
+        return stroker.createStroke(path);
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        if (isSelected()) {
+            QColor halo = color_;
+            halo.setAlpha(90);
+            QPen haloPen(halo);
+            haloPen.setCosmetic(true);
+            haloPen.setWidthF(7.0);
+            painter->setPen(haloPen);
+            painter->drawLine(line_);
+        }
+        QPen pen(isSelected() ? ice::uiColor(ice::UiColor::Accent5) : color_);
+        pen.setCosmetic(true);
+        pen.setWidthF(isSelected() ? 2.5 : 1.5);
+        painter->setPen(pen);
+        painter->drawLine(line_);
+        painter->restore();
+    }
+
+  private:
+    qreal viewScale() const {
+        qreal scale = 1.0;
+        if (scene() && !scene()->views().empty())
+            scale = std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return scale;
+    }
+
+    qreal hitWidth() const { return 12.0 / viewScale(); }
+
+    ice::ObjectId id_ = 0;
+    QLineF line_;
+    QColor color_;
+};
+
 class LayoutPathItem : public QGraphicsItem {
   public:
     LayoutPathItem(ice::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<QColor> segmentColors,
-                   std::vector<std::vector<QColor>> pointViaColors, bool readOnly,
-                   LayoutPathPointMovedCallback pointMoved, LayoutPathPointInsertedCallback pointInserted,
-                   LayoutPathPointDeletedCallback pointDeleted)
+                   std::vector<std::vector<QColor>> pointViaColors, bool readOnly, bool pointEditable,
+                   bool endpointHandlesOnly, LayoutPathPointMovedCallback pointMoved,
+                   LayoutPathPointInsertedCallback pointInserted, LayoutPathPointDeletedCallback pointDeleted)
         : id_(id), points_(std::move(points)), width_(std::max<qreal>(1.0, width)),
           segmentColors_(std::move(segmentColors)), pointViaColors_(std::move(pointViaColors)), readOnly_(readOnly),
-          pointMoved_(std::move(pointMoved)), pointInserted_(std::move(pointInserted)),
-          pointDeleted_(std::move(pointDeleted)) {
+          pointEditable_(pointEditable), endpointHandlesOnly_(endpointHandlesOnly), pointMoved_(std::move(pointMoved)),
+          pointInserted_(std::move(pointInserted)), pointDeleted_(std::move(pointDeleted)) {
         setData(0, QVariant::fromValue<qulonglong>(id_));
         setFlag(QGraphicsItem::ItemIsSelectable);
         if (!readOnly_)
@@ -204,10 +268,9 @@ class LayoutPathItem : public QGraphicsItem {
         }
         // Handles stay hittable even when the path is not selected yet, so a
         // press near a point never falls through to the rubber-band selection.
-        if (!readOnly_) {
-            for (int index = 0; index < static_cast<int>(points_.size()); ++index)
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index)
+            if (handleEditable(index))
                 result.addRect(handleHitRect(index));
-        }
         return result;
     }
 
@@ -255,7 +318,7 @@ class LayoutPathItem : public QGraphicsItem {
             }
         }
 
-        if (!isSelected() || readOnly_ || !pointEditingEnabled_) {
+        if (!isSelected() || !pointEditingEnabled_) {
             painter->restore();
             return;
         }
@@ -267,12 +330,13 @@ class LayoutPathItem : public QGraphicsItem {
         painter->setPen(handlePen);
         painter->setBrush(handleBrush);
         for (int index = 0; index < static_cast<int>(points_.size()); ++index)
-            painter->drawRect(handleRect(index));
+            if (handleEditable(index))
+                painter->drawRect(handleRect(index));
         painter->restore();
     }
 
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override {
-        if (!readOnly_) {
+        if (!readOnly_ && pointEditable_) {
             if (event->button() == Qt::LeftButton && pointEditingEnabled_) {
                 const int handle = nearestHandle(event->pos());
                 if (handle >= 0) {
@@ -286,7 +350,8 @@ class LayoutPathItem : public QGraphicsItem {
                     event->accept();
                     return;
                 }
-            } else if (event->button() == Qt::RightButton && isSelected() && pointEditingEnabled_) {
+            } else if (event->button() == Qt::RightButton && isSelected() && pointEditingEnabled_ &&
+                       !endpointHandlesOnly_) {
                 const int handle = nearestHandle(event->pos());
                 if (handle >= 0 && points_.size() > 2 && pointDeleted_) {
                     QMenu menu;
@@ -326,8 +391,8 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
-        if (!readOnly_ && pointEditingEnabled_ && event->button() == Qt::LeftButton &&
-            nearestHandle(event->pos()) < 0 && pointInserted_) {
+        if (!readOnly_ && pointEditable_ && pointEditingEnabled_ && !endpointHandlesOnly_ &&
+            event->button() == Qt::LeftButton && nearestHandle(event->pos()) < 0 && pointInserted_) {
             const auto local = mapFromScene(event->scenePos());
             const int segment = nearestSegment(local);
             if (segment >= 0) {
@@ -346,16 +411,17 @@ class LayoutPathItem : public QGraphicsItem {
     ice::ObjectId pathId() const { return id_; }
 
     void setPointEditingEnabled(bool enabled) {
-        if (pointEditingEnabled_ == enabled)
+        const auto effective = enabled && pointEditable_;
+        if (pointEditingEnabled_ == effective)
             return;
-        pointEditingEnabled_ = enabled;
-        if (!enabled)
+        pointEditingEnabled_ = effective;
+        if (!effective)
             cancelHandleDrag();
         update();
     }
 
     int handleAtScenePosition(const QPointF &scenePos) const {
-        if (readOnly_ || !pointEditingEnabled_)
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_)
             return -1;
         return nearestHandle(mapFromScene(scenePos));
     }
@@ -367,14 +433,15 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     void beginHandleDrag(int index) {
-        if (index < 0 || index >= static_cast<int>(points_.size()))
+        if (!pointEditingEnabled_ || !handleEditable(index))
             return;
         draggingHandle_ = index;
         handleDragStart_ = points_[static_cast<std::size_t>(index)];
     }
 
     void dragHandleToScenePosition(const QPointF &scenePos) {
-        if (draggingHandle_ < 0 || draggingHandle_ >= static_cast<int>(points_.size()))
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || draggingHandle_ < 0 ||
+            draggingHandle_ >= static_cast<int>(points_.size()))
             return;
         prepareGeometryChange();
         points_[static_cast<std::size_t>(draggingHandle_)] = mapFromScene(scenePos);
@@ -402,6 +469,14 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
   private:
+    bool handleEditable(int index) const {
+        if (readOnly_ || !pointEditable_ || index < 0 || index >= static_cast<int>(points_.size()))
+            return false;
+        if (endpointHandlesOnly_ && index != 0 && index != static_cast<int>(points_.size()) - 1)
+            return false;
+        return true;
+    }
+
     bool hasVia(std::size_t index) const { return index < pointViaColors_.size() && !pointViaColors_[index].empty(); }
 
     QPainterPath runPath(std::size_t start, std::size_t end) const {
@@ -480,7 +555,7 @@ class LayoutPathItem : public QGraphicsItem {
         int nearest = -1;
         qreal nearestDistance = std::numeric_limits<qreal>::max();
         for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
-            if (!handleHitRect(index).contains(position))
+            if (!handleEditable(index) || !handleHitRect(index).contains(position))
                 continue;
             const auto distance = QLineF(position, points_[static_cast<std::size_t>(index)]).length();
             if (distance < nearestDistance) {
@@ -521,6 +596,8 @@ class LayoutPathItem : public QGraphicsItem {
     std::vector<QColor> segmentColors_;
     std::vector<std::vector<QColor>> pointViaColors_;
     bool readOnly_ = false;
+    bool pointEditable_ = true;
+    bool endpointHandlesOnly_ = false;
     bool pointEditingEnabled_ = true;
     int draggingHandle_ = -1;
     QPointF handleDragStart_;
@@ -890,7 +967,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 continue;
             if (!(item->flags() & QGraphicsItem::ItemIsSelectable))
                 continue;
-            item->setFlag(QGraphicsItem::ItemIsMovable, moveMode);
+            const bool movable = moveMode && item->data(2).toString() != QStringLiteral("planned-connection");
+            item->setFlag(QGraphicsItem::ItemIsMovable, movable);
         }
         updateResizeHandleVisibility(nullptr);
     }
@@ -1195,6 +1273,14 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setPinPlacedCallback(LayoutPinPlacedCallback callback) override { pinPlaced_ = std::move(callback); }
     void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) override {
         instancePinActivated_ = std::move(callback);
+    }
+
+    void setPlannedDeviceActivatedCallback(LayoutPlannedDeviceActivatedCallback callback) override {
+        plannedDeviceActivated_ = std::move(callback);
+    }
+
+    void setPlannedConnectionActivatedCallback(LayoutPlannedConnectionActivatedCallback callback) override {
+        plannedConnectionActivated_ = std::move(callback);
     }
 
     void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) override {
@@ -2057,6 +2143,24 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
+            auto *planned = itemAt(event->pos());
+            while (planned && planned->data(2).toString().isEmpty())
+                planned = planned->parentItem();
+            if (planned) {
+                const auto tag = planned->data(2).toString();
+                const auto id = static_cast<ice::ObjectId>(planned->data(0).toULongLong());
+                if (tag == QStringLiteral("planned-device") && plannedDeviceActivated_) {
+                    plannedDeviceActivated_(id);
+                    event->accept();
+                    return;
+                }
+                if ((tag == QStringLiteral("planned-connection") || tag == QStringLiteral("planned-connection-hit")) &&
+                    plannedConnectionActivated_) {
+                    plannedConnectionActivated_(id);
+                    event->accept();
+                    return;
+                }
+            }
             auto *hit = itemAt(event->pos());
             while (hit && !hit->data(3).isValid())
                 hit = hit->parentItem();
@@ -2076,6 +2180,38 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
         }
         QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        if (!readOnly_) {
+            auto *planned = itemAt(event->pos());
+            while (planned && planned->data(2).toString().isEmpty())
+                planned = planned->parentItem();
+            if (planned) {
+                const auto tag = planned->data(2).toString();
+                const auto id = static_cast<ice::ObjectId>(planned->data(0).toULongLong());
+                const auto activate = [&](const std::function<void(ice::ObjectId)> &callback) {
+                    if (!callback)
+                        return false;
+                    if (scene()) {
+                        scene()->clearSelection();
+                        planned->setSelected(true);
+                    }
+                    callback(id);
+                    event->accept();
+                    return true;
+                };
+                if (tag == QStringLiteral("planned-device")) {
+                    if (activate(plannedDeviceActivated_))
+                        return;
+                }
+                if (tag == QStringLiteral("planned-connection") || tag == QStringLiteral("planned-connection-hit")) {
+                    if (activate(plannedConnectionActivated_))
+                        return;
+                }
+            }
+        }
+        QGraphicsView::contextMenuEvent(event);
     }
 
     void keyPressEvent(QKeyEvent *event) override {
@@ -2291,7 +2427,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
-QGraphicsItem *textPolygonOwner(QGraphicsItem *item) const {
+    QGraphicsItem *textPolygonOwner(QGraphicsItem *item) const {
         for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
             if (cursor->data(3).toString() == QStringLiteral("text-polygon"))
                 return cursor;
@@ -2505,6 +2641,8 @@ QGraphicsItem *textPolygonOwner(QGraphicsItem *item) const {
     std::function<void()> changed_;
     std::function<void(QPointF)> devicePlacementRequested_;
     std::function<void(ice::ObjectId)> instanceActivated_;
+    std::function<void(ice::ObjectId)> plannedDeviceActivated_;
+    std::function<void(ice::ObjectId)> plannedConnectionActivated_;
     std::function<void(ice::ObjectId)> instanceSelectionChanged_;
     std::function<void()> toolEscapeRequested_;
     std::function<void(ice::ObjectId)> shapeActivated_;
@@ -2547,14 +2685,20 @@ QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &na
     return item;
 }
 
+QGraphicsItem *createLayoutPlannedConnectionItem(ice::ObjectId id, const QLineF &line, const QColor &color) {
+    return new PlannedConnectionItem(id, line, color);
+}
+
 QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
+                                    bool pointEditable, bool endpointHandlesOnly,
                                     LayoutPathPointMovedCallback pointMoved,
                                     LayoutPathPointInsertedCallback pointInserted,
                                     LayoutPathPointDeletedCallback pointDeleted) {
-    return new LayoutPathItem(id, points, width, segmentColors, pointViaColors, readOnly, std::move(pointMoved),
-                              std::move(pointInserted), std::move(pointDeleted));
+    return new LayoutPathItem(id, points, width, segmentColors, pointViaColors, readOnly, pointEditable,
+                              endpointHandlesOnly, std::move(pointMoved), std::move(pointInserted),
+                              std::move(pointDeleted));
 }
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent) { return new LayoutCanvasImpl(parent); }

@@ -248,6 +248,9 @@ std::vector<Diagnostic> Project::validate() const {
             if (!layers.contains(shape.layer))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.shape.layer", "Shape references a missing layer", shapeId});
+            if (shape.routedConnection != 0 && !cell.plannedConnections.contains(shape.routedConnection))
+                result.push_back({Diagnostic::Severity::error, "layout.shape.routed_connection",
+                                  "Routed path references a missing planned connection", shapeId});
             if ((!shape.polygon.empty() && shape.polygon.size() < 3) ||
                 (shape.polygon.empty() && !shape.rectangle.valid()))
                 result.push_back({Diagnostic::Severity::error, "layout.shape.geometry",
@@ -301,10 +304,22 @@ std::vector<Diagnostic> Project::validate() const {
                 result.push_back({Diagnostic::Severity::error, "layout.planned_device.geometry",
                                   "Planned device must have positive dimensions", deviceId});
         }
+        const auto endpointExists = [&](ObjectId endpoint, ObjectId port) {
+            if (cell.plannedDevices.contains(endpoint) || cell.ports.contains(endpoint))
+                return true;
+            const auto instance = cell.instances.find(endpoint);
+            if (instance == cell.instances.end())
+                return false;
+            if (port == 0)
+                return true;
+            const auto child = layoutCells.find(instance->second.cell);
+            return child != layoutCells.end() && child->second.ports.contains(port);
+        };
         for (const auto &[connectionId, connection] : cell.plannedConnections) {
-            if (!cell.plannedDevices.contains(connection.from) || !cell.plannedDevices.contains(connection.to))
+            if (!endpointExists(connection.from, connection.fromPort) ||
+                !endpointExists(connection.to, connection.toPort))
                 result.push_back({Diagnostic::Severity::error, "layout.planned_connection.device",
-                                  "Planned connection references a missing planned device", connectionId});
+                                  "Planned connection references a missing device or layout instance", connectionId});
             if (connection.from == connection.to)
                 result.push_back({Diagnostic::Severity::error, "layout.planned_connection.self",
                                   "Planned connection must join two different devices", connectionId});
@@ -501,6 +516,8 @@ std::string Project::serialize() const {
                 s["text_group"] = shape.textGroup;
             if (!shape.textSource.empty())
                 s["text_source"] = shape.textSource;
+            if (shape.routedConnection != 0)
+                s["routed_connection"] = shape.routedConnection;
             c["shapes"].push_back(s);
         }
         for (const auto &[pid, port] : cell.ports) {
@@ -516,19 +533,22 @@ std::string Project::serialize() const {
                       {"locked", port.locked},
                       {"source_instance", port.sourceInstance},
                       {"source_port", port.sourcePort}};
+            if (port.schematicInstance != 0)
+                p["schematic_instance"] = port.schematicInstance;
             put(p["rectangle"], port.rectangle);
             c["ports"].push_back(p);
         }
         c["nets"] = json::array();
         for (const auto &[netId, net] : cell.nets)
             c["nets"].push_back({{"id", netId}, {"name", net.name}});
-        for (const auto &[iid, instance] : cell.instances)
-            c["instances"].push_back({{"id", iid},
-                                      {"cell", instance.cell},
-                                      {"name", instance.name},
-                                      {"x", instance.x},
-                                      {"y", instance.y},
-                                      {"orientation", orientationName(instance.orientation)}});
+        for (const auto &[iid, instance] : cell.instances) {
+            json item = {
+                {"id", iid},       {"cell", instance.cell}, {"name", instance.name},
+                {"x", instance.x}, {"y", instance.y},       {"orientation", orientationName(instance.orientation)}};
+            if (instance.schematicInstance != 0)
+                item["schematic_instance"] = instance.schematicInstance;
+            c["instances"].push_back(std::move(item));
+        }
         for (const auto &[did, device] : cell.plannedDevices) {
             json d = {{"id", did},     {"name", device.name},   {"x", device.x},
                       {"y", device.y}, {"width", device.width}, {"height", device.height}};
@@ -536,9 +556,24 @@ std::string Project::serialize() const {
                 d["schematic_instance"] = device.schematicInstance;
             c["planned_devices"].push_back(std::move(d));
         }
-        for (const auto &[cid, connection] : cell.plannedConnections)
-            c["planned_connections"].push_back(
-                {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"net", connection.net}});
+        for (const auto &[cid, connection] : cell.plannedConnections) {
+            json item = {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"net", connection.net}};
+            if (connection.fromPort != 0)
+                item["from_port"] = connection.fromPort;
+            if (connection.toPort != 0)
+                item["to_port"] = connection.toPort;
+            if (!connection.fromPin.empty())
+                item["from_pin"] = connection.fromPin;
+            if (!connection.toPin.empty())
+                item["to_pin"] = connection.toPin;
+            if (connection.fromSide)
+                item["from_side"] = portSideName(*connection.fromSide);
+            if (connection.toSide)
+                item["to_side"] = portSideName(*connection.toSide);
+            if (connection.routed)
+                item["routed"] = true;
+            c["planned_connections"].push_back(std::move(item));
+        }
         j["layout_cells"].push_back(c);
     }
     j["procedural_layouts"] = json::array();
@@ -794,6 +829,7 @@ Project Project::deserialize(const std::string &text) {
                 shape.textPolygon = s.value("text_polygon", false);
                 shape.textGroup = s.value("text_group", ObjectId{0});
                 shape.textSource = s.value("text_source", std::string{});
+                shape.routedConnection = s.value("routed_connection", ObjectId{0});
                 cell.shapes.emplace(shape.id, shape);
             }
             for (const auto &net : c.at("nets"))
@@ -814,11 +850,15 @@ Project Project::deserialize(const std::string &text) {
                 value.locked = port.at("locked").get<bool>();
                 value.sourceInstance = port.at("source_instance").get<ObjectId>();
                 value.sourcePort = port.at("source_port").get<ObjectId>();
+                value.schematicInstance = port.value("schematic_instance", ObjectId{0});
                 cell.ports.emplace(value.id, std::move(value));
             }
-            for (const auto &i : c.at("instances"))
-                cell.instances.emplace(i.at("id"), LayoutInstance{i.at("id"), i.at("cell"), i.at("name"), i.at("x"),
-                                                                  i.at("y"), parseOrientation(i.at("orientation"))});
+            for (const auto &i : c.at("instances")) {
+                LayoutInstance instance{i.at("id"), i.at("cell"), i.at("name"),
+                                        i.at("x"),  i.at("y"),    parseOrientation(i.at("orientation"))};
+                instance.schematicInstance = i.value("schematic_instance", ObjectId{0});
+                cell.instances.emplace(instance.id, std::move(instance));
+            }
             if (c.contains("planned_devices")) {
                 for (const auto &d : c.at("planned_devices")) {
                     PlannedDevice device;
@@ -840,6 +880,15 @@ Project Project::deserialize(const std::string &text) {
                     planned.from = connection.at("from").get<ObjectId>();
                     planned.to = connection.at("to").get<ObjectId>();
                     planned.net = connection.at("net").get<ObjectId>();
+                    planned.fromPort = connection.value("from_port", ObjectId{0});
+                    planned.toPort = connection.value("to_port", ObjectId{0});
+                    planned.fromPin = connection.value("from_pin", std::string{});
+                    planned.toPin = connection.value("to_pin", std::string{});
+                    if (connection.contains("from_side"))
+                        planned.fromSide = parsePortSide(connection.at("from_side").get<std::string>());
+                    if (connection.contains("to_side"))
+                        planned.toSide = parsePortSide(connection.at("to_side").get<std::string>());
+                    planned.routed = connection.value("routed", false);
                     const auto connectionId = planned.id;
                     cell.plannedConnections.emplace(connectionId, std::move(planned));
                 }

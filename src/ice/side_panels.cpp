@@ -52,10 +52,11 @@ enum class HierarchyItemKind : int {
     path = 9,
     text = 10,
     pin = 11,
-    textPolygon = 12
+    textPolygon = 12,
+    routedPath = 13
 };
 
-enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, text = 3, textPolygon = 4 };
+enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, routedPath = 3, text = 4, textPolygon = 5 };
 
 constexpr int kDeviceIconSize = 18;
 
@@ -79,7 +80,7 @@ ShapeEntryKind shapeEntryKind(const ice::Shape &shape) {
     if (shape.isText())
         return ShapeEntryKind::text;
     if (shape.isPath())
-        return ShapeEntryKind::path;
+        return shape.routedConnection != 0 ? ShapeEntryKind::routedPath : ShapeEntryKind::path;
     if (!shape.polygon.empty())
         return ShapeEntryKind::polygon;
     return ShapeEntryKind::rectangle;
@@ -92,6 +93,8 @@ const char *shapeEntryIcon(ShapeEntryKind kind) {
     case ShapeEntryKind::polygon:
         return "pentagon";
     case ShapeEntryKind::path:
+        return "waypoints";
+    case ShapeEntryKind::routedPath:
         return "route";
     case ShapeEntryKind::text:
         return "type";
@@ -109,6 +112,8 @@ const char *shapeEntryName(ShapeEntryKind kind) {
         return "Polygon";
     case ShapeEntryKind::path:
         return "Path";
+    case ShapeEntryKind::routedPath:
+        return "Routed Path";
     case ShapeEntryKind::text:
         return "Text";
     case ShapeEntryKind::textPolygon:
@@ -125,6 +130,8 @@ HierarchyItemKind shapeEntryHierarchyKind(ShapeEntryKind kind) {
         return HierarchyItemKind::polygon;
     case ShapeEntryKind::path:
         return HierarchyItemKind::path;
+    case ShapeEntryKind::routedPath:
+        return HierarchyItemKind::routedPath;
     case ShapeEntryKind::text:
         return HierarchyItemKind::text;
     case ShapeEntryKind::textPolygon:
@@ -510,39 +517,6 @@ void ProjectPanel::rebuildTree() {
         }
         if (layoutIt == project.layoutCells.end())
             return;
-        std::vector<std::pair<ice::ObjectId, const ice::Port *>> pinEntries;
-        pinEntries.reserve(layoutIt->second.ports.size());
-        for (const auto &[pinId, pin] : layoutIt->second.ports)
-            pinEntries.emplace_back(pinId, &pin);
-        std::sort(pinEntries.begin(), pinEntries.end(), [](const auto &left, const auto &right) {
-            if (left.second->name != right.second->name)
-                return left.second->name < right.second->name;
-            return left.first < right.first;
-        });
-        if (!pinEntries.empty()) {
-            auto *pinsItem = new QTreeWidgetItem(parentItem, {QStringLiteral("Pins")});
-            pinsItem->setIcon(0, hierarchyIcon("circle-dot"));
-            pinsItem->setToolTip(0, QStringLiteral("Layout pins"));
-            for (const auto &[pinId, pin] : pinEntries) {
-                auto *pinItem = new QTreeWidgetItem(pinsItem, {QString::fromStdString(pin->name)});
-                pinItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(pinId));
-                pinItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::pin));
-                pinItem->setData(0, kOwnerCellRole, QVariant::fromValue<qulonglong>(layoutId));
-                pinItem->setFlags(pinItem->flags() | Qt::ItemIsUserCheckable);
-                pinItem->setCheckState(0, pin->visible ? Qt::Checked : Qt::Unchecked);
-                pinItem->setIcon(0, hierarchyIcon("circle-dot"));
-                QString tooltip =
-                    QStringLiteral("%1 pin: %2 (%3, %4)")
-                        .arg(QString::fromStdString(layoutIt->second.name), QString::fromStdString(pin->name),
-                             QString::fromStdString(ice::portDirectionName(pin->direction)),
-                             QString::fromStdString(ice::portSideName(pin->side)));
-                if (pin->net != 0) {
-                    if (const auto net = layoutIt->second.nets.find(pin->net); net != layoutIt->second.nets.end())
-                        tooltip += QStringLiteral(" · net %1").arg(QString::fromStdString(net->second.name));
-                }
-                pinItem->setToolTip(0, tooltip);
-            }
-        }
         for (const auto &[deviceId, device] : layoutIt->second.plannedDevices) {
             auto *deviceItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(device.name)});
             deviceItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(deviceId));
@@ -711,7 +685,9 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
                       [this, parentId, id](const std::string &name) { onRenamePlannedDevice_(parentId, id, name); });
     } else if (kind == static_cast<int>(HierarchyItemKind::rectangle) ||
                kind == static_cast<int>(HierarchyItemKind::polygon) ||
-               kind == static_cast<int>(HierarchyItemKind::path) || kind == static_cast<int>(HierarchyItemKind::text) ||
+               kind == static_cast<int>(HierarchyItemKind::path) ||
+               kind == static_cast<int>(HierarchyItemKind::routedPath) ||
+               kind == static_cast<int>(HierarchyItemKind::text) ||
                kind == static_cast<int>(HierarchyItemKind::textPolygon)) {
         const auto *parent = item->parent();
         const auto parentId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;

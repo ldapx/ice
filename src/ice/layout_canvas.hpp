@@ -17,6 +17,7 @@
 #include <vector>
 
 class QGraphicsItem;
+class QLineF;
 class QPainter;
 class QRectF;
 class QLineEdit;
@@ -44,6 +45,8 @@ using LayoutTextPlacedCallback = std::function<void(QPointF)>;
 using LayoutTextPolygonPlacedCallback = std::function<void(QPointF)>;
 using LayoutPinPlacedCallback = std::function<void(QPointF, QPointF)>;
 using LayoutInstancePinActivatedCallback = std::function<void(ice::ObjectId instance, ice::ObjectId port)>;
+using LayoutPlannedDeviceActivatedCallback = std::function<void(ice::ObjectId device)>;
+using LayoutPlannedConnectionActivatedCallback = std::function<void(ice::ObjectId connection)>;
 using LayoutPolygonCreatedCallback = std::function<void(const std::vector<QPointF> &points)>;
 using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 
@@ -92,6 +95,8 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) = 0;
     virtual void setPinPlacedCallback(LayoutPinPlacedCallback callback) = 0;
     virtual void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) = 0;
+    virtual void setPlannedDeviceActivatedCallback(LayoutPlannedDeviceActivatedCallback callback) = 0;
+    virtual void setPlannedConnectionActivatedCallback(LayoutPlannedConnectionActivatedCallback callback) = 0;
     virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;
     virtual void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) = 0;
     virtual void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
@@ -116,12 +121,15 @@ QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
 QPolygonF layoutPathOutline(const std::vector<QPointF> &points, qreal width);
 
 // Creates the single selectable item used for a routed path. Points are in
-// scene coordinates. Handles become visible while selected; dragging a handle
-// calls pointMoved, double-clicking a segment calls pointInserted, and
-// right-clicking a handle offers point deletion.
+// scene coordinates. When pointEditable is true, handles become visible while
+// selected; dragging a handle calls pointMoved, double-clicking a segment calls
+// pointInserted, and right-clicking a handle offers point deletion. When
+// endpointHandlesOnly is true, only the first and last points expose handles
+// and point insertion/deletion are disabled.
 QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
+                                    bool pointEditable, bool endpointHandlesOnly,
                                     LayoutPathPointMovedCallback pointMoved,
                                     LayoutPathPointInsertedCallback pointInserted,
                                     LayoutPathPointDeletedCallback pointDeleted);
@@ -130,6 +138,10 @@ QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF>
 // rectangle is given in scene coordinates and the item is positioned at its
 // top-left corner so drag deltas map directly onto layout coordinates.
 QGraphicsItem *createLayoutPlannedDeviceItem(ice::ObjectId id, const QString &name, const QRectF &rect, bool readOnly);
+
+// Creates the selectable line used for a planned connection. The line is given
+// in scene coordinates and has a wide invisible hit area.
+QGraphicsItem *createLayoutPlannedConnectionItem(ice::ObjectId id, const QLineF &line, const QColor &color);
 
 // Rectangle resize handles use the same square point style as routed paths.
 // Handle 0..3 are the corners; 4..7 are the left, right, top, and bottom

@@ -233,7 +233,9 @@ flattened instance geometry instead of only the layout cell's own shapes.
 Right-clicking a schematic in the Schematic **Hierarchy** tab offers **Make
 Layout from Schematic**. This creates a layout with the schematic's technology
 and projects every schematic instance into a movable **Planned Device** box
-under the new layout. Nets are drawn as straight connections between the boxes;
+under the new layout. The boxes keep the relative positions the symbols had in
+the schematic instead of being arranged in a grid. Nets are drawn as straight
+connections between the boxes;
 planned devices use a box icon in the hierarchy and can be selected and moved
 directly on the canvas. Use **Hierarchy Go Up** and **Hierarchy Go Down** in the
 left layout tool column to open the parent layout or the selected child
@@ -339,9 +341,13 @@ Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
 Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
 stored as one path shape
 with an editable centerline, width, and cached outline; it moves as a single
-object rather than as independent segment rectangles. Select a path to show its
-point handles. Drag a handle to move a point, double-click a segment to insert a
-point, and right-click a handle to delete it. Changing layers while drawing
+object rather than as independent segment rectangles. The Draw Path tool and
+manually drawn paths use the waypoints icon, while automatically routed paths
+are listed as Routed Path shapes with the route icon. Select a manual path to
+show its point handles; drag a handle to move a point, double-click a segment to
+insert a point, and right-click a handle to delete it. Automatically routed
+paths expose handles only at their endpoints; drag an endpoint to a different
+border of its pin to change which side the route attaches to. Changing layers while drawing
 keeps the same path and records the layer for each segment; changing the width
 starts a new path at the current endpoint. Corners and endpoints are square,
 not rounded. Layer-change vias are stored with the path and move with it.
@@ -402,6 +408,34 @@ pin-label TEXT records; use `-1` to import text as ordinary text shapes only.
 **Save Layout Interchange** writes the active cell as GDSII. LEF and DEF pin
 exchange is available through `ice-cli` and `ice-mcp`.
 
+Select a planned device box to highlight it. Double-click it, or right-click it,
+to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
+sources, ground symbols, and `Input`/`Output` port symbols instead offer
+**Convert to Pin**: a dialog lets you choose the pin
+layer, then the block is replaced by a single layout pin (an existing pin on the
+connection's net is reused when there is only one net), and all planned
+connections from the block are retargeted to that pin. Converted `Input` and
+`Output` pins keep the corresponding port direction and name. The placement
+dialog lists the active PDK's PCells, suggests
+devices by model and pin compatibility, and lets you edit the PCell parameters
+before placement. Placing the device replaces the planned box with a layout
+instance and rewires the existing planned connections from the box to the new
+PCell pins. After placement, select the instance and edit its PCell parameters
+in **Properties**. Select a planned connection to highlight it. Double-click it,
+or right-click it, to choose **Draw Connection Manually** or **Route
+Automatically**. Automatic routing is enabled when both
+ends are placed device pins or layout pins; it routes on metal drawing layers,
+transitions from non-metal pins through the required contact/via stack, and
+leaves/enters rectangular pins from the middle of their narrowest sides. Automatically routed
+paths are recomputed when either endpoint moves, rotates, snaps, or is
+regenerated from changed PCell parameters, so the route stays attached to the
+device pins. The route leaves each pin outwards, turns with Manhattan segments,
+and can be edited with the normal path tools; moving either endpoint recomputes
+it and replaces those manual edits. Undo the routing to restore the planned
+connection.
+Manual connection removes the logical planned connection and switches to the
+path tool.
+
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
@@ -414,10 +448,13 @@ checks device presence, reference names, device types, shared parameters on
 placed device instances, and net topology from planned connections. Device
 parameters are compared numerically when both sides use compatible quantity
 values, so `0.15u` and `150n` are equivalent. If the layout has no planned
-connectivity, LVS reports a warning and compares devices only. Top-level
-schematic ports created with `Input`/`Output` symbols are matched to layout pins
-by name; missing pins, extra pins, direction changes, and net-binding changes
-are reported. Results appear in the **LVS Report** tab with mismatch categories
+connectivity, LVS reports a warning and compares devices only. Primitive
+sources and ground symbols are treated as external references rather than
+layout devices, and pins converted from them are not compared as schematic
+ports. Top-level schematic ports created with `Input`/`Output` symbols are
+matched to layout pins by name, including pins produced by **Convert to Pin**;
+missing pins, extra pins, direction changes, and net-binding changes are
+reported. Results appear in the **LVS Report** tab with mismatch categories
 and schematic/layout object ids. Text SPICE and SystemVerilog source cells are
 not supported by LVS yet.
 

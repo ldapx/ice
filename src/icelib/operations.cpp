@@ -446,16 +446,40 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     const auto gridStep = [&](Coordinate value) { return std::max(project.grid, project.snap(value)); };
     const auto boxWidth = gridStep(1200);
     const auto boxHeight = gridStep(700);
-    const auto horizontalGap = gridStep(900);
-    const auto verticalGap = gridStep(700);
-    const auto columnStep = boxWidth + horizontalGap;
-    const auto rowStep = boxHeight + verticalGap;
+
+    // Schematic instances are positioned in symbol-canvas units. Map those
+    // coordinates into layout nanometers so the planned boxes keep the
+    // relative arrangement they had in the schematic.
+    constexpr Coordinate schematicToLayoutScale = 10;
+    struct PlannedPlacement {
+        Coordinate x = 0;
+        Coordinate y = 0;
+    };
+    std::vector<PlannedPlacement> placements(orderedInstances.size());
+    Coordinate minimumX = 0;
+    Coordinate minimumY = 0;
+    bool havePlacement = false;
+    for (std::size_t index = 0; index < orderedInstances.size(); ++index) {
+        const auto *instance = orderedInstances[index];
+        const auto x = project.snap(instance->x * schematicToLayoutScale - boxWidth / 2);
+        const auto y = project.snap(instance->y * schematicToLayoutScale - boxHeight / 2);
+        placements[index] = {x, y};
+        if (!havePlacement) {
+            minimumX = x;
+            minimumY = y;
+            havePlacement = true;
+        } else {
+            minimumX = std::min(minimumX, x);
+            minimumY = std::min(minimumY, y);
+        }
+    }
+    const auto offsetX = havePlacement ? -minimumX : 0;
+    const auto offsetY = havePlacement ? -minimumY : 0;
 
     const auto count = static_cast<int>(orderedInstances.size());
-    const auto columns = std::max(1, std::min(4, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))))));
-    const auto rows = (count + columns - 1) / columns;
 
     std::map<ObjectId, std::vector<ObjectId>> pinDevices;
+    std::map<ObjectId, std::string> pinNames;
     for (int index = 0; index < count; ++index) {
         const auto *instance = orderedInstances[static_cast<std::size_t>(index)];
         std::string deviceName = instance->name;
@@ -466,32 +490,40 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             deviceName = "Device " + std::to_string(index + 1);
 
         const auto deviceId = project.nextId();
-        const auto row = index / columns;
-        const auto column = index % columns;
-        const auto x = static_cast<Coordinate>(column) * columnStep;
-        const auto y = static_cast<Coordinate>(rows - 1 - row) * rowStep;
-        layout.plannedDevices.emplace(
-            deviceId, PlannedDevice{deviceId, std::move(deviceName), instance->id, x, y, boxWidth, boxHeight});
+        const auto &placement = placements[static_cast<std::size_t>(index)];
+        layout.plannedDevices.emplace(deviceId,
+                                      PlannedDevice{deviceId, std::move(deviceName), instance->id,
+                                                    placement.x + offsetX, placement.y + offsetY, boxWidth, boxHeight});
         if (symbol == schematic.symbols.end())
             continue;
-        for (const auto &pin : symbol->second.pins)
+        for (const auto &pin : symbol->second.pins) {
             pinDevices[pin.id].push_back(deviceId);
+            pinNames[pin.id] = pin.name;
+        }
     }
+
+    struct NetEndpoint {
+        ObjectId device = 0;
+        std::string pin;
+    };
 
     std::set<std::string> layoutNetNames;
     for (const auto &[_, net] : schematic.nets) {
         std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
-        std::vector<ObjectId> devices;
+        std::vector<NetEndpoint> endpoints;
         for (const auto pinId : net.pins) {
             const auto entry = pinDevices.find(pinId);
             if (entry == pinDevices.end())
                 continue;
+            const auto pinName = pinNames.find(pinId);
             for (const auto deviceId : entry->second) {
-                if (std::find(devices.begin(), devices.end(), deviceId) == devices.end())
-                    devices.push_back(deviceId);
+                const bool exists = std::any_of(endpoints.begin(), endpoints.end(),
+                                                [&](const auto &endpoint) { return endpoint.device == deviceId; });
+                if (!exists)
+                    endpoints.push_back({deviceId, pinName == pinNames.end() ? std::string{} : pinName->second});
             }
         }
-        if (devices.size() < 2)
+        if (endpoints.size() < 2)
             continue;
         auto netName = net.name.empty() ? "N" + std::to_string(net.id) : net.name;
         if (!layoutNetNames.insert(lower(netName)).second)
@@ -499,16 +531,20 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         layoutNetNames.insert(lower(netName));
         const auto layoutNetId = project.nextId();
         layout.nets.emplace(layoutNetId, LayoutNet{layoutNetId, netName});
-        const auto from = devices.front();
-        for (std::size_t index = 1; index < devices.size(); ++index) {
-            const auto to = devices[index];
-            if (from == to)
+        const auto &from = endpoints.front();
+        for (std::size_t index = 1; index < endpoints.size(); ++index) {
+            const auto &to = endpoints[index];
+            if (from.device == to.device)
                 continue;
-            const auto pair = from < to ? std::make_pair(from, to) : std::make_pair(to, from);
+            const auto pair = from.device < to.device ? std::make_pair(from.device, to.device)
+                                                      : std::make_pair(to.device, from.device);
             if (!connectedPairs.insert(pair).second)
                 continue;
             const auto connectionId = project.nextId();
-            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, layoutNetId});
+            PlannedConnection connection{connectionId, from.device, to.device, layoutNetId};
+            connection.fromPin = from.pin;
+            connection.toPin = to.pin;
+            layout.plannedConnections.emplace(connectionId, std::move(connection));
         }
     }
     return layoutId;
@@ -683,6 +719,8 @@ void removePort(Project &project, ObjectId cellId, ObjectId portId) {
                 throw ProjectError("layout.port.referenced", "Port is promoted by another layout cell");
         }
     }
+    std::erase_if(cell.plannedConnections,
+                  [&](const auto &entry) { return entry.second.from == portId || entry.second.to == portId; });
     cell.ports.erase(portId);
 }
 

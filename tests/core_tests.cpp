@@ -1779,6 +1779,10 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(capacitorDevice != 0);
     CHECK(connection.from == resistorDevice);
     CHECK(connection.to == capacitorDevice);
+    // The schematic placed C1 100 units to the right of R1, so the layout
+    // boxes keep the same relative arrangement.
+    CHECK(layout.plannedDevices.at(capacitorDevice).x - layout.plannedDevices.at(resistorDevice).x == 1000);
+    CHECK(layout.plannedDevices.at(capacitorDevice).y == layout.plannedDevices.at(resistorDevice).y);
     CHECK(project.validate().empty());
 
     const auto serialized = project.serialize();
@@ -1794,6 +1798,76 @@ TEST_CASE("planned devices are projected from a schematic") {
 
     const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
     CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);
+}
+
+TEST_CASE("planned connections can target placed layout instance pins") {
+    ice::Project project;
+    project.identity = "planned-instance";
+    project.name = "planned-instance";
+    const auto schematicId = ice::createSchematicCell(project, "amp", "example.pdk");
+
+    const auto symbolId = ice::addSymbol(project, schematicId, "NMOS");
+    auto &symbol = project.schematicCells.at(schematicId).symbols.at(symbolId);
+    const auto drain = project.nextId();
+    symbol.pins.push_back({drain, "D", 0, 0, ice::PinDirection::right});
+    const auto schematicInstance = ice::addSchematicInstance(project, schematicId, symbolId, "M1", 0, 0);
+
+    const auto layoutId = ice::createLayoutFromSchematic(project, schematicId);
+    auto &layout = project.layoutCells.at(layoutId);
+    CHECK(layout.plannedDevices.size() == 1);
+    const auto plannedId = layout.plannedDevices.begin()->first;
+
+    const auto childId = ice::createLayoutCell(project, "child", "example.pdk");
+    const auto layerId = ice::addLayer(project, "Metal1", 8);
+    const auto portId = ice::addPort(project, childId, "D", layerId, ice::Rect{0, 0, 100, 200});
+    const auto instanceId = project.nextId();
+    ice::LayoutInstance instance{instanceId, childId, "X1", 100, 100, ice::Orientation::r0};
+    instance.schematicInstance = schematicInstance;
+    layout.instances.emplace(instanceId, instance);
+
+    const auto connectionId = project.nextId();
+    ice::PlannedConnection connection{connectionId, plannedId, instanceId, 0};
+    connection.fromPin = "D";
+    connection.toPin = "D";
+    connection.toPort = portId;
+    connection.fromSide = ice::PortSide::right;
+    connection.toSide = ice::PortSide::top;
+    connection.routed = true;
+    layout.plannedConnections.emplace(connectionId, connection);
+    const auto topPortId = ice::addPort(project, layoutId, "OUT", layerId, ice::Rect{200, 200, 100, 100});
+    layout.ports.at(topPortId).schematicInstance = schematicInstance;
+    const auto topConnectionId = project.nextId();
+    ice::PlannedConnection topConnection{topConnectionId, plannedId, topPortId, 0};
+    topConnection.fromPin = "D";
+    layout.plannedConnections.emplace(topConnectionId, topConnection);
+    CHECK(project.validate().empty());
+    CHECK(ice::schematicForLayout(project, layoutId) == schematicId);
+
+    auto badConnection = connection;
+    badConnection.id = project.nextId();
+    badConnection.toPort = project.nextId();
+    layout.plannedConnections.emplace(badConnection.id, badConnection);
+    CHECK(!project.validate().empty());
+    layout.plannedConnections.erase(badConnection.id);
+
+    const auto serialized = project.serialize();
+    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto &roundLayout = roundTrip.layoutCells.at(layoutId);
+    CHECK(roundLayout.instances.contains(instanceId));
+    CHECK(roundLayout.instances.at(instanceId).schematicInstance == schematicInstance);
+    CHECK(roundLayout.plannedConnections.contains(connectionId));
+    const auto &roundConnection = roundLayout.plannedConnections.at(connectionId);
+    CHECK(roundConnection.fromPin == "D");
+    CHECK(roundConnection.toPin == "D");
+    CHECK(roundConnection.toPort == portId);
+    CHECK(roundConnection.fromSide == ice::PortSide::right);
+    CHECK(roundConnection.toSide == ice::PortSide::top);
+    CHECK(roundConnection.routed);
+    CHECK(roundLayout.plannedConnections.contains(topConnectionId));
+    CHECK(roundLayout.plannedConnections.at(topConnectionId).to == topPortId);
+    CHECK(roundLayout.ports.contains(topPortId));
+    CHECK(roundLayout.ports.at(topPortId).schematicInstance == schematicInstance);
+    CHECK(roundTrip.validate().empty());
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {

@@ -2,9 +2,10 @@
 
 #include "icelib/core.hpp"
 #include "icelib/layout_library.hpp"
-#include "layout_render.hpp"
 #include "icelib/packages.hpp"
+#include "layout_render.hpp"
 
+#include <QDialog>
 #include <QString>
 #include <QWidget>
 
@@ -20,6 +21,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPaintEvent;
+class QTableWidget;
 
 class LayoutDevicePreview : public QWidget {
   public:
@@ -36,6 +38,33 @@ class LayoutDevicePreview : public QWidget {
     ice::LayoutPreviewModel model_;
     ice::LayoutRenderer::LayerStyleMap styles_;
     ice::LayoutRenderer::DeviceStyleMap deviceStyles_;
+};
+
+class LayoutDevicePlacementDialog : public QDialog {
+  public:
+    LayoutDevicePlacementDialog(const ice::LayoutDeviceLibrary &library, const std::string &suggestedName,
+                                const std::vector<std::string> &schematicPins,
+                                const std::map<std::string, std::string> &initialParameters, QWidget *parent = nullptr);
+
+    const ice::LayoutDeviceCell *selectedDevice() const;
+    std::map<std::string, std::string> parameterValues() const;
+
+  private:
+    int scoreDevice(const ice::LayoutDeviceCell &device) const;
+    std::string initialValue(const std::string &parameterName) const;
+    void rebuildList();
+    void updateSelection();
+
+    const ice::LayoutDeviceLibrary &library_;
+    std::string suggestedName_;
+    std::vector<std::string> schematicPins_;
+    std::map<std::string, std::string> initialParameters_;
+    QLineEdit *search_ = nullptr;
+    QComboBox *category_ = nullptr;
+    QListWidget *list_ = nullptr;
+    LayoutDevicePreview *preview_ = nullptr;
+    QTableWidget *parameters_ = nullptr;
+    QLabel *hint_ = nullptr;
 };
 
 class LayoutDevicesPanel : public QWidget {
