@@ -26,7 +26,10 @@
 #include <QPen>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QStyleOptionGraphicsItem>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -925,6 +928,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
         setBackgroundBrush(ice::uiColor(ice::UiColor::Background2));
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
         applyNavigationTransform();
+        // Typing a size while drawing commits once the user stops typing, so
+        // "281,2875" produces the rectangle without an explicit Enter.
+        rectangleCommitTimer_ = new QTimer(this);
+        rectangleCommitTimer_->setSingleShot(true);
+        rectangleCommitTimer_->setInterval(900);
+        connect(rectangleCommitTimer_, &QTimer::timeout, this, [this] { commitTypedRectangle(); });
     }
 
     void setTool(Tool tool) {
@@ -942,6 +951,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             finishPolygon();
         if (tool != Tool::ruler)
             clearRuler();
+        if (tool != Tool::rectangle)
+            cancelRectangleDrawing();
         tool_ = tool;
         if (tool_ == Tool::select)
             unsetCursor();
@@ -950,6 +961,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         else
             setCursor(Qt::CrossCursor);
         applyInteractionState();
+        syncRectangleSizeEditor();
         viewport()->update();
     }
 
@@ -1457,6 +1469,45 @@ class LayoutCanvasImpl : public LayoutCanvas {
         QPainter painter(viewport());
         painter.setRenderHint(QPainter::Antialiasing);
         drawScaleIndicator(painter);
+        drawRectangleMeasurement(painter);
+    }
+
+    // Shows the live width x height of the rectangle being drawn inside the
+    // preview, so the size is readable without looking away from the cursor.
+    void drawRectangleMeasurement(QPainter &painter) {
+        if (!drawing_ || !drawPreview_)
+            return;
+        const auto sceneRect = drawPreview_->rect();
+        if (!sceneRect.isValid() || sceneRect.isNull())
+            return;
+        const auto label =
+            QStringLiteral("%1 x %2")
+                .arg(static_cast<qint64>(std::llround(sceneRect.width())))
+                .arg(static_cast<qint64>(std::llround(sceneRect.height())));
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setBold(true);
+        painter.setFont(font);
+        const QFontMetricsF metrics(font);
+        const auto textSize = metrics.size(Qt::TextSingleLine, label);
+        const QRectF screenRect =
+            QRectF(QPointF(mapFromScene(sceneRect.topLeft())), QPointF(mapFromScene(sceneRect.bottomRight())))
+                .normalized();
+        auto center = screenRect.center();
+        if (screenRect.width() < textSize.width() + 16.0 || screenRect.height() < textSize.height() + 10.0)
+            center = QPointF(mapFromScene(drawEnd_)) + QPointF(0.0, -26.0);
+        const QRectF box(center.x() - textSize.width() * 0.5 - 6.0, center.y() - textSize.height() * 0.5 - 3.0,
+                         textSize.width() + 12.0, textSize.height() + 6.0);
+        QColor background = ice::uiColor(ice::UiColor::Background1);
+        background.setAlpha(225);
+        painter.setPen(QPen(ice::uiColor(ice::UiColor::Border1), 1.0));
+        painter.setBrush(background);
+        painter.drawRoundedRect(box, 3.0, 3.0);
+        painter.setPen(ice::uiColor(ice::UiColor::Text1));
+        painter.drawText(box, Qt::AlignCenter, label);
+        painter.restore();
     }
 
     LayoutPathItem *findPathItem(ice::ObjectId id) const {
@@ -1641,14 +1692,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 event->accept();
                 return;
             }
-            drawing_ = true;
-            drawStart_ = snapPosition(mapToScene(event->pos()));
-            const auto previewColor = rectangleStyle_.color;
-            QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 70),
-                                rectangleStyle_.pattern);
-            if (rectangleStyle_.pattern == Qt::NoBrush)
-                previewBrush = QBrush(Qt::NoBrush);
-            drawPreview_ = scene()->addRect(QRectF(drawStart_, drawStart_), QPen(previewColor, 1), previewBrush);
+            // Click once to anchor the rectangle, then click again to finish.
+            const auto point = snapPosition(mapToScene(event->pos()));
+            if (drawing_)
+                finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : point);
+            else
+                beginRectangleDrawing(point);
             event->accept();
             return;
         }
@@ -1947,7 +1996,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (drawing_ && drawPreview_) {
-            drawPreview_->setRect(QRectF(drawStart_, snapPosition(mapToScene(event->pos()))).normalized());
+            if (!rectangleSizeValid_) {
+                drawEnd_ = snapPosition(mapToScene(event->pos()));
+                drawPreview_->setRect(QRectF(drawStart_, drawEnd_).normalized());
+                viewport()->update();
+            }
             event->accept();
             return;
         }
@@ -2036,16 +2089,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (drawing_ && event->button() == Qt::LeftButton) {
-            const auto end = snapPosition(mapToScene(event->pos()));
-            const auto rectangle = QRectF(drawStart_, end).normalized();
-            if (drawPreview_) {
-                scene()->removeItem(drawPreview_);
-                delete drawPreview_;
-                drawPreview_ = nullptr;
-            }
-            drawing_ = false;
-            if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && rectangleCreated_)
-                rectangleCreated_(drawStart_, end);
+            // The rectangle is finished by the next click (handled in the press
+            // event), not by releasing the mouse.
             event->accept();
             return;
         }
@@ -2125,6 +2170,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton && drawing_) {
+            // A fast second click can arrive as a double-click event.
+            finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd()
+                                                       : snapPosition(mapToScene(event->pos())));
             event->accept();
             return;
         }
@@ -2219,6 +2271,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
              tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text ||
              tool_ == Tool::textPolygon)) {
+            cancelRectangleDrawing();
             setTool(Tool::select);
             if (toolEscapeRequested_)
                 toolEscapeRequested_();
@@ -2226,6 +2279,30 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         QGraphicsView::keyPressEvent(event);
+    }
+
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (rectangleSizeEditor_ && watched == rectangleSizeEditor_ && event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Escape) {
+                cancelRectangleDrawing();
+                setTool(Tool::select);
+                if (toolEscapeRequested_)
+                    toolEscapeRequested_();
+                return true;
+            }
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+                if (drawing_)
+                    finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : drawEnd_);
+                return true;
+            }
+        }
+        return LayoutCanvas::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent *event) override {
+        LayoutCanvas::resizeEvent(event);
+        updateRectangleSizeEditorGeometry();
     }
 
     void updateResizeHandles(ice::ObjectId shapeId, const QRectF &rect) {
@@ -2572,6 +2649,180 @@ class LayoutCanvasImpl : public LayoutCanvas {
             polygonCreated_(points);
     }
 
+    void ensureRectangleSizeEditor() {
+        if (rectangleSizeEditor_)
+            return;
+        rectangleSizeEditor_ = new QLineEdit(viewport());
+        rectangleSizeEditor_->setObjectName(QStringLiteral("layoutRectangleSize"));
+        rectangleSizeEditor_->setAlignment(Qt::AlignCenter);
+        rectangleSizeEditor_->setPlaceholderText(QStringLiteral("W, H"));
+        rectangleSizeEditor_->setToolTip(QStringLiteral("Rectangle size in database units\n"
+                                                        "Type width,height (for example 281,2875); Enter finishes now"));
+        rectangleSizeEditor_->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(
+                QStringLiteral("^\\s*[0-9]{1,9}(?:(?:\\s*[,xX*]\\s*|\\s+)[0-9]{1,9})?\\s*$")),
+            rectangleSizeEditor_));
+        rectangleSizeEditor_->installEventFilter(this);
+        connect(rectangleSizeEditor_, &QLineEdit::textEdited, this,
+                [this](const QString &text) { applyRectangleSizeText(text); });
+        connect(rectangleSizeEditor_, &QLineEdit::returnPressed, this, [this] {
+            if (drawing_)
+                finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : drawEnd_);
+        });
+        rectangleSizeEditor_->hide();
+        updateRectangleSizeEditorGeometry();
+    }
+
+    void updateRectangleSizeEditorGeometry() {
+        if (!rectangleSizeEditor_)
+            return;
+        constexpr int width = 168;
+        constexpr int height = 26;
+        constexpr int margin = 12;
+        rectangleSizeEditor_->setGeometry(std::max(0, viewport()->width() - width - margin),
+                                          std::max(0, viewport()->height() - height - margin), width, height);
+    }
+
+    void syncRectangleSizeEditor() {
+        if (tool_ != Tool::rectangle && !rectangleSizeEditor_)
+            return;
+        ensureRectangleSizeEditor();
+        rectangleSizeEditor_->setVisible(tool_ == Tool::rectangle && !readOnly_);
+        updateRectangleSizeEditorGeometry();
+    }
+
+    // The rectangle tool is click-move-click: the first click anchors the
+    // corner and focuses the size field, so the user can either click again
+    // or type an exact width and height.
+    void beginRectangleDrawing(QPointF start) {
+        ensureRectangleSizeEditor();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = true;
+        drawStart_ = start;
+        drawEnd_ = start;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        const auto previewColor = rectangleStyle_.color;
+        QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 70),
+                            rectangleStyle_.pattern);
+        if (rectangleStyle_.pattern == Qt::NoBrush)
+            previewBrush = QBrush(Qt::NoBrush);
+        QPen previewPen(previewColor, 1.0, Qt::DashLine);
+        previewPen.setCosmetic(true);
+        drawPreview_ = scene()->addRect(QRectF(drawStart_, drawStart_), previewPen, previewBrush);
+        drawPreview_->setZValue(20.0);
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+            rectangleSizeEditor_->show();
+            rectangleSizeEditor_->setFocus();
+        }
+        viewport()->update();
+    }
+
+    QPointF typedRectangleEnd() const { return drawStart_ + typedRectangleSize_; }
+
+    void applyRectangleSizeText(const QString &text) {
+        if (!drawing_) {
+            rectangleSizeValid_ = false;
+            return;
+        }
+        QPointF size;
+        bool hasHeight = false;
+        if (!parseRectangleSize(text, &size, &hasHeight)) {
+            rectangleSizeValid_ = false;
+            viewport()->update();
+            return;
+        }
+        rectangleSizeValid_ = true;
+        typedRectangleSize_ = size;
+        drawEnd_ = typedRectangleEnd();
+        if (drawPreview_)
+            drawPreview_->setRect(QRectF(drawStart_, drawEnd_).normalized());
+        // Only a width,height pair commits on its own; a lone number stays a
+        // preview so a pause while typing does not create the wrong rectangle.
+        if (hasHeight && rectangleCommitTimer_)
+            rectangleCommitTimer_->start();
+        viewport()->update();
+    }
+
+    // Accepts "281,2875" as width,height. The dimensions follow the layout
+    // spacing (grid) setting when snapping is on.
+    bool parseRectangleSize(const QString &text, QPointF *size, bool *hasHeight) const {
+        static const QRegularExpression pattern(
+            QStringLiteral("^\\s*([0-9]{1,9})(?:(?:\\s*[,xX*]\\s*|\\s+)([0-9]{1,9}))?\\s*$"));
+        const auto match = pattern.match(text);
+        if (!match.hasMatch())
+            return false;
+        const auto length = [this](const QString &value) {
+            auto number = std::round(value.toDouble());
+            if (snapToGrid_ && gridSpacing_ > 1.0)
+                number = std::round(number / gridSpacing_) * gridSpacing_;
+            return std::max<qreal>(1.0, number);
+        };
+        size->setX(length(match.captured(1)));
+        *hasHeight = !match.captured(2).isEmpty();
+        size->setY(*hasHeight ? length(match.captured(2)) : size->x());
+        return true;
+    }
+
+    void commitTypedRectangle() {
+        if (!drawing_ || !rectangleSizeValid_)
+            return;
+        finishRectangleDrawing(typedRectangleEnd());
+    }
+
+    void finishRectangleDrawing(QPointF end) {
+        if (!drawing_)
+            return;
+        const auto start = drawStart_;
+        const auto rectangle = QRectF(start, end).normalized();
+        if (rectangleCommitTimer_)
+            rectangleCommitTimer_->stop();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = false;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        drawEnd_ = end;
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+            rectangleSizeEditor_->clearFocus();
+        }
+        setFocus(Qt::OtherFocusReason);
+        viewport()->update();
+        if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && rectangleCreated_)
+            rectangleCreated_(start, end);
+    }
+
+    void cancelRectangleDrawing() {
+        if (!drawing_ && !drawPreview_)
+            return;
+        if (rectangleCommitTimer_)
+            rectangleCommitTimer_->stop();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = false;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+        }
+        viewport()->update();
+    }
+
     void applyNavigationTransform() {
         if (rulerItem_)
             rulerItem_->prepareForScaleChange();
@@ -2611,6 +2862,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPoint panStartPosition_;
     QPointF panStartCenterScene_;
     QPointF drawStart_;
+    QPointF drawEnd_;
+    QPointF typedRectangleSize_;
+    QLineEdit *rectangleSizeEditor_ = nullptr;
+    QTimer *rectangleCommitTimer_ = nullptr;
+    bool rectangleSizeValid_ = false;
     QPointF pinDrawStart_;
     QGraphicsRectItem *drawPreview_ = nullptr;
     QGraphicsRectItem *pinDrawPreview_ = nullptr;
