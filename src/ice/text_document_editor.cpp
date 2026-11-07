@@ -1,8 +1,11 @@
 #include "text_document_editor.hpp"
 
+#include "systemverilog_highlighter.hpp"
+
 #include <QFontDatabase>
 #include <QPlainTextEdit>
 #include <QSignalBlocker>
+#include <QTextCursor>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -33,6 +36,37 @@ void TextDocumentEditor::setText(const QString &text) {
 }
 
 QString TextDocumentEditor::text() const { return editor_->toPlainText(); }
+
+void TextDocumentEditor::setLanguage(TextDocumentLanguage language) {
+    if (language_ == language)
+        return;
+    language_ = language;
+    if (systemVerilogHighlighter_) {
+        delete systemVerilogHighlighter_;
+        systemVerilogHighlighter_ = nullptr;
+        // Deleting a highlighter leaves its last formats on the text. Replace
+        // the document contents to clear them while preserving the selection.
+        const auto contents = editor_->toPlainText();
+        const auto selection = editor_->textCursor();
+        const int anchor = selection.anchor();
+        const int position = selection.position();
+        {
+            const QSignalBlocker blocker(editor_);
+            editor_->setPlainText(contents);
+        }
+        QTextCursor cursor = editor_->textCursor();
+        cursor.setPosition(anchor);
+        cursor.setPosition(position, QTextCursor::KeepAnchor);
+        editor_->setTextCursor(cursor);
+    }
+    if (language_ == TextDocumentLanguage::SystemVerilog)
+        systemVerilogHighlighter_ = new SystemVerilogSyntaxHighlighter(editor_->document());
+}
+
+void TextDocumentEditor::refreshSyntaxColors() {
+    if (systemVerilogHighlighter_)
+        systemVerilogHighlighter_->refreshColors();
+}
 
 void TextDocumentEditor::setOnTextEdited(std::function<void(const QString &)> callback) {
     onTextEdited_ = std::move(callback);

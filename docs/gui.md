@@ -174,7 +174,8 @@ Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
 notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and
 open a plain-text SPICE editor in place of the canvas and canvas toolbar.
 SystemVerilog cells use a notebook-text icon, appear with a `.sv` extension, and
-open the same source editor with SystemVerilog templates.
+open the same source editor with SystemVerilog templates and syntax
+highlighting.
 Their source is stored directly in the project and saved with it. Source cells
 are not projected into generated hierarchy symbols, but they can be selected as
 the source for a simulation. For a text schematic, simulation uses the stored
@@ -188,7 +189,8 @@ Testbench…**, and **Add Simulation Script…**. **Add SystemVerilog Testbench�
 creates the testbench source cell and a simulation that targets it with the
 **Icarus Verilog (SystemVerilog)** simulator and **Digital / VCD** analysis, then
 opens the **Testbench** tab in the simulation editor. The tab edits the source
-directly and has its own **Run Simulation** button. Selecting a SystemVerilog
+directly with SystemVerilog syntax highlighting and has its own **Run
+Simulation** button. Selecting a SystemVerilog
 cell created elsewhere in the Simulation tab switches the simulator and analysis
 the same way. The source is compiled with `iverilog`, run with `vvp`, and the
 generated VCD is loaded as the result traces. If the source has no
@@ -267,8 +269,8 @@ information.
 
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
-Python script editor in the middle view, and contain a generated static layout
-as their child. The canvas tool columns are hidden while a procedural layout
+Python script editor with syntax highlighting in the middle view, and contain a
+generated static layout as their child. The canvas tool columns are hidden while a procedural layout
 tab is active. The script runs with a `layout` builder that exposes
 `layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
 procedural layout and choose **Regenerate layout** (or use the editor's

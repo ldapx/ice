@@ -2859,6 +2859,7 @@ class DocumentWindow : public QMainWindow {
         if (schematicViewStack_ && textSchematicEditorPage_)
             schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
         if (textSchematicEditor_) {
+            textSchematicEditor_->setLanguage(textSourceLanguage(it->second));
             const auto text = QString::fromStdString(it->second.sourceText());
             if (textSchematicEditor_->text() != text)
                 textSchematicEditor_->setText(text);
@@ -9058,6 +9059,10 @@ class DocumentWindow : public QMainWindow {
         return cell.textSchematic ? QStringLiteral("sp") : QStringLiteral("icesch");
     }
 
+    static TextDocumentLanguage textSourceLanguage(const ice::SchematicCell &cell) {
+        return cell.systemVerilogSchematic ? TextDocumentLanguage::SystemVerilog : TextDocumentLanguage::Spice;
+    }
+
     void syncOpenFileTabs() {
         if (!project_) {
             openSchematicTabs_.clear();
@@ -9572,6 +9577,7 @@ class DocumentWindow : public QMainWindow {
             if (schematicViewStack_ && textSchematicEditorPage_)
                 schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
             if (textSchematicEditor_) {
+                textSchematicEditor_->setLanguage(textSourceLanguage(cell));
                 const auto text = QString::fromStdString(cell.sourceText());
                 if (textSchematicEditor_->text() != text)
                     textSchematicEditor_->setText(text);
@@ -10231,6 +10237,12 @@ class DocumentWindow : public QMainWindow {
             startupView_->refreshAppearance();
         if (reportHighlighter_)
             reportHighlighter_->refreshColors();
+        if (proceduralEditor_)
+            proceduralEditor_->refreshSyntaxColors();
+        if (textSchematicEditor_)
+            textSchematicEditor_->refreshSyntaxColors();
+        if (simulationTestbenchEditor_)
+            simulationTestbenchEditor_->refreshSyntaxColors();
         if (graphTabs_) {
             for (int index = 0; index < graphTabs_->count(); ++index)
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
@@ -11293,6 +11305,7 @@ class DocumentWindow : public QMainWindow {
         testbenchToolbar->addWidget(simulationTestbenchRunButton_);
         testbenchLayout->addLayout(testbenchToolbar);
         simulationTestbenchEditor_ = new TextDocumentEditor;
+        simulationTestbenchEditor_->setLanguage(TextDocumentLanguage::SystemVerilog);
         simulationTestbenchEditor_->setOnTextEdited([this](const QString &text) { onSimulationTestbenchEdited(text); });
         testbenchLayout->addWidget(simulationTestbenchEditor_, 1);
         simulationTestbenchTabIndex_ = simulationTabs_->addTab(testbenchPage, QStringLiteral("Testbench"));

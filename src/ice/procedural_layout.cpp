@@ -4,6 +4,7 @@
 #include "icons.hpp"
 #include "layout_devices.hpp"
 #include "package_ui.hpp"
+#include "python_highlighter.hpp"
 #include "ui_helpers.hpp"
 
 #include <QCoreApplication>
@@ -610,6 +611,7 @@ ProceduralLayoutEditor::ProceduralLayoutEditor(QWidget *parent) : QWidget(parent
     editor_->setTabStopDistance(editor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
     editor_->setAccessibleName(QStringLiteral("Procedural layout Python script"));
     editor_->setPlaceholderText(QStringLiteral("Write Python that builds the layout through the `layout` object."));
+    pythonHighlighter_ = new PythonSyntaxHighlighter(editor_->document());
     layout->addWidget(editor_, 1);
 
     connect(editor_, &QPlainTextEdit::textChanged, this, [this] {
@@ -628,6 +630,11 @@ void ProceduralLayoutEditor::setScript(const QString &script) {
 }
 
 QString ProceduralLayoutEditor::script() const { return editor_->toPlainText(); }
+
+void ProceduralLayoutEditor::refreshSyntaxColors() {
+    if (pythonHighlighter_)
+        pythonHighlighter_->refreshColors();
+}
 
 void ProceduralLayoutEditor::setOnScriptEdited(std::function<void(const QString &)> callback) {
     onScriptEdited_ = std::move(callback);
