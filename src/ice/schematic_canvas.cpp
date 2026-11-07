@@ -82,16 +82,37 @@ void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
         return;
     if (symbol->isSelected() != selected)
         symbol->setSelected(selected);
+    const bool comment = symbolChild(symbol, QStringLiteral("comment-text")) != nullptr;
     if (auto *highlight = symbolChild(symbol, QStringLiteral("symbol-highlight")))
-        highlight->setVisible(selected);
+        highlight->setVisible(selected && comment);
     if (auto *label = symbolChild(symbol, QStringLiteral("symbol-label")))
         static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
                                                                               : ice::uiColor(ice::UiColor::Axis1));
+    for (auto *child : symbol->childItems()) {
+        if (child->data(0).toString() == QStringLiteral("symbol-value"))
+            static_cast<QGraphicsTextItem *>(child)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
+                                                                                  : ice::uiColor(ice::UiColor::Text1));
+    }
     if (auto *commentText = symbolChild(symbol, QStringLiteral("comment-text")))
         static_cast<QGraphicsTextItem *>(commentText)
             ->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Text1));
     if (auto *effect = symbolArtworkEffect(symbol)) {
-        effect->setColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1));
+        const auto hovered = symbol->data(4).toBool();
+        effect->setColor(hovered
+                             ? ice::uiColor(ice::UiColor::Accent5)
+                             : (selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1)));
+        effect->setEnabled(true);
+    }
+}
+
+void applySymbolHoverStyle(QGraphicsItem *symbol, bool hovered) {
+    if (!symbol)
+        return;
+    symbol->setData(4, hovered);
+    if (auto *effect = symbolArtworkEffect(symbol)) {
+        effect->setColor(
+            hovered ? ice::uiColor(ice::UiColor::Accent5)
+                    : (symbol->isSelected() ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1)));
         effect->setEnabled(true);
     }
 }
@@ -483,6 +504,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     void mouseMoveEvent(QMouseEvent *event) override {
         cursorScenePosition_ = mapToScene(event->pos());
         updatePinVisibility();
+        updateHover(event->pos());
         if (placeSymbolMode_)
             viewport()->update();
         if (panning_) {
@@ -576,6 +598,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     void leaveEvent(QEvent *event) override {
+        clearHover();
         for (auto *item : scene()->items())
             if (item->data(0).toString() == QStringLiteral("pin"))
                 item->setVisible(false);
@@ -739,6 +762,49 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     QGraphicsItem *symbolById(ice::ObjectId instanceId) { return itemById(instanceId); }
+
+    void setNetHovered(ice::ObjectId netId, bool hovered) {
+        if (netId == 0 || !scene())
+            return;
+        const auto color = ice::uiColor(hovered ? ice::UiColor::Accent5 : ice::UiColor::Accent4);
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() != QStringLiteral("wire") || item->data(1).toULongLong() != netId)
+                continue;
+            if (auto *wire = dynamic_cast<QGraphicsPathItem *>(item))
+                wire->setPen(QPen(color, 2));
+        }
+    }
+
+    void updateHover(const QPoint &position) {
+        if (!scene())
+            return;
+        auto *owner = schematicItemOwner(itemAt(position));
+        ice::ObjectId instanceId = 0;
+        if (owner && owner->data(0).toString() == QStringLiteral("symbol"))
+            instanceId = owner->data(1).toULongLong();
+        if (instanceId != hoveredInstanceId_) {
+            if (auto *previous = itemById(hoveredInstanceId_))
+                applySymbolHoverStyle(previous, false);
+            hoveredInstanceId_ = instanceId;
+            if (auto *current = itemById(hoveredInstanceId_))
+                applySymbolHoverStyle(current, true);
+        }
+
+        const auto netId = netIdAtPosition(position);
+        if (netId != hoveredNetId_) {
+            setNetHovered(hoveredNetId_, false);
+            hoveredNetId_ = netId;
+            setNetHovered(hoveredNetId_, true);
+        }
+    }
+
+    void clearHover() {
+        if (auto *previous = itemById(hoveredInstanceId_))
+            applySymbolHoverStyle(previous, false);
+        hoveredInstanceId_ = 0;
+        setNetHovered(hoveredNetId_, false);
+        hoveredNetId_ = 0;
+    }
 
     // Selection is view state expressed over stable domain ids, so it survives
     // a scene rebuild and can be mirrored by the properties panel.
@@ -976,6 +1042,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
     std::function<void(int)> placeSymbolCycleRequested_;
     std::function<void()> toolEscapeRequested_;
     std::set<ice::ObjectId> selectedInstances_;
+    ice::ObjectId hoveredInstanceId_ = 0;
+    ice::ObjectId hoveredNetId_ = 0;
     bool updatingSelection_ = false;
     bool viewInitialized_ = false;
     qreal zoom_ = 1.0;

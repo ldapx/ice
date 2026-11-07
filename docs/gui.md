@@ -160,7 +160,12 @@ intersect its new geometry. Unrelated nets keep their existing routing.
 Dragging a net label stores a route-relative anchor: the branch endpoints, the
 normalized distance along that branch, and the label side (A or B). Labels
 therefore follow translated or re-routed wires, survive save/load, and do not
-depend on volatile segment numbering.
+depend on volatile segment numbering. Source reference labels sit to the left
+of their symbols. Passive values are shown below resistors, capacitors, and
+inductors. Source values are shown to the right, with sine sources displaying
+amplitude and period. Selecting a symbol highlights its artwork, reference
+label, and value text without drawing a selection rectangle. Hovering over a
+symbol highlights its artwork, and hovering over a net highlights its wires.
 The **+** button in Schematic **Hierarchy** offers **Schematic**, **Text SPICE
 Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
 notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and

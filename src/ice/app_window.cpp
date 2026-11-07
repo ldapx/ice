@@ -70,6 +70,7 @@
 #include <QGraphicsView>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -6465,6 +6466,12 @@ class DocumentWindow : public QMainWindow {
         }
         updateSchematicNetlistState();
         updateSimulationNetlistState();
+        // The parameter callback runs while the properties table is still
+        // handling the edit, so redraw the schematic after that event returns.
+        QTimer::singleShot(0, this, [this] {
+            if (project_)
+                refreshSchematic();
+        });
     }
 
     void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
@@ -9356,6 +9363,190 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    static std::string lowerText(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    }
+
+    static std::optional<std::string> instanceParameter(const ice::SchematicInstance &instance,
+                                                        std::initializer_list<const char *> names) {
+        for (const auto &parameter : instance.parameters) {
+            const auto key = lowerText(parameter.name);
+            for (const auto *name : names)
+                if (key == name)
+                    return parameter.value;
+        }
+        return std::nullopt;
+    }
+
+    static bool isSchematicSourceSymbol(const ice::Symbol &symbol, const ice::SchematicInstance &instance) {
+        const auto name = lowerText(symbol.name);
+        if (name.find("source") != std::string::npos || name.find("battery") != std::string::npos)
+            return true;
+        return instanceParameter(instance, {"voltage", "current", "amplitude", "pulsed_voltage"}).has_value();
+    }
+
+    static std::optional<double> parseQuantityValue(const std::string &text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return std::nullopt;
+        const auto last = text.find_last_not_of(" \t\r\n");
+        const auto trimmed = text.substr(first, last - first + 1);
+        try {
+            std::size_t consumed = 0;
+            const auto value = std::stod(trimmed, &consumed);
+            while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
+                ++consumed;
+            double scale = 1.0;
+            if (consumed < trimmed.size()) {
+                switch (trimmed[consumed]) {
+                case 'f':
+                    scale = 1.0e-15;
+                    break;
+                case 'p':
+                    scale = 1.0e-12;
+                    break;
+                case 'n':
+                    scale = 1.0e-9;
+                    break;
+                case 'u':
+                    scale = 1.0e-6;
+                    break;
+                case 'm':
+                    scale = 1.0e-3;
+                    break;
+                case 'k':
+                    scale = 1.0e3;
+                    break;
+                case 'M':
+                    scale = 1.0e6;
+                    break;
+                case 'G':
+                    scale = 1.0e9;
+                    break;
+                default:
+                    return std::nullopt;
+                }
+                ++consumed;
+                while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
+                    ++consumed;
+                if (consumed != trimmed.size())
+                    return std::nullopt;
+            }
+            if (!std::isfinite(value))
+                return std::nullopt;
+            return value * scale;
+        } catch (const std::exception &) {
+            return std::nullopt;
+        }
+    }
+
+    static QString formatQuantityValue(double value) {
+        if (!std::isfinite(value))
+            return {};
+        constexpr std::array<std::pair<double, const char *>, 9> units = {
+            std::pair{1.0e9, "G"},  std::pair{1.0e6, "M"},   std::pair{1.0e3, "k"},
+            std::pair{1.0, ""},     std::pair{1.0e-3, "m"},  std::pair{1.0e-6, "u"},
+            std::pair{1.0e-9, "n"}, std::pair{1.0e-12, "p"}, std::pair{1.0e-15, "f"}};
+        const auto magnitude = std::abs(value);
+        for (const auto &[scale, suffix] : units) {
+            if (magnitude >= scale || scale == 1.0e-15)
+                return QString::number(value / scale, 'g', 4) + QString::fromLatin1(suffix);
+        }
+        return QString::number(value, 'g', 4);
+    }
+
+    static QString withUnit(const std::string &value, const QString &unit) {
+        const auto text = QString::fromStdString(value).trimmed();
+        if (text.endsWith(unit, Qt::CaseInsensitive))
+            return text;
+        return text + QLatin1Char(' ') + unit;
+    }
+
+    static QRectF svgVisibleBounds(QSvgRenderer &renderer, const QSizeF &size) {
+        if (!renderer.isValid() || !size.isValid() || size.isEmpty())
+            return {};
+        constexpr qreal maxDimension = 512.0;
+        const auto scale = std::min(maxDimension / std::max(size.width(), size.height()), 8.0);
+        const auto width = std::max(1, qRound(size.width() * scale));
+        const auto height = std::max(1, qRound(size.height() * scale));
+        QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        renderer.render(&painter, QRectF(0.0, 0.0, width, height));
+        painter.end();
+        int minX = width;
+        int minY = height;
+        int maxX = -1;
+        int maxY = -1;
+        for (int y = 0; y < height; ++y) {
+            const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+            for (int x = 0; x < width; ++x) {
+                if (qAlpha(line[x]) <= 8)
+                    continue;
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+            }
+        }
+        if (maxX < minX || maxY < minY)
+            return {};
+        return QRectF(minX / scale, minY / scale, (maxX - minX + 1) / scale, (maxY - minY + 1) / scale);
+    }
+
+    const QRectF &schematicArtworkVisibleBounds(QSvgRenderer &renderer, const std::string &artwork,
+                                                const QSizeF &size) {
+        if (const auto cached = schematicArtworkBoundsCache_.find(artwork);
+            cached != schematicArtworkBoundsCache_.end())
+            return cached->second;
+        return schematicArtworkBoundsCache_.emplace(artwork, svgVisibleBounds(renderer, size)).first->second;
+    }
+
+    struct SchematicValueLabel {
+        QString text;
+        bool onRight = false;
+    };
+
+    static SchematicValueLabel schematicValueLabel(const ice::Symbol &symbol, const ice::SchematicInstance &instance) {
+        if (const auto value = instanceParameter(instance, {"resistance"}))
+            return {QString::fromStdString(*value), false};
+        if (const auto value = instanceParameter(instance, {"capacitance"}))
+            return {QString::fromStdString(*value), false};
+        if (const auto value = instanceParameter(instance, {"inductance"}))
+            return {QString::fromStdString(*value), false};
+
+        const auto name = lowerText(symbol.name);
+        if (name.find("sine") != std::string::npos) {
+            QStringList lines;
+            if (const auto amplitude = instanceParameter(instance, {"amplitude"}))
+                lines.append(QStringLiteral("A = %1").arg(withUnit(*amplitude, QStringLiteral("V"))));
+            if (const auto frequency = instanceParameter(instance, {"frequency", "freq"})) {
+                if (const auto parsed = parseQuantityValue(*frequency); parsed && *parsed > 0.0)
+                    lines.append(QStringLiteral("T = %1 s").arg(formatQuantityValue(1.0 / *parsed)));
+            } else if (const auto period = instanceParameter(instance, {"period"})) {
+                lines.append(QStringLiteral("T = %1").arg(withUnit(*period, QStringLiteral("s"))));
+            }
+            if (!lines.isEmpty())
+                return {lines.join('\n'), true};
+        }
+        if (name.find("pulse") != std::string::npos) {
+            QStringList lines;
+            if (const auto voltage = instanceParameter(instance, {"pulsed_voltage", "amplitude", "voltage"}))
+                lines.append(QStringLiteral("V = %1").arg(withUnit(*voltage, QStringLiteral("V"))));
+            if (const auto period = instanceParameter(instance, {"period"}))
+                lines.append(QStringLiteral("T = %1").arg(withUnit(*period, QStringLiteral("s"))));
+            if (!lines.isEmpty())
+                return {lines.join('\n'), true};
+        }
+        if (const auto voltage = instanceParameter(instance, {"voltage"}))
+            return {withUnit(*voltage, QStringLiteral("V")), true};
+        if (const auto current = instanceParameter(instance, {"current"}))
+            return {withUnit(*current, QStringLiteral("A")), true};
+        return {};
+    }
+
     void refreshSchematic() {
         if (!schematicCanvas_)
             return;
@@ -9476,7 +9667,13 @@ class DocumentWindow : public QMainWindow {
             // Center artwork of any size on the symbol origin; pins are
             // defined relative to the artwork center (see symbols/*.toml).
             const auto artworkSize = renderer->defaultSize();
-            artwork->setPos(-artworkSize.width() / 2.0, -artworkSize.height() / 2.0);
+            const QRectF artworkRect(-artworkSize.width() / 2.0, -artworkSize.height() / 2.0, artworkSize.width(),
+                                     artworkSize.height());
+            const auto &visibleArtwork = schematicArtworkVisibleBounds(*renderer, artworkText, artworkSize);
+            const auto visibleInGroup = visibleArtwork.isValid() && !visibleArtwork.isEmpty()
+                                            ? visibleArtwork.translated(artworkRect.topLeft())
+                                            : artworkRect;
+            artwork->setPos(artworkRect.topLeft());
             artwork->setFlag(QGraphicsItem::ItemIsSelectable, false);
             artwork->setData(0, QStringLiteral("symbol-artwork"));
             auto *tint = new QGraphicsColorizeEffect(artwork);
@@ -9485,17 +9682,47 @@ class DocumentWindow : public QMainWindow {
             tint->setEnabled(true);
             artwork->setGraphicsEffect(tint);
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
+            constexpr qreal symbolAnnotationGap = 2.0;
+            const bool sourceSymbol = isSchematicSourceSymbol(symbolIt->second, instance);
+            const auto valueLabel = schematicValueLabel(symbolIt->second, instance);
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
             label->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
-            if (symbolIt->second.label) {
+            if (sourceSymbol) {
+                const auto bounds = label->boundingRect();
+                label->setPos(visibleInGroup.left() - bounds.width() - symbolAnnotationGap,
+                              visibleInGroup.center().y() - bounds.height() / 2.0);
+            } else if (symbolIt->second.label) {
                 const auto bounds = label->boundingRect();
                 label->setPos(symbolIt->second.label->x - bounds.width() / 2.0,
                               -symbolIt->second.label->y - bounds.height() / 2.0);
             } else {
-                label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
+                const auto bounds = label->boundingRect();
+                label->setPos(visibleInGroup.center().x() - bounds.width() / 2.0,
+                              visibleInGroup.bottom() + symbolAnnotationGap);
             }
             label->setData(0, QStringLiteral("symbol-label"));
             label->setFlag(QGraphicsItem::ItemIsSelectable, false);
+            if (!valueLabel.text.isEmpty()) {
+                auto *valueItem = new QGraphicsTextItem(valueLabel.text, group);
+                valueItem->setDefaultTextColor(ice::uiColor(ice::UiColor::Text1));
+                valueItem->setData(0, QStringLiteral("symbol-value"));
+                valueItem->setFlag(QGraphicsItem::ItemIsSelectable, false);
+                valueItem->setAcceptedMouseButtons(Qt::NoButton);
+                const auto bounds = valueItem->boundingRect();
+                if (valueLabel.onRight) {
+                    valueItem->setPos(visibleInGroup.right() + symbolAnnotationGap,
+                                      visibleInGroup.center().y() - bounds.height() / 2.0);
+                } else {
+                    qreal valueGap = symbolAnnotationGap;
+                    if (symbolIt->second.label) {
+                        const auto referenceBounds = label->boundingRect();
+                        const auto referenceBottom = -symbolIt->second.label->y + referenceBounds.height() / 2.0;
+                        valueGap = std::max<qreal>(0.0, visibleInGroup.top() - referenceBottom);
+                    }
+                    valueItem->setPos(visibleInGroup.center().x() - bounds.width() / 2.0,
+                                      visibleInGroup.bottom() + valueGap);
+                }
+            }
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
                 pinItem->setPen(QPen(ice::uiColor(ice::UiColor::Axis1)));
@@ -12430,6 +12657,9 @@ class DocumentWindow : public QMainWindow {
     // Per-cell, per-net branch routes. Unchanged branches are reused so editing
     // one net does not perturb unrelated schematic wiring.
     std::map<ice::ObjectId, std::map<ice::ObjectId, SchematicNetRoute>> schematicRouteCache_;
+    // Visible SVG ink bounds keyed by artwork source. Measuring an SVG requires
+    // an offscreen render and alpha scan, so cache it for the session.
+    std::map<std::string, QRectF> schematicArtworkBoundsCache_;
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
