@@ -577,18 +577,13 @@ class SchematicCanvasImpl : public SchematicCanvas {
             event->ignore();
             return;
         }
-        if (event->modifiers().testFlag(Qt::ControlModifier)) {
-            const auto scenePosition = mapToScene(event->position().toPoint());
-            const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
-            zoom_ = std::clamp(zoom_ * factor, qreal(0.05), qreal(100.0));
-            const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
-            const auto cursor = event->position();
-            centerScene_ = scenePosition - QPointF((cursor.x() - viewportCenter.x()) / zoom_,
-                                                   (cursor.y() - viewportCenter.y()) / zoom_);
-        } else {
-            const auto delta = event->angleDelta();
-            centerScene_ -= QPointF(-delta.x() / zoom_, delta.y() / zoom_);
-        }
+        const auto scenePosition = mapToScene(event->position().toPoint());
+        const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+        zoom_ = std::clamp(zoom_ * factor, qreal(0.05), qreal(100.0));
+        const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
+        const auto cursor = event->position();
+        centerScene_ = scenePosition -
+                       QPointF((cursor.x() - viewportCenter.x()) / zoom_, (cursor.y() - viewportCenter.y()) / zoom_);
         applyNavigationTransform();
         cursorScenePosition_ = mapToScene(event->position().toPoint());
         updatePinVisibility();

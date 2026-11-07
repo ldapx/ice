@@ -153,6 +153,7 @@ The schematic editor should initially provide:
 
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
+Scroll the mouse wheel to zoom around the cursor.
 Connecting two pins merges their nets, and schematic wire routes are cached per
 net and branch. Editing a connection re-routes only the affected net, while
 moving or rotating a symbol re-routes nets attached to it or whose wires
