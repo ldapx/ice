@@ -82,8 +82,10 @@ Project state, view state, and transient job state should be separate:
 
 Schematic and layout file tabs are closable. Their labels include the file
 extension (`.sp` for text SPICE schematics, `.sv` for SystemVerilog source
-cells, `.icesch` for drawn schematics, or `.icelay` for layouts) and a leading
-`●` while that file has unsaved edits. If
+cells, `.icesch` for drawn schematics, `.icelay` for static layouts, or `.py`
+for procedural layouts) and a leading `●` while that file has unsaved edits.
+Hierarchy file entries use the same extensions; nested instance entries keep
+their instance names. If
 every schematic or layout file tab is closed, the central editor area shows a
 form to open an existing file or create a new one. Opening a project starts with
 no schematic or layout file tabs open; open files from the hierarchy or the

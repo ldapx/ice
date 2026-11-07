@@ -178,6 +178,18 @@ QString layerPurposeLabel(const ice::Layer &layer) {
 QString layerVariantLabel(const ice::Layer &layer) {
     return QStringLiteral("%1 (dt %2)").arg(layerPurposeLabel(layer)).arg(layer.datatype);
 }
+
+QString hierarchyFileLabel(const std::string &name, const char *extension) {
+    return QString::fromStdString(name) + QLatin1Char('.') + QLatin1String(extension);
+}
+
+QString hierarchySchematicLabel(const ice::SchematicCell &cell) {
+    if (cell.systemVerilogSchematic)
+        return hierarchyFileLabel(cell.name, "sv");
+    if (cell.textSchematic)
+        return hierarchyFileLabel(cell.name, "sp");
+    return hierarchyFileLabel(cell.name, "icesch");
+}
 } // namespace
 
 ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutHierarchy, bool showActions,
@@ -430,10 +442,11 @@ void ProjectPanel::rebuildTree() {
                 const auto cellIt = project.schematicCells.find(childId);
                 if (cellIt == project.schematicCells.end())
                     continue;
-                auto *childItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(cellIt->second.name)});
+                const auto childLabel = hierarchySchematicLabel(cellIt->second);
+                auto *childItem = new QTreeWidgetItem(parentItem, {childLabel});
                 childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
                 childItem->setIcon(0, hierarchyIcon("puzzle"));
-                childItem->setToolTip(0, QStringLiteral("Cell: %1").arg(QString::fromStdString(cellIt->second.name)));
+                childItem->setToolTip(0, QStringLiteral("Cell: %1").arg(childLabel));
                 if (std::find(ancestors.begin(), ancestors.end(), childId) != ancestors.end())
                     continue;
                 ancestors.push_back(childId);
@@ -442,18 +455,19 @@ void ProjectPanel::rebuildTree() {
             }
         };
         for (const auto &[id, cell] : project.schematicCells) {
-            auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
+            const auto cellLabel = hierarchySchematicLabel(cell);
+            auto *cellItem = new QTreeWidgetItem(tree_, {cellLabel});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             if (cell.isTextSource()) {
                 cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::textSchematic));
                 cellItem->setIcon(0, hierarchyIcon("notebook-text"));
                 cellItem->setToolTip(0, (cell.systemVerilogSchematic ? QStringLiteral("SystemVerilog source: %1")
                                                                      : QStringLiteral("Text SPICE schematic: %1"))
-                                            .arg(QString::fromStdString(cell.name)));
+                                            .arg(cellLabel));
                 continue;
             }
             cellItem->setIcon(0, hierarchyIcon("microchip"));
-            cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(QString::fromStdString(cell.name)));
+            cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(cellLabel));
             std::vector<ice::ObjectId> ancestors{id};
             addChildren(cellItem, id, ancestors);
         }
@@ -562,32 +576,33 @@ void ProjectPanel::rebuildTree() {
     for (const auto &[id, procedural] : project.proceduralLayouts) {
         if (procedural.generatedCell != 0)
             generatedCells.insert(procedural.generatedCell);
-        auto *proceduralItem = new QTreeWidgetItem(tree_, {QString::fromStdString(procedural.name)});
+        const auto proceduralLabel = hierarchyFileLabel(procedural.name, "py");
+        auto *proceduralItem = new QTreeWidgetItem(tree_, {proceduralLabel});
         proceduralItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
         proceduralItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::proceduralLayout));
         proceduralItem->setIcon(0, hierarchyIcon("notebook-text"));
-        proceduralItem->setToolTip(
-            0, QStringLiteral("Procedural layout (Python script): %1").arg(QString::fromStdString(procedural.name)));
+        proceduralItem->setToolTip(0, QStringLiteral("Procedural layout (Python script): %1").arg(proceduralLabel));
         const auto generatedIt = project.layoutCells.find(procedural.generatedCell);
         if (generatedIt == project.layoutCells.end())
             continue;
-        auto *generatedItem = new QTreeWidgetItem(proceduralItem, {QString::fromStdString(generatedIt->second.name)});
+        const auto generatedLabel = hierarchyFileLabel(generatedIt->second.name, "icelay");
+        auto *generatedItem = new QTreeWidgetItem(proceduralItem, {generatedLabel});
         generatedItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(generatedIt->first));
         generatedItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
         generatedItem->setIcon(0, hierarchyIcon("notebook-pen"));
-        generatedItem->setToolTip(
-            0, QStringLiteral("Generated static layout: %1").arg(QString::fromStdString(generatedIt->second.name)));
+        generatedItem->setToolTip(0, QStringLiteral("Generated static layout: %1").arg(generatedLabel));
         std::vector<ice::ObjectId> ancestors{generatedIt->first};
         addContents(generatedItem, generatedIt->first, ancestors);
     }
     for (const auto &[id, cell] : project.layoutCells) {
         if (cell.library || generatedCells.contains(id))
             continue;
-        auto *cellItem = new QTreeWidgetItem(tree_, {QString::fromStdString(cell.name)});
+        const auto cellLabel = hierarchyFileLabel(cell.name, "icelay");
+        auto *cellItem = new QTreeWidgetItem(tree_, {cellLabel});
         cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
         cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
         cellItem->setIcon(0, hierarchyIcon("notebook-pen"));
-        cellItem->setToolTip(0, QStringLiteral("Layout: %1").arg(QString::fromStdString(cell.name)));
+        cellItem->setToolTip(0, QStringLiteral("Layout: %1").arg(cellLabel));
         std::vector<ice::ObjectId> ancestors{id};
         addContents(cellItem, id, ancestors);
     }
@@ -626,11 +641,14 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
     QAction *flattenAction = nullptr;
     QAction *pexAction = nullptr;
     QAction *renameAction = nullptr;
+    QString renameCurrentName;
     std::function<void(const std::string &)> renameHandler;
 
-    const auto addRename = [&](const QString &title, std::function<void(const std::string &)> handler) {
+    const auto addRename = [&](const QString &title, const QString &currentName,
+                               std::function<void(const std::string &)> handler) {
         renameAction = menu.addAction(title);
         setLucideIcon(renameAction, QStringLiteral("pencil"));
+        renameCurrentName = currentName;
         renameHandler = std::move(handler);
     };
 
@@ -642,7 +660,7 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         openAction = menu.addAction(QStringLiteral("Open script"));
         setLucideIcon(openAction, QStringLiteral("notebook-text"));
         if (onRenameProceduralLayout_)
-            addRename(QStringLiteral("Rename Script…"),
+            addRename(QStringLiteral("Rename Script…"), QString::fromStdString(project_->proceduralLayouts.at(id).name),
                       [this, id](const std::string &name) { onRenameProceduralLayout_(id, name); });
     } else if (kind == static_cast<int>(HierarchyItemKind::layout)) {
         const auto *parent = item->parent();
@@ -652,15 +670,16 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             if (id == 0 || !project_->layoutCells.contains(id))
                 return;
             if (onRenameLayout_)
-                addRename(QStringLiteral("Rename Layout…"),
+                addRename(QStringLiteral("Rename Layout…"), QString::fromStdString(project_->layoutCells.at(id).name),
                           [this, id](const std::string &name) { onRenameLayout_(id, name); });
         } else {
             const auto parentId = parent->data(0, Qt::UserRole).toULongLong();
             const auto instanceId = item->data(0, kInstanceIdRole).toULongLong();
             if (parentId != 0 && instanceId != 0 && onRenameInstance_)
-                addRename(QStringLiteral("Rename Instance…"), [this, parentId, instanceId](const std::string &name) {
-                    onRenameInstance_(parentId, instanceId, name);
-                });
+                addRename(QStringLiteral("Rename Instance…"), item->text(0),
+                          [this, parentId, instanceId](const std::string &name) {
+                              onRenameInstance_(parentId, instanceId, name);
+                          });
         }
         if (id != 0 && project_->layoutCells.contains(id)) {
             flattenAction = menu.addAction(QStringLiteral("Flatten Layout for DRC"));
@@ -674,14 +693,15 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         const auto parentId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;
         const auto instanceId = item->data(0, kInstanceIdRole).toULongLong();
         if (parentId != 0 && instanceId != 0 && onRenameInstance_)
-            addRename(QStringLiteral("Rename Instance…"), [this, parentId, instanceId](const std::string &name) {
-                onRenameInstance_(parentId, instanceId, name);
-            });
+            addRename(QStringLiteral("Rename Instance…"), item->text(0),
+                      [this, parentId, instanceId](const std::string &name) {
+                          onRenameInstance_(parentId, instanceId, name);
+                      });
     } else if (kind == static_cast<int>(HierarchyItemKind::plannedDevice)) {
         const auto *parent = item->parent();
         const auto parentId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;
         if (parentId != 0 && id != 0 && onRenamePlannedDevice_)
-            addRename(QStringLiteral("Rename Device…"),
+            addRename(QStringLiteral("Rename Device…"), item->text(0),
                       [this, parentId, id](const std::string &name) { onRenamePlannedDevice_(parentId, id, name); });
     } else if (kind == static_cast<int>(HierarchyItemKind::rectangle) ||
                kind == static_cast<int>(HierarchyItemKind::polygon) ||
@@ -692,7 +712,7 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         const auto *parent = item->parent();
         const auto parentId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;
         if (parentId != 0 && id != 0 && onRenameShape_)
-            addRename(QStringLiteral("Rename Shape…"),
+            addRename(QStringLiteral("Rename Shape…"), item->text(0),
                       [this, parentId, id](const std::string &name) { onRenameShape_(parentId, id, name); });
     } else {
         return;
@@ -717,11 +737,10 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         onRunPex_(id);
     } else if (chosen == renameAction) {
         bool ok = false;
-        const auto current = item->text(0);
-        const auto name =
-            QInputDialog::getText(this, renameAction->text(), QStringLiteral("Name:"), QLineEdit::Normal, current, &ok)
-                .trimmed();
-        if (ok && !name.isEmpty() && name != current && renameHandler)
+        const auto name = QInputDialog::getText(this, renameAction->text(), QStringLiteral("Name:"), QLineEdit::Normal,
+                                                renameCurrentName, &ok)
+                              .trimmed();
+        if (ok && !name.isEmpty() && name != renameCurrentName && renameHandler)
             renameHandler(name.toStdString());
     }
 }

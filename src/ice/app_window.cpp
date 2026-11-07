@@ -9147,7 +9147,7 @@ class DocumentWindow : public QMainWindow {
                     const bool conflict = conflictedProceduralFiles_.contains(id);
                     layoutCellTabs_->setTabText(index,
                                                 fileTabLabel(QString::fromStdString(procedural->second.name),
-                                                             QStringLiteral("icelay"), layoutFileDirty(id), conflict));
+                                                             QStringLiteral("py"), layoutFileDirty(id), conflict));
                     continue;
                 }
                 const auto cell = project_->project().layoutCells.find(id);
@@ -9263,9 +9263,9 @@ class DocumentWindow : public QMainWindow {
                     if (!openLayoutTabs_.contains(id))
                         continue;
                     const auto index = layoutCellTabs_->count();
-                    layoutCellTabs_->addTab(new QWidget, fileTabLabel(QString::fromStdString(procedural.name),
-                                                                      QStringLiteral("icelay"), layoutFileDirty(id),
-                                                                      conflictedProceduralFiles_.contains(id)));
+                    layoutCellTabs_->addTab(new QWidget,
+                                            fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
+                                                         layoutFileDirty(id), conflictedProceduralFiles_.contains(id)));
                     layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
                     layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
                 }
@@ -10707,7 +10707,7 @@ class DocumentWindow : public QMainWindow {
                 if (project_) {
                     for (const auto &[id, layout] : project_->project().proceduralLayouts)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(layout.name),
-                                                                 QStringLiteral("icelay"), layoutFileDirty(id),
+                                                                 QStringLiteral("py"), layoutFileDirty(id),
                                                                  conflictedProceduralFiles_.contains(id)));
                     for (const auto &[id, cell] : project_->project().layoutCells)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
