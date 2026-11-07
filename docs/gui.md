@@ -347,7 +347,11 @@ are listed as Routed Path shapes with the route icon. Select a manual path to
 show its point handles; drag a handle to move a point, double-click a segment to
 insert a point, and right-click a handle to delete it. Automatically routed
 paths expose handles only at their endpoints; drag an endpoint to a different
-border of its pin to change which side the route attaches to. Changing layers while drawing
+border of its pin to change which side the route attaches to. Routing avoids
+other automatically routed paths on different nets by choosing another metal
+layer, trying an alternate Manhattan trace, or bridging a segment through an
+adjacent layer with vias. If no conflict-free route exists, the direct route is
+kept. Changing layers while drawing
 keeps the same path and records the layer for each segment; changing the width
 starts a new path at the current endpoint. Corners and endpoints are square,
 not rounded. Layer-change vias are stored with the path and move with it.

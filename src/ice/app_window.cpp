@@ -661,11 +661,213 @@ LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
 struct AutoRouteGeometry {
     ice::ObjectId layer = 0;
     std::vector<ice::LayoutPoint> points;
+    std::vector<ice::ObjectId> segmentLayers;
     std::vector<std::vector<ice::ObjectId>> pointVias;
 };
 
+struct AutoRouteObstacleSegment {
+    ice::LayoutPoint a;
+    ice::LayoutPoint b;
+    ice::ObjectId layer = 0;
+    ice::Coordinate halfWidth = 1;
+};
+
+struct AutoRouteObstacleVia {
+    ice::LayoutPoint point;
+    std::set<ice::ObjectId> conductorLayers;
+    ice::Coordinate halfWidth = 1;
+};
+
+struct AutoRouteObstacles {
+    std::vector<AutoRouteObstacleSegment> segments;
+    std::vector<AutoRouteObstacleVia> vias;
+};
+
+bool routeSegmentsConflict(ice::LayoutPoint a, ice::LayoutPoint b, ice::Coordinate halfWidth,
+                           const AutoRouteObstacleSegment &obstacle, ice::Coordinate margin) {
+    const auto clearance = static_cast<double>(halfWidth + obstacle.halfWidth + margin);
+    const auto aHorizontal = a.y == b.y;
+    const auto bHorizontal = obstacle.a.y == obstacle.b.y;
+    const auto minAX = std::min(a.x, b.x);
+    const auto maxAX = std::max(a.x, b.x);
+    const auto minAY = std::min(a.y, b.y);
+    const auto maxAY = std::max(a.y, b.y);
+    const auto minBX = std::min(obstacle.a.x, obstacle.b.x);
+    const auto maxBX = std::max(obstacle.a.x, obstacle.b.x);
+    const auto minBY = std::min(obstacle.a.y, obstacle.b.y);
+    const auto maxBY = std::max(obstacle.a.y, obstacle.b.y);
+    if (aHorizontal && bHorizontal) {
+        return std::abs(static_cast<double>(a.y) - obstacle.a.y) <= clearance &&
+               std::max(minAX, minBX) <= std::min(maxAX, maxBX) + clearance;
+    }
+    if (!aHorizontal && !bHorizontal) {
+        return std::abs(static_cast<double>(a.x) - obstacle.a.x) <= clearance &&
+               std::max(minAY, minBY) <= std::min(maxAY, maxBY) + clearance;
+    }
+    if (aHorizontal) {
+        return obstacle.a.x >= minAX - clearance && obstacle.a.x <= maxAX + clearance && a.y >= minBY - clearance &&
+               a.y <= maxBY + clearance;
+    }
+    return a.x >= minBX - clearance && a.x <= maxBX + clearance && obstacle.a.y >= minAY - clearance &&
+           obstacle.a.y <= maxAY + clearance;
+}
+
+double routePointSegmentDistance(ice::LayoutPoint point, ice::LayoutPoint a, ice::LayoutPoint b) {
+    const auto minX = static_cast<double>(std::min(a.x, b.x));
+    const auto maxX = static_cast<double>(std::max(a.x, b.x));
+    const auto minY = static_cast<double>(std::min(a.y, b.y));
+    const auto maxY = static_cast<double>(std::max(a.y, b.y));
+    const auto x = std::clamp(static_cast<double>(point.x), minX, maxX);
+    const auto y = std::clamp(static_cast<double>(point.y), minY, maxY);
+    return std::hypot(static_cast<double>(point.x) - x, static_cast<double>(point.y) - y);
+}
+
+AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::PlannedConnection &connection,
+                                      const LayoutConnectivity &connectivity) {
+    AutoRouteObstacles result;
+    for (const auto &[_, shape] : cell.shapes) {
+        if (shape.routedConnection == 0 || shape.routedConnection == connection.id)
+            continue;
+        const auto other = cell.plannedConnections.find(shape.routedConnection);
+        if (other != cell.plannedConnections.end() && !other->second.routed)
+            continue;
+        const auto otherNet = other != cell.plannedConnections.end() ? other->second.net : shape.net.value_or(0);
+        if (connection.net != 0 && otherNet != 0 && connection.net == otherNet)
+            continue;
+        if (shape.centerline.size() < 2)
+            continue;
+        const auto halfWidth = std::max<ice::Coordinate>(1, shape.width) / 2;
+        for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+            if (shape.centerline[index].x == shape.centerline[index + 1].x &&
+                shape.centerline[index].y == shape.centerline[index + 1].y)
+                continue;
+            result.segments.push_back(
+                {shape.centerline[index], shape.centerline[index + 1], shape.layerForSegment(index), halfWidth});
+        }
+        for (std::size_t index = 0; index < shape.centerline.size() && index < shape.pointVias.size(); ++index) {
+            for (const auto via : shape.pointVias[index]) {
+                AutoRouteObstacleVia obstacle;
+                obstacle.point = shape.centerline[index];
+                obstacle.halfWidth = halfWidth;
+                if (const auto entry = connectivity.viaConductors.find(via); entry != connectivity.viaConductors.end())
+                    obstacle.conductorLayers = entry->second;
+                else
+                    obstacle.conductorLayers.insert(via);
+                result.vias.push_back(std::move(obstacle));
+            }
+        }
+    }
+    return result;
+}
+
+int autoRouteConflictCount(const std::vector<ice::LayoutPoint> &points, const std::vector<ice::ObjectId> &segmentLayers,
+                           const std::vector<std::vector<ice::ObjectId>> &pointVias, ice::Coordinate width,
+                           const AutoRouteObstacles &obstacles, const LayoutConnectivity &connectivity,
+                           ice::Coordinate margin) {
+    if (points.size() < 2 || segmentLayers.size() + 1 != points.size())
+        return std::numeric_limits<int>::max() / 2;
+    const auto halfWidth = std::max<ice::Coordinate>(1, width) / 2;
+    int conflicts = 0;
+    for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+        for (const auto &obstacle : obstacles.segments) {
+            if (obstacle.layer != segmentLayers[index])
+                continue;
+            if (routeSegmentsConflict(points[index], points[index + 1], halfWidth, obstacle, margin))
+                ++conflicts;
+        }
+        for (const auto &via : obstacles.vias) {
+            if (!via.conductorLayers.contains(segmentLayers[index]))
+                continue;
+            if (routePointSegmentDistance(via.point, points[index], points[index + 1]) <=
+                halfWidth + via.halfWidth + margin)
+                ++conflicts;
+        }
+    }
+    for (std::size_t index = 0; index < points.size() && index < pointVias.size(); ++index) {
+        for (const auto viaLayer : pointVias[index]) {
+            const auto via = connectivity.viaConductors.find(viaLayer);
+            if (via == connectivity.viaConductors.end())
+                continue;
+            for (const auto &obstacle : obstacles.segments) {
+                if (!via->second.contains(obstacle.layer))
+                    continue;
+                if (routePointSegmentDistance(points[index], obstacle.a, obstacle.b) <=
+                    halfWidth + obstacle.halfWidth + margin)
+                    ++conflicts;
+            }
+        }
+    }
+    return conflicts;
+}
+
+std::vector<ice::LayoutPoint> buildAutoRoutePoints(const PinRoutePoint &start, const PinRoutePoint &end,
+                                                   const ice::LayoutPoint &startStub, const ice::LayoutPoint &endStub,
+                                                   std::optional<ice::Coordinate> variant) {
+    std::vector<ice::LayoutPoint> points;
+    const auto append = [&](ice::LayoutPoint point) {
+        if (points.empty() || points.back().x != point.x || points.back().y != point.y)
+            points.push_back(point);
+    };
+    append(start.point);
+    append(startStub);
+    if (start.normal.x != 0) {
+        const auto x = variant.value_or(startStub.x);
+        append({x, startStub.y});
+        append({x, endStub.y});
+    } else if (start.normal.y != 0) {
+        const auto y = variant.value_or(startStub.y);
+        append({startStub.x, y});
+        append({endStub.x, y});
+    } else if (end.normal.x == 0) {
+        const auto middleY = (startStub.y + endStub.y) / 2;
+        append({startStub.x, middleY});
+        append({endStub.x, middleY});
+    } else {
+        append({endStub.x, startStub.y});
+    }
+    append(endStub);
+    append(end.point);
+    return points;
+}
+
+std::vector<ice::Coordinate> buildAutoRouteVariants(const PinRoutePoint &start, const PinRoutePoint &end,
+                                                    const ice::LayoutPoint &startStub,
+                                                    const ice::LayoutPoint &endStub) {
+    std::vector<ice::Coordinate> variants;
+    const auto add = [&](ice::Coordinate value) {
+        if (std::find(variants.begin(), variants.end(), value) == variants.end())
+            variants.push_back(value);
+    };
+    if (start.normal.x != 0) {
+        const auto mid = startStub.x + (endStub.x - startStub.x) / 2;
+        add(end.normal.x != 0 ? mid : startStub.x);
+        add(startStub.x);
+        add(endStub.x);
+        add(mid);
+        add(startStub.x + (endStub.x - startStub.x) / 4);
+        add(startStub.x + (endStub.x - startStub.x) * 3 / 4);
+    } else if (start.normal.y != 0) {
+        const auto mid = startStub.y + (endStub.y - startStub.y) / 2;
+        add(end.normal.y != 0 ? mid : startStub.y);
+        add(startStub.y);
+        add(endStub.y);
+        add(mid);
+        add(startStub.y + (endStub.y - startStub.y) / 4);
+        add(startStub.y + (endStub.y - startStub.y) * 3 / 4);
+    }
+    return variants;
+}
+
+double autoRouteLength(const std::vector<ice::LayoutPoint> &points) {
+    double length = 0.0;
+    for (std::size_t index = 0; index + 1 < points.size(); ++index)
+        length += std::abs(static_cast<double>(points[index + 1].x - points[index].x)) +
+                  std::abs(static_cast<double>(points[index + 1].y - points[index].y));
+    return length;
+}
+
 std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &project, ice::ObjectId cellId,
-                                                        const ice::PlannedConnection &connection,
+                                                        const ice::PlannedConnection &connection, ice::Coordinate width,
                                                         std::string *error = nullptr) {
     const auto fail = [error](const char *message) -> std::optional<AutoRouteGeometry> {
         if (error)
@@ -725,27 +927,6 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     bfs(sourceLayer, distanceFrom, predecessorFrom);
     bfs(targetLayer, distanceTo, predecessorTo);
 
-    int best = std::numeric_limits<int>::max();
-    ice::ObjectId common = 0;
-    for (const auto &[layer, distance] : distanceFrom) {
-        const auto other = distanceTo.find(layer);
-        if (other == distanceTo.end())
-            continue;
-        const auto layerIt = project.layers.find(layer);
-        if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
-            layerIsPinLayer(layerIt->second))
-            continue;
-        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
-            continue;
-        const auto score = distance + other->second;
-        if (score < best) {
-            best = score;
-            common = layer;
-        }
-    }
-    if (common == 0)
-        return fail("No metal layer is reachable from both pins.");
-
     const auto viaStack = [&](ice::ObjectId from, ice::ObjectId to,
                               const std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> &predecessor) {
         std::vector<ice::ObjectId> vias;
@@ -760,20 +941,48 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         std::reverse(vias.begin(), vias.end());
         return vias;
     };
-    const auto sourceVias = viaStack(sourceLayer, common, predecessorFrom);
-    const auto targetVias = viaStack(targetLayer, common, predecessorTo);
     const auto layerAvailable = [&](ice::ObjectId layer) {
         const auto layerIt = project.layers.find(layer);
         return layerIt != project.layers.end() && layerAvailableForLayout(project, cellId, layerIt->second);
     };
-    if (!layerAvailable(common))
-        return fail("The routing layer is not available in this layout.");
-    for (const auto layer : sourceVias)
-        if (!layerAvailable(layer))
-            return fail("A source via layer is not available in this layout.");
-    for (const auto layer : targetVias)
-        if (!layerAvailable(layer))
-            return fail("A target via layer is not available in this layout.");
+
+    struct LayerOption {
+        ice::ObjectId layer = 0;
+        int viaCount = 0;
+        std::vector<ice::ObjectId> sourceVias;
+        std::vector<ice::ObjectId> targetVias;
+    };
+    std::vector<LayerOption> layerOptions;
+    for (const auto &[layer, distance] : distanceFrom) {
+        const auto other = distanceTo.find(layer);
+        if (other == distanceTo.end())
+            continue;
+        const auto layerIt = project.layers.find(layer);
+        if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
+            layerIsPinLayer(layerIt->second))
+            continue;
+        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+            continue;
+        const auto sourceVias = viaStack(sourceLayer, layer, predecessorFrom);
+        const auto targetVias = viaStack(targetLayer, layer, predecessorTo);
+        if ((sourceLayer != layer && sourceVias.empty()) || (targetLayer != layer && targetVias.empty()))
+            continue;
+        bool available = layerAvailable(layer);
+        for (const auto via : sourceVias)
+            available = available && layerAvailable(via);
+        for (const auto via : targetVias)
+            available = available && layerAvailable(via);
+        if (!available)
+            continue;
+        layerOptions.push_back({layer, distance + other->second, sourceVias, targetVias});
+    }
+    if (layerOptions.empty())
+        return fail("No metal layer is reachable from both pins.");
+    std::sort(layerOptions.begin(), layerOptions.end(), [](const auto &left, const auto &right) {
+        if (left.viaCount != right.viaCount)
+            return left.viaCount < right.viaCount;
+        return left.layer < right.layer;
+    });
 
     const ice::LayoutPoint sourceCenter{source->rect.x + source->rect.width / 2,
                                         source->rect.y + source->rect.height / 2};
@@ -795,40 +1004,180 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     };
     const auto startStub = stub(start, end.point);
     const auto endStub = stub(end, start.point);
-    const auto startHorizontal = start.normal.x != 0;
-    const auto endHorizontal = end.normal.x != 0;
 
-    AutoRouteGeometry result;
-    result.layer = common;
-    const auto append = [&](ice::LayoutPoint point) {
-        if (result.points.empty() || result.points.back().x != point.x || result.points.back().y != point.y)
-            result.points.push_back(point);
+    const auto makeGeometry = [](const LayerOption &option, const std::vector<ice::LayoutPoint> &points) {
+        AutoRouteGeometry geometry;
+        geometry.layer = option.layer;
+        geometry.points = points;
+        geometry.segmentLayers.assign(points.size() > 0 ? points.size() - 1 : 0, option.layer);
+        geometry.pointVias.resize(points.size());
+        if (!points.empty()) {
+            geometry.pointVias.front() = option.sourceVias;
+            geometry.pointVias.back() = option.targetVias;
+        }
+        return geometry;
     };
-    append(start.point);
-    append(startStub);
-    if (startHorizontal && endHorizontal) {
-        const auto middleX = (startStub.x + endStub.x) / 2;
-        append({middleX, startStub.y});
-        append({middleX, endStub.y});
-    } else if (!startHorizontal && !endHorizontal) {
-        const auto middleY = (startStub.y + endStub.y) / 2;
-        append({startStub.x, middleY});
-        append({endStub.x, middleY});
-    } else if (startHorizontal) {
-        // Leave horizontally, turn away from the start pin, then approach the
-        // vertical end pin along its normal.
-        append({startStub.x, endStub.y});
-    } else {
-        // Leave vertically, turn away from the start pin, then approach the
-        // horizontal end pin along its normal.
-        append({endStub.x, startStub.y});
+
+    const auto margin = std::max<ice::Coordinate>(1, project.grid);
+    const auto obstacles = autoRouteObstacles(cellIt->second, connection, connectivity);
+    const auto variants = buildAutoRouteVariants(start, end, startStub, endStub);
+
+    AutoRouteGeometry baseline;
+    bool haveBaseline = false;
+    std::optional<AutoRouteGeometry> bestCandidate;
+    int bestViaCount = std::numeric_limits<int>::max();
+    double bestLength = std::numeric_limits<double>::max();
+    std::optional<AutoRouteGeometry> leastConflictCandidate;
+    int leastConflictCount = std::numeric_limits<int>::max();
+    int leastConflictViaCount = std::numeric_limits<int>::max();
+    double leastConflictLength = std::numeric_limits<double>::max();
+    for (const auto &option : layerOptions) {
+        const auto consider = [&](const std::vector<ice::LayoutPoint> &points, bool makeBaseline) {
+            auto geometry = makeGeometry(option, points);
+            if (makeBaseline && !haveBaseline) {
+                baseline = geometry;
+                haveBaseline = true;
+            }
+            const auto conflicts = autoRouteConflictCount(geometry.points, geometry.segmentLayers, geometry.pointVias,
+                                                          width, obstacles, connectivity, margin);
+            const auto length = autoRouteLength(points);
+            if (conflicts < leastConflictCount ||
+                (conflicts == leastConflictCount &&
+                 (option.viaCount < leastConflictViaCount ||
+                  (option.viaCount == leastConflictViaCount && length < leastConflictLength)))) {
+                leastConflictCandidate = geometry;
+                leastConflictCount = conflicts;
+                leastConflictViaCount = option.viaCount;
+                leastConflictLength = length;
+            }
+            if (conflicts != 0)
+                return;
+            if (!bestCandidate || option.viaCount < bestViaCount ||
+                (option.viaCount == bestViaCount && length < bestLength)) {
+                bestCandidate = std::move(geometry);
+                bestViaCount = option.viaCount;
+                bestLength = length;
+            }
+        };
+        if (variants.empty()) {
+            consider(buildAutoRoutePoints(start, end, startStub, endStub, std::nullopt), true);
+            continue;
+        }
+        for (std::size_t index = 0; index < variants.size(); ++index)
+            consider(buildAutoRoutePoints(start, end, startStub, endStub, variants[index]), index == 0);
     }
-    append(endStub);
-    append(end.point);
-    result.pointVias.resize(result.points.size());
-    result.pointVias.front() = sourceVias;
-    result.pointVias.back() = targetVias;
-    return result;
+    if (!haveBaseline)
+        return fail("No route could be generated.");
+    if (bestCandidate)
+        return bestCandidate;
+
+    // No conflict-free route was found. Try short layer bridges on interior
+    // segments before falling back to the original overlapping route.
+    const auto &bridgeBase = leastConflictCandidate ? *leastConflictCandidate : baseline;
+    const auto viaStackBetween = [&](ice::ObjectId from,
+                                     ice::ObjectId to) -> std::optional<std::vector<ice::ObjectId>> {
+        std::map<ice::ObjectId, int> distance;
+        std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> predecessor;
+        bfs(from, distance, predecessor);
+        if (!distance.contains(to))
+            return std::nullopt;
+        return viaStack(from, to, predecessor);
+    };
+    const auto makeBridgeGeometry =
+        [&](const std::vector<ice::ObjectId> &segmentLayers) -> std::optional<AutoRouteGeometry> {
+        if (segmentLayers.size() + 1 != bridgeBase.points.size() || segmentLayers.empty())
+            return std::nullopt;
+        if (segmentLayers.front() != bridgeBase.layer || segmentLayers.back() != bridgeBase.layer)
+            return std::nullopt;
+        AutoRouteGeometry geometry;
+        geometry.layer = bridgeBase.layer;
+        geometry.points = bridgeBase.points;
+        geometry.segmentLayers = segmentLayers;
+        geometry.pointVias.resize(bridgeBase.points.size());
+        geometry.pointVias.front() = bridgeBase.pointVias.front();
+        geometry.pointVias.back() = bridgeBase.pointVias.back();
+        for (std::size_t index = 1; index + 1 < bridgeBase.points.size(); ++index) {
+            if (segmentLayers[index - 1] == segmentLayers[index])
+                continue;
+            const auto stack = viaStackBetween(segmentLayers[index - 1], segmentLayers[index]);
+            if (!stack)
+                return std::nullopt;
+            geometry.pointVias[index] = *stack;
+        }
+        for (const auto &vias : geometry.pointVias)
+            for (const auto via : vias)
+                if (!layerAvailable(via))
+                    return std::nullopt;
+        return geometry;
+    };
+
+    std::vector<ice::ObjectId> bridgeLayers{bridgeBase.layer};
+    for (const auto &[neighbor, via] : graph[bridgeBase.layer]) {
+        const auto layerIt = project.layers.find(neighbor);
+        if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
+            layerIsPinLayer(layerIt->second))
+            continue;
+        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+            continue;
+        if (std::find(bridgeLayers.begin(), bridgeLayers.end(), neighbor) == bridgeLayers.end())
+            bridgeLayers.push_back(neighbor);
+    }
+    std::sort(bridgeLayers.begin(), bridgeLayers.end(), [&](ice::ObjectId left, ice::ObjectId right) {
+        if (left == bridgeBase.layer)
+            return false;
+        if (right == bridgeBase.layer)
+            return true;
+        return left < right;
+    });
+    if (bridgeBase.points.size() >= 3 && bridgeLayers.size() > 1) {
+        std::vector<ice::ObjectId> segmentLayers(bridgeBase.points.size() - 1, bridgeBase.layer);
+        auto currentConflicts = autoRouteConflictCount(bridgeBase.points, segmentLayers, bridgeBase.pointVias, width,
+                                                       obstacles, connectivity, margin);
+        std::optional<AutoRouteGeometry> bestBridge;
+        int bestBridgeConflicts = currentConflicts;
+        for (int pass = 0; pass < 3 && bestBridgeConflicts > 0; ++pass) {
+            bool changed = false;
+            for (std::size_t index = 1; index + 1 < segmentLayers.size(); ++index) {
+                const auto original = segmentLayers[index];
+                auto segmentBest = original;
+                auto segmentBestConflicts = bestBridgeConflicts;
+                std::optional<AutoRouteGeometry> segmentBestGeometry;
+                for (const auto alt : bridgeLayers) {
+                    segmentLayers[index] = alt;
+                    auto geometry = makeBridgeGeometry(segmentLayers);
+                    if (!geometry)
+                        continue;
+                    const auto conflicts =
+                        autoRouteConflictCount(geometry->points, geometry->segmentLayers, geometry->pointVias, width,
+                                               obstacles, connectivity, margin);
+                    if (conflicts < segmentBestConflicts) {
+                        segmentBestConflicts = conflicts;
+                        segmentBest = alt;
+                        segmentBestGeometry = std::move(geometry);
+                    }
+                }
+                segmentLayers[index] = segmentBest;
+                if (segmentBest != original) {
+                    bestBridgeConflicts = segmentBestConflicts;
+                    bestBridge = std::move(segmentBestGeometry);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                break;
+            if (bestBridgeConflicts == 0)
+                break;
+        }
+        if (bestBridge && bestBridgeConflicts == 0)
+            return bestBridge;
+        if (auto geometry = makeBridgeGeometry(segmentLayers)) {
+            if (autoRouteConflictCount(geometry->points, geometry->segmentLayers, geometry->pointVias, width, obstacles,
+                                       connectivity, margin) == 0)
+                return geometry;
+        }
+    }
+
+    return baseline;
 }
 
 class DocumentWindow : public QMainWindow {
@@ -3305,7 +3654,8 @@ class DocumentWindow : public QMainWindow {
         const auto connection = connectionIt->second;
 
         std::string routeError;
-        const auto geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, &routeError);
+        const auto routeWidth = std::max<ice::Coordinate>(1, layoutPathWidth_);
+        const auto geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, routeWidth, &routeError);
         if (!geometry) {
             if (routeError == "The two pins already touch; no route is needed.")
                 statusBar()->showMessage(QString::fromStdString(routeError));
@@ -3331,7 +3681,7 @@ class DocumentWindow : public QMainWindow {
                 shape.routedConnection = connectionId;
                 shape.name = ice::nextShapeName(cell->second, "Routed Path");
                 shape.centerline = points;
-                shape.segmentLayers.assign(points.size() > 0 ? points.size() - 1 : 0, common);
+                shape.segmentLayers = geometry->segmentLayers;
                 shape.pointVias = pointVias;
                 shape.width = std::max(1, layoutPathWidth_);
                 rebuildLayoutPathGeometry(shape);
@@ -3523,7 +3873,11 @@ class DocumentWindow : public QMainWindow {
                     continue;
                 }
                 std::string error;
-                const auto geometry = computeLayoutAutoRoute(project, cellId, connection, &error);
+                const auto pathShape = cell.shapes.find(path->second);
+                const auto routeWidth = pathShape != cell.shapes.end()
+                                            ? std::max<ice::Coordinate>(1, pathShape->second.width)
+                                            : std::max<ice::Coordinate>(1, project.grid);
+                const auto geometry = computeLayoutAutoRoute(project, cellId, connection, routeWidth, &error);
                 if (!geometry) {
                     if (const auto shape = cell.shapes.find(path->second); shape != cell.shapes.end())
                         cell.shapes.erase(shape);
@@ -3537,8 +3891,7 @@ class DocumentWindow : public QMainWindow {
                 else
                     shape.net.reset();
                 shape.centerline = geometry->points;
-                shape.segmentLayers.assign(geometry->points.size() > 0 ? geometry->points.size() - 1 : 0,
-                                           geometry->layer);
+                shape.segmentLayers = geometry->segmentLayers;
                 shape.pointVias = geometry->pointVias;
                 if (shape.width <= 0)
                     shape.width = std::max<ice::Coordinate>(1, project.grid);
