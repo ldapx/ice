@@ -1180,6 +1180,24 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     return baseline;
 }
 
+struct SchematicPinView {
+    QPointF point;
+    ice::PinDirection direction = ice::PinDirection::left;
+    ice::ObjectId instance = 0;
+};
+
+struct SchematicBranchRoute {
+    ice::ObjectId fromPin = 0;
+    ice::ObjectId toPin = 0;
+    ice::PinDirection fromDirection = ice::PinDirection::left;
+    ice::PinDirection toDirection = ice::PinDirection::left;
+    std::vector<QPointF> points;
+};
+
+struct SchematicNetRoute {
+    std::vector<SchematicBranchRoute> branches;
+};
+
 class DocumentWindow : public QMainWindow {
   public:
     explicit DocumentWindow(ice::AppearanceMode appearanceMode = ice::AppearanceMode::System)
@@ -6130,6 +6148,40 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
+    void renameSchematicNet(ice::ObjectId netId) {
+        if (!project_ || netId == 0)
+            return;
+        auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+        if (cellIt == project_->project().schematicCells.end())
+            cellIt = project_->project().schematicCells.begin();
+        if (cellIt == project_->project().schematicCells.end())
+            return;
+        const auto netIt = cellIt->second.nets.find(netId);
+        if (netIt == cellIt->second.nets.end())
+            return;
+        bool accepted = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Rename Net Label"), QStringLiteral("Net name:"),
+                                  QLineEdit::Normal, QString::fromStdString(netIt->second.name), &accepted)
+                .trimmed();
+        if (!accepted || name.isEmpty() || name.toStdString() == netIt->second.name)
+            return;
+        const auto cellId = cellIt->first;
+        bool changed = false;
+        project_->execute("rename net label", [&](ice::Project &project) {
+            auto &cell = project.schematicCells.at(cellId);
+            auto net = cell.nets.find(netId);
+            if (net == cell.nets.end())
+                return;
+            net->second.name = name.toStdString();
+            changed = true;
+        });
+        if (!changed)
+            return;
+        project_->setLastHistoryLabel("Renamed net label to " + name.toStdString());
+        refreshProject();
+    }
+
     void placeNetLabel(QPointF position) {
         if (!project_ || project_->project().schematicCells.empty())
             return;
@@ -8826,6 +8878,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     void resetSectionHistories() {
+        schematicRouteCache_.clear();
         schematicHistory_.clear();
         layoutHistory_.clear();
         schematicHistoryPosition_ = 0;
@@ -8877,6 +8930,7 @@ class DocumentWindow : public QMainWindow {
             restored.proceduralLayouts = entries[position].project.proceduralLayouts;
         }
         project_->replaceProject(std::move(restored));
+        schematicRouteCache_.clear();
         if (schematic)
             schematicHistoryPosition_ = position;
         else
@@ -9358,6 +9412,7 @@ class DocumentWindow : public QMainWindow {
         }
         if (schematicNetlistPanel_)
             schematicNetlistPanel_->setCell(project_->project(), &cell);
+        std::map<ice::ObjectId, QGraphicsTextItem *> netLabelItems;
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
                 continue;
@@ -9366,6 +9421,7 @@ class DocumentWindow : public QMainWindow {
             label->setData(0, QStringLiteral("net-label"));
             label->setData(1, QVariant::fromValue<qulonglong>(netId));
             label->setPos(net.x, -net.y);
+            netLabelItems.emplace(netId, label);
         }
         std::map<ice::ObjectId, ice::ObjectId> pinNetIds;
         for (const auto &[netId, net] : cell.nets)
@@ -9497,36 +9553,46 @@ class DocumentWindow : public QMainWindow {
             highlight->setData(0, QStringLiteral("symbol-highlight"));
             highlight->setVisible(false);
         }
-        struct PinView {
-            QPointF point;
-            ice::PinDirection direction;
-        };
-        std::map<ice::ObjectId, PinView> pinViews;
+        std::map<ice::ObjectId, SchematicPinView> pinViews;
         for (auto *item : scene->items()) {
             if (item->data(0).toString() != QStringLiteral("pin"))
                 continue;
+            auto *owner = item->parentItem();
             pinViews[item->data(1).toULongLong()] = {item->scenePos(),
-                                                     static_cast<ice::PinDirection>(item->data(2).toInt())};
+                                                     static_cast<ice::PinDirection>(item->data(2).toInt()),
+                                                     owner ? owner->data(1).toULongLong() : ice::ObjectId{0}};
+        }
+        reconcileSchematicRoutes(cellIt->first, cellIt->second, pinViews, scene);
+        if (const auto routeIt = schematicRouteCache_.find(cellIt->first); routeIt != schematicRouteCache_.end()) {
+            for (const auto &[netId, netRoute] : routeIt->second) {
+                for (const auto &branch : netRoute.branches) {
+                    if (branch.points.size() < 2)
+                        continue;
+                    QPainterPath path;
+                    path.moveTo(branch.points.front());
+                    for (std::size_t index = 1; index < branch.points.size(); ++index)
+                        path.lineTo(branch.points[index]);
+                    auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
+                    wire->setZValue(-1);
+                    wire->setData(0, QStringLiteral("wire"));
+                    wire->setData(1, QVariant::fromValue<qulonglong>(netId));
+                    wire->setData(4, QVariant::fromValue<qulonglong>(branch.fromPin));
+                    wire->setData(5, QVariant::fromValue<qulonglong>(branch.toPin));
+                }
+            }
         }
         for (const auto &[netId, net] : cell.nets) {
-            if (net.pins.size() < 2)
+            const auto label = netLabelItems.find(netId);
+            if (label == netLabelItems.end())
                 continue;
-            const auto root = pinViews.find(net.pins.front());
-            if (root == pinViews.end())
-                continue;
-            // A net is a tree rooted at its first pin. Route one branch to
-            // every other member so multi-pin nets remain fully visible.
-            for (std::size_t index = 1; index < net.pins.size(); ++index) {
-                const auto target = pinViews.find(net.pins[index]);
-                if (target == pinViews.end())
-                    continue;
-                auto path = routeWire(root->second.point, root->second.direction, target->second.point,
-                                      target->second.direction, scene, net.pins.front(), net.pins[index]);
-                auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
-                wire->setZValue(-1);
-                wire->setData(0, QStringLiteral("wire"));
-                wire->setData(1, QVariant::fromValue<qulonglong>(netId));
-            }
+            std::optional<QPointF> position;
+            if (net.labelAnchor)
+                position = schematicNetLabelPosition(cellIt->first, net, *label->second);
+            if (!position)
+                position =
+                    schematicNetNearestLabelPosition(cellIt->first, netId, *label->second, QPointF(net.x, -net.y));
+            if (position)
+                label->second->setPos(*position);
         }
         // Selection is view state over the domain model, so re-apply it after
         // the scene has been rebuilt from the database.
@@ -9540,6 +9606,308 @@ class DocumentWindow : public QMainWindow {
             if (child->data(0).toString() == QStringLiteral("symbol-artwork"))
                 return child->sceneBoundingRect();
         return symbol->sceneBoundingRect();
+    }
+
+    static bool schematicSegmentIntersectsRect(QPointF first, QPointF second, QRectF rect, qreal margin) {
+        rect = rect.normalized().adjusted(-margin, -margin, margin, margin);
+        if (rect.width() <= 0.0 || rect.height() <= 0.0)
+            return false;
+        constexpr qreal epsilon = 0.001;
+        if (std::abs(first.y() - second.y()) <= epsilon) {
+            if (first.y() <= rect.top() + epsilon || first.y() >= rect.bottom() - epsilon)
+                return false;
+            return std::min(std::max(first.x(), second.x()), rect.right()) -
+                       std::max(std::min(first.x(), second.x()), rect.left()) >
+                   epsilon;
+        }
+        if (std::abs(first.x() - second.x()) <= epsilon) {
+            if (first.x() <= rect.left() + epsilon || first.x() >= rect.right() - epsilon)
+                return false;
+            return std::min(std::max(first.y(), second.y()), rect.bottom()) -
+                       std::max(std::min(first.y(), second.y()), rect.top()) >
+                   epsilon;
+        }
+        return false;
+    }
+
+    bool schematicBranchValid(const SchematicBranchRoute &branch,
+                              const std::map<ice::ObjectId, SchematicPinView> &pinViews, QGraphicsScene *scene) const {
+        const auto from = pinViews.find(branch.fromPin);
+        const auto to = pinViews.find(branch.toPin);
+        if (from == pinViews.end() || to == pinViews.end() || branch.fromPin == branch.toPin)
+            return false;
+        if (branch.fromDirection != from->second.direction || branch.toDirection != to->second.direction)
+            return false;
+        if (branch.points.size() < 2)
+            return false;
+        constexpr qreal tolerance = 0.5;
+        if (QLineF(branch.points.front(), from->second.point).length() > tolerance ||
+            QLineF(branch.points.back(), to->second.point).length() > tolerance)
+            return false;
+        constexpr qreal clearance = 2.0;
+        constexpr qreal minimumExtension = 30.0;
+        for (auto *item : scene->items()) {
+            if (item->data(0).toString() != QStringLiteral("symbol"))
+                continue;
+            const auto instance = item->data(1).toULongLong();
+            if (instance == from->second.instance || instance == to->second.instance)
+                continue;
+            const auto rect = symbolObstacleRect(item);
+            if (!rect.isValid() || rect.isEmpty())
+                continue;
+            for (std::size_t index = 0; index + 1 < branch.points.size(); ++index)
+                if (schematicSegmentIntersectsRect(branch.points[index], branch.points[index + 1], rect, clearance))
+                    return false;
+        }
+        for (const auto &[pinId, view] : pinViews) {
+            if (pinId == branch.fromPin || pinId == branch.toPin)
+                continue;
+            const auto exit = view.point + directionVector(view.direction) * minimumExtension;
+            const QRectF extension = QRectF(view.point, exit).normalized();
+            for (std::size_t index = 0; index + 1 < branch.points.size(); ++index)
+                if (schematicSegmentIntersectsRect(branch.points[index], branch.points[index + 1], extension,
+                                                   clearance + 0.5))
+                    return false;
+        }
+        return true;
+    }
+
+    std::optional<QPointF> schematicNetLabelPosition(ice::ObjectId cellId, const ice::Net &net,
+                                                     const QGraphicsTextItem &label) const {
+        if (!net.labelAnchor)
+            return std::nullopt;
+        const auto cellRoutes = schematicRouteCache_.find(cellId);
+        if (cellRoutes == schematicRouteCache_.end())
+            return std::nullopt;
+        const auto netRoute = cellRoutes->second.find(net.id);
+        if (netRoute == cellRoutes->second.end())
+            return std::nullopt;
+        const SchematicBranchRoute *branch = nullptr;
+        bool reversed = false;
+        for (const auto &candidate : netRoute->second.branches) {
+            if (candidate.fromPin == net.labelAnchor->fromPin && candidate.toPin == net.labelAnchor->toPin) {
+                branch = &candidate;
+                break;
+            }
+            if (candidate.fromPin == net.labelAnchor->toPin && candidate.toPin == net.labelAnchor->fromPin) {
+                branch = &candidate;
+                reversed = true;
+                break;
+            }
+        }
+        if (!branch || branch->points.size() < 2)
+            return std::nullopt;
+        std::vector<qreal> cumulative(branch->points.size(), 0.0);
+        for (std::size_t index = 1; index < branch->points.size(); ++index)
+            cumulative[index] =
+                cumulative[index - 1] + QLineF(branch->points[index - 1], branch->points[index]).length();
+        const auto totalLength = cumulative.back();
+        if (totalLength <= 0.0)
+            return std::nullopt;
+        const auto fraction =
+            std::clamp(reversed ? 1.0 - net.labelAnchor->fraction : net.labelAnchor->fraction, 0.0, 1.0);
+        const auto side = (net.labelAnchor->sideB != reversed) ? 1.0 : -1.0;
+        const auto target = fraction * totalLength;
+        const auto bounds = label.boundingRect();
+        const auto width = bounds.width() > 0.0 ? bounds.width() : 80.0;
+        const auto height = bounds.height() > 0.0 ? bounds.height() : 18.0;
+        for (std::size_t index = 1; index < branch->points.size(); ++index) {
+            const auto start = branch->points[index - 1];
+            const auto end = branch->points[index];
+            const auto delta = end - start;
+            const auto length = QLineF(start, end).length();
+            if (length <= 0.0)
+                continue;
+            if (target > cumulative[index] + 0.001 && index + 1 < branch->points.size())
+                continue;
+            const auto local = std::clamp((target - cumulative[index - 1]) / length, qreal(0.0), qreal(1.0));
+            const auto point = start + delta * local;
+            const QPointF normal(-delta.y() / length, delta.x() / length);
+            const qreal clearance = std::abs(normal.x()) * width / 2.0 + std::abs(normal.y()) * height / 2.0 + 2.0;
+            return point + normal * side * clearance - bounds.center();
+        }
+        return std::nullopt;
+    }
+
+    std::optional<QPointF> schematicNetNearestLabelPosition(ice::ObjectId cellId, ice::ObjectId netId,
+                                                            const QGraphicsTextItem &label, QPointF candidate) const {
+        const auto cellRoutes = schematicRouteCache_.find(cellId);
+        if (cellRoutes == schematicRouteCache_.end())
+            return std::nullopt;
+        const auto netRoute = cellRoutes->second.find(netId);
+        if (netRoute == cellRoutes->second.end())
+            return std::nullopt;
+        const auto bounds = label.boundingRect();
+        const auto width = bounds.width() > 0.0 ? bounds.width() : 80.0;
+        const auto height = bounds.height() > 0.0 ? bounds.height() : 18.0;
+        const QPointF labelCenter = bounds.center();
+        const QPointF candidateCenter = candidate + labelCenter;
+        constexpr qreal margin = 2.0;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        std::optional<QPointF> best;
+        for (const auto &branch : netRoute->second.branches) {
+            for (std::size_t index = 1; index < branch.points.size(); ++index) {
+                const auto start = branch.points[index - 1];
+                const auto end = branch.points[index];
+                const auto delta = end - start;
+                const auto lengthSquared = QPointF::dotProduct(delta, delta);
+                if (lengthSquared <= 0.0)
+                    continue;
+                const auto length = std::sqrt(lengthSquared);
+                const auto fraction = std::clamp(QPointF::dotProduct(candidateCenter - start, delta) / lengthSquared,
+                                                 qreal(0.0), qreal(1.0));
+                const auto point = start + delta * fraction;
+                const QPointF normal(-delta.y() / length, delta.x() / length);
+                const qreal side = QPointF::dotProduct(candidateCenter - point, normal) < 0.0 ? -1.0 : 1.0;
+                const qreal clearance =
+                    std::abs(normal.x()) * width / 2.0 + std::abs(normal.y()) * height / 2.0 + margin;
+                const auto anchored = point + normal * side * clearance - labelCenter;
+                const auto distance = QLineF(candidate, anchored).length();
+                if (distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                best = anchored;
+            }
+        }
+        return best;
+    }
+
+    void reconcileSchematicRoutes(ice::ObjectId cellId, const ice::SchematicCell &cell,
+                                  const std::map<ice::ObjectId, SchematicPinView> &pinViews, QGraphicsScene *scene) {
+        auto &cellCache = schematicRouteCache_[cellId];
+        for (auto entry = cellCache.begin(); entry != cellCache.end();) {
+            if (!cell.nets.contains(entry->first))
+                entry = cellCache.erase(entry);
+            else
+                ++entry;
+        }
+        for (const auto &[netId, net] : cell.nets) {
+            std::vector<ice::ObjectId> pins;
+            std::set<ice::ObjectId> pinSet;
+            for (const auto pin : net.pins) {
+                if (!pinViews.contains(pin) || !pinSet.insert(pin).second)
+                    continue;
+                pins.push_back(pin);
+            }
+            if (pins.size() < 2) {
+                cellCache.erase(netId);
+                continue;
+            }
+            auto &route = cellCache[netId];
+            if (net.labelAnchor && pinSet.contains(net.labelAnchor->fromPin) &&
+                pinSet.contains(net.labelAnchor->toPin) && net.labelAnchor->fromPin != net.labelAnchor->toPin) {
+                const auto present =
+                    std::any_of(route.branches.begin(), route.branches.end(), [&](const SchematicBranchRoute &branch) {
+                        return (branch.fromPin == net.labelAnchor->fromPin && branch.toPin == net.labelAnchor->toPin) ||
+                               (branch.fromPin == net.labelAnchor->toPin && branch.toPin == net.labelAnchor->fromPin);
+                    });
+                if (!present) {
+                    SchematicBranchRoute branch;
+                    branch.fromPin = net.labelAnchor->fromPin;
+                    branch.toPin = net.labelAnchor->toPin;
+                    route.branches.insert(route.branches.begin(), branch);
+                }
+            }
+
+            std::map<ice::ObjectId, ice::ObjectId> parent;
+            for (const auto pin : pins)
+                parent.emplace(pin, pin);
+            std::function<ice::ObjectId(ice::ObjectId)> findRoot = [&](ice::ObjectId pin) {
+                auto root = pin;
+                while (parent.at(root) != root)
+                    root = parent.at(root);
+                while (parent.at(pin) != pin) {
+                    const auto next = parent.at(pin);
+                    parent[pin] = root;
+                    pin = next;
+                }
+                return root;
+            };
+            const auto unite = [&](ice::ObjectId left, ice::ObjectId right) {
+                const auto leftRoot = findRoot(left);
+                const auto rightRoot = findRoot(right);
+                if (leftRoot != rightRoot)
+                    parent[rightRoot] = leftRoot;
+            };
+
+            std::vector<SchematicBranchRoute> branches;
+            std::set<std::pair<ice::ObjectId, ice::ObjectId>> seen;
+            for (auto &branch : route.branches) {
+                if (!pinSet.contains(branch.fromPin) || !pinSet.contains(branch.toPin) ||
+                    branch.fromPin == branch.toPin)
+                    continue;
+                const auto key = branch.fromPin < branch.toPin ? std::make_pair(branch.fromPin, branch.toPin)
+                                                               : std::make_pair(branch.toPin, branch.fromPin);
+                if (!seen.insert(key).second)
+                    continue;
+                if (findRoot(branch.fromPin) == findRoot(branch.toPin))
+                    continue;
+                unite(branch.fromPin, branch.toPin);
+                branches.push_back(std::move(branch));
+            }
+
+            // Keep existing branches and add the shortest links needed to
+            // connect any pins that are not yet covered by the cached tree.
+            while (true) {
+                std::map<ice::ObjectId, std::vector<ice::ObjectId>> components;
+                for (const auto pin : pins)
+                    components[findRoot(pin)].push_back(pin);
+                if (components.size() <= 1)
+                    break;
+                const std::vector<std::pair<ice::ObjectId, std::vector<ice::ObjectId>>> componentList(
+                    components.begin(), components.end());
+                double bestDistance = std::numeric_limits<double>::max();
+                ice::ObjectId bestFrom = 0;
+                ice::ObjectId bestTo = 0;
+                for (std::size_t left = 0; left < componentList.size(); ++left) {
+                    for (std::size_t right = left + 1; right < componentList.size(); ++right) {
+                        for (const auto leftPin : componentList[left].second) {
+                            for (const auto rightPin : componentList[right].second) {
+                                const auto distance =
+                                    QLineF(pinViews.at(leftPin).point, pinViews.at(rightPin).point).length();
+                                const auto better =
+                                    distance < bestDistance - 0.001 ||
+                                    (std::abs(distance - bestDistance) <= 0.001 &&
+                                     std::make_pair(leftPin, rightPin) < std::make_pair(bestFrom, bestTo));
+                                if (!better)
+                                    continue;
+                                bestDistance = distance;
+                                bestFrom = leftPin;
+                                bestTo = rightPin;
+                            }
+                        }
+                    }
+                }
+                if (bestFrom == 0)
+                    break;
+                SchematicBranchRoute branch;
+                branch.fromPin = bestFrom;
+                branch.toPin = bestTo;
+                branches.push_back(branch);
+                unite(bestFrom, bestTo);
+            }
+
+            for (auto &branch : branches) {
+                const auto from = pinViews.find(branch.fromPin);
+                const auto to = pinViews.find(branch.toPin);
+                if (from == pinViews.end() || to == pinViews.end())
+                    continue;
+                if (schematicBranchValid(branch, pinViews, scene))
+                    continue;
+                branch.points.clear();
+                const auto path = routeWire(from->second.point, from->second.direction, to->second.point,
+                                            to->second.direction, scene, branch.fromPin, branch.toPin);
+                for (int index = 0; index < path.elementCount(); ++index) {
+                    const auto element = path.elementAt(index);
+                    const QPointF point(element.x, element.y);
+                    if (branch.points.empty() || QLineF(branch.points.back(), point).length() > 0.001)
+                        branch.points.push_back(point);
+                }
+                branch.fromDirection = from->second.direction;
+                branch.toDirection = to->second.direction;
+            }
+            route.branches = std::move(branches);
+        }
     }
 
     QPainterPath routeWire(QPointF start, ice::PinDirection startDirection, QPointF target,
@@ -10975,26 +11343,125 @@ class DocumentWindow : public QMainWindow {
                     refreshProject();
                 },
                 [this](ice::ObjectId firstPin, ice::ObjectId secondPin) {
-                    if (!project_)
+                    if (!project_ || firstPin == 0 || secondPin == 0 || firstPin == secondPin)
                         return;
+                    auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                    if (cellIt == project_->project().schematicCells.end())
+                        cellIt = project_->project().schematicCells.begin();
+                    if (cellIt == project_->project().schematicCells.end())
+                        return;
+                    const auto cellId = cellIt->first;
+                    const auto findNet = [&](ice::ObjectId pin) {
+                        for (const auto &[id, net] : cellIt->second.nets)
+                            if (std::find(net.pins.begin(), net.pins.end(), pin) != net.pins.end())
+                                return id;
+                        return ice::ObjectId{0};
+                    };
+                    const auto firstNet = findNet(firstPin);
+                    const auto secondNet = findNet(secondPin);
+                    if (firstNet != 0 && firstNet == secondNet)
+                        return;
+                    std::vector<SchematicBranchRoute> inheritedBranches;
+                    for (const auto netId : {firstNet, secondNet}) {
+                        if (netId == 0)
+                            continue;
+                        if (const auto cached = schematicRouteCache_[cellId].find(netId);
+                            cached != schematicRouteCache_[cellId].end())
+                            inheritedBranches.insert(inheritedBranches.end(), cached->second.branches.begin(),
+                                                     cached->second.branches.end());
+                    }
+                    ice::ObjectId finalNet = 0;
                     project_->execute("connect pins", [&](ice::Project &project) {
-                        auto cellIt = project.schematicCells.find(activeSchematicId_);
-                        if (cellIt == project.schematicCells.end())
-                            cellIt = project.schematicCells.begin();
-                        auto &cell = cellIt->second;
-                        auto netIt = std::find_if(cell.nets.begin(), cell.nets.end(), [&](const auto &entry) {
-                            return std::find(entry.second.pins.begin(), entry.second.pins.end(), firstPin) !=
-                                   entry.second.pins.end();
-                        });
-                        if (netIt == cell.nets.end()) {
-                            auto netId = project.nextId();
-                            cell.nets.emplace(netId,
-                                              ice::Net{netId, "N" + std::to_string(netId), {firstPin, secondPin}});
-                        } else if (std::find(netIt->second.pins.begin(), netIt->second.pins.end(), secondPin) ==
-                                   netIt->second.pins.end())
-                            netIt->second.pins.push_back(secondPin);
+                        auto &cell = project.schematicCells.at(cellId);
+                        const auto netForPin = [&](ice::ObjectId pin) -> ice::ObjectId {
+                            for (const auto &[id, net] : cell.nets)
+                                if (std::find(net.pins.begin(), net.pins.end(), pin) != net.pins.end())
+                                    return id;
+                            return 0;
+                        };
+                        const auto first = netForPin(firstPin);
+                        const auto second = netForPin(secondPin);
+                        if (first != 0 && first == second) {
+                            finalNet = first;
+                            return;
+                        }
+                        if (first == 0 && second == 0) {
+                            finalNet = project.nextId();
+                            cell.nets.emplace(
+                                finalNet, ice::Net{finalNet, "N" + std::to_string(finalNet), {firstPin, secondPin}});
+                        } else if (first != 0 && second == 0) {
+                            finalNet = first;
+                            auto &pins = cell.nets.at(first).pins;
+                            if (std::find(pins.begin(), pins.end(), secondPin) == pins.end())
+                                pins.push_back(secondPin);
+                        } else if (first == 0 && second != 0) {
+                            finalNet = second;
+                            auto &pins = cell.nets.at(second).pins;
+                            if (std::find(pins.begin(), pins.end(), firstPin) == pins.end())
+                                pins.push_back(firstPin);
+                        } else {
+                            finalNet = first;
+                            auto &target = cell.nets.at(first);
+                            auto &source = cell.nets.at(second);
+                            for (const auto pin : source.pins)
+                                if (std::find(target.pins.begin(), target.pins.end(), pin) == target.pins.end())
+                                    target.pins.push_back(pin);
+                            const auto automaticName = [](const ice::Net &net) {
+                                return net.name.empty() || net.name == "N" + std::to_string(net.id);
+                            };
+                            if (automaticName(target) && !source.name.empty() && !automaticName(source))
+                                target.name = source.name;
+                            if (!target.labelAnchor && source.labelAnchor)
+                                target.labelAnchor = source.labelAnchor;
+                            cell.nets.erase(second);
+                        }
+                        // A pin may only belong to one net. Clean up any
+                        // duplicate memberships and make sure both edited pins
+                        // are present in the final net.
+                        std::vector<ice::ObjectId> removeNets;
+                        for (auto &[id, net] : cell.nets) {
+                            if (id != finalNet) {
+                                net.pins.erase(std::remove_if(net.pins.begin(), net.pins.end(),
+                                                              [&](ice::ObjectId pin) {
+                                                                  return pin == firstPin || pin == secondPin;
+                                                              }),
+                                               net.pins.end());
+                                if (net.pins.size() < 2)
+                                    removeNets.push_back(id);
+                            }
+                        }
+                        for (const auto id : removeNets)
+                            cell.nets.erase(id);
+                        auto &final = cell.nets.at(finalNet);
+                        std::set<ice::ObjectId> uniquePins;
+                        final.pins.erase(
+                            std::remove_if(final.pins.begin(), final.pins.end(),
+                                           [&](ice::ObjectId pin) { return !uniquePins.insert(pin).second; }),
+                            final.pins.end());
+                        for (const auto pin : {firstPin, secondPin})
+                            if (std::find(final.pins.begin(), final.pins.end(), pin) == final.pins.end())
+                                final.pins.push_back(pin);
+                        if (!final.labelAnchor)
+                            final.labelAnchor = ice::NetLabelAnchor{firstPin, secondPin, 0.5, false};
                         updateAutomaticNetLabelPositions(project);
                     });
+                    if (finalNet != 0) {
+                        auto &cellCache = schematicRouteCache_[cellId];
+                        cellCache.erase(firstNet);
+                        cellCache.erase(secondNet);
+                        auto &branches = cellCache[finalNet].branches;
+                        branches = std::move(inheritedBranches);
+                        const auto duplicate = std::any_of(branches.begin(), branches.end(), [&](const auto &branch) {
+                            return (branch.fromPin == firstPin && branch.toPin == secondPin) ||
+                                   (branch.fromPin == secondPin && branch.toPin == firstPin);
+                        });
+                        if (!duplicate) {
+                            SchematicBranchRoute branch;
+                            branch.fromPin = firstPin;
+                            branch.toPin = secondPin;
+                            branches.push_back(branch);
+                        }
+                    }
                     refreshProject();
                 },
                 [this](QPointF position) { placeComment(position); },
@@ -11038,34 +11505,41 @@ class DocumentWindow : public QMainWindow {
                 if (changed)
                     refreshProject();
             });
-            schematicCanvas_->setNetLabelMovedCallback([this](ice::ObjectId netId, QPointF position) {
-                if (!project_)
-                    return;
-                auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
-                if (cellIt == project_->project().schematicCells.end())
-                    cellIt = project_->project().schematicCells.begin();
-                if (cellIt == project_->project().schematicCells.end())
-                    return;
-                const auto cellId = cellIt->first;
-                bool changed = false;
-                project_->execute("move net label", [&](ice::Project &project) {
-                    auto &cell = project.schematicCells.at(cellId);
-                    auto netIt = cell.nets.find(netId);
-                    if (netIt == cell.nets.end())
+            schematicCanvas_->setNetLabelMovedCallback(
+                [this](ice::ObjectId netId, const ice::NetLabelAnchor &anchor, QPointF position) {
+                    if (!project_)
                         return;
-                    const auto x = static_cast<ice::Coordinate>(position.x());
-                    const auto y = static_cast<ice::Coordinate>(-position.y());
-                    if (netIt->second.x == x && netIt->second.y == y)
+                    auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                    if (cellIt == project_->project().schematicCells.end())
+                        cellIt = project_->project().schematicCells.begin();
+                    if (cellIt == project_->project().schematicCells.end())
                         return;
-                    netIt->second.x = x;
-                    netIt->second.y = y;
-                    changed = true;
+                    const auto cellId = cellIt->first;
+                    bool changed = false;
+                    project_->execute("move net label", [&](ice::Project &project) {
+                        auto &cell = project.schematicCells.at(cellId);
+                        auto netIt = cell.nets.find(netId);
+                        if (netIt == cell.nets.end())
+                            return;
+                        const auto x = static_cast<ice::Coordinate>(position.x());
+                        const auto y = static_cast<ice::Coordinate>(-position.y());
+                        if (netIt->second.x == x && netIt->second.y == y && netIt->second.labelAnchor &&
+                            netIt->second.labelAnchor->fromPin == anchor.fromPin &&
+                            netIt->second.labelAnchor->toPin == anchor.toPin &&
+                            netIt->second.labelAnchor->fraction == anchor.fraction &&
+                            netIt->second.labelAnchor->sideB == anchor.sideB)
+                            return;
+                        netIt->second.x = x;
+                        netIt->second.y = y;
+                        netIt->second.labelAnchor = anchor;
+                        changed = true;
+                    });
+                    if (changed)
+                        refreshProject();
+                    else
+                        refreshSchematic();
                 });
-                if (changed)
-                    refreshProject();
-                else
-                    refreshSchematic();
-            });
+            schematicCanvas_->setNetLabelActivatedCallback([this](ice::ObjectId netId) { renameSchematicNet(netId); });
             schematicCanvas_->setFlipCallback([this](ice::ObjectId id) {
                 if (!project_)
                     return;
@@ -11568,8 +12042,8 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setFocus();
                 }
                 refreshLayoutProperties(false);
-                statusBar()->showMessage(QStringLiteral(
-                    "Rectangle: click to start, move to size, click to finish · or type width,height in the size field"));
+                statusBar()->showMessage(QStringLiteral("Rectangle: click to start, move to size, click to finish · or "
+                                                        "type width,height in the size field"));
             });
             connect(pathTool, &QAction::triggered, this, [this, pathTool] {
                 if (!pathTool->isChecked() || !layoutCanvas_ || layoutCanvas_->isReadOnly())
@@ -11953,6 +12427,9 @@ class DocumentWindow : public QMainWindow {
     QWidget *layoutToolbarColumn_ = nullptr;
     QWidget *layoutOptionsColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
+    // Per-cell, per-net branch routes. Unchanged branches are reused so editing
+    // one net does not perturb unrelated schematic wiring.
+    std::map<ice::ObjectId, std::map<ice::ObjectId, SchematicNetRoute>> schematicRouteCache_;
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;

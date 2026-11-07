@@ -90,12 +90,25 @@ struct SchematicInstance {
     std::vector<Parameter> parameters;
 };
 
+struct NetLabelAnchor {
+    // The label follows the schematic branch between these two pins. The
+    // fraction is measured from fromPin to toPin along the routed branch.
+    ObjectId fromPin = 0;
+    ObjectId toPin = 0;
+    double fraction = 0.5;
+    // False places the label on side A of the branch direction, true on B.
+    bool sideB = false;
+};
+
 struct Net {
     ObjectId id = 0;
     std::string name;
     std::vector<ObjectId> pins;
     Coordinate x = 0;
     Coordinate y = 0;
+    // Optional route-relative label anchor. x/y remain as a fallback for
+    // labels that have not been dragged or whose anchor branch disappeared.
+    std::optional<NetLabelAnchor> labelAnchor;
 };
 
 struct SchematicComment {

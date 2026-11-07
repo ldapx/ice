@@ -143,7 +143,7 @@ The schematic editor should initially provide:
 - an infinite panning canvas with origin axes;
 - pan, zoom, grid, snapping, and fit-to-view;
 - symbol placement and movement;
-- wire and net-label creation;
+- wire and net-label creation, with double-click rename for net labels;
 - pin and net inspection;
 - instance/property editing;
 - hierarchy navigation;
@@ -153,6 +153,14 @@ The schematic editor should initially provide:
 
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
+Connecting two pins merges their nets, and schematic wire routes are cached per
+net and branch. Editing a connection re-routes only the affected net, while
+moving or rotating a symbol re-routes nets attached to it or whose wires
+intersect its new geometry. Unrelated nets keep their existing routing.
+Dragging a net label stores a route-relative anchor: the branch endpoints, the
+normalized distance along that branch, and the label side (A or B). Labels
+therefore follow translated or re-routed wires, survive save/load, and do not
+depend on volatile segment numbering.
 The **+** button in Schematic **Hierarchy** offers **Schematic**, **Text SPICE
 Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
 notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and

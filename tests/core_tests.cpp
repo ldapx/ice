@@ -1750,6 +1750,8 @@ TEST_CASE("planned devices are projected from a schematic") {
     ice::addSchematicInstance(project, schematicId, capacitorId, "C1", 100, 0);
     const auto netId = project.nextId();
     project.schematicCells.at(schematicId).nets.emplace(netId, ice::Net{netId, "out", {resistorRight, capacitorLeft}});
+    project.schematicCells.at(schematicId).nets.at(netId).labelAnchor =
+        ice::NetLabelAnchor{resistorRight, capacitorLeft, 0.25, true};
     CHECK(project.validate().empty());
 
     const auto layoutId = ice::createLayoutFromSchematic(project, schematicId);
@@ -1795,6 +1797,12 @@ TEST_CASE("planned devices are projected from a schematic") {
     const auto roundTripNet = roundTrip.layoutCells.at(layoutId).nets.find(roundTripConnection.net);
     CHECK(roundTripNet != roundTrip.layoutCells.at(layoutId).nets.end());
     CHECK(roundTripNet->second.name == "out");
+    const auto &roundTripSchematicNet = roundTrip.schematicCells.at(schematicId).nets.at(netId);
+    CHECK(roundTripSchematicNet.labelAnchor.has_value());
+    CHECK(roundTripSchematicNet.labelAnchor->fromPin == resistorRight);
+    CHECK(roundTripSchematicNet.labelAnchor->toPin == capacitorLeft);
+    CHECK(roundTripSchematicNet.labelAnchor->fraction == 0.25);
+    CHECK(roundTripSchematicNet.labelAnchor->sideB);
 
     const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
     CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);

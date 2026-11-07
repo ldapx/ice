@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -197,6 +198,15 @@ std::vector<Diagnostic> Project::validate() const {
                 if (!pinIds.contains(pinId))
                     result.push_back(
                         {Diagnostic::Severity::error, "schematic.net.pin", "Net references a missing pin", netId});
+            }
+            if (net.labelAnchor) {
+                if (net.labelAnchor->fromPin == net.labelAnchor->toPin)
+                    result.push_back({Diagnostic::Severity::error, "schematic.net.label_anchor",
+                                      "Net label anchor must reference two different pins", netId});
+                if (!std::isfinite(net.labelAnchor->fraction) || net.labelAnchor->fraction < 0.0 ||
+                    net.labelAnchor->fraction > 1.0)
+                    result.push_back({Diagnostic::Severity::error, "schematic.net.label_anchor",
+                                      "Net label anchor fraction must be between 0 and 1", netId});
             }
         }
         (void)cellId;
@@ -434,8 +444,16 @@ std::string Project::serialize() const {
             }
             c["instances"].push_back(std::move(item));
         }
-        for (const auto &[nid, net] : cell.nets)
-            c["nets"].push_back({{"id", nid}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+        for (const auto &[nid, net] : cell.nets) {
+            json item = {{"id", nid}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}};
+            if (net.labelAnchor) {
+                item["label_anchor"] = {{"from_pin", net.labelAnchor->fromPin},
+                                        {"to_pin", net.labelAnchor->toPin},
+                                        {"fraction", net.labelAnchor->fraction},
+                                        {"side_b", net.labelAnchor->sideB}};
+            }
+            c["nets"].push_back(std::move(item));
+        }
         c["comments"] = json::array();
         for (const auto &[cid, comment] : cell.comments)
             c["comments"].push_back({{"id", cid}, {"text", comment.text}, {"x", comment.x}, {"y", comment.y}});
@@ -771,9 +789,21 @@ Project Project::deserialize(const std::string &text) {
                 }
                 cell.instances.emplace(instance.id, std::move(instance));
             }
-            for (const auto &n : c.at("nets"))
-                cell.nets.emplace(n.at("id"), Net{n.at("id"), n.at("name"), n.at("pins").get<std::vector<ObjectId>>(),
-                                                  n.value("x", 0), n.value("y", 0)});
+            for (const auto &n : c.at("nets")) {
+                Net net{n.at("id"), n.at("name"), n.at("pins").get<std::vector<ObjectId>>(), n.value("x", 0),
+                        n.value("y", 0)};
+                if (n.contains("label_anchor") && n.at("label_anchor").is_object()) {
+                    const auto &anchor = n.at("label_anchor");
+                    NetLabelAnchor parsed;
+                    parsed.fromPin = anchor.value("from_pin", ObjectId{0});
+                    parsed.toPin = anchor.value("to_pin", ObjectId{0});
+                    parsed.fraction = std::clamp(anchor.value("fraction", 0.5), 0.0, 1.0);
+                    parsed.sideB = anchor.value("side_b", false);
+                    if (parsed.fromPin != 0 && parsed.toPin != 0 && parsed.fromPin != parsed.toPin)
+                        net.labelAnchor = parsed;
+                }
+                cell.nets.emplace(net.id, std::move(net));
+            }
             if (c.contains("comments") && c.at("comments").is_array()) {
                 for (const auto &cm : c.at("comments"))
                     cell.comments.emplace(

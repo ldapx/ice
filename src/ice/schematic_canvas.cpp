@@ -50,9 +50,7 @@ QGraphicsItem *schematicItemOwner(QGraphicsItem *item) {
     return nullptr;
 }
 
-QGraphicsItem *symbolOwner(QGraphicsItem *item) {
-    return schematicItemOwner(item);
-}
+QGraphicsItem *symbolOwner(QGraphicsItem *item) { return schematicItemOwner(item); }
 
 QGraphicsItem *symbolChild(QGraphicsItem *symbol, const QString &kind) {
     if (!symbol)
@@ -90,8 +88,8 @@ void applySymbolSelectedStyle(QGraphicsItem *symbol, bool selected) {
         static_cast<QGraphicsTextItem *>(label)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
                                                                               : ice::uiColor(ice::UiColor::Axis1));
     if (auto *commentText = symbolChild(symbol, QStringLiteral("comment-text")))
-        static_cast<QGraphicsTextItem *>(commentText)->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4)
-                                                                                    : ice::uiColor(ice::UiColor::Text1));
+        static_cast<QGraphicsTextItem *>(commentText)
+            ->setDefaultTextColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Text1));
     if (auto *effect = symbolArtworkEffect(symbol)) {
         effect->setColor(selected ? ice::uiColor(ice::UiColor::Accent4) : ice::uiColor(ice::UiColor::Axis1));
         effect->setEnabled(true);
@@ -138,8 +136,13 @@ class SchematicCanvasImpl : public SchematicCanvas {
         disconnected_ = std::move(callback);
     }
 
-    void setNetLabelMovedCallback(std::function<void(ice::ObjectId, QPointF)> callback) override {
+    void setNetLabelMovedCallback(
+        std::function<void(ice::ObjectId, const ice::NetLabelAnchor &, QPointF)> callback) override {
         netLabelMoved_ = std::move(callback);
+    }
+
+    void setNetLabelActivatedCallback(std::function<void(ice::ObjectId)> callback) override {
+        netLabelActivated_ = std::move(callback);
     }
 
     void setNetLabelMode(bool enabled) override { setCommentMode(enabled); }
@@ -441,13 +444,14 @@ class SchematicCanvasImpl : public SchematicCanvas {
                 netLabelDragNetId_ = item->data(1).toULongLong();
                 netLabelDragOriginScene_ = mapToScene(event->pos());
                 netLabelDragOriginPosition_ = item->pos();
+                netLabelDragCandidate_ = netLabelDragOriginPosition_;
                 event->accept();
                 return;
             }
             if (auto *target = schematicItemOwner(item)) {
                 const auto targetId = target->data(1).toULongLong();
-                const bool additive = event->modifiers().testFlag(Qt::ControlModifier) ||
-                                      event->modifiers().testFlag(Qt::ShiftModifier);
+                const bool additive =
+                    event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::ShiftModifier);
                 if (additive) {
                     selectSymbol(target, true);
                 } else if (!selectedInstances_.contains(targetId)) {
@@ -498,8 +502,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
                 netLabelDragNetId_ = 0;
             } else {
                 const auto delta = mapToScene(event->pos()) - netLabelDragOriginScene_;
-                netLabelDrag_->setPos(
-                    clampNetLabelPosition(netLabelDragNetId_, netLabelDrag_, netLabelDragOriginPosition_ + delta));
+                netLabelDragCandidate_ = netLabelDragOriginPosition_ + delta;
+                netLabelDrag_->setPos(clampNetLabelPosition(netLabelDragNetId_, netLabelDrag_, netLabelDragCandidate_));
                 event->accept();
                 return;
             }
@@ -522,6 +526,12 @@ class SchematicCanvasImpl : public SchematicCanvas {
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
         if (event->button() == Qt::LeftButton) {
+            if (auto *item = itemAt(event->pos()); item && item->data(0).toString() == QStringLiteral("net-label")) {
+                if (netLabelActivated_)
+                    netLabelActivated_(item->data(1).toULongLong());
+                event->accept();
+                return;
+            }
             if (auto *item = schematicItemOwner(itemAt(event->pos()))) {
                 if (symbolActivated_)
                     symbolActivated_(item->data(1).toULongLong());
@@ -587,8 +597,11 @@ class SchematicCanvasImpl : public SchematicCanvas {
         if (netLabelDrag_) {
             if (event->button() == Qt::LeftButton && netLabelDragNetId_ != 0 && itemIsInScene(netLabelDrag_)) {
                 const auto position = netLabelDrag_->pos();
-                if (netLabelMoved_ && position != netLabelDragOriginPosition_)
-                    netLabelMoved_(netLabelDragNetId_, position);
+                if (netLabelMoved_ && position != netLabelDragOriginPosition_) {
+                    if (const auto projection =
+                            projectNetLabel(netLabelDragNetId_, netLabelDrag_, netLabelDragCandidate_))
+                        netLabelMoved_(netLabelDragNetId_, projection->anchor, projection->position);
+                }
             }
             netLabelDrag_ = nullptr;
             netLabelDragNetId_ = 0;
@@ -725,9 +738,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
         return nullptr;
     }
 
-    QGraphicsItem *symbolById(ice::ObjectId instanceId) {
-        return itemById(instanceId);
-    }
+    QGraphicsItem *symbolById(ice::ObjectId instanceId) { return itemById(instanceId); }
 
     // Selection is view state expressed over stable domain ids, so it survives
     // a scene rebuild and can be mirrored by the properties panel.
@@ -831,12 +842,19 @@ class SchematicCanvasImpl : public SchematicCanvas {
         return 0;
     }
 
+    struct NetLabelProjection {
+        QPointF position;
+        ice::NetLabelAnchor anchor;
+    };
+
     // Net labels stay beside the wire they name, on whichever side the drag
-    // requests. The requested position is projected onto the nearest wire
+    // requests. The requested position is projected onto the nearest branch
     // segment, then offset perpendicular to the line by half the label size so
-    // it never covers the wire. Projecting onto each segment also clamps the
-    // label to the line's extents.
-    QPointF clampNetLabelPosition(ice::ObjectId netId, const QGraphicsItem *label, const QPointF &candidate) const {
+    // it never covers the wire. The branch endpoints, normalized branch
+    // distance, and side are returned so the caller can store a route-relative
+    // anchor instead of an absolute position.
+    std::optional<NetLabelProjection> projectNetLabel(ice::ObjectId netId, const QGraphicsItem *label,
+                                                      const QPointF &candidate) const {
         const auto bounds = label ? label->boundingRect() : QRectF(0.0, 0.0, 80.0, 18.0);
         const qreal width = bounds.width() > 0.0 ? bounds.width() : 80.0;
         const qreal height = bounds.height() > 0.0 ? bounds.height() : 18.0;
@@ -844,40 +862,67 @@ class SchematicCanvasImpl : public SchematicCanvas {
         const QPointF candidateCenter = candidate + labelCenter;
         constexpr qreal margin = 2.0;
         qreal bestDistance = std::numeric_limits<qreal>::max();
-        QPointF bestPosition = candidate;
+        std::optional<NetLabelProjection> best;
         for (auto *item : scene()->items()) {
             if (item->data(0).toString() != QStringLiteral("wire") || item->data(1).toULongLong() != netId)
                 continue;
             auto *wire = dynamic_cast<QGraphicsPathItem *>(item);
             if (!wire)
                 continue;
+            const auto fromPin = item->data(4).toULongLong();
+            const auto toPin = item->data(5).toULongLong();
+            if (fromPin == 0 || toPin == 0 || fromPin == toPin)
+                continue;
             const auto path = wire->path();
-            for (int index = 1; index < path.elementCount(); ++index) {
-                const auto first = path.elementAt(index - 1);
-                const auto second = path.elementAt(index);
-                const QPointF start = wire->mapToScene(QPointF(first.x, first.y));
-                const QPointF end = wire->mapToScene(QPointF(second.x, second.y));
+            std::vector<QPointF> points;
+            points.reserve(static_cast<std::size_t>(path.elementCount()));
+            for (int index = 0; index < path.elementCount(); ++index) {
+                const auto element = path.elementAt(index);
+                points.push_back(wire->mapToScene(QPointF(element.x, element.y)));
+            }
+            if (points.size() < 2)
+                continue;
+            std::vector<qreal> cumulative(points.size(), 0.0);
+            for (std::size_t index = 1; index < points.size(); ++index)
+                cumulative[index] = cumulative[index - 1] + QLineF(points[index - 1], points[index]).length();
+            const auto totalLength = cumulative.back();
+            if (totalLength <= 0.0)
+                continue;
+            for (std::size_t index = 1; index < points.size(); ++index) {
+                const auto start = points[index - 1];
+                const auto end = points[index];
                 const auto delta = end - start;
                 const auto lengthSquared = QPointF::dotProduct(delta, delta);
                 if (lengthSquared <= 0.0)
                     continue;
                 const auto length = std::sqrt(lengthSquared);
-                const auto fraction = std::clamp(QPointF::dotProduct(candidateCenter - start, delta) / lengthSquared,
-                                                 qreal(0.0), qreal(1.0));
-                const auto point = start + delta * fraction;
+                const auto segmentFraction = std::clamp(
+                    QPointF::dotProduct(candidateCenter - start, delta) / lengthSquared, qreal(0.0), qreal(1.0));
+                const auto point = start + delta * segmentFraction;
                 const QPointF normal(-delta.y() / length, delta.x() / length);
                 const qreal side = QPointF::dotProduct(candidateCenter - point, normal) < 0.0 ? -1.0 : 1.0;
                 const qreal clearance =
                     std::abs(normal.x()) * width / 2.0 + std::abs(normal.y()) * height / 2.0 + margin;
                 const auto anchored = point + normal * side * clearance - labelCenter;
                 const auto distance = QLineF(candidate, anchored).length();
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestPosition = anchored;
-                }
+                if (distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                best = NetLabelProjection{
+                    anchored,
+                    ice::NetLabelAnchor{static_cast<ice::ObjectId>(fromPin), static_cast<ice::ObjectId>(toPin),
+                                        std::clamp((cumulative[index - 1] + length * segmentFraction) / totalLength,
+                                                   qreal(0.0), qreal(1.0)),
+                                        side > 0.0}};
             }
         }
-        return bestPosition;
+        return best;
+    }
+
+    QPointF clampNetLabelPosition(ice::ObjectId netId, const QGraphicsItem *label, const QPointF &candidate) const {
+        if (const auto projection = projectNetLabel(netId, label, candidate))
+            return projection->position;
+        return candidate;
     }
 
     void updatePinVisibility() {
@@ -903,6 +948,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     ice::ObjectId netLabelDragNetId_ = 0;
     QPointF netLabelDragOriginScene_;
     QPointF netLabelDragOriginPosition_;
+    QPointF netLabelDragCandidate_;
     std::map<ice::ObjectId, QPointF> dragOriginPositions_;
     QPointF dragOriginScene_;
     bool dragged_ = false;
@@ -911,7 +957,8 @@ class SchematicCanvasImpl : public SchematicCanvas {
     std::function<void(ice::ObjectId)> flipped_;
     std::function<void(ice::ObjectId, ice::ObjectId)> connected_;
     std::function<void(ice::ObjectId)> disconnected_;
-    std::function<void(ice::ObjectId, QPointF)> netLabelMoved_;
+    std::function<void(ice::ObjectId, const ice::NetLabelAnchor &, QPointF)> netLabelMoved_;
+    std::function<void(ice::ObjectId)> netLabelActivated_;
     std::function<void(QPointF)> commentPlaced_;
     std::function<void()> changed_;
     std::function<void(ice::ObjectId)> symbolSelected_;
