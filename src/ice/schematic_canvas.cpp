@@ -36,6 +36,8 @@
 SchematicCanvas::SchematicCanvas(QWidget *parent) : QGraphicsView(parent) {}
 SchematicCanvas::~SchematicCanvas() = default;
 
+namespace {
+
 bool isSelectableSchematicItem(const QGraphicsItem *item) {
     if (!item)
         return false;
@@ -49,8 +51,6 @@ QGraphicsItem *schematicItemOwner(QGraphicsItem *item) {
             return cursor;
     return nullptr;
 }
-
-QGraphicsItem *symbolOwner(QGraphicsItem *item) { return schematicItemOwner(item); }
 
 QGraphicsItem *symbolChild(QGraphicsItem *symbol, const QString &kind) {
     if (!symbol)
@@ -316,7 +316,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
             flipped_(id);
     }
 
-    void fitToContent() {
+    void fitToContent() override {
         QRectF bounds;
         for (auto *item : scene()->items()) {
             if (!item->parentItem())
@@ -1044,4 +1044,6 @@ class SchematicCanvasImpl : public SchematicCanvas {
     qreal zoom_ = 1.0;
     QPointF centerScene_;
 };
+} // namespace
+
 SchematicCanvas *createSchematicCanvas(QWidget *parent) { return new SchematicCanvasImpl(parent); }

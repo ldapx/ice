@@ -49,25 +49,19 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     CHECK(roundTrip.layers.at(layer).color == "#123456");
     CHECK(roundTrip.layers.at(layer).pattern == 3);
 
-    auto legacy = project.serialize();
-    const auto datatype = legacy.find("\"datatype\": 2");
+    auto missingDatatype = project.serialize();
+    const auto datatype = missingDatatype.find("\"datatype\": 2");
     CHECK(datatype != std::string::npos);
     if (datatype == std::string::npos)
         return;
-    const auto lineBegin = legacy.rfind('\n', datatype);
-    const auto lineEnd = legacy.find('\n', datatype);
+    const auto lineBegin = missingDatatype.rfind('\n', datatype);
+    const auto lineEnd = missingDatatype.find('\n', datatype);
     CHECK(lineBegin != std::string::npos);
     CHECK(lineEnd != std::string::npos);
     if (lineBegin == std::string::npos || lineEnd == std::string::npos)
         return;
-    legacy.erase(lineBegin, lineEnd - lineBegin + 1);
-    const auto name = legacy.find("\"name\": \"Metal1.pin\"");
-    CHECK(name != std::string::npos);
-    if (name == std::string::npos)
-        return;
-    legacy.replace(name, std::string("\"name\": \"Metal1.pin\"").size(), "\"name\": \"Metal1 (dt 2)\"");
-    const auto legacyLoaded = ice::Project::deserialize(legacy);
-    CHECK(legacyLoaded.layers.at(layer).datatype == 2);
+    missingDatatype.erase(lineBegin, lineEnd - lineBegin + 1);
+    CHECK_THROWS_AS(ice::Project::deserialize(missingDatatype), ice::ProjectError);
 }
 
 TEST_CASE("text polygon shape groups survive serialization") {
@@ -2043,7 +2037,7 @@ TEST_CASE("project reports can be created and edited through core helpers") {
     project.identity = "report-test";
     project.name = "report-test";
     const auto reportId = ice::createProjectReport(project, root, "Comparison Report",
-                                                   "# custom report\ndef build_report(ctx):\n    return \"# ok\"\n");
+                                                   "# custom report\ndef build_script(ctx):\n    return \"# ok\"\n");
     CHECK(project.reports.contains(reportId));
     const auto &report = project.reports.at(reportId);
     CHECK(report.name == "Comparison Report");

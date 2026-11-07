@@ -1,7 +1,6 @@
 #pragma once
 
 #include "icelib/core.hpp"
-#include "icelib/simulation.hpp"
 
 #include <chrono>
 #include <future>
@@ -89,6 +88,5 @@ class VerificationScheduler {
 
 std::string serializeVerificationReport(const VerificationReport &report);
 std::string verificationSeverityName(VerificationSeverity severity);
-SimulationRequest applyParasitics(const SimulationRequest &request, const VerificationReport &report);
 
 } // namespace ice

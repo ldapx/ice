@@ -216,8 +216,8 @@ transistor-level load check.
 
 ## Source schematics
 
-Use `schematic_create` with `kind: "text"` (or the `schematic_create_text` /
-`schematic_add_text` aliases) when a text SPICE cell is intended. Use
+Use `schematic_create` with `kind: "text"` (or `schematic_create_text`) when a
+text SPICE cell is intended. Use
 `kind: "systemverilog"` or `schematic_create_systemverilog` for a digital HDL
 cell. Do not create a drawn cell and then write its sidecar by hand.
 
@@ -308,7 +308,7 @@ the newer files. Reload or reopen the project and retry.
 `simulation_script_run` executes the script through the shared Python runner and
 returns `exit_code`, `timed_out`, `stdout`, `stderr`, and generated graph data,
 so agents can inspect analysis results and adjust the schematic in the same
-session. The legacy `report_*` tool names remain accepted as aliases.
+session.
 
 ## Resources
 

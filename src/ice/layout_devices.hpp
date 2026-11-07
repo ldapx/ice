@@ -106,7 +106,6 @@ std::filesystem::path layoutDeviceLibraryPath(const std::string &pdk = {});
 std::string layoutDeviceCellPrefix(const ice::LayoutDeviceLibrary &library);
 std::string stripLayoutDevicePrefix(const ice::LayoutDeviceLibrary &library, const std::string &cellName);
 bool layoutPdkIdsMatch(const std::string &left, const std::string &right);
-std::filesystem::path ihpSourceRoot();
 QString pythonExecutable();
 QString icepyPythonPath();
 

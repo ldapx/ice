@@ -33,7 +33,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <functional>
 #include <limits>
 #include <set>
@@ -80,13 +79,8 @@ void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::
             return existing.name == layer.name && existing.layout == 0 &&
                    (existing.pdk.empty() || existing.pdk == technology);
         });
-        if (exists == project.layers.end()) {
+        if (exists == project.layers.end())
             ice::addLayer(project, layer.name, layer.number, 0, technology);
-        } else if (exists->second.pdk.empty()) {
-            // Tag legacy technology layers when opening an older project so
-            // they do not leak into layouts using another PDK.
-            exists->second.pdk = technology;
-        }
     }
     // The device library is the complete layer map for the technology. Adding
     // it here means creating a PDK layout exposes every layer up front and
@@ -109,8 +103,9 @@ void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &i
         const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
             return ice::packageMatchesPdk(entry.spec, pdkName);
         });
-        if (package != packages.end() && package->spec.pdk)
-            addPdkLayers(project, *package->spec.pdk, pdkName);
+        if (package == packages.end() || !package->spec.pdk)
+            continue;
+        addPdkLayers(project, *package->spec.pdk, pdkName);
     }
 }
 
@@ -250,9 +245,6 @@ const ice::LayoutDeviceCell *findLayoutDevice(const ice::LayoutDeviceLibrary &li
     return it == library.cells.end() ? nullptr : &*it;
 }
 
-const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
-                                                         const std::string &cellName);
-
 const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibrary &library,
                                                      const ice::LayoutCell &cell) {
     if (!cell.device.empty()) {
@@ -327,35 +319,8 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     return cloneId;
 }
 
-std::filesystem::path ihpSourceRoot() {
-    const auto valid = [](const std::filesystem::path &path) {
-        std::error_code status;
-        return std::filesystem::is_directory(path / "cni", status) && !status &&
-               std::filesystem::is_directory(path / "ihp" / "refs" / "ihp_pycell", status) && !status;
-    };
-    std::vector<std::filesystem::path> candidates;
-    const auto configured = qEnvironmentVariable("ICE_IHP_ROOT");
-    if (!configured.isEmpty())
-        candidates.emplace_back(configured.toStdString());
-#ifdef ICE_SOURCE_DIR
-    candidates.push_back(std::filesystem::path(ICE_SOURCE_DIR).parent_path() / "IHP");
-#endif
-    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
-    candidates.push_back(std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / ".." / "IHP");
-    candidates.push_back(std::filesystem::current_path() / "IHP");
-    candidates.push_back(std::filesystem::current_path().parent_path() / "IHP");
-    candidates.push_back(std::filesystem::path(QDir::homePath().toStdString()) / "repositories" / "IHP");
-    for (const auto &candidate : candidates) {
-        std::error_code status;
-        const auto normalized = std::filesystem::weakly_canonical(candidate, status);
-        if (!status && valid(normalized))
-            return normalized;
-    }
-    return {};
-}
-
 QString pythonExecutable() {
-    const auto configured = qEnvironmentVariable("ICE_PYTHON");
+    auto configured = qEnvironmentVariable("ICE_PYTHON");
     if (!configured.isEmpty())
         return configured;
     for (const auto &candidate : {QStringLiteral("python3"), QStringLiteral("python")}) {
@@ -592,7 +557,7 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
                 message = QStringLiteral("The PCell generator exited with code %1.").arg(process.exitCode());
             if (message.size() > 4000)
                 message = message.right(4000);
-            *error = message;
+            *error = std::move(message);
         }
         return std::nullopt;
     }

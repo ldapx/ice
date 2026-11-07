@@ -1,5 +1,6 @@
 #include "side_panels.hpp"
 
+#include "file_labels.hpp"
 #include "icons.hpp"
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
@@ -97,7 +98,6 @@ const char *shapeEntryIcon(ShapeEntryKind kind) {
     case ShapeEntryKind::routedPath:
         return "route";
     case ShapeEntryKind::text:
-        return "type";
     case ShapeEntryKind::textPolygon:
         return "type";
     }
@@ -177,18 +177,6 @@ QString layerPurposeLabel(const ice::Layer &layer) {
 
 QString layerVariantLabel(const ice::Layer &layer) {
     return QStringLiteral("%1 (dt %2)").arg(layerPurposeLabel(layer)).arg(layer.datatype);
-}
-
-QString hierarchyFileLabel(const std::string &name, const char *extension) {
-    return QString::fromStdString(name) + QLatin1Char('.') + QLatin1String(extension);
-}
-
-QString hierarchySchematicLabel(const ice::SchematicCell &cell) {
-    if (cell.systemVerilogSchematic)
-        return hierarchyFileLabel(cell.name, "sv");
-    if (cell.textSchematic)
-        return hierarchyFileLabel(cell.name, "sp");
-    return hierarchyFileLabel(cell.name, "icesch");
 }
 } // namespace
 
@@ -442,7 +430,7 @@ void ProjectPanel::rebuildTree() {
                 const auto cellIt = project.schematicCells.find(childId);
                 if (cellIt == project.schematicCells.end())
                     continue;
-                const auto childLabel = hierarchySchematicLabel(cellIt->second);
+                const auto childLabel = schematicFileLabel(cellIt->second);
                 auto *childItem = new QTreeWidgetItem(parentItem, {childLabel});
                 childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
                 childItem->setIcon(0, hierarchyIcon("puzzle"));
@@ -455,7 +443,7 @@ void ProjectPanel::rebuildTree() {
             }
         };
         for (const auto &[id, cell] : project.schematicCells) {
-            const auto cellLabel = hierarchySchematicLabel(cell);
+            const auto cellLabel = schematicFileLabel(cell);
             auto *cellItem = new QTreeWidgetItem(tree_, {cellLabel});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             if (cell.isTextSource()) {
@@ -576,7 +564,7 @@ void ProjectPanel::rebuildTree() {
     for (const auto &[id, procedural] : project.proceduralLayouts) {
         if (procedural.generatedCell != 0)
             generatedCells.insert(procedural.generatedCell);
-        const auto proceduralLabel = hierarchyFileLabel(procedural.name, "py");
+        const auto proceduralLabel = proceduralLayoutFileLabel(procedural);
         auto *proceduralItem = new QTreeWidgetItem(tree_, {proceduralLabel});
         proceduralItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
         proceduralItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::proceduralLayout));
@@ -585,7 +573,7 @@ void ProjectPanel::rebuildTree() {
         const auto generatedIt = project.layoutCells.find(procedural.generatedCell);
         if (generatedIt == project.layoutCells.end())
             continue;
-        const auto generatedLabel = hierarchyFileLabel(generatedIt->second.name, "icelay");
+        const auto generatedLabel = layoutFileLabel(generatedIt->second);
         auto *generatedItem = new QTreeWidgetItem(proceduralItem, {generatedLabel});
         generatedItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(generatedIt->first));
         generatedItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
@@ -597,7 +585,7 @@ void ProjectPanel::rebuildTree() {
     for (const auto &[id, cell] : project.layoutCells) {
         if (cell.library || generatedCells.contains(id))
             continue;
-        const auto cellLabel = hierarchyFileLabel(cell.name, "icelay");
+        const auto cellLabel = layoutFileLabel(cell);
         auto *cellItem = new QTreeWidgetItem(tree_, {cellLabel});
         cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
         cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));

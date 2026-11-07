@@ -24,6 +24,7 @@
 #include "side_panels.hpp"
 
 #include "appearance.hpp"
+#include "file_labels.hpp"
 #include "icons.hpp"
 #include "package_ui.hpp"
 #include "procedural_layout.hpp"
@@ -602,8 +603,6 @@ LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
             std::string viaKey;
             if (!stack[index].second && !stack[index + 1].second)
                 viaKey = "via" + std::to_string(stack[index].first);
-            else if (!stack[index].second && stack[index + 1].second)
-                viaKey = "topvia" + std::to_string(stack[index + 1].first);
             else
                 viaKey = "topvia" + std::to_string(stack[index + 1].first);
             const auto viaLayer = layerFor(viaKey);
@@ -1725,10 +1724,8 @@ class DocumentWindow : public QMainWindow {
         const bool hadExternalConflictsAfterReload = !conflictedSchematicFiles_.empty() ||
                                                      !conflictedLayoutFiles_.empty() ||
                                                      !conflictedProceduralFiles_.empty();
-        if (hadExternalConflictsAfterReload) {
-            if (!resolveExternalFileConflicts())
-                return;
-        }
+        if (hadExternalConflictsAfterReload && !resolveExternalFileConflicts())
+            return;
         if (projectDiskChangePending_) {
             const auto response =
                 QMessageBox::warning(this, QStringLiteral("Save Project"),
@@ -7671,7 +7668,7 @@ class DocumentWindow : public QMainWindow {
                 break;
             uniqueName = QStringLiteral("%1 %2").arg(name).arg(suffix);
         }
-        name = uniqueName;
+        name = std::move(uniqueName);
 
         const auto root = QFileInfo(projectPath_).absolutePath();
         QDir reportsDir(QDir(root).filePath(QStringLiteral("scripts")));
@@ -7697,12 +7694,9 @@ class DocumentWindow : public QMainWindow {
         const auto relative = QDir(root).relativeFilePath(target);
         ice::ObjectId newId = 0;
         try {
-            const auto reportName = name;
-            const auto reportPath = relative;
             project_->execute("add simulation script", [&](ice::Project &project) {
                 newId = project.nextId();
-                project.reports.emplace(newId,
-                                        ice::ProjectReport{newId, reportName.toStdString(), reportPath.toStdString()});
+                project.reports.emplace(newId, ice::ProjectReport{newId, name.toStdString(), relative.toStdString()});
             });
             project_->setLastHistoryLabel("Added simulation script " + name.toStdString());
             activeReportId_ = newId;
@@ -8392,7 +8386,7 @@ class DocumentWindow : public QMainWindow {
         for (const auto &trace : vcd.traces) {
             traceNames.push_back(trace.name);
             if (!capture.empty())
-                capture += ",";
+                capture += ',';
             capture += trace.name;
         }
         bool graphsUpdated = false;
@@ -9053,12 +9047,6 @@ class DocumentWindow : public QMainWindow {
         return label;
     }
 
-    static QString schematicFileExtension(const ice::SchematicCell &cell) {
-        if (cell.systemVerilogSchematic)
-            return QStringLiteral("sv");
-        return cell.textSchematic ? QStringLiteral("sp") : QStringLiteral("icesch");
-    }
-
     static TextDocumentLanguage textSourceLanguage(const ice::SchematicCell &cell) {
         return cell.systemVerilogSchematic ? TextDocumentLanguage::SystemVerilog : TextDocumentLanguage::Spice;
     }
@@ -9463,7 +9451,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     static QString withUnit(const std::string &value, const QString &unit) {
-        const auto text = QString::fromStdString(value).trimmed();
+        auto text = QString::fromStdString(value).trimmed();
         if (text.endsWith(unit, Qt::CaseInsensitive))
             return text;
         return text + QLatin1Char(' ') + unit;
@@ -12825,6 +12813,8 @@ class DocumentWindow : public QMainWindow {
 
 } // namespace
 
+namespace {
+
 class AppWindowAdapter final : public AppWindow {
   public:
     explicit AppWindowAdapter(std::unique_ptr<DocumentWindow> window) : window_(std::move(window)) {}
@@ -12838,6 +12828,8 @@ class AppWindowAdapter final : public AppWindow {
   private:
     std::unique_ptr<DocumentWindow> window_;
 };
+
+} // namespace
 
 std::unique_ptr<AppWindow> createAppWindow(ice::AppearanceMode appearance) {
     return std::make_unique<AppWindowAdapter>(std::make_unique<DocumentWindow>(appearance));

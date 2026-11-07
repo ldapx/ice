@@ -642,12 +642,6 @@ json doctorJson(const std::filesystem::path &executablePath) {
         }
     }
 
-    // Keep the old top-level list for compatibility, but make it a list of
-    // simulation models. Liberty timing libraries live in their own field.
-    std::vector<std::string> simulationPaths;
-    for (const auto &entry : simulationLibraries)
-        simulationPaths.push_back(entry.at("path").get<std::string>());
-
     std::vector<std::string> timingLibraries;
     for (const auto &root : roots) {
         std::error_code status;
@@ -689,7 +683,6 @@ json doctorJson(const std::filesystem::path &executablePath) {
             {"ready_pdks", std::move(readyPdks)},
             {"simulation_model_libraries", std::move(simulationLibraries)},
             {"timing_libraries", std::move(timingLibraries)},
-            {"model_libraries", std::move(simulationPaths)},
             {"ok", pythonAvailable && !runner.empty() && (ngspiceAvailable || ngspiceLibrary)}};
 }
 
@@ -1233,20 +1226,10 @@ class IceMcpServer {
     }
 
     json callInternal(const std::string &name, const json &arguments) {
-        std::string toolName = name;
-        json toolArguments = arguments;
-        if (toolName.starts_with("simulation_script_")) {
-            toolName = "report_" + toolName.substr(std::string("simulation_script_").size());
-            if (toolArguments.contains("script")) {
-                toolArguments["report"] = toolArguments.at("script");
-                toolArguments.erase("script");
-            }
-        }
         if (name == "ice_version") {
             auto result = buildJson(executablePath_);
             result["features"].push_back("mcp");
             result["features"].push_back("schematic_create_text");
-            result["features"].push_back("schematic_add_text");
             result["features"].push_back("simulation_measure");
             result["features"].push_back("pdk_info");
             if (!startupWarning_.empty())
@@ -1970,50 +1953,50 @@ class IceMcpServer {
             return {{"id", id}, {"name", simulationName}, {"deleted", true}};
         }
 
-        if (toolName == "report_create") {
-            const auto reportName = requiredString(toolArguments, "name");
-            const auto source = optionalString(toolArguments, "source");
+        if (name == "simulation_script_create") {
+            const auto scriptName = requiredString(arguments, "name");
+            const auto source = optionalString(arguments, "source");
             const auto root = projectRootPath();
             ice::ObjectId id = 0;
             session.execute("mcp simulation-script-create", [&](ice::Project &project) {
-                id = ice::createProjectReport(project, root, reportName, source);
+                id = ice::createProjectReport(project, root, scriptName, source);
             });
-            const auto &report = session.project().reports.at(id);
+            const auto &script = session.project().reports.at(id);
             return {{"id", id},
-                    {"name", report.name},
-                    {"path", report.path},
-                    {"source", ice::readProjectReportSource(root, report)}};
+                    {"name", script.name},
+                    {"path", script.path},
+                    {"source", ice::readProjectReportSource(root, script)}};
         }
-        if (toolName == "report_list") {
-            json reports = json::array();
-            for (const auto &[id, report] : session.project().reports)
-                reports.push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
-            return reports;
+        if (name == "simulation_script_list") {
+            json scripts = json::array();
+            for (const auto &[id, script] : session.project().reports)
+                scripts.push_back({{"id", id}, {"name", script.name}, {"path", script.path}});
+            return scripts;
         }
-        if (toolName == "report_read") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
-                                             "simulation script");
-            const auto &report = session.project().reports.at(id);
+        if (name == "simulation_script_read") {
+            const auto id =
+                lookupByIdOrName(session.project().reports, requiredValue(arguments, "script"), "simulation script");
+            const auto &script = session.project().reports.at(id);
             return {{"id", id},
-                    {"name", report.name},
-                    {"path", report.path},
-                    {"source", ice::readProjectReportSource(projectRootPath(), report)}};
+                    {"name", script.name},
+                    {"path", script.path},
+                    {"source", ice::readProjectReportSource(projectRootPath(), script)}};
         }
-        if (toolName == "report_write") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
-                                             "simulation script");
-            const auto &report = session.project().reports.at(id);
-            const auto source = requiredStringAllowEmpty(toolArguments, "source");
-            ice::writeProjectReportSource(projectRootPath(), report, source);
-            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"bytes", source.size()}};
+        if (name == "simulation_script_write") {
+            const auto id =
+                lookupByIdOrName(session.project().reports, requiredValue(arguments, "script"), "simulation script");
+            const auto &script = session.project().reports.at(id);
+            const auto source = requiredStringAllowEmpty(arguments, "source");
+            ice::writeProjectReportSource(projectRootPath(), script, source);
+            return {{"id", id}, {"name", script.name}, {"path", script.path}, {"bytes", source.size()}};
         }
-        if (toolName == "report_run") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
-                                             "simulation script");
-            const auto &report = session.project().reports.at(id);
-            const auto timeoutValue = optionalInteger(toolArguments, "timeout_ms").value_or(30000);
+        if (name == "simulation_script_run") {
+            const auto id =
+                lookupByIdOrName(session.project().reports, requiredValue(arguments, "script"), "simulation script");
+            const auto &script = session.project().reports.at(id);
+            const auto timeoutValue = optionalInteger(arguments, "timeout_ms").value_or(30000);
             const auto timeout = std::chrono::milliseconds(std::max<std::int64_t>(1, timeoutValue));
-            const auto result = ice::runProjectReport(projectRootPath(), report, executablePath_, timeout);
+            const auto result = ice::runProjectReport(projectRootPath(), script, executablePath_, timeout);
             json graphs = json::array();
             if (!result.graphsText.empty()) {
                 const auto document = json::parse(result.graphsText, nullptr, false);
@@ -2021,8 +2004,8 @@ class IceMcpServer {
                     graphs = document.at("graphs");
             }
             return {{"id", id},
-                    {"name", report.name},
-                    {"path", report.path},
+                    {"name", script.name},
+                    {"path", script.path},
                     {"ok", !result.timedOut && result.exitCode == 0},
                     {"timed_out", result.timedOut},
                     {"exit_code", result.exitCode},
@@ -2030,19 +2013,19 @@ class IceMcpServer {
                     {"stderr", result.stderrText},
                     {"graphs", std::move(graphs)}};
         }
-        if (toolName == "report_delete") {
-            const auto id = lookupByIdOrName(session.project().reports, requiredValue(toolArguments, "report"),
-                                             "simulation script");
-            const auto report = session.project().reports.at(id);
-            const bool purge = optionalBoolean(toolArguments, "purge", false);
+        if (name == "simulation_script_delete") {
+            const auto id =
+                lookupByIdOrName(session.project().reports, requiredValue(arguments, "script"), "simulation script");
+            const auto script = session.project().reports.at(id);
+            const bool purge = optionalBoolean(arguments, "purge", false);
             session.execute("mcp simulation-script-delete", [&](ice::Project &project) { project.reports.erase(id); });
             if (purge) {
                 std::error_code status;
-                std::filesystem::remove(projectReportPath(projectRootPath(), report), status);
+                std::filesystem::remove(projectReportPath(projectRootPath(), script), status);
                 if (status)
                     throw ToolError("Unable to purge script file: " + status.message());
             }
-            return {{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}, {"purged", purge}};
+            return {{"id", id}, {"name", script.name}, {"path", script.path}, {"deleted", true}, {"purged", purge}};
         }
 
         if (name == "schematic_delete") {
@@ -2133,7 +2116,7 @@ class IceMcpServer {
             });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
         }
-        if (name == "schematic_create_text" || name == "schematic_add_text") {
+        if (name == "schematic_create_text") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto cellName = requiredString(arguments, "name");
@@ -2146,7 +2129,7 @@ class IceMcpServer {
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "text"}, {"text", text}};
         }
         if (name == "schematic_set_text") {
-            const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
+            const auto id = resolveSchematic(session.project(), arguments, "schematic");
             const auto &cell = session.project().schematicCells.at(id);
             const bool systemVerilogCell = cell.systemVerilogSchematic;
             const auto kind = optionalString(arguments, "kind", systemVerilogCell ? "systemverilog" : "text");
@@ -2238,8 +2221,7 @@ class IceMcpServer {
             request.name = optionalString(arguments, "name");
             request.x = optionalInteger(arguments, "x").value_or(0);
             request.y = optionalInteger(arguments, "y").value_or(0);
-            const auto paramsIt =
-                arguments.contains("parameters") ? arguments.find("parameters") : arguments.find("params");
+            const auto paramsIt = arguments.find("parameters");
             request.parameters = parseParameters(paramsIt == arguments.end() ? nullptr : &*paramsIt, "parameters");
             ice::ComponentPlacement placement;
             session.execute("mcp schematic-add-component", [&](ice::Project &project) {
@@ -2281,8 +2263,7 @@ class IceMcpServer {
                 component.name = optionalString(entry, "name");
                 component.x = optionalInteger(entry, "x").value_or(0);
                 component.y = optionalInteger(entry, "y").value_or(0);
-                const auto parametersIt =
-                    entry.contains("parameters") ? entry.find("parameters") : entry.find("params");
+                const auto parametersIt = entry.find("parameters");
                 component.parameters =
                     parseParameters(parametersIt == entry.end() ? nullptr : &*parametersIt, "component.parameters");
                 request.components.push_back(std::move(component));
@@ -3195,11 +3176,11 @@ class IceMcpServer {
         tools.push_back(customTool(
             "schematic_add_component",
             "Create a common component (resistor, capacitor, source, ground, device) with symbol and pins.",
-            R"json({"type":"object","properties":{"cell":{"type":["string","integer"]},"type":{"type":"string","description":"resistor, capacitor, voltage source, ground, nmos, ..."},"symbol":{"type":"string","description":"Exact symbol name; overrides type"},"name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"parameters":{"type":["object","array"],"description":"Parameter map or array of {name,value}"},"params":{"type":["object","array"],"description":"Alias for parameters"}},"required":["cell"]})json"));
+            R"json({"type":"object","properties":{"cell":{"type":["string","integer"]},"type":{"type":"string","description":"resistor, capacitor, voltage source, ground, nmos, ..."},"symbol":{"type":"string","description":"Exact symbol name; overrides type"},"name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"parameters":{"type":["object","array"],"description":"Parameter map or array of {name,value}"}},"required":["cell"]})json"));
         tools.push_back(customTool(
             "schematic_add_circuit",
             "Add multiple components and nets atomically and return all instance, symbol, pin, and net ids.",
-            R"json({"type":"object","properties":{"cell":{"type":["string","integer"]},"components":{"type":"array","minItems":1,"items":{"type":"object","properties":{"type":{"type":"string"},"symbol":{"type":"string"},"name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"parameters":{"type":["object","array"]},"params":{"type":["object","array"]}}}},"nets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"pins":{"type":"array","minItems":2,"items":{"type":["string","integer"]}},"x":{"type":"integer"},"y":{"type":"integer"}},"required":["pins"]}}},"required":["cell","components"]})json"));
+            R"json({"type":"object","properties":{"cell":{"type":["string","integer"]},"components":{"type":"array","minItems":1,"items":{"type":"object","properties":{"type":{"type":"string"},"symbol":{"type":"string"},"name":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"parameters":{"type":["object","array"]}}}},"nets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"pins":{"type":"array","minItems":2,"items":{"type":["string","integer"]}},"x":{"type":"integer"},"y":{"type":"integer"}},"required":["pins"]}}},"required":["cell","components"]})json"));
         tools.push_back(tool_builder("schematic_list_symbols")
                             .with_description("List available primitive and PDK symbols with pins and defaults.")
                             .with_string_param("pdk", "Optional PDK id", false)
@@ -3225,12 +3206,6 @@ class IceMcpServer {
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("text", "Optional SPICE source", false)
                             .build());
-        tools.push_back(tool_builder("schematic_add_text")
-                            .with_description("Alias for schematic_create_text; creates a text SPICE cell.")
-                            .with_string_param("name", "Schematic name")
-                            .with_string_param("pdk", "Optional PDK identifier", false)
-                            .with_string_param("text", "Optional SPICE source", false)
-                            .build());
         tools.push_back(tool_builder("schematic_create_systemverilog")
                             .with_description("Create a SystemVerilog source cell.")
                             .with_string_param("name", "Schematic name")
@@ -3243,12 +3218,11 @@ class IceMcpServer {
             "Replace the source of an existing text SPICE or SystemVerilog cell, or convert an empty drawn cell.";
         setTextTool.input_schema =
             R"({"type":"object","properties":{"schematic":{"type":["string","integer"],)"
-            R"("description":"Schematic name or id"},"cell":{"type":["string","integer"],)"
-            R"("description":"Legacy alias for schematic"},"text":{"type":"string","description":"Source text"},)"
+            R"("description":"Schematic name or id"},"text":{"type":"string","description":"Source text"},)"
             R"("kind":{"type":"string","enum":["text","spice","systemverilog","sv"],)"
             R"("description":"Source language of the cell; defaults to its existing language"},)"
             R"("convert":{"type":"boolean","description":"Convert an empty drawn cell to a source cell"}},)"
-            R"("anyOf":[{"required":["schematic"]},{"required":["cell"]}],"required":["text"]})";
+            R"("required":["schematic","text"]})";
         tools.push_back(std::move(setTextTool));
         tools.push_back(tool_builder("schematic_delete")
                             .with_description("Inspect or delete a schematic, optionally cascading dependencies.")
@@ -3567,8 +3541,7 @@ int main(int argc, char **argv) {
             if (executablePath.empty())
                 executablePath = std::filesystem::absolute(argv[0]);
             auto version = buildJson(executablePath);
-            for (const auto *feature :
-                 {"mcp", "schematic_create_text", "schematic_add_text", "simulation_measure", "pdk_info"})
+            for (const auto *feature : {"mcp", "schematic_create_text", "simulation_measure", "pdk_info"})
                 version["features"].push_back(feature);
             std::cout << version.dump(2) << "\n";
             return 0;

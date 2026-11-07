@@ -70,7 +70,6 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -2454,8 +2453,8 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     layout->setSpacing(12);
 
     layout->addWidget(heading(QStringLiteral("Create a schematic")));
-    description_ = new QLabel(
-        QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
+    description_ =
+        new QLabel(QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);
@@ -2543,8 +2542,7 @@ void EmptySchematicPanel::updateKindUi() {
         return;
     switch (kind_) {
     case Kind::SchematicDrawing:
-        kindDescription_->setText(
-            QStringLiteral("Draw a schematic on the canvas using symbols, wires, and ports."));
+        kindDescription_->setText(QStringLiteral("Draw a schematic on the canvas using symbols, wires, and ports."));
         createButton_->setText(QStringLiteral("Create Schematic"));
         break;
     case Kind::TextSpice:
@@ -2626,8 +2624,8 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     layout->setSpacing(12);
 
     layout->addWidget(heading(QStringLiteral("Create a layout")));
-    description_ = new QLabel(
-        QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
+    description_ =
+        new QLabel(QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);

@@ -157,17 +157,11 @@ MultiPolygon GeometryKernel::booleanOp(const MultiPolygon &subject, const MultiP
     return cleanup(result);
 }
 
-MultiPolygon Clipper2Adapter::unionPolygons(const MultiPolygon &left, const MultiPolygon &right) const {
-    return booleanOp(left, right, BooleanOperation::union_);
-}
 MultiPolygon Clipper2Adapter::difference(const MultiPolygon &left, const MultiPolygon &right) const {
     return booleanOp(left, right, BooleanOperation::difference);
 }
 MultiPolygon Clipper2Adapter::intersection(const MultiPolygon &left, const MultiPolygon &right) const {
     return booleanOp(left, right, BooleanOperation::intersection);
-}
-MultiPolygon Clipper2Adapter::xorPolygons(const MultiPolygon &left, const MultiPolygon &right) const {
-    return booleanOp(left, right, BooleanOperation::xor_);
 }
 
 MultiPolygon GeometryKernel::offset(const MultiPolygon &subject, Coordinate delta) const {
@@ -333,17 +327,4 @@ std::vector<ObjectId> SpatialIndex::query(Rect bounds) const {
     return result;
 }
 
-std::string booleanOperationName(BooleanOperation operation) {
-    switch (operation) {
-    case BooleanOperation::union_:
-        return "union";
-    case BooleanOperation::difference:
-        return "difference";
-    case BooleanOperation::intersection:
-        return "intersection";
-    case BooleanOperation::xor_:
-        return "xor";
-    }
-    return "unknown";
-}
 } // namespace ice

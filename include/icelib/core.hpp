@@ -147,8 +147,8 @@ struct Layer {
     std::string name;
     int number = 0;
     bool visible = true;
-    // Zero means this is a legacy/project-wide layer. Non-zero custom layers
-    // belong only to that layout cell; pdk layers are shared by matching PDKs.
+    // Zero means this is a project-wide layer. Non-zero custom layers belong
+    // only to that layout cell; PDK layers are shared by matching PDKs.
     ObjectId layout = 0;
     std::string pdk;
     // GDSII datatype/purpose. Layers with the same number but different
@@ -446,7 +446,6 @@ class ProjectSession {
     const std::vector<std::string> &history() const noexcept;
     std::size_t historyPosition() const noexcept;
     void setLastHistoryLabel(std::string label);
-    bool jumpToHistory(std::size_t position);
     void replaceProject(Project project);
     void markDirty();
     void subscribe(Observer observer);

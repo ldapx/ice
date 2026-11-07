@@ -913,6 +913,8 @@ QGraphicsItem *createLayoutPolygonHandleItem(ice::ObjectId shapeId, int index) {
     return new LayoutResizeHandleItem(shapeId, index, true);
 }
 
+namespace {
+
 class LayoutCanvasImpl : public LayoutCanvas {
   public:
     explicit LayoutCanvasImpl(QWidget *parent = nullptr) : LayoutCanvas(parent) {
@@ -936,7 +938,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         connect(rectangleCommitTimer_, &QTimer::timeout, this, [this] { commitTypedRectangle(); });
     }
 
-    void setTool(Tool tool) {
+    void setTool(Tool tool) override {
         clearLayoutNetHighlight();
         if (readOnly_ && tool != Tool::select)
             tool = Tool::select;
@@ -985,7 +987,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         updateResizeHandleVisibility(nullptr);
     }
 
-    void setReadOnly(bool readOnly) {
+    void setReadOnly(bool readOnly) override {
         if (readOnly_ != readOnly) {
             cancelManualPathDrag();
             cancelPolygonDrag();
@@ -1001,22 +1003,22 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
     }
 
-    bool isReadOnly() const { return readOnly_; }
-    Tool currentTool() const { return tool_; }
+    bool isReadOnly() const override { return readOnly_; }
+    Tool currentTool() const override { return tool_; }
 
-    void setGridVisible(bool visible) {
+    void setGridVisible(bool visible) override {
         gridVisible_ = visible;
         viewport()->update();
     }
 
-    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; }
+    void setSnapToGrid(bool enabled) override { snapToGrid_ = enabled; }
 
-    void setGridSpacing(qreal spacing) {
+    void setGridSpacing(qreal spacing) override {
         if (spacing > 0.0)
             gridSpacing_ = spacing;
     }
 
-    void setDevicePreview(const ice::LayoutDeviceCell *cell) {
+    void setDevicePreview(const ice::LayoutDeviceCell *cell) override {
         devicePreview_ = cell;
         devicePreviewModel_ = cell ? ice::buildLayoutDevicePreviewModel(*cell) : ice::LayoutPreviewModel{};
         viewport()->update();
@@ -1027,7 +1029,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         viewport()->update();
     }
 
-    void restoreLayoutInstanceSelection() { applyLayoutInstanceSelection(); }
+    void restoreLayoutInstanceSelection() override { applyLayoutInstanceSelection(); }
 
     // Mirrors a hierarchy selection onto the canvas. Instance ids are unique
     // across the project, so the scene only needs the id to find its group.
@@ -1040,21 +1042,21 @@ class LayoutCanvasImpl : public LayoutCanvas {
         viewport()->update();
     }
 
-    void setDevicePlacementCallback(std::function<void(QPointF)> callback) {
+    void setDevicePlacementCallback(std::function<void(QPointF)> callback) override {
         devicePlacementRequested_ = std::move(callback);
     }
 
-    void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) {
+    void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) override {
         instanceActivated_ = std::move(callback);
     }
 
-    void setInstanceSelectionCallback(std::function<void(ice::ObjectId)> callback) {
+    void setInstanceSelectionCallback(std::function<void(ice::ObjectId)> callback) override {
         instanceSelectionChanged_ = std::move(callback);
     }
 
-    ice::ObjectId selectedLayoutInstance() const { return selectedLayoutInstance_; }
+    ice::ObjectId selectedLayoutInstance() const override { return selectedLayoutInstance_; }
 
-    void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) {
+    void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) override {
         shapeActivated_ = std::move(callback);
     }
 
@@ -1157,9 +1159,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
     }
 
-    void setToolEscapeCallback(std::function<void()> callback) { toolEscapeRequested_ = std::move(callback); }
+    void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
 
-    void deleteSelectedShapes() {
+    void deleteSelectedShapes() override {
         if (readOnly_)
             return;
         std::vector<ice::ObjectId> ids;
@@ -1173,7 +1175,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setCallbacks(std::function<void(QPointF, QPointF)> rectangleCreated,
                       std::function<void(ice::ObjectId, QPointF)> shapeMoved,
                       std::function<void(ice::ObjectId, QRectF)> shapeResized,
-                      std::function<void(std::vector<ice::ObjectId>)> deleted, std::function<void()> changed) {
+                      std::function<void(std::vector<ice::ObjectId>)> deleted, std::function<void()> changed) override {
         rectangleCreated_ = std::move(rectangleCreated);
         shapeMoved_ = std::move(shapeMoved);
         shapeResized_ = std::move(shapeResized);
@@ -1225,9 +1227,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
             painter.drawLine(QPointF(exposed.left(), y * major), QPointF(exposed.right(), y * major));
     }
 
-    void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) { layerStyles_ = styles; }
+    void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) override { layerStyles_ = styles; }
 
-    void setRectangleStyle(const LayerStyle &style) { rectangleStyle_ = style; }
+    void setRectangleStyle(const LayerStyle &style) override { rectangleStyle_ = style; }
 
     void setPathConfig(const LayoutPathConfig &config) override {
         const bool cellChanged = pathCell_ != config.cell;
@@ -1315,7 +1317,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         applyNavigationTransform();
     }
 
-    void fitToContent() {
+    void fitToContent() override {
         const auto bounds = scene()->itemsBoundingRect();
         if (!bounds.isValid() || bounds.isNull()) {
             zoom_ = 1.0;
@@ -1480,10 +1482,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
         const auto sceneRect = drawPreview_->rect();
         if (!sceneRect.isValid() || sceneRect.isNull())
             return;
-        const auto label =
-            QStringLiteral("%1 x %2")
-                .arg(static_cast<qint64>(std::llround(sceneRect.width())))
-                .arg(static_cast<qint64>(std::llround(sceneRect.height())));
+        const auto label = QStringLiteral("%1 x %2")
+                               .arg(static_cast<qint64>(std::llround(sceneRect.width())))
+                               .arg(static_cast<qint64>(std::llround(sceneRect.height())));
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing);
         QFont font = painter.font();
@@ -2175,8 +2176,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton && drawing_) {
             // A fast second click can arrive as a double-click event.
-            finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd()
-                                                       : snapPosition(mapToScene(event->pos())));
+            finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : snapPosition(mapToScene(event->pos())));
             event->accept();
             return;
         }
@@ -2656,11 +2656,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
         rectangleSizeEditor_->setObjectName(QStringLiteral("layoutRectangleSize"));
         rectangleSizeEditor_->setAlignment(Qt::AlignCenter);
         rectangleSizeEditor_->setPlaceholderText(QStringLiteral("W, H"));
-        rectangleSizeEditor_->setToolTip(QStringLiteral("Rectangle size in database units\n"
-                                                        "Type width,height (for example 281,2875); Enter finishes now"));
+        rectangleSizeEditor_->setToolTip(
+            QStringLiteral("Rectangle size in database units\n"
+                           "Type width,height (for example 281,2875); Enter finishes now"));
         rectangleSizeEditor_->setValidator(new QRegularExpressionValidator(
-            QRegularExpression(
-                QStringLiteral("^\\s*[0-9]{1,9}(?:(?:\\s*[,xX*]\\s*|\\s+)[0-9]{1,9})?\\s*$")),
+            QRegularExpression(QStringLiteral("^\\s*[0-9]{1,9}(?:(?:\\s*[,xX*]\\s*|\\s+)[0-9]{1,9})?\\s*$")),
             rectangleSizeEditor_));
         rectangleSizeEditor_->installEventFilter(this);
         connect(rectangleSizeEditor_, &QLineEdit::textEdited, this,
@@ -2921,6 +2921,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     qreal zoom_ = 1.0;
     QPointF centerScene_;
 };
+
+} // namespace
 
 // Item data roles used to identify schematic canvas items.
 //

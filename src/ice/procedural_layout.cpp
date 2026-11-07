@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>

@@ -74,8 +74,8 @@ bool containsHdlRecursive(const Project &project, ObjectId cellId, std::set<Obje
 
 void addError(MixedSignalPlan &plan, std::string message) {
     if (!plan.error.empty())
-        plan.error += "\n";
-    plan.error += std::move(message);
+        plan.error += '\n';
+    plan.error += message;
 }
 
 } // namespace

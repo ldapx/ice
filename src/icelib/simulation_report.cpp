@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <iomanip>
 #include <random>
 #include <sstream>
 #include <system_error>
@@ -86,7 +85,7 @@ std::string shellQuote(const std::string &value) {
         else
             quoted += character;
     }
-    quoted += "'";
+    quoted += '\'';
     return quoted;
 #endif
 }
@@ -316,7 +315,7 @@ std::filesystem::path currentExecutablePath() {
         return std::filesystem::path(std::wstring(buffer.data(), length));
 #elif defined(__linux__)
     std::error_code status;
-    const auto path = std::filesystem::read_symlink("/proc/self/exe", status);
+    auto path = std::filesystem::read_symlink("/proc/self/exe", status);
     if (!status)
         return path;
 #endif
@@ -446,10 +445,9 @@ ReportProcessResult runProjectReport(const std::filesystem::path &projectRoot, c
         throw ProjectError("report.run", "Report file is missing: " + reportFile.string());
     const auto runner = reportRunnerScriptPath(executablePath);
     if (runner.empty())
-        throw ProjectError("report.runner",
-                           "Python report runner is not available. Set ICE_REPORT_RUNNER to "
-                           "assets/simulation/report_runner.py or install it under "
-                           "<prefix>/share/ice/assets/simulation/report_runner.py.");
+        throw ProjectError("report.runner", "Python report runner is not available. Set ICE_REPORT_RUNNER to "
+                                            "assets/simulation/report_runner.py or install it under "
+                                            "<prefix>/share/ice/assets/simulation/report_runner.py.");
     const auto python = reportPythonExecutable();
     const auto pythonPath = reportPythonPath(executablePath);
 

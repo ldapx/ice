@@ -413,7 +413,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     const auto &schematic =
         require(project.schematicCells, schematicId, "schematic.cell", "Schematic cell does not exist");
 
-    std::string layoutName = name.empty() ? schematic.name : std::move(name);
+    std::string layoutName = name.empty() ? schematic.name : name;
     if (layoutName.empty())
         layoutName = "Layout";
     const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
@@ -810,7 +810,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
         throw ProjectError("layout.boolean", "Select at least two shapes for a boolean operation");
 
     std::vector<Shape *> operands;
-    std::optional<ObjectId> layer;
+    ObjectId layer = 0;
     std::optional<ObjectId> net;
     bool firstNet = true;
     std::set<ObjectId> seen;
@@ -825,7 +825,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
             throw ProjectError("layout.boolean", "Boolean operations support rectangles and polygons only");
         if (shape.polygon.empty() && !shape.rectangle.valid())
             throw ProjectError("layout.shape", "Shape does not contain a valid filled outline");
-        if (layer && *layer != shape.layer)
+        if (layer != 0 && layer != shape.layer)
             throw ProjectError("layout.boolean", "Select shapes on the same layer");
         layer = shape.layer;
         if (firstNet) {
@@ -920,7 +920,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
         points.reserve(polygon.size());
         for (const auto &point : polygon)
             points.push_back({point.x, point.y});
-        Shape shape{id, *layer, net, GeometryKernel::bounds(polygon), std::move(points)};
+        Shape shape{id, layer, net, GeometryKernel::bounds(polygon), std::move(points)};
         shape.name = nextShapeName(cell, type);
         cell.shapes.emplace(id, std::move(shape));
         resultIds.push_back(id);

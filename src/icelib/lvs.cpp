@@ -736,7 +736,7 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
 }
 
 std::string schematicBaseName(std::string name) {
-    const auto normalized = normalizedIdentifier(name);
+    auto normalized = normalizedIdentifier(name);
     if (normalized.ends_with("_layout"))
         return normalized.substr(0, normalized.size() - 7);
     return normalized;

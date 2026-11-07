@@ -26,11 +26,6 @@ std::string trimCopy(std::string text) {
     return text;
 }
 
-bool isIdentifierStart(char character) {
-    const auto byte = static_cast<unsigned char>(character);
-    return std::isalpha(byte) || character == '_' || character == '$';
-}
-
 bool isIdentifierChar(char character) {
     const auto byte = static_cast<unsigned char>(character);
     return std::isalnum(byte) || character == '_' || character == '$';
@@ -162,16 +157,6 @@ bool isTypeKeyword(const std::string &word) {
     return keywords.contains(word);
 }
 
-std::optional<HdlPortDirection> directionForWord(const std::string &word) {
-    if (word == "input")
-        return HdlPortDirection::input;
-    if (word == "output")
-        return HdlPortDirection::output;
-    if (word == "inout")
-        return HdlPortDirection::inout;
-    return std::nullopt;
-}
-
 std::optional<long long> parseIntegerLiteral(std::string text) {
     text = trimCopy(std::move(text));
     if (text.empty())
@@ -285,7 +270,7 @@ std::string portNameForSegment(const std::string &segment) {
             current.push_back(character);
         } else {
             if (!current.empty()) {
-                if (!isTypeKeyword(lowerCopy(current)) && !current.starts_with("'"))
+                if (!isTypeKeyword(lowerCopy(current)) && !current.starts_with('\''))
                     last = current;
                 current.clear();
             }
@@ -472,20 +457,6 @@ void applyBodyDeclarations(const std::string &body, std::vector<HdlPort> &ports)
             }
         }
     }
-}
-
-std::size_t identifierOccurrences(const std::string &source, const std::string &identifier) {
-    std::size_t count = 0;
-    std::size_t position = 0;
-    while ((position = source.find(identifier, position)) != std::string::npos) {
-        const bool left = position == 0 || !isIdentifierChar(source[position - 1]);
-        const auto after = position + identifier.size();
-        const bool right = after >= source.size() || !isIdentifierChar(source[after]);
-        if (left && right)
-            ++count;
-        position = after;
-    }
-    return count;
 }
 
 HdlParseResult parseRawModule(const RawModule &raw, const std::string &source) {
@@ -688,7 +659,7 @@ HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module, bool flattenBus
     }
     svg << "</svg>";
     symbol.artwork = svg.str();
-    symbol.labelY = static_cast<Coordinate>(height / 2 + 12);
+    symbol.labelY = static_cast<Coordinate>(height) / 2 + 12;
     return symbol;
 }
 

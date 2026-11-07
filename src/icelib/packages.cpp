@@ -9,7 +9,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
-#include <openssl/sha.h>
+#include <memory>
+#include <openssl/evp.h>
 #include <set>
 #include <sstream>
 #include <toml++/toml.h>
@@ -464,7 +465,7 @@ void PackageManager::uninstallPackage(const std::filesystem::path &repository, c
 }
 
 std::filesystem::path PackageManager::packageLogo(const std::filesystem::path &packageRoot) {
-    const auto logo = packageRoot / ".github" / "logo.png";
+    auto logo = packageRoot / ".github" / "logo.png";
     std::error_code error;
     if (std::filesystem::is_regular_file(logo, error) && !error)
         return logo;
@@ -579,10 +580,10 @@ void PackageManager::updateIndex(const std::filesystem::path &indexRoot) {
 }
 
 std::string PackageManager::contentHash(const std::filesystem::path &packageRoot) {
-    SHA256_CTX context;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    SHA256_Init(&context);
+    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    DigestContext context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1)
+        throw ProjectError("package.index", "Unable to initialize the package content hash");
     std::vector<std::filesystem::path> files;
     for (const auto &entry : std::filesystem::recursive_directory_iterator(packageRoot)) {
         if (!entry.is_regular_file())
@@ -597,22 +598,23 @@ std::string PackageManager::contentHash(const std::filesystem::path &packageRoot
     std::array<unsigned char, 8192> buffer{};
     for (const auto &file : files) {
         auto relative = std::filesystem::relative(file, packageRoot).generic_string();
-        SHA256_Update(&context, relative.data(), relative.size());
+        EVP_DigestUpdate(context.get(), relative.data(), relative.size());
         std::ifstream input(file, std::ios::binary);
         while (input) {
             input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
             auto count = input.gcount();
             if (count > 0)
-                SHA256_Update(&context, buffer.data(), static_cast<std::size_t>(count));
+                EVP_DigestUpdate(context.get(), buffer.data(), static_cast<std::size_t>(count));
         }
     }
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-    SHA256_Final(digest.data(), &context);
-#pragma GCC diagnostic pop
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digestLength = 0;
+    if (EVP_DigestFinal_ex(context.get(), digest.data(), &digestLength) != 1)
+        throw ProjectError("package.index", "Unable to finalize the package content hash");
     std::ostringstream result;
     result << "sha256:";
-    for (auto byte : digest)
-        result << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    for (unsigned int index = 0; index < digestLength; ++index)
+        result << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(digest[index]);
     return result.str();
 }
 

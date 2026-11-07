@@ -738,7 +738,6 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
     json pdkArray = json::array();
     json simulationLibraries = json::array();
     json readyPdks = json::array();
-    std::vector<std::string> simulationPaths;
     bool pdksReady = false;
     bool allPdksReady = !pdks.empty();
     for (const auto &pdk : pdks) {
@@ -750,7 +749,6 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
         for (const auto &file : pdk.modelFiles) {
             simulationLibraries.push_back(
                 {{"pdk", pdk.id}, {"version", pdk.version}, {"path", file.path.string()}, {"sections", file.sections}});
-            simulationPaths.push_back(file.path.string());
         }
     }
 
@@ -789,8 +787,7 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
                    {"all_pdks_ready", allPdksReady},
                    {"ready_pdks", std::move(readyPdks)},
                    {"simulation_model_libraries", std::move(simulationLibraries)},
-                   {"timing_libraries", std::move(timingLibraries)},
-                   {"model_libraries", std::move(simulationPaths)}};
+                   {"timing_libraries", std::move(timingLibraries)}};
     for (const auto &root : roots)
         result["pdk_roots"].push_back(root.string());
 
@@ -948,8 +945,7 @@ void printHelp() {
               << "  script-write <project> <script> <source-file|->\n"
               << "  script-run <project> <script> [timeout-ms] [--json]\n"
               << "  script-delete <project> <script> [--purge]\n\n"
-              << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n"
-              << "The legacy report-* command names remain available as aliases.\n";
+              << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n";
 }
 
 } // namespace
@@ -969,8 +965,6 @@ int main(int argc, char **argv) {
     for (int index = 1; index < argc; ++index)
         args.emplace_back(argv[index]);
     auto command = args.front();
-    if (command.starts_with("script-"))
-        command = "report-" + command.substr(7);
     auto executablePath = ice::currentExecutablePath();
     if (executablePath.empty())
         executablePath = std::filesystem::absolute(argv[0]);
@@ -1227,7 +1221,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "schematic-add-sv" || command == "schematic-add-systemverilog") {
+        if (command == "schematic-add-sv") {
             expectArguments(args, 3, 5, "schematic-add-sv <project> <name> [pdk] [source-file]");
             auto pdk = std::string(ice::genericPdkId);
             std::string sourceFile;
@@ -1632,7 +1626,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "schematic-remove" || command == "schematic-delete") {
+        if (command == "schematic-remove") {
             expectArguments(args, 3, 5, "schematic-remove <project> <cell> [--dry-run] [--cascade]");
             bool dryRun = false;
             bool cascade = false;
@@ -1936,7 +1930,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "layout-remove" || command == "layout-delete") {
+        if (command == "layout-remove") {
             expectArguments(args, 3, 3, "layout-remove <project> <cell|procedural>");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveLayoutItem(project, args[2]);
@@ -2347,7 +2341,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "simulation-remove" || command == "simulation-delete") {
+        if (command == "simulation-remove") {
             expectArguments(args, 3, 3, "simulation-remove <project> <simulation>");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveSimulation(project, args[2]);
@@ -2697,7 +2691,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "report-add") {
+        if (command == "script-add") {
             expectArguments(args, 3, 4, "script-add <project> <name> [source-file]");
             auto project = ice::Project::load(args[1]);
             std::string source;
@@ -2710,14 +2704,14 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "report-list") {
+        if (command == "script-list") {
             expectArguments(args, 2, 2, "script-list <project>");
             const auto project = ice::Project::load(args[1]);
             printJson(projectSummary(project, args[1])["simulation_scripts"]);
             return 0;
         }
 
-        if (command == "report-info") {
+        if (command == "script-info") {
             expectArguments(args, 3, 3, "script-info <project> <script>");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
@@ -2726,7 +2720,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "report-read") {
+        if (command == "script-read") {
             expectArguments(args, 3, 3, "script-read <project> <script>");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
@@ -2738,7 +2732,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "report-write") {
+        if (command == "script-write") {
             expectArguments(args, 4, 4, "script-write <project> <script> <source-file|->");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
@@ -2749,7 +2743,7 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "report-run") {
+        if (command == "script-run") {
             expectArguments(args, 3, 5, "script-run <project> <script> [timeout-ms] [--json]");
             const auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
@@ -2801,14 +2795,14 @@ int main(int argc, char **argv) {
                            {"graphs", graphSummary}});
             }
             if (result.timedOut)
-                throw ice::ProjectError("report.timeout", "Simulation script timed out");
+                throw ice::ProjectError("script.timeout", "Simulation script timed out");
             if (result.exitCode != 0)
-                throw ice::ProjectError("report.failed",
+                throw ice::ProjectError("script.failed",
                                         "Simulation script exited with code " + std::to_string(result.exitCode));
             return 0;
         }
 
-        if (command == "report-delete") {
+        if (command == "script-delete") {
             expectArguments(args, 3, 4, "script-delete <project> <script> [--purge]");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
@@ -2822,7 +2816,7 @@ int main(int argc, char **argv) {
                 std::error_code status;
                 std::filesystem::remove(projectRootForCli(args[1]) / report.path, status);
                 if (status)
-                    throw ice::ProjectError("report.delete", "Unable to purge script file: " + status.message());
+                    throw ice::ProjectError("script.delete", "Unable to purge script file: " + status.message());
             }
             printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}, {"purged", purge}});
             return 0;

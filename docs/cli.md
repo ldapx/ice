@@ -91,10 +91,9 @@ the unambiguous `--pdk <pdk> --file <spice-file>` form. If a file path is passed
 where the PDK is expected, the command accepts it as a file but warns that the
 cell was stored with the generic PDK; pass `--pdk` to preserve the intended PDK.
 The MCP equivalent is `schematic_create` with `kind: "text"` or
-`schematic_add_text`.
+`schematic_create_text`.
 
-`schematic-add-sv` (alias `schematic-add-systemverilog`) creates a
-SystemVerilog source cell. The optional file is stored as its source; without a
+`schematic-add-sv` creates a SystemVerilog source cell. The optional file is stored as its source; without a
 file, ICE inserts a small digital block template. `schematic-info` and
 `schematic-list` report the `systemverilog` flag for these cells.
 
@@ -335,7 +334,7 @@ project metadata. `script-read` returns the source, and `script-run` returns JSO
 with the process exit code, timeout state, stdout, stderr, and generated graph
 data. Script runs use the stored simulation runs under `build/simulations/`.
 `script-delete` removes only the project association; the Python file remains on
-disk. The legacy `report-*` command names remain available as aliases.
+disk.
 
 The typical agent feedback loop is:
 

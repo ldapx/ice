@@ -22,39 +22,6 @@
 namespace ice {
 using json = nlohmann::ordered_json;
 
-namespace {
-std::string trimCopy(std::string text) {
-    const auto notSpace = [](unsigned char character) { return !std::isspace(character); };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
-    text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
-    return text;
-}
-
-std::string joinedSignalList(const std::vector<std::string> &signalNames) {
-    std::string text;
-    for (const auto &signal : signalNames) {
-        if (!text.empty())
-            text += ", ";
-        text += signal;
-    }
-    return text;
-}
-
-int legacyLayerDatatype(const std::string &name) {
-    // Schema-2 projects written before Layer stored its datatype encoded the
-    // value in the generated name, for example "Metal1 (dt 2)".
-    const auto marker = name.rfind("(dt ");
-    if (marker == std::string::npos || name.empty() || name.back() != ')')
-        return 0;
-    try {
-        const auto value = std::stoi(name.substr(marker + 4, name.size() - marker - 5));
-        return value >= 0 && value <= 65535 ? value : 0;
-    } catch (const std::exception &) {
-        return 0;
-    }
-}
-} // namespace
-
 ProjectError::ProjectError(std::string code, std::string message)
     : std::runtime_error(message), code_(std::move(code)) {}
 const std::string &ProjectError::code() const noexcept { return code_; }
@@ -360,11 +327,10 @@ std::vector<Diagnostic> Project::validate() const {
                               "Simulation script name is listed more than once: " + report.name, reportId});
         const auto normalized = std::filesystem::path(report.path).lexically_normal();
         const auto first = normalized.begin();
-        const bool inScriptsDirectory =
-            first != normalized.end() && (first->string() == "scripts" || first->string() == "reports");
+        const bool inScriptsDirectory = first != normalized.end() && first->string() == "scripts";
         if (report.path.empty() || normalized.empty() || normalized.is_absolute() || !inScriptsDirectory ||
             normalized.extension() != ".py")
-            result.push_back({Diagnostic::Severity::error, "report.path",
+            result.push_back({Diagnostic::Severity::error, "script.path",
                               "Simulation script path must be a relative Python file inside scripts/", reportId});
     }
     return result;
@@ -813,10 +779,10 @@ Project Project::deserialize(const std::string &text) {
         }
         for (const auto &l : j.at("layers")) {
             const auto name = l.at("name").get<std::string>();
-            const auto datatype = l.contains("datatype") ? l.value("datatype", 0) : legacyLayerDatatype(name);
             p.layers.emplace(l.at("id"), Layer{l.at("id"), name, l.at("number"), l.value("visible", true),
-                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{}), datatype,
-                                               l.value("color", std::string{}), l.value("pattern", -1)});
+                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{}),
+                                               l.at("datatype").get<int>(), l.value("color", std::string{}),
+                                               l.value("pattern", -1)});
         }
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
@@ -952,33 +918,16 @@ Project Project::deserialize(const std::string &text) {
                 sim.use_initial_conditions = s.value("use_initial_conditions", false);
                 sim.directives = s.value("directives", std::string{});
                 sim.captureSignals = s.value("signals", std::string{});
-                std::vector<std::string> legacySignals;
                 if (s.contains("graphs")) {
                     for (const auto &g : s.at("graphs")) {
                         SimulationGraph graph;
                         graph.id = g.at("id");
                         graph.name = g.value("name", std::string{"Graph"});
                         graph.xAxis = g.value("x_axis", std::string{"time"});
-                        if (g.contains("y_signals") && g.at("y_signals").is_array()) {
-                            for (const auto &signal : g.at("y_signals").get<std::vector<std::string>>()) {
-                                if (!signal.empty() && std::find(graph.ySignals.begin(), graph.ySignals.end(),
-                                                                 signal) == graph.ySignals.end())
-                                    graph.ySignals.push_back(signal);
-                            }
-                        } else {
-                            const auto legacyYAxis = g.value("y_axis", std::string{});
-                            if (!legacyYAxis.empty())
-                                graph.ySignals.push_back(legacyYAxis);
-                        }
-                        // Older projects stored probe lists per graph. Fold
-                        // them into the simulation-level captured-signal list.
-                        if (g.contains("nodes")) {
-                            for (const auto &node : g.at("nodes").get<std::vector<std::string>>()) {
-                                const auto signal = trimCopy(node);
-                                if (!signal.empty() && std::find(legacySignals.begin(), legacySignals.end(), signal) ==
-                                                           legacySignals.end())
-                                    legacySignals.push_back(signal);
-                            }
+                        for (const auto &signal : g.at("y_signals").get<std::vector<std::string>>()) {
+                            if (!signal.empty() &&
+                                std::find(graph.ySignals.begin(), graph.ySignals.end(), signal) == graph.ySignals.end())
+                                graph.ySignals.push_back(signal);
                         }
                         if (const auto labels = g.find("signal_labels"); labels != g.end() && labels->is_object()) {
                             for (auto label = labels->begin(); label != labels->end(); ++label) {
@@ -998,21 +947,15 @@ Project Project::deserialize(const std::string &text) {
                         sim.graphs.push_back(std::move(graph));
                     }
                 }
-                if (sim.captureSignals.empty() && !legacySignals.empty())
-                    sim.captureSignals = joinedSignalList(legacySignals);
                 p.simulations.emplace(sim.id, std::move(sim));
             }
         }
-        const auto *scripts = j.contains("simulation_scripts") ? &j.at("simulation_scripts")
-                                                               : (j.contains("reports") ? &j.at("reports") : nullptr);
-        if (scripts != nullptr) {
-            for (const auto &report : *scripts) {
-                ProjectReport entry;
-                entry.id = report.at("id");
-                entry.name = report.at("name");
-                entry.path = report.at("path");
-                p.reports.emplace(entry.id, std::move(entry));
-            }
+        for (const auto &report : j.at("simulation_scripts")) {
+            ProjectReport entry;
+            entry.id = report.at("id");
+            entry.name = report.at("name");
+            entry.path = report.at("path");
+            p.reports.emplace(entry.id, std::move(entry));
         }
         auto diagnostics = p.validate();
         if (!diagnostics.empty())
@@ -1211,27 +1154,10 @@ void ensureGitignore(const std::filesystem::path &root) {
         if (input)
             text.assign(std::istreambuf_iterator<char>(input), {});
     }
-    const auto removeLine = [&](const std::string &line) {
-        std::istringstream input(text);
-        std::string current;
-        std::string updated;
-        while (std::getline(input, current)) {
-            if (current == line)
-                continue;
-            updated += current + "\n";
-        }
-        text = std::move(updated);
-    };
     const auto ensureLine = [&](const std::string &line) {
         if (text.find(line + "\n") == std::string::npos && text != line)
             text += (text.empty() || text.back() == '\n' ? "" : "\n") + line + "\n";
     };
-    // Simulation scripts are project source files, not generated output. Older
-    // projects may have used reports/ before the directory was renamed.
-    removeLine("reports/");
-    removeLine("reports");
-    removeLine("scripts/");
-    removeLine("scripts");
     ensureLine("build/");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output)
@@ -1285,7 +1211,7 @@ std::string generatedAgentsGuidance() {
               "names. `schematic_validate` checks connectivity and values before simulation. The lower-level "
               "`schematic_add_symbol`, `schematic_add_instance`, and `schematic_add_net` calls remain "
               "available for explicit control. `schematic_create` creates a drawn cell; "
-              "`schematic_create(kind=\"text\")`, `schematic_create_text`, and `schematic_add_text` "
+              "`schematic_create(kind=\"text\")` or `schematic_create_text` "
               "create a text SPICE cell. `schematic_create(kind=\"systemverilog\")` and "
               "`schematic_create_systemverilog` create a SystemVerilog source cell for digital HDL "
               "simulation. Use `schematic_hdl_ports` to inspect its module ports and "
@@ -1415,10 +1341,10 @@ void Project::save(const std::filesystem::path &path) const {
     }
     const auto full = json::parse(serialize());
     json projectJson = full;
-    const auto schematicCells = full.at("schematic_cells");
-    const auto layoutCells = full.at("layout_cells");
-    const auto proceduralLayouts = full.at("procedural_layouts");
-    const auto simulations = full.at("simulations");
+    const auto &schematicCells = full.at("schematic_cells");
+    const auto &layoutCells = full.at("layout_cells");
+    const auto &proceduralLayouts = full.at("procedural_layouts");
+    const auto &simulations = full.at("simulations");
     projectJson.erase("schematic_cells");
     projectJson.erase("layout_cells");
     projectJson.erase("procedural_layouts");
@@ -1586,17 +1512,6 @@ std::size_t ProjectSession::historyPosition() const noexcept { return historyPos
 void ProjectSession::setLastHistoryLabel(std::string label) {
     if (historyPosition_ != 0 && historyPosition_ <= historyLabels_.size())
         historyLabels_[historyPosition_ - 1] = std::move(label);
-}
-bool ProjectSession::jumpToHistory(std::size_t position) {
-    if (position > historyPosition_ || position >= historyStates_.size())
-        return false;
-    if (position == historyPosition_)
-        return true;
-    project_ = historyStates_[position];
-    historyPosition_ = position;
-    dirty_ = true;
-    notify();
-    return true;
 }
 void ProjectSession::replaceProject(Project project) {
     project_ = std::move(project);
