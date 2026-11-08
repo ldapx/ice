@@ -102,6 +102,8 @@ struct ActivityPanel::AgentBackend {
 
 namespace {
 
+constexpr int kDrcViolationIndexRole = Qt::UserRole + 1;
+
 QString jsonString(const nlohmann::json &object, const char *key, const QString &fallback = {}) {
     const auto it = object.find(key);
     if (it == object.end() || !it->is_string())
@@ -372,6 +374,17 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     drcTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     drcTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     drcTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    connect(drcTable_, &QTableWidget::cellClicked, this, [this](int row, int) {
+        if (!onDrcViolationActivated_)
+            return;
+        const auto *item = drcTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(kDrcViolationIndexRole).toInt();
+        if (index < 0 || index >= static_cast<int>(drcViolations_.size()))
+            return;
+        onDrcViolationActivated_(drcViolations_[static_cast<std::size_t>(index)]);
+    });
     drcLayout->addWidget(drcTable_, 1);
     drcTabIndex_ = tabs->addTab(drcPage, QStringLiteral("DRC Report"));
 
@@ -449,6 +462,10 @@ void ActivityPanel::setProjectPath(const QString &path) { projectPath_ = path; }
 
 void ActivityPanel::setProjectChangedCallback(std::function<void()> callback) {
     projectChangedCallback_ = std::move(callback);
+}
+
+void ActivityPanel::setOnDrcViolationActivated(std::function<void(const ice::DrcViolation &)> callback) {
+    onDrcViolationActivated_ = std::move(callback);
 }
 
 ActivityPanel::AgentSession *ActivityPanel::activeAgentSession() {
@@ -1952,6 +1969,8 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
         return;
     drcTable_->setSortingEnabled(false);
     drcTable_->setRowCount(0);
+    drcViolations_.clear();
+    drcViolations_.reserve(report.drc.size());
     int errors = 0;
     int warnings = 0;
     int infos = 0;
@@ -1967,6 +1986,8 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
             ++infos;
             break;
         }
+        const auto violationIndex = static_cast<int>(drcViolations_.size());
+        drcViolations_.push_back(violation);
         const int row = drcTable_->rowCount();
         drcTable_->insertRow(row);
         auto *severity = new QTableWidgetItem(drcSeverityLabel(violation.severity));
@@ -1975,6 +1996,7 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
         auto *cell = new QTableWidgetItem(QString::fromStdString(violation.cell));
         auto *location = new QTableWidgetItem(drcLocationLabel(violation.location));
         severity->setData(Qt::UserRole, static_cast<int>(violation.severity));
+        severity->setData(kDrcViolationIndexRole, violationIndex);
         drcTable_->setItem(row, 0, severity);
         drcTable_->setItem(row, 1, rule);
         drcTable_->setItem(row, 2, message);
@@ -2000,6 +2022,7 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
 void ActivityPanel::setDrcRunning(const QString &message) {
     if (!drcSummary_ || !drcTable_)
         return;
+    drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message.isEmpty() ? QStringLiteral("Running gdscheck...") : message);
     showDrcTab();
@@ -2008,6 +2031,7 @@ void ActivityPanel::setDrcRunning(const QString &message) {
 void ActivityPanel::setDrcError(const QString &message) {
     if (!drcSummary_ || !drcTable_)
         return;
+    drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message);
     showDrcTab();

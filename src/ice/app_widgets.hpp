@@ -35,6 +35,7 @@ class QTableWidget;
 class QTabWidget;
 
 namespace ice {
+struct DrcViolation;
 struct LvsReport;
 struct VerificationReport;
 } // namespace ice
@@ -53,6 +54,7 @@ class ActivityPanel : public QWidget {
 
     void setProjectPath(const QString &path);
     void setProjectChangedCallback(std::function<void()> callback);
+    void setOnDrcViolationActivated(std::function<void(const ice::DrcViolation &)> callback);
     void setDrcReport(const ice::VerificationReport &report, const QString &reportPath = {});
     void setDrcRunning(const QString &message = {});
     void setDrcError(const QString &message);
@@ -135,6 +137,8 @@ class ActivityPanel : public QWidget {
     QPlainTextEdit *messages_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
     QPlainTextEdit *lvsReport_ = nullptr;
+    std::vector<ice::DrcViolation> drcViolations_;
+    std::function<void(const ice::DrcViolation &)> onDrcViolationActivated_;
     int drcTabIndex_ = -1;
     int lvsTabIndex_ = -1;
     int agentTabIndex_ = -1;

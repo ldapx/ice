@@ -1328,6 +1328,36 @@ class LayoutCanvasImpl : public LayoutCanvas {
         setInitialView(bounds.adjusted(-20, -20, 20, 20));
     }
 
+    void focusOnLayoutRect(const ice::Rect &rect) override {
+        if (!scene())
+            return;
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() != QStringLiteral("drc-highlight"))
+                continue;
+            scene()->removeItem(item);
+            delete item;
+        }
+
+        const qreal rawWidth = std::max<qreal>(0.0, static_cast<qreal>(rect.width));
+        const qreal rawHeight = std::max<qreal>(0.0, static_cast<qreal>(rect.height));
+        const QRectF rawRect(static_cast<qreal>(rect.x), -static_cast<qreal>(rect.y) - rawHeight, rawWidth, rawHeight);
+        const QPointF center = rawRect.center();
+        const qreal markerWidth = std::max<qreal>(rawWidth, 1000.0);
+        const qreal markerHeight = std::max<qreal>(rawHeight, 1000.0);
+        const QRectF marker(center.x() - markerWidth * 0.5, center.y() - markerHeight * 0.5, markerWidth, markerHeight);
+
+        QPen pen(ice::uiColor(ice::UiColor::Accent6), 2.0, Qt::DashLine);
+        pen.setCosmetic(true);
+        QColor fill = pen.color();
+        fill.setAlpha(35);
+        auto *highlight = scene()->addRect(marker, pen, QBrush(fill));
+        highlight->setData(0, QStringLiteral("drc-highlight"));
+        highlight->setZValue(1000.0);
+
+        const qreal viewSize = std::max<qreal>(5000.0, std::max(markerWidth, markerHeight) * 3.0);
+        setInitialView(QRectF(center.x() - viewSize * 0.5, center.y() - viewSize * 0.5, viewSize, viewSize));
+    }
+
   protected:
     void drawBackground(QPainter *painter, const QRectF &rect) override {
         painter->fillRect(rect, ice::uiColor(ice::UiColor::Background2));

@@ -471,6 +471,8 @@ path tool.
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
 the activity dock with severity, rule, message, cell, and location columns.
+Clicking a violation row opens the checked layout and centers the canvas on
+the reported location with a temporary highlight.
 
 **Tools → Run LVS** compares the active layout against its source schematic.
 ICE infers the schematic from planned-device links, then from matching layout

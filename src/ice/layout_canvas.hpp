@@ -82,6 +82,9 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setLayerStyles(const std::map<ice::ObjectId, LayerStyle> &styles) = 0;
     virtual void setRectangleStyle(const LayerStyle &style) = 0;
     virtual void fitToContent() = 0;
+    // Centers the view on a layout-space rectangle and marks it with a
+    // temporary DRC highlight. Zero-size rectangles mark a single point.
+    virtual void focusOnLayoutRect(const ice::Rect &rect) = 0;
 
     virtual void setPathConfig(const LayoutPathConfig &config) = 0;
     virtual void setPathWidth(int width) = 0;

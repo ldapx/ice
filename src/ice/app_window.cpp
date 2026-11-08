@@ -1379,6 +1379,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
+        drcLayoutId_ = 0;
         selectingReport_ = false;
         loadedCachedRunPath_.clear();
         if (schematicViewStack_ && schematicCanvasPage_)
@@ -2329,6 +2330,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
+        drcLayoutId_ = 0;
         selectingReport_ = false;
         loadedCachedRunPath_.clear();
         lastSchematicPlacementDevice_.reset();
@@ -8632,6 +8634,7 @@ class DocumentWindow : public QMainWindow {
         }
 
         ensureDrcProcess();
+        drcLayoutId_ = cellId;
         drcTempDir_ = std::move(temporary);
         drcReportPath_ = reportPath;
         drcLog_.clear();
@@ -8697,6 +8700,38 @@ class DocumentWindow : public QMainWindow {
         if (activityPanel_)
             activityPanel_->showDrcTab();
         statusBar()->showMessage(QStringLiteral("DRC failed"));
+    }
+
+    void focusDrcViolation(const ice::DrcViolation &violation) {
+        if (!project_)
+            return;
+        const auto &project = project_->project();
+        auto cellId = drcLayoutId_;
+        if (!project.layoutCells.contains(cellId) && !violation.cell.empty()) {
+            const auto cell = std::find_if(project.layoutCells.begin(), project.layoutCells.end(),
+                                           [&](const auto &entry) { return entry.second.name == violation.cell; });
+            if (cell != project.layoutCells.end())
+                cellId = cell->first;
+        }
+        if (!project.layoutCells.contains(cellId))
+            cellId = activeLayoutId_;
+        if (!project.layoutCells.contains(cellId)) {
+            statusBar()->showMessage(QStringLiteral("DRC violation does not match an open layout cell"));
+            return;
+        }
+
+        openLayoutFile(cellId);
+        if (layoutCanvas_) {
+            layoutCanvas_->focusOnLayoutRect(violation.location);
+            layoutCanvas_->setFocus();
+        }
+        if (activityDock_)
+            activityDock_->show();
+
+        const auto rule = QString::fromStdString(violation.rule);
+        const auto message = QString::fromStdString(violation.message);
+        statusBar()->showMessage(message.isEmpty() ? QStringLiteral("DRC: %1").arg(rule)
+                                                   : QStringLiteral("DRC %1: %2").arg(rule, message));
     }
 
     void runLvs() {
@@ -10500,6 +10535,8 @@ class DocumentWindow : public QMainWindow {
         activityDock_->setTitleBarWidget(titleBar);
         activityPanel_ = new ActivityPanel;
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
+        activityPanel_->setOnDrcViolationActivated(
+            [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
         activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }
@@ -12700,6 +12737,7 @@ class DocumentWindow : public QMainWindow {
     std::unique_ptr<QTemporaryDir> drcTempDir_;
     QString drcReportPath_;
     QString drcLog_;
+    ice::ObjectId drcLayoutId_ = 0;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
     QWidget *layoutPage_ = nullptr;
