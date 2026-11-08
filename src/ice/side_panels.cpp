@@ -1279,13 +1279,16 @@ void LayersPanel::setProject(const ice::Project &project, ice::ObjectId layoutId
     // Purpose variants (pin, nofill, noqrc, mask, …) are separate stream
     // layers because they carry different GDS datatypes. Group them under the
     // base layer number so the panel reads like a technology stack.
+    const auto layout = layoutId == 0 ? project.layoutCells.end() : project.layoutCells.find(layoutId);
     std::map<int, std::vector<std::pair<ice::ObjectId, const ice::Layer *>>> groups;
     for (const auto &[id, layer] : project.layers) {
         if (layoutId != 0 && layer.layout != 0 && layer.layout != layoutId)
             continue;
-        if (layoutId != 0 && layer.layout == 0 && !layer.pdk.empty()) {
-            const auto cell = project.layoutCells.find(layoutId);
-            if (cell == project.layoutCells.end() || cell->second.pdk != layer.pdk)
+        if (layoutId != 0 && layer.layout == 0) {
+            if (layout != project.layoutCells.end() && !layer.pdk.empty() && layout->second.pdk != layer.pdk)
+                continue;
+            if (layout != project.layoutCells.end() && !layer.stack.empty() && !layout->second.stack.empty() &&
+                layout->second.stack != layer.stack)
                 continue;
         }
         groups[layer.number].emplace_back(id, &layer);

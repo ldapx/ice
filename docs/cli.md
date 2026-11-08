@@ -110,9 +110,16 @@ schematics that contain HDL instances.
 
 ## Layout
 
+Layouts are bound to one PDK and one stack variant. Pass the stack as the last
+argument when the package declares `[[pdk.stack]]` entries; omitting it selects
+the package's `default_stack`. `layout-list` and `layout-info` include the
+resolved `stack` field, and `layout-info` also reports it for procedural
+layouts. A layout instance whose child uses a different PDK or stack is
+rejected.
+
 ```sh
-ice-cli layout-add-cell <project> <name> [pdk]
-ice-cli layout-add-procedural <project> <name> [pdk] [script-file]
+ice-cli layout-add-cell <project> <name> [pdk] [stack]
+ice-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]
 ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>

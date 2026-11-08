@@ -136,7 +136,11 @@ bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId
         return false;
     if (layer.layout != 0)
         return layer.layout == layoutId;
-    return !layer.pdk.empty() && layer.pdk == cell->second.pdk;
+    if (layer.pdk.empty() || layer.pdk != cell->second.pdk)
+        return false;
+    if (cell->second.stack.empty() || layer.stack.empty())
+        return true;
+    return layer.stack == cell->second.stack;
 }
 
 std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Project &project,
@@ -2636,9 +2640,23 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    bool resolveLayoutPdk(const std::string &pdk, QString *pdkLabel, std::optional<ice::PackagePdk> *selectedPdk,
+    std::string defaultStackForPdk(const std::string &pdk) const {
+        if (pdk == ice::genericPdkId)
+            return {};
+        const auto packages = installedPackages(configuredPackageInstallDirectory());
+        const auto package = std::find_if(packages.begin(), packages.end(),
+                                          [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, pdk); });
+        if (package == packages.end() || !package->spec.pdk)
+            return {};
+        return package->spec.pdk->defaultStack;
+    }
+
+    bool resolveLayoutPdk(const std::string &pdk, const std::string &requestedStack, QString *pdkLabel,
+                          QString *stackLabel, std::string *stack, std::optional<ice::PackagePdk> *selectedPdk,
                           bool *addDependency) {
         *pdkLabel = QStringLiteral("Generic PDK");
+        *stackLabel = QStringLiteral("Default");
+        stack->clear();
         selectedPdk->reset();
         *addDependency = false;
         if (pdk == ice::genericPdkId)
@@ -2660,8 +2678,23 @@ class DocumentWindow : public QMainWindow {
             return false;
         }
         *pdkLabel = packagePdkDisplayName(package->spec);
-        if (package->spec.pdk)
+        if (package->spec.pdk) {
             *selectedPdk = *package->spec.pdk;
+            try {
+                const auto stackId = ice::resolvePdkStack(*package->spec.pdk, requestedStack);
+                if (!stackId.empty()) {
+                    const auto selected =
+                        std::find_if(package->spec.pdk->stacks.begin(), package->spec.pdk->stacks.end(),
+                                     [&](const auto &entry) { return entry.id == stackId; });
+                    *stack = stackId;
+                    *stackLabel =
+                        QString::fromStdString(selected->displayName.empty() ? selected->id : selected->displayName);
+                }
+            } catch (const ice::ProjectError &error) {
+                QMessageBox::critical(this, QStringLiteral("Create Layout Cell"), QString::fromStdString(error.what()));
+                return false;
+            }
+        }
         const auto &dependencies = project_->project().packageDependencies;
         if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
             const auto displayName = packagePdkDisplayName(package->spec);
@@ -2688,29 +2721,33 @@ class DocumentWindow : public QMainWindow {
         CreateLayoutDialog dialog(installDirectory, nextLayoutDefaultName(), this);
         if (dialog.exec() != QDialog::Accepted)
             return;
-        createLayoutCell(dialog.layoutName(), dialog.pdkId());
+        createLayoutCell(dialog.layoutName(), dialog.pdkId(), dialog.stackId());
     }
 
-    void createLayoutCell(const QString &name, const std::string &pdk) {
+    void createLayoutCell(const QString &name, const std::string &pdk, const std::string &requestedStack = {}) {
         if (!project_ || name.trimmed().isEmpty())
             return;
         QString pdkLabel;
+        QString stackLabel;
+        std::string stack;
         std::optional<ice::PackagePdk> selectedPdk;
         bool addDependency = false;
-        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+        if (!resolveLayoutPdk(pdk, requestedStack, &pdkLabel, &stackLabel, &stack, &selectedPdk, &addDependency))
             return;
         try {
             project_->execute("create layout cell", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk, pdk);
-                activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk);
+                    addPdkLayers(project, *selectedPdk, pdk, stack);
+                activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk, stack);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
             activeProceduralLayoutId_ = 0;
             refreshProject();
-            statusBar()->showMessage(QStringLiteral("Layout cell created with %1").arg(pdkLabel));
+            statusBar()->showMessage(
+                QStringLiteral("Layout cell created with %1%2")
+                    .arg(pdkLabel, stack.empty() ? QString{} : QStringLiteral(" / %1").arg(stackLabel)));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Layout Cell"), QString::fromStdString(error.what()));
         }
@@ -2745,16 +2782,18 @@ class DocumentWindow : public QMainWindow {
         dialog.setWindowTitle(QStringLiteral("Create Procedural Layout"));
         if (dialog.exec() != QDialog::Accepted)
             return;
-        createProceduralLayout(dialog.layoutName(), dialog.pdkId());
+        createProceduralLayout(dialog.layoutName(), dialog.pdkId(), dialog.stackId());
     }
 
-    void createProceduralLayout(const QString &name, const std::string &pdk) {
+    void createProceduralLayout(const QString &name, const std::string &pdk, const std::string &requestedStack = {}) {
         if (!project_ || name.trimmed().isEmpty())
             return;
         QString pdkLabel;
+        QString stackLabel;
+        std::string stack;
         std::optional<ice::PackagePdk> selectedPdk;
         bool addDependency = false;
-        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+        if (!resolveLayoutPdk(pdk, requestedStack, &pdkLabel, &stackLabel, &stack, &selectedPdk, &addDependency))
             return;
         ice::ObjectId proceduralId = 0;
         QString generationError;
@@ -2764,9 +2803,9 @@ class DocumentWindow : public QMainWindow {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk, pdk);
+                    addPdkLayers(project, *selectedPdk, pdk, stack);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
-                                                           ice::defaultProceduralLayoutScript());
+                                                           ice::defaultProceduralLayoutScript(), stack);
                 generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
             });
             project_->setLastHistoryLabel("Created procedural layout " + name.trimmed().toStdString());
@@ -2783,7 +2822,9 @@ class DocumentWindow : public QMainWindow {
                                                     "failed:\n%1")
                                          .arg(generationError));
             }
-            statusBar()->showMessage(QStringLiteral("Procedural layout created with %1").arg(pdkLabel));
+            statusBar()->showMessage(
+                QStringLiteral("Procedural layout created with %1%2")
+                    .arg(pdkLabel, stack.empty() ? QString{} : QStringLiteral(" / %1").arg(stackLabel)));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Procedural Layout"),
                                   QString::fromStdString(error.what()));
@@ -3098,9 +3139,11 @@ class DocumentWindow : public QMainWindow {
         if (schematicIt == project_->project().schematicCells.end())
             return;
         const auto schematicName = QString::fromStdString(schematicIt->second.name);
+        const auto schematicPdk = schematicIt->second.pdk;
         try {
             project_->execute("make layout from schematic", [&](ice::Project &project) {
-                activeLayoutId_ = ice::createLayoutFromSchematic(project, schematicId);
+                activeLayoutId_ =
+                    ice::createLayoutFromSchematic(project, schematicId, {}, defaultStackForPdk(schematicPdk));
                 ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
             });
         } catch (const ice::ProjectError &error) {
@@ -3131,6 +3174,8 @@ class DocumentWindow : public QMainWindow {
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
         cell.device = device.name;
+        if (activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_))
+            cell.stack = project.layoutCells.at(activeLayoutId_).stack;
         syncLayoutDeviceParameters(project, cell, device);
         if (values) {
             for (auto &parameter : cell.parameters) {
@@ -5434,16 +5479,7 @@ class DocumentWindow : public QMainWindow {
                 project.packageDependencies.push_back(spec.name);
             if (spec.pdk) {
                 const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
-                for (const auto &layer : spec.pdk->layers) {
-                    const auto exists =
-                        std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
-                            const auto &existing = entry.second;
-                            return existing.name == layer.name && existing.layout == 0 &&
-                                   (existing.pdk.empty() || existing.pdk == technology);
-                        });
-                    if (exists == project.layers.end())
-                        ice::addLayer(project, layer.name, layer.number, 0, technology);
-                }
+                addPdkLayers(project, *spec.pdk, technology);
             }
             if (project.schematicCells.empty()) {
                 const auto schematic =
@@ -10941,13 +10977,13 @@ class DocumentWindow : public QMainWindow {
         layoutEditorLayout->addWidget(layoutViewStack_, 1);
         layoutEmptyPanel_ = new EmptyLayoutPanel;
         layoutEmptyPanel_->setOnCreate(
-            [this](EmptyLayoutPanel::Kind kind, const QString &name, const std::string &pdk) {
+            [this](EmptyLayoutPanel::Kind kind, const QString &name, const std::string &pdk, const std::string &stack) {
                 switch (kind) {
                 case EmptyLayoutPanel::Kind::StaticLayout:
-                    createLayoutCell(name, pdk);
+                    createLayoutCell(name, pdk, stack);
                     break;
                 case EmptyLayoutPanel::Kind::ProceduralLayout:
-                    createProceduralLayout(name, pdk);
+                    createProceduralLayout(name, pdk, stack);
                     break;
                 }
             });

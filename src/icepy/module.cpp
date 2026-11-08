@@ -1,5 +1,7 @@
 #include "icelib/core.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/packages.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
 #include "icelib/verification.hpp"
 
@@ -14,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nb = nanobind;
@@ -73,8 +76,10 @@ class LayoutBuilder {
     std::string layer(const std::string &name, int number = -1, int datatype = 0) {
         if (name.empty())
             throw ProjectError("icepy.layer", "Layer name must not be empty");
+        const auto target = layerScope();
         for (const auto &[_, existing] : project_->layers) {
-            if (existing.name == name && existing.datatype == datatype)
+            if (existing.name == name && existing.datatype == datatype && existing.pdk == target.first &&
+                existing.stack == target.second)
                 return name;
         }
         int layerNumber = number;
@@ -84,7 +89,7 @@ class LayoutBuilder {
                 layerNumber = std::max(layerNumber, existing.number);
             ++layerNumber;
         }
-        ice::addLayer(*project_, name, layerNumber, 0, {}, datatype);
+        ice::addLayer(*project_, name, layerNumber, 0, target.first, datatype, target.second);
         return name;
     }
 
@@ -140,6 +145,11 @@ class LayoutBuilder {
         if (childId == cellId_)
             throw ProjectError("icepy.instance", "A layout cell cannot instance itself");
         auto &cell = project_->layoutCells.at(cellId_);
+        const auto &childCell = project_->layoutCells.at(childId);
+        if (!cell.pdk.empty() && !childCell.pdk.empty() && cell.pdk != childCell.pdk)
+            throw ProjectError("icepy.instance", "Parent and child layouts must use the same PDK");
+        if (cell.stack != childCell.stack)
+            throw ProjectError("icepy.instance", "Parent and child layouts must use the same PDK stack");
         const auto id = project_->nextId();
         std::string name = instanceName;
         if (name.empty())
@@ -173,10 +183,20 @@ class LayoutBuilder {
     }
 
   private:
+    std::pair<std::string, std::string> layerScope() const {
+        const auto &cell = project_->layoutCells.at(cellId_);
+        return {cell.pdk == genericPdkId ? std::string{} : cell.pdk, cell.stack};
+    }
+
     ObjectId layerId(const std::string &name) {
+        const auto target = layerScope();
+        for (const auto &[id, layer] : project_->layers) {
+            if (layer.name == name && layer.pdk == target.first && layer.stack == target.second)
+                return id;
+        }
         layer(name);
         for (const auto &[id, layer] : project_->layers) {
-            if (layer.name == name)
+            if (layer.name == name && layer.pdk == target.first && layer.stack == target.second)
                 return id;
         }
         throw ProjectError("icepy.layer", "Layer does not exist: " + name);
@@ -199,6 +219,18 @@ std::optional<LayoutCell> findLayoutCell(const Project &project, ObjectId id) {
     if (it == project.layoutCells.end())
         return std::nullopt;
     return it->second;
+}
+
+std::string resolveLayoutStack(const std::string &pdk, const std::string &requested) {
+    if (pdk.empty() || pdk == genericPdkId)
+        return requested;
+    const auto pdks = findPdks(pdk);
+    if (pdks.empty())
+        return requested;
+    const auto package = PackageManager::readManifest(pdks.front().packageRoot);
+    if (!package.pdk)
+        return requested;
+    return resolvePdkStack(*package.pdk, requested);
 }
 
 } // namespace
@@ -251,6 +283,7 @@ NB_MODULE(icepy, module) {
         .def_rw("name", &Layer::name)
         .def_rw("number", &Layer::number)
         .def_rw("datatype", &Layer::datatype)
+        .def_rw("stack", &Layer::stack)
         .def_rw("color", &Layer::color)
         .def_rw("pattern", &Layer::pattern)
         .def_rw("visible", &Layer::visible);
@@ -327,6 +360,9 @@ NB_MODULE(icepy, module) {
         .def_prop_rw(
             "pdk", [](const LayoutCell &cell) { return cell.pdk; },
             [](LayoutCell &cell, const std::string &pdk) { cell.pdk = pdk; })
+        .def_prop_rw(
+            "stack", [](const LayoutCell &cell) { return cell.stack; },
+            [](LayoutCell &cell, const std::string &stack) { cell.stack = stack; })
         .def_prop_rw(
             "library", [](const LayoutCell &cell) { return cell.library; },
             [](LayoutCell &cell, bool library) { cell.library = library; })
@@ -423,23 +459,24 @@ NB_MODULE(icepy, module) {
         .def("layout_cell",
              [](const Project &project, const std::string &name) { return findLayoutCell(project, name); })
         .def("layout_cell_by_id", [](const Project &project, ObjectId id) { return findLayoutCell(project, id); })
-        .def("add_layer",
-             [](Project &project, const std::string &name, int number, int datatype) {
-                 ice::addLayer(project, name, number, 0, {}, datatype);
-                 for (const auto &[_, layer] : project.layers) {
-                     if (layer.name == name && layer.datatype == datatype)
-                         return layer;
-                 }
-                 throw ProjectError("icepy.layer", "Layer creation failed");
-             },
-             nb::arg("name"), nb::arg("number"), nb::arg("datatype") = 0)
+        .def(
+            "add_layer",
+            [](Project &project, const std::string &name, int number, int datatype) {
+                ice::addLayer(project, name, number, 0, {}, datatype);
+                for (const auto &[_, layer] : project.layers) {
+                    if (layer.name == name && layer.datatype == datatype)
+                        return layer;
+                }
+                throw ProjectError("icepy.layer", "Layer creation failed");
+            },
+            nb::arg("name"), nb::arg("number"), nb::arg("datatype") = 0)
         .def(
             "create_layout_cell",
-            [](Project &project, const std::string &name, const std::string &pdk) {
-                const auto id = ice::createLayoutCell(project, name, pdk);
+            [](Project &project, const std::string &name, const std::string &pdk, const std::string &stack) {
+                const auto id = ice::createLayoutCell(project, name, pdk, resolveLayoutStack(pdk, stack));
                 return LayoutBuilder(project, id);
             },
-            nb::arg("name"), nb::arg("pdk") = genericPdkId, nb::keep_alive<0, 1>())
+            nb::arg("name"), nb::arg("pdk") = genericPdkId, nb::arg("stack") = "", nb::keep_alive<0, 1>())
         .def(
             "edit_layout_cell",
             [](Project &project, ObjectId id) {

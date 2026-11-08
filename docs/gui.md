@@ -230,14 +230,22 @@ The layout editor should initially provide:
 - undo/redo.
 
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
-column contains **Properties** and **Layers**. Creating a layout with a packaged
-PDK adds that package's complete device-library layer set up front; placing
-devices reuses those layers instead of adding new ones. The **Layers** panel
+column contains **Properties** and **Layers**. The layout creation dialog asks
+for the layout PDK and, when that package declares stack variants, the stack
+(for example GF180MCU `3LM_1TM` through `6LM_1TM`). The package's default stack
+is preselected. The selected PDK and stack are stored on the layout cell and
+shown in its properties; a layout instance must use the same PDK and stack as
+its parent. Creating a layout with a packaged PDK adds that package's complete
+device-library layer set for the selected stack up front; placing devices
+reuses those layers instead of adding new ones. The **Layers** panel
 groups GDS purpose variants under their base layer number: for example
 `Metal1.pin` and `Metal1.nofill` appear under `Metal1`. Pin, mask,
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
-checkbox. Creating a custom layer opens a form with the layer name, assigned
+checkbox. PDK packages may supply default layer colors, patterns, and
+visibility in `layout/layer-styles.json`; these styles are applied when the
+package's layers are added, and layers without an entry keep the built-in
+number-based palette. Creating a custom layer opens a form with the layer name, assigned
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
 next to the search field can show only drawing layers or only pin layers. Its
 single eye button shows all layers when any layer is hidden and switches to

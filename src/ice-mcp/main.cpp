@@ -690,6 +690,20 @@ ice::ObjectId resolveLayoutCell(const ice::Project &project, const json &argumen
     return lookupByIdOrName(project.layoutCells, requiredValue(arguments, key), "layout cell");
 }
 
+// Fills in the package default when a layout tool omits the stack. Invalid
+// stack requests fail before the project is modified.
+std::string resolveLayoutStack(const std::string &pdk, const std::string &requested) {
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return requested;
+    const auto pdks = ice::findPdks(pdk);
+    if (pdks.empty())
+        return requested;
+    const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+    if (!package.pdk)
+        return requested;
+    return ice::resolvePdkStack(*package.pdk, requested);
+}
+
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
     if (value.is_number_integer() || value.is_number_unsigned()) {
         const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
@@ -1029,6 +1043,7 @@ class IceMcpServer {
             result["layouts"].push_back({{"id", id},
                                          {"name", cell.name},
                                          {"pdk", cell.pdk},
+                                         {"stack", cell.stack},
                                          {"library", cell.library},
                                          {"device", cell.device},
                                          {"generated_by", cell.generatedBy},
@@ -1041,6 +1056,7 @@ class IceMcpServer {
             result["procedural_layouts"].push_back({{"id", id},
                                                     {"name", cell.name},
                                                     {"pdk", cell.pdk},
+                                                    {"stack", cell.stack},
                                                     {"generated_cell", cell.generatedCell},
                                                     {"script_length", cell.script.size()}});
         }
@@ -2670,19 +2686,22 @@ class IceMcpServer {
         if (name == "layout_create") {
             ice::ObjectId id = 0;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
+            const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
             const auto cellName = requiredString(arguments, "name");
             session.execute("mcp layout-create",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, cellName, pdk); });
-            return {{"id", id}, {"name", cellName}, {"pdk", pdk}};
+                            [&](ice::Project &project) { id = ice::createLayoutCell(project, cellName, pdk, stack); });
+            return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"stack", stack}};
         }
         if (name == "layout_create_from_schematic") {
             ice::ObjectId id = 0;
             const auto schematic = resolveSchematic(session.project(), arguments, "schematic");
+            const auto stack = resolveLayoutStack(session.project().schematicCells.at(schematic).pdk,
+                                                  optionalString(arguments, "stack"));
             const auto layoutName = optionalString(arguments, "name");
             session.execute("mcp layout-create-from-schematic", [&](ice::Project &project) {
-                id = ice::createLayoutFromSchematic(project, schematic, layoutName);
+                id = ice::createLayoutFromSchematic(project, schematic, layoutName, stack);
             });
-            return {{"id", id}, {"schematic", schematic}};
+            return {{"id", id}, {"schematic", schematic}, {"stack", stack}};
         }
         if (name == "layout_add_layer") {
             ice::ObjectId id = 0;
@@ -2892,6 +2911,7 @@ class IceMcpServer {
             return {{"id", cellId},
                     {"name", cell.name},
                     {"pdk", cell.pdk},
+                    {"stack", cell.stack},
                     {"device", cell.device},
                     {"library", cell.library},
                     {"shapes", cell.shapes.size()},
@@ -3302,11 +3322,13 @@ class IceMcpServer {
                             .with_description("Create a static layout cell.")
                             .with_string_param("name", "Layout name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("stack", "Optional PDK stack identifier", false)
                             .build());
         tools.push_back(tool_builder("layout_create_from_schematic")
                             .with_description("Create a layout from a schematic.")
                             .with_string_param("schematic", "Schematic name or id")
                             .with_string_param("name", "Optional layout name", false)
+                            .with_string_param("stack", "Optional PDK stack identifier", false)
                             .build());
         tools.push_back(tool_builder("layout_delete")
                             .with_description("Delete a static or procedural layout; blocked when instances use it.")

@@ -159,6 +159,9 @@ struct Layer {
     // number. Explicit values let users style custom layers.
     std::string color;
     int pattern = -1;
+    // Empty for shared/pdk-wide layers; otherwise only the named PDK stack
+    // exposes this layer to its layout cells.
+    std::string stack;
 };
 
 struct Rect {
@@ -295,6 +298,9 @@ struct LayoutCell {
     ObjectId id = 0;
     std::string name;
     std::string pdk = genericPdkId;
+    // Selected PDK stack variant. Empty means the package default or a
+    // stack-less PDK.
+    std::string stack;
     // True for cells imported from a read-only device library.
     bool library = false;
     // Source device name in the bundled layout library. Empty for ordinary
@@ -322,6 +328,7 @@ struct ProceduralLayout {
     ObjectId id = 0;
     std::string name;
     std::string pdk = genericPdkId;
+    std::string stack;
     std::string script;
     ObjectId generatedCell = 0;
 };

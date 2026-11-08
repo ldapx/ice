@@ -283,7 +283,8 @@ class EmptySchematicPanel : public QWidget {
 class EmptyLayoutPanel : public QWidget {
   public:
     enum class Kind { StaticLayout, ProceduralLayout };
-    using CreateCallback = std::function<void(Kind kind, const QString &name, const std::string &pdk)>;
+    using CreateCallback =
+        std::function<void(Kind kind, const QString &name, const std::string &pdk, const std::string &stack)>;
     using OpenCallback = std::function<void(ice::ObjectId)>;
     explicit EmptyLayoutPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
@@ -299,6 +300,7 @@ class EmptyLayoutPanel : public QWidget {
     void submit();
     void selectKind(Kind kind);
     void updateKindUi();
+    void refreshStacks();
 
     QLabel *description_ = nullptr;
     QWidget *openSection_ = nullptr;
@@ -306,8 +308,11 @@ class EmptyLayoutPanel : public QWidget {
     QLabel *kindDescription_ = nullptr;
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
+    QLabel *stackLabel_ = nullptr;
+    QComboBox *stack_ = nullptr;
     QPushButton *createButton_ = nullptr;
     QButtonGroup *kindGroup_ = nullptr;
+    std::filesystem::path installDirectory_;
     Kind kind_ = Kind::StaticLayout;
     bool nameEdited_ = false;
     CreateCallback onCreate_;
@@ -320,11 +325,17 @@ class CreateLayoutDialog : public QDialog {
                                 QWidget *parent = nullptr);
     QString layoutName() const;
     std::string pdkId() const;
+    std::string stackId() const;
 
   private:
+    void updateStacks();
+
     QLineEdit *name_ = nullptr;
     QComboBox *pdk_ = nullptr;
     QLabel *pdkDescription_ = nullptr;
+    QLabel *stackLabel_ = nullptr;
+    QComboBox *stack_ = nullptr;
+    std::filesystem::path installDirectory_;
 };
 
 class CreateLayerDialog : public QDialog {

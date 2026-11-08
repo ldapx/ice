@@ -426,16 +426,20 @@ std::string Project::serialize() const {
         j["schematic_cells"].push_back(c);
     }
     j["layers"] = json::array();
-    for (const auto &[id, layer] : layers)
-        j["layers"].push_back({{"id", id},
-                               {"name", layer.name},
-                               {"number", layer.number},
-                               {"datatype", layer.datatype},
-                               {"color", layer.color},
-                               {"pattern", layer.pattern},
-                               {"visible", layer.visible},
-                               {"layout", layer.layout},
-                               {"pdk", layer.pdk}});
+    for (const auto &[id, layer] : layers) {
+        json entry = {{"id", id},
+                      {"name", layer.name},
+                      {"number", layer.number},
+                      {"datatype", layer.datatype},
+                      {"color", layer.color},
+                      {"pattern", layer.pattern},
+                      {"visible", layer.visible},
+                      {"layout", layer.layout},
+                      {"pdk", layer.pdk}};
+        if (!layer.stack.empty())
+            entry["stack"] = layer.stack;
+        j["layers"].push_back(std::move(entry));
+    }
     j["layout_cells"] = json::array();
     for (const auto &[id, cell] : layoutCells) {
         json c = {{"id", id},
@@ -446,6 +450,8 @@ std::string Project::serialize() const {
                   {"instances", json::array()},
                   {"planned_devices", json::array()},
                   {"planned_connections", json::array()}};
+        if (!cell.stack.empty())
+            c["stack"] = cell.stack;
         if (cell.library)
             c["library"] = true;
         if (!cell.device.empty())
@@ -562,11 +568,14 @@ std::string Project::serialize() const {
     }
     j["procedural_layouts"] = json::array();
     for (const auto &[id, layout] : proceduralLayouts) {
-        j["procedural_layouts"].push_back({{"id", id},
-                                           {"name", layout.name},
-                                           {"pdk", layout.pdk},
-                                           {"script", layout.script},
-                                           {"generated_cell", layout.generatedCell}});
+        json entry = {{"id", id},
+                      {"name", layout.name},
+                      {"pdk", layout.pdk},
+                      {"script", layout.script},
+                      {"generated_cell", layout.generatedCell}};
+        if (!layout.stack.empty())
+            entry["stack"] = layout.stack;
+        j["procedural_layouts"].push_back(std::move(entry));
     }
     j["simulations"] = json::array();
     for (const auto &[id, sim] : simulations) {
@@ -779,16 +788,24 @@ Project Project::deserialize(const std::string &text) {
         }
         for (const auto &l : j.at("layers")) {
             const auto name = l.at("name").get<std::string>();
-            p.layers.emplace(l.at("id"), Layer{l.at("id"), name, l.at("number"), l.value("visible", true),
-                                               l.value("layout", ObjectId{0}), l.value("pdk", std::string{}),
-                                               l.at("datatype").get<int>(), l.value("color", std::string{}),
-                                               l.value("pattern", -1)});
+            Layer layer{l.at("id"),
+                        name,
+                        l.at("number"),
+                        l.value("visible", true),
+                        l.value("layout", ObjectId{0}),
+                        l.value("pdk", std::string{}),
+                        l.at("datatype").get<int>(),
+                        l.value("color", std::string{}),
+                        l.value("pattern", -1)};
+            layer.stack = l.value("stack", std::string{});
+            p.layers.emplace(layer.id, std::move(layer));
         }
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
             cell.pdk = c.value("pdk", std::string{genericPdkId});
             if (cell.pdk.empty())
                 cell.pdk = genericPdkId;
+            cell.stack = c.value("stack", std::string{});
             cell.library = c.value("library", false);
             cell.device = c.value("device", std::string{});
             cell.generatedBy = c.value("generated_by", ObjectId{0});
@@ -899,6 +916,7 @@ Project Project::deserialize(const std::string &text) {
                 entry.pdk = layout.value("pdk", std::string{genericPdkId});
                 if (entry.pdk.empty())
                     entry.pdk = genericPdkId;
+                entry.stack = layout.value("stack", std::string{});
                 entry.script = layout.value("script", std::string{});
                 entry.generatedCell = layout.value("generated_cell", ObjectId{0});
                 const auto layoutId = entry.id;

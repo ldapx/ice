@@ -143,6 +143,21 @@ ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &
     argumentError("Unknown layout or procedural layout: " + text);
 }
 
+// Fills in the package default when a layout command omits the stack. A
+// request that names an undeclared stack is rejected before the project is
+// modified.
+std::string resolveLayoutStack(const std::string &pdk, const std::string &requested) {
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return requested;
+    const auto pdks = ice::findPdks(pdk);
+    if (pdks.empty())
+        return requested;
+    const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+    if (!package.pdk)
+        return requested;
+    return ice::resolvePdkStack(*package.pdk, requested);
+}
+
 ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
     return resolveByIdOrName(project.layers, text, "layer");
 }
@@ -608,6 +623,7 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
     json result = {{"id", cell.id},
                    {"name", cell.name},
                    {"pdk", cell.pdk},
+                   {"stack", cell.stack},
                    {"library", cell.library},
                    {"device", cell.device},
                    {"generated_by", cell.generatedBy},
@@ -892,8 +908,8 @@ void printHelp() {
               << "  schematic-validate-hierarchy <project> <cell>\n"
               << "  schematic-netlist <project> <cell>\n\n"
               << "Layout:\n"
-              << "  layout-add-cell <project> <name> [pdk]\n"
-              << "  layout-add-procedural <project> <name> [pdk] [script-file]\n"
+              << "  layout-add-cell <project> <name> [pdk] [stack]\n"
+              << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
@@ -1843,30 +1859,32 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-add-cell") {
-            expectArguments(args, 3, 4, "layout-add-cell <project> <name> [pdk]");
+            expectArguments(args, 3, 5, "layout-add-cell <project> <name> [pdk] [stack]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             ice::ObjectId id = 0;
-            const auto pdk = args.size() == 4 ? args[3] : std::string(ice::genericPdkId);
+            const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
+            const auto stack = resolveLayoutStack(pdk, args.size() == 5 ? args[4] : std::string{});
             session.execute("layout-add-cell",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, args[2], pdk); });
+                            [&](ice::Project &project) { id = ice::createLayoutCell(project, args[2], pdk, stack); });
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}});
             return 0;
         }
 
         if (command == "layout-add-procedural") {
-            expectArguments(args, 3, 5, "layout-add-procedural <project> <name> [pdk] [script-file]");
+            expectArguments(args, 3, 6, "layout-add-procedural <project> <name> [pdk] [script-file] [stack]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
-            const auto script = args.size() == 5 ? readTextFile(args[4]) : std::string{};
+            const auto script = args.size() >= 5 ? readTextFile(args[4]) : std::string{};
+            const auto stack = resolveLayoutStack(pdk, args.size() == 6 ? args[5] : std::string{});
             ice::ObjectId id = 0;
             ice::ObjectId generated = 0;
             session.execute("layout-add-procedural", [&](ice::Project &project) {
-                id = ice::createProceduralLayout(project, args[2], pdk, script);
+                id = ice::createProceduralLayout(project, args[2], pdk, script, stack);
                 generated = project.proceduralLayouts.at(id).generatedCell;
             });
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"generated_cell", generated}});
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}, {"generated_cell", generated}});
             return 0;
         }
 
@@ -1875,12 +1893,13 @@ int main(int argc, char **argv) {
             const auto project = ice::Project::load(args[1]);
             const auto schematic = resolveSchematic(project, args[2]);
             const auto name = args.size() == 4 ? args[3] : std::string{};
+            const auto stack = resolveLayoutStack(project.schematicCells.at(schematic).pdk, {});
             ice::ProjectSession session(project);
             ice::ObjectId id = 0;
             session.execute("layout-create-from-schematic",
-                            [&](ice::Project &p) { id = ice::createLayoutFromSchematic(p, schematic, name); });
+                            [&](ice::Project &p) { id = ice::createLayoutFromSchematic(p, schematic, name, stack); });
             session.save(args[1]);
-            printJson({{"id", id}, {"schematic", schematic}});
+            printJson({{"id", id}, {"schematic", schematic}, {"stack", stack}});
             return 0;
         }
 
@@ -1892,6 +1911,7 @@ int main(int argc, char **argv) {
                 result.push_back({{"id", id},
                                   {"name", cell.name},
                                   {"pdk", cell.pdk},
+                                  {"stack", cell.stack},
                                   {"procedural", false},
                                   {"library", cell.library},
                                   {"device", cell.device},
@@ -1904,6 +1924,7 @@ int main(int argc, char **argv) {
                 result.push_back({{"id", id},
                                   {"name", procedural.name},
                                   {"pdk", procedural.pdk},
+                                  {"stack", procedural.stack},
                                   {"procedural", true},
                                   {"generated_cell", procedural.generatedCell},
                                   {"script_length", procedural.script.size()}});
@@ -1921,6 +1942,7 @@ int main(int argc, char **argv) {
                 printJson({{"id", id},
                            {"name", procedural->second.name},
                            {"pdk", procedural->second.pdk},
+                           {"stack", procedural->second.stack},
                            {"procedural", true},
                            {"generated_cell", procedural->second.generatedCell},
                            {"script", procedural->second.script}});
@@ -2172,11 +2194,11 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-add-instance") {
-            expectArguments(args, 8, 9, "layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]");
+            expectArguments(args, 7, 8, "layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]");
             const auto project = ice::Project::load(args[1]);
             const auto parent = resolveLayout(project, args[2]);
             const auto child = resolveLayout(project, args[3]);
-            const auto orientation = args.size() == 9 ? parseOrientation(args[8]) : ice::Orientation::r0;
+            const auto orientation = args.size() == 8 ? parseOrientation(args[7]) : ice::Orientation::r0;
             const auto x = parseInteger(args[5], "x");
             const auto y = parseInteger(args[6], "y");
             ice::ProjectSession session(project);

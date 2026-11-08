@@ -43,21 +43,91 @@ namespace {
 // activation can apply the same purpose/marker visibility rules.
 bool layerHiddenByDefault(const std::string &name, int datatype);
 
-void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk) {
+const ice::PackagePdkStack *findPdkStack(const ice::PackagePdk &pdk, const std::string &id) {
+    for (const auto &stack : pdk.stacks)
+        if (stack.id == id)
+            return &stack;
+    return nullptr;
+}
+
+std::string effectivePdkStack(const ice::PackagePdk &pdk, const std::string &requested) {
+    const auto id = !requested.empty() ? requested : pdk.defaultStack;
+    if (id.empty())
+        return {};
+    if (!findPdkStack(pdk, id))
+        throw ice::ProjectError("layout.stack", "Unknown stack '" + id + "' for PDK '" + pdk.id + "'");
+    return id;
+}
+
+bool stackAllowsLayer(const ice::PackagePdkStack *stack, const std::string &name) {
+    if (!stack || stack->layers.empty())
+        return true;
+    if (std::find(stack->layers.begin(), stack->layers.end(), name) != stack->layers.end())
+        return true;
+    const auto dot = name.find('.');
+    const auto base = name.substr(0, dot);
+    return std::find(stack->layers.begin(), stack->layers.end(), base) != stack->layers.end();
+}
+
+std::optional<int> layerPatternIndex(const std::string &name) {
+    if (name.empty())
+        return std::nullopt;
+    const auto &options = layerPatternOptions();
+    for (std::size_t index = 0; index < options.size(); ++index)
+        if (options[index].name.compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0)
+            return static_cast<int>(index);
+    return std::nullopt;
+}
+
+const ice::PackageLayerStyle *findLayerStyle(const ice::PackagePdk &pdk, const std::string &name) {
+    const auto exact = std::find_if(pdk.layerStyles.begin(), pdk.layerStyles.end(),
+                                    [&](const auto &style) { return style.name == name; });
+    if (exact != pdk.layerStyles.end())
+        return &*exact;
+    const auto dot = name.find('.');
+    if (dot == std::string::npos)
+        return nullptr;
+    const auto base = name.substr(0, dot);
+    const auto inherited = std::find_if(pdk.layerStyles.begin(), pdk.layerStyles.end(),
+                                        [&](const auto &style) { return style.name == base; });
+    return inherited == pdk.layerStyles.end() ? nullptr : &*inherited;
+}
+
+void applyPdkLayerStyles(ice::Project &project, const ice::PackagePdk &pdk, const std::string &technology,
+                         const std::string &stack) {
+    for (auto &[_, layer] : project.layers) {
+        if (layer.layout != 0 || layer.pdk != technology || layer.stack != stack)
+            continue;
+        const auto *style = findLayerStyle(pdk, layer.name);
+        if (!style)
+            continue;
+        if (!style->color.empty())
+            layer.color = style->color;
+        if (const auto pattern = layerPatternIndex(style->pattern))
+            layer.pattern = *pattern;
+        if (style->visible >= 0)
+            layer.visible = style->visible != 0;
+    }
+}
+
+void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk, const std::string &stack,
+                                  const ice::PackagePdkStack *stackInfo) {
     const auto path = layoutDeviceLibraryPath(pdk);
     if (path.empty())
         return;
     try {
         const auto library = ice::LayoutDeviceLibrary::load(path);
         for (const auto &layer : library.layers) {
+            if (!stackAllowsLayer(stackInfo, layer.name))
+                continue;
             const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
                 const auto &existing = entry.second;
                 return existing.number == layer.number && existing.datatype == layer.datatype &&
-                       existing.name == layer.name && existing.layout == 0 &&
+                       existing.name == layer.name && existing.stack == stack && existing.layout == 0 &&
                        (existing.pdk.empty() || existing.pdk == pdk);
             });
             if (exists == project.layers.end()) {
-                const auto id = ice::addLayer(project, layer.name, layer.number, 0, pdk, layer.datatype);
+                const auto id = ice::addLayer(project, layer.name, layer.number, 0, pdk, layer.datatype, stack);
                 if (layerHiddenByDefault(layer.name, layer.datatype))
                     project.layers.at(id).visible = false;
             } else if (exists->second.pdk.empty()) {
@@ -71,41 +141,52 @@ void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk)
 }
 } // namespace
 
-void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
+void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk,
+                  const std::string &stack) {
     const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
+    const auto stackId = effectivePdkStack(pdk, stack);
+    const auto *stackInfo = findPdkStack(pdk, stackId);
     for (const auto &layer : pdk.layers) {
+        if (!stackAllowsLayer(stackInfo, layer.name))
+            continue;
         const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
             const auto &existing = entry.second;
-            return existing.name == layer.name && existing.layout == 0 &&
+            return existing.name == layer.name && existing.number == layer.number &&
+                   existing.datatype == layer.datatype && existing.stack == stackId && existing.layout == 0 &&
                    (existing.pdk.empty() || existing.pdk == technology);
         });
-        if (exists == project.layers.end())
-            ice::addLayer(project, layer.name, layer.number, 0, technology);
+        if (exists != project.layers.end())
+            continue;
+        const auto id = ice::addLayer(project, layer.name, layer.number, 0, technology, layer.datatype, stackId);
+        if (layerHiddenByDefault(layer.name, layer.datatype))
+            project.layers.at(id).visible = false;
     }
     // The device library is the complete layer map for the technology. Adding
     // it here means creating a PDK layout exposes every layer up front and
     // placing devices only reuses existing entries.
-    addLayoutDeviceLibraryLayers(project, technology);
+    addLayoutDeviceLibraryLayers(project, technology, stackId, stackInfo);
+    applyPdkLayerStyles(project, pdk, technology, stackId);
 }
 
 void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &installDirectory) {
-    std::vector<std::string> pdkNames;
+    std::vector<std::pair<std::string, std::string>> technologies;
     for (const auto &[_, cell] : project.layoutCells) {
         if (cell.pdk.empty() || cell.pdk == ice::genericPdkId)
             continue;
-        if (std::find(pdkNames.begin(), pdkNames.end(), cell.pdk) == pdkNames.end())
-            pdkNames.push_back(cell.pdk);
+        const auto key = std::make_pair(cell.pdk, cell.stack);
+        if (std::find(technologies.begin(), technologies.end(), key) == technologies.end())
+            technologies.push_back(key);
     }
-    if (pdkNames.empty())
+    if (technologies.empty())
         return;
     const auto packages = installedPackages(installDirectory);
-    for (const auto &pdkName : pdkNames) {
+    for (const auto &[pdkName, stack] : technologies) {
         const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
             return ice::packageMatchesPdk(entry.spec, pdkName);
         });
         if (package == packages.end() || !package->spec.pdk)
             continue;
-        addPdkLayers(project, *package->spec.pdk, pdkName);
+        addPdkLayers(project, *package->spec.pdk, pdkName, stack);
     }
 }
 
@@ -334,9 +415,9 @@ QString pythonExecutable() {
 namespace {
 bool layerHiddenByDefault(const std::string &name, int datatype) {
     // Non-zero datatypes are purposes such as pin, nofill, noqrc, or mask.
-    // They are part of the device geometry but should not clutter the canvas
-    // unless the user explicitly enables them.
-    if (datatype != 0)
+    // Drawing purposes remain visible even when their PDK uses a non-zero
+    // datatype, as SKY130 does.
+    if (datatype != 0 && !name.ends_with(".drawing"))
         return true;
     const auto dot = name.find('.');
     const auto base = name.substr(0, dot);
@@ -347,7 +428,8 @@ bool layerHiddenByDefault(const std::string &name, int datatype) {
 }
 
 ice::ObjectId layoutDeviceLayerId(ice::Project &project, std::map<std::pair<int, int>, std::string> &layerNames,
-                                  std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype) {
+                                  std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype,
+                                  const std::string &pdk, const std::string &stack) {
     const auto key = std::make_pair(number, datatype);
     if (const auto existing = layerIds.find(key); existing != layerIds.end())
         return existing->second;
@@ -361,13 +443,20 @@ ice::ObjectId layoutDeviceLayerId(ice::Project &project, std::map<std::pair<int,
         layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
     ice::ObjectId layerId = 0;
     for (const auto &[id, layer] : project.layers) {
-        if (layer.number == number && layer.datatype == datatype && layer.name == layerName) {
+        if (layer.number == number && layer.datatype == datatype && layer.name == layerName && layer.pdk == pdk &&
+            layer.stack == stack) {
             layerId = id;
             break;
         }
     }
     if (layerId == 0) {
-        layerId = ice::addLayer(project, layerName, number, 0, {}, datatype);
+        // A stack-scoped package must declare the layer first. Silently
+        // creating an undeclared purpose would bypass the stack filter.
+        if (!pdk.empty() && !stack.empty()) {
+            layerIds.emplace(key, 0);
+            return 0;
+        }
+        layerId = ice::addLayer(project, layerName, number, 0, pdk, datatype, stack);
         if (layerHiddenByDefault(layerName, datatype)) {
             if (const auto layer = project.layers.find(layerId); layer != project.layers.end())
                 layer->second.visible = false;
@@ -392,12 +481,14 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     const auto layerIdFor = [&](int number, int datatype) {
-        return layoutDeviceLayerId(project, layerNames, layerIds, number, datatype);
+        return layoutDeviceLayerId(project, layerNames, layerIds, number, datatype, cell.pdk, cell.stack);
     };
     for (const auto &sourceShape : sourceShapes) {
         if (sourceShape.polygon.size() < 3)
             continue;
         const auto layerId = layerIdFor(sourceShape.layer, sourceShape.datatype);
+        if (layerId == 0)
+            continue;
         ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
@@ -417,9 +508,12 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
                                                 ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
     }
     for (const auto &sourcePort : sourcePorts) {
+        const auto layerId = layerIdFor(sourcePort.layer, sourcePort.datatype);
+        if (layerId == 0)
+            continue;
         const auto existing = existingPorts.find(sourcePort.name);
         const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
-        ice::Port port{id, sourcePort.name, layerIdFor(sourcePort.layer, sourcePort.datatype), sourcePort.rectangle};
+        ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
@@ -448,11 +542,13 @@ void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const 
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     for (const auto &sourcePort : sourcePorts) {
+        const auto layerId = layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype,
+                                                 cell.pdk, cell.stack);
+        if (layerId == 0)
+            continue;
         const auto existing = existingPorts.find(sourcePort.name);
         const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
-        ice::Port port{id, sourcePort.name,
-                       layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype),
-                       sourcePort.rectangle};
+        ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;

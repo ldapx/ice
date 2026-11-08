@@ -111,7 +111,8 @@ QString icepyPythonPath();
 
 std::map<std::string, std::string> parameterValues(const std::vector<ice::LayoutDeviceParameter> &parameters);
 
-void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk = {});
+void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk = {},
+                  const std::string &stack = {});
 void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &installDirectory);
 
 void syncLayoutDeviceParameters(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceCell &device);

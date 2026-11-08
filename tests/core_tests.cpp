@@ -64,6 +64,27 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     CHECK_THROWS_AS(ice::Project::deserialize(missingDatatype), ice::ProjectError);
 }
 
+TEST_CASE("layout cells preserve PDK stack selections") {
+    ice::Project project;
+    project.identity = "layout-stack";
+    project.name = "layout-stack";
+    const auto layer = ice::addLayer(project, "Metal1", 34, 0, "gf180mcuA", 0, "3LM_1TM");
+    const auto cell = ice::createLayoutCell(project, "top", "gf180mcuA", "3LM_1TM");
+    const auto procedural = ice::createProceduralLayout(project, "scripted", "gf180mcuA", "layout = None\n", "6LM_1TM");
+    const auto child = ice::createLayoutCell(project, "child", "gf180mcuA", "6LM_1TM");
+    CHECK_THROWS_AS(ice::addLayoutInstance(project, cell, child, "I1", 0, 0), ice::ProjectError);
+    CHECK(project.layoutCells.at(cell).stack == "3LM_1TM");
+    CHECK(project.layoutCells.at(project.proceduralLayouts.at(procedural).generatedCell).stack == "6LM_1TM");
+    CHECK(project.layers.at(layer).stack == "3LM_1TM");
+
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.layoutCells.at(cell).stack == "3LM_1TM");
+    CHECK(roundTrip.layoutCells.at(project.proceduralLayouts.at(procedural).generatedCell).stack == "6LM_1TM");
+    CHECK(roundTrip.proceduralLayouts.at(procedural).stack == "6LM_1TM");
+    CHECK(roundTrip.layers.at(layer).stack == "3LM_1TM");
+    CHECK(roundTrip.serialize() == project.serialize());
+}
+
 TEST_CASE("text polygon shape groups survive serialization") {
     ice::Project project;
     project.identity = "text-polygon";
@@ -1012,12 +1033,16 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     auto repositoryRoot = std::filesystem::temp_directory_path() / "ice-package-test";
     std::filesystem::remove_all(repositoryRoot);
     std::filesystem::create_directories(repositoryRoot / "example-lib");
-    std::filesystem::create_directories(repositoryRoot / "example-pdk");
+    std::filesystem::create_directories(repositoryRoot / "example-pdk" / "layout");
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
         << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n"
            "\n[pdk]\ndisplay_name = \"Example PDK\"\ndefault_schematic = \"example_top\"\n"
-           "\n[[pdk.layer]]\nname = \"diff\"\nnumber = 65\n"
-           "\n[[pdk.layer]]\nname = \"metal1\"\nnumber = 68\n";
+           "default_stack = \"base\"\n\n[[pdk.stack]]\nid = \"base\"\ndisplay_name = \"Base stack\"\n"
+           "layers = [\"diff.drawing\", \"metal1.drawing\"]\n"
+           "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\n"
+           "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\n";
+    std::ofstream(repositoryRoot / "example-pdk/layout/layer-styles.json")
+        << R"({"schema_version": 1, "layers": [{"name": "diff", "color": "#123456", "pattern": "Diagonal /", "visible": true}]})";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
         << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
            "\">=1.0.0\"\n\n[provides]\nmodels = true\nsymbols = true\n";
@@ -1032,8 +1057,26 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
         CHECK(pdk.pdk->displayName == "Example PDK");
         CHECK(pdk.pdk->defaultSchematic == "example_top");
         CHECK(pdk.pdk->layers.size() == 2);
-        CHECK(pdk.pdk->layers.front().name == "diff");
+        CHECK(pdk.pdk->layers.front().name == "diff.drawing");
         CHECK(pdk.pdk->layers.front().number == 65);
+        CHECK(pdk.pdk->layers.front().datatype == 20);
+        CHECK(pdk.pdk->defaultStack == "base");
+        CHECK(pdk.pdk->stacks.size() == 1);
+        if (!pdk.pdk->stacks.empty()) {
+            CHECK(pdk.pdk->stacks.front().id == "base");
+            CHECK(pdk.pdk->stacks.front().displayName == "Base stack");
+            CHECK(pdk.pdk->stacks.front().layers.size() == 2);
+        }
+        CHECK(ice::resolvePdkStack(*pdk.pdk, "") == "base");
+        CHECK(ice::resolvePdkStack(*pdk.pdk, "base") == "base");
+        CHECK_THROWS_AS(ice::resolvePdkStack(*pdk.pdk, "missing"), ice::ProjectError);
+        CHECK(pdk.pdk->layerStyles.size() == 1);
+        if (!pdk.pdk->layerStyles.empty()) {
+            CHECK(pdk.pdk->layerStyles.front().name == "diff");
+            CHECK(pdk.pdk->layerStyles.front().color == "#123456");
+            CHECK(pdk.pdk->layerStyles.front().pattern == "Diagonal /");
+            CHECK(pdk.pdk->layerStyles.front().visible == 1);
+        }
     }
     auto lock = ice::PackageManager::resolve({repositoryRoot}, {{"example.lib", "*"}}, "0.1.0");
     CHECK(lock.packages.size() == 2);
@@ -1258,11 +1301,14 @@ TEST_CASE("package layout device libraries load") {
         const char *pdk;
         const char *prefix;
         const char *device;
+        int drawingLayer;
+        int drawingDatatype;
+        int purposeDatatype;
     };
     const std::vector<PackageLibrary> packages = {
-        {"ice-pkg-ihp-sg13g2", "IHP SG13G2", "ihp-sg13g2", "IHP ", "nmos"},
-        {"ice-pkg-sky130", "SkyWater SKY130", "sky130A", "SKY130 ", "nfet"},
-        {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos"},
+        {"ice-pkg-ihp-sg13g2", "IHP SG13G2", "ihp-sg13g2", "IHP ", "nmos", 8, 0, 2},
+        {"ice-pkg-sky130", "SkyWater SKY130", "sky130A", "SKY130 ", "nfet", 68, 20, 16},
+        {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos", 34, 0, 4},
     };
     for (const auto &package : packages) {
         const auto path = repositoryRoot / package.directory / "layout" / "devices.json";
@@ -1273,6 +1319,21 @@ TEST_CASE("package layout device libraries load") {
         CHECK(library.pdk == package.pdk);
         CHECK(library.cellPrefix == package.prefix);
         CHECK(!library.cells.empty());
+        const auto hasStream = [&](int number, int datatype) {
+            return std::any_of(library.layers.begin(), library.layers.end(),
+                               [&](const auto &layer) { return layer.number == number && layer.datatype == datatype; });
+        };
+        CHECK(hasStream(package.drawingLayer, package.drawingDatatype));
+        CHECK(hasStream(package.drawingLayer, package.purposeDatatype));
+        const auto manifest = ice::PackageManager::readManifest(repositoryRoot / package.directory);
+        CHECK(manifest.pdk.has_value());
+        if (manifest.pdk) {
+            const auto drawing =
+                std::find_if(manifest.pdk->layers.begin(), manifest.pdk->layers.end(), [&](const auto &layer) {
+                    return layer.number == package.drawingLayer && layer.datatype == package.drawingDatatype;
+                });
+            CHECK(drawing != manifest.pdk->layers.end());
+        }
         const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
             for (const auto &cell : library.cells)
                 if (cell.name == name)

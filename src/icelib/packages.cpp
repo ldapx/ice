@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <set>
 #include <sstream>
@@ -297,11 +298,68 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                     PackageLayer entry;
                     entry.name = readString(*layer, "name");
                     entry.number = static_cast<int>((*layer)["number"].value_or(-1LL));
-                    if (entry.name.empty() || entry.number < 0)
-                        throw ProjectError("package.manifest", "PDK layers require a name and non-negative GDS number");
+                    entry.datatype = static_cast<int>((*layer)["datatype"].value_or(0LL));
+                    if (entry.name.empty() || entry.number < 0 || entry.datatype < 0 || entry.datatype > 65535)
+                        throw ProjectError("package.manifest",
+                                           "PDK layers require a name, non-negative GDS number, and datatype");
                     if (!layerNames.insert(entry.name).second)
                         throw ProjectError("package.manifest", "Duplicate PDK layer name: " + entry.name);
                     pdkSpec.layers.push_back(std::move(entry));
+                }
+            }
+            pdkSpec.defaultStack = readString(*pdk, "default_stack");
+            if (const auto *stacks = (*pdk)["stack"].as_array()) {
+                std::set<std::string> stackIds;
+                for (const auto &item : *stacks) {
+                    const auto *stack = item.as_table();
+                    if (!stack)
+                        throw ProjectError("package.manifest", "PDK stack entry must be a table");
+                    PackagePdkStack entry;
+                    entry.id = readString(*stack, "id");
+                    entry.displayName = readString(*stack, "display_name", entry.id);
+                    if (entry.id.empty() || entry.id.find_first_of("/\\") != std::string::npos)
+                        throw ProjectError("package.manifest", "PDK stacks require a valid id");
+                    if (!stackIds.insert(entry.id).second)
+                        throw ProjectError("package.manifest", "Duplicate PDK stack id: " + entry.id);
+                    entry.layers = readStringArray(*stack, "layers");
+                    pdkSpec.stacks.push_back(std::move(entry));
+                }
+            }
+            if (pdkSpec.defaultStack.empty() && !pdkSpec.stacks.empty())
+                pdkSpec.defaultStack = pdkSpec.stacks.front().id;
+            if (!pdkSpec.defaultStack.empty() &&
+                std::none_of(pdkSpec.stacks.begin(), pdkSpec.stacks.end(),
+                             [&](const auto &stack) { return stack.id == pdkSpec.defaultStack; }))
+                throw ProjectError("package.manifest", "Default PDK stack is not declared: " + pdkSpec.defaultStack);
+
+            const auto stylesPath = packageRoot / "layout" / "layer-styles.json";
+            if (std::filesystem::is_regular_file(stylesPath)) {
+                const auto document = [&] {
+                    try {
+                        std::ifstream input(stylesPath);
+                        return nlohmann::json::parse(input);
+                    } catch (const std::exception &error) {
+                        throw ProjectError("package.manifest", "Unable to read layer styles '" + stylesPath.string() +
+                                                                   "': " + error.what());
+                    }
+                }();
+                if (document.value("schema_version", 0) != 1)
+                    throw ProjectError("package.manifest", "Layer styles must use schema_version 1");
+                if (const auto styles = document.find("layers"); styles != document.end()) {
+                    if (!styles->is_array())
+                        throw ProjectError("package.manifest", "Layer styles 'layers' must be an array");
+                    for (const auto &item : *styles) {
+                        if (!item.is_object())
+                            throw ProjectError("package.manifest", "Layer style entry must be an object");
+                        PackageLayerStyle style;
+                        style.name = item.value("name", std::string{});
+                        style.color = item.value("color", std::string{});
+                        style.pattern = item.value("pattern", std::string{});
+                        style.visible = item.contains("visible") ? (item.value("visible", true) ? 1 : 0) : -1;
+                        if (style.name.empty())
+                            throw ProjectError("package.manifest", "Layer styles require a layer name");
+                        pdkSpec.layerStyles.push_back(std::move(style));
+                    }
                 }
             }
             if (const auto *simulation = (*pdk)["simulation"].as_table()) {
@@ -748,6 +806,17 @@ std::vector<ProvenanceDiagnostic> PackageManager::provenance(const Lockfile &loc
     }
     return result;
 }
+std::string resolvePdkStack(const PackagePdk &pdk, const std::string &requested) {
+    const auto id = requested.empty() ? pdk.defaultStack : requested;
+    if (id.empty())
+        return {};
+    const auto stack =
+        std::find_if(pdk.stacks.begin(), pdk.stacks.end(), [&](const auto &entry) { return entry.id == id; });
+    if (stack == pdk.stacks.end())
+        throw ProjectError("layout.stack", "Unknown stack '" + id + "' for PDK '" + pdk.id + "'");
+    return id;
+}
+
 bool packageMatchesPdk(const PackageSpec &package, const std::string &pdkId) {
     const auto normalize = [](std::string value) {
         for (auto &character : value)

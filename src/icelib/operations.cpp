@@ -371,23 +371,28 @@ std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
     }
     return added;
 }
-ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
+ObjectId createLayoutCell(Project &project, std::string name, std::string pdk, std::string stack) {
     if (name.empty())
         throw ProjectError("layout.cell", "Layout cell name must not be empty");
     if (layoutNameTaken(project, name))
         throw ProjectError("layout.name", "A layout named '" + name + "' already exists");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layout stack must be a valid stack identifier");
     ObjectId id = project.nextId();
-    project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk)});
+    project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk), std::move(stack)});
     return id;
 }
 
-ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script) {
+ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script,
+                                std::string stack) {
     if (name.empty())
         throw ProjectError("layout.procedural.name", "Procedural layout name must not be empty");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layout stack must be a valid stack identifier");
 
     const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
     if (nameTaken(name))
@@ -401,15 +406,15 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
             generatedName = stem + " " + std::to_string(index);
     }
 
-    const auto generatedCell = createLayoutCell(project, generatedName, pdk);
+    const auto generatedCell = createLayoutCell(project, generatedName, pdk, stack);
     const auto id = project.nextId();
     project.layoutCells.at(generatedCell).generatedBy = id;
     project.proceduralLayouts.emplace(
-        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(script), generatedCell});
+        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(stack), std::move(script), generatedCell});
     return id;
 }
 
-ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name) {
+ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name, std::string stack) {
     const auto &schematic =
         require(project.schematicCells, schematicId, "schematic.cell", "Schematic cell does not exist");
 
@@ -425,7 +430,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     }
 
     const auto pdk = schematic.pdk.empty() ? std::string{genericPdkId} : schematic.pdk;
-    const auto layoutId = createLayoutCell(project, layoutName, pdk);
+    const auto layoutId = createLayoutCell(project, layoutName, pdk, std::move(stack));
     auto &layout = project.layoutCells.at(layoutId);
 
     std::vector<const SchematicInstance *> orderedInstances;
@@ -561,15 +566,20 @@ std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
     }
 }
 
-ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype) {
+ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype,
+                  std::string stack) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
     if (number < 0)
         throw ProjectError("layout.layer", "Layer number must not be negative");
     if (datatype < 0 || datatype > 65535)
         throw ProjectError("layout.layer", "Layer datatype out of GDSII range");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layer stack must be a valid stack identifier");
     ObjectId id = project.nextId();
-    project.layers.emplace(id, Layer{id, std::move(name), number, true, layout, std::move(pdk), datatype});
+    Layer layer{id, std::move(name), number, true, layout, std::move(pdk), datatype};
+    layer.stack = std::move(stack);
+    project.layers.emplace(id, std::move(layer));
     return id;
 }
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
@@ -752,7 +762,11 @@ ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId chi
     if (parentCellId == childCellId)
         throw ProjectError("layout.instance", "A layout cell cannot instance itself");
     auto &parent = require(project.layoutCells, parentCellId, "layout.cell", "Parent layout cell does not exist");
-    require(project.layoutCells, childCellId, "layout.cell", "Child layout cell does not exist");
+    const auto &child = require(project.layoutCells, childCellId, "layout.cell", "Child layout cell does not exist");
+    if (!parent.pdk.empty() && !child.pdk.empty() && parent.pdk != child.pdk)
+        throw ProjectError("layout.instance.technology", "Parent and child layouts must use the same PDK");
+    if (parent.stack != child.stack)
+        throw ProjectError("layout.instance.stack", "Parent and child layouts must use the same PDK stack");
     ObjectId id = project.nextId();
     parent.instances.emplace(id, LayoutInstance{id, childCellId, std::move(name), x, y, orientation});
     return id;
