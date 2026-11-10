@@ -1154,6 +1154,38 @@ TEST_CASE("geometry transforms match Qt rotation convention") {
     CHECK((ice::Transform{0, 0, ice::Orientation::m135}.apply(point) == ice::Point{0, -10}));
 }
 
+TEST_CASE("ngspice simulation is numeric-locale independent") {
+    struct LocaleGuard {
+        std::string previous;
+        ~LocaleGuard() {
+            if (!previous.empty())
+                std::setlocale(LC_NUMERIC, previous.c_str());
+        }
+    } localeGuard;
+    if (const auto *current = std::setlocale(LC_NUMERIC, nullptr))
+        localeGuard.previous = current;
+    // The GUI installs the user's numeric locale. ngspice parses netlist
+    // numbers through strtod(), which would otherwise treat 1.5 as two tokens.
+    if (!std::setlocale(LC_NUMERIC, "es_CL.UTF-8"))
+        return;
+
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.step = 0.1e-6;
+    request.stop = 2e-6;
+    request.netlist = {"* locale RC", "V1 1 0 1", "R1 1 2 1.5k", "C1 2 0 0.5u"};
+    request.probeSignals = {"2"};
+    ice::SimulationRunner runner;
+    const auto result = runner.run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.traces.size() == 1);
+    if (!result.traces.empty()) {
+        CHECK(!result.time.empty());
+        CHECK(result.traces.front().values.size() == result.time.size());
+        CHECK(*std::max_element(result.traces.front().values.begin(), result.traces.front().values.end()) > 0.5);
+    }
+}
+
 TEST_CASE("ngspice simulation reports missing netlists explicitly") {
     ice::SimulationRequest request;
     ice::SimulationRunner runner;

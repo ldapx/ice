@@ -105,34 +105,43 @@ confirmation.
 RTL-to-GDS is part of the main document tab strip, not a separate workspace:
 
 ```text
-A/MS Schematic | HDL Schematic | Synthesis | Floorplan | Placement | CTS | Routing | Layout | Simulation
+A/MS Schematic | HDL Schematic | Synthesis | Physical Design | Layout | Simulation
 ```
 
 Each top-level document tab has a custom SVG icon. Analog/mixed-signal
 workspaces (`A/MS Schematic`, `Layout`, `Simulation`) use red icons; digital
-workspaces (`HDL Schematic`, `Synthesis`, `Floorplan`, `Placement`, `CTS`,
-`Routing`) use blue icons.
+workspaces (`HDL Schematic`, `Synthesis`, `Physical Design`) use blue icons.
 
-The six implementation tabs are global views over one selected implementation
-run. Selecting a run or stage in the left `Runs` tree changes the active run, so
-multiple runs do not multiply the top-level tab count. Execution remains
+The implementation tabs are global views over one selected implementation
+run. Selecting a run in the left `Runs` tree changes the active run; selecting
+one of its physical stage rows switches the `Physical Design` pane. Multiple
+runs therefore do not multiply the top-level tab count. Execution remains
 available through `ice-cli implementation-run`, MCP, and `icepy`, and its output
 is reported in the bottom Messages dock.
 
-Each page uses the same three-column shell as Schematic and Layout:
+`Physical Design` is one workspace whose stage is selected from the left
+`Runs` tab:
 
-- **Left:** `Runs` tree with every implementation run and stage status, plus an
-  `Artifacts` list for the current stage. Floorplan also has a `Netlists`
-  explorer listing technology-mapped `.v` files. The HDL Schematic page uses an
-  `Explorer` list of `.sv` files instead.
-- **Middle:** a read-only canvas. Floorplan, Placement, CTS, and Routing load
-  their stage ODB through the `ice-openroad` reader, with the legacy DEF import
-  as a fallback; an **Overlay** selector shows embedded placement-density or
-  routing-density maps and **Export CSV** writes native OpenROAD heat maps.
-  Synthesis shows Yosys elaboration and synthesized netlist graphs. The HDL
-  Schematic page uses a SystemVerilog text editor instead.
-- **Right:** `Properties`, `Metrics`, and `Settings` tabs for the active run and
-  stage.
+```text
+Floorplan → Placement → CTS → Routing
+```
+
+Each stage pane uses the same three-column shell as Schematic and Layout:
+
+- **Left:** a compact run row with the run selector and icon actions, followed
+  by the `Runs` tree and `Artifacts` list. In the physical workspace the tree
+  shows only the physical stages (Floorplan, Placement, CTS, Routing) for each
+  run. Selecting a stage row switches the stage pane. Floorplan also has a
+  `Netlists` explorer listing technology-mapped `.v` files. The icon actions
+  are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
+  contextual hint below the row shows the next prerequisite, the ready action,
+  or the last failure.
+- **Middle:** a read-only canvas. The physical stages load their stage ODB
+  through the `ice-openroad` reader, with the legacy DEF import as a fallback;
+  an **Overlay** selector shows embedded placement-density or routing-density
+  maps and **Export CSV** writes native OpenROAD heat maps.
+- **Right:** the stage settings form first, followed by `Metrics` and
+  `Properties` for the active run and stage.
 
 The HDL Schematic page shows the project's `.sv` files in the left `Explorer`,
 with a search field and icon buttons to create (`+`) or delete the selected file.
@@ -167,28 +176,18 @@ netlist opens a read-only Verilog editor. The right column lists only the
 `2_tech_map.v` netlist. Logs, scripts, and the generic `1_synth.v` stay in the
 run directory but are not shown in this list.
 
-The Floorplan page adds a `Netlists` tab to its left column. It lists every
-`synth/2_tech_map.v` and exported technology-mapped `.v` present across runs;
-activating an entry selects that run. Floorplan reads the run's
+The Floorplan stage pane adds a `Netlists` tab to its left column. It lists
+every `synth/2_tech_map.v` and exported technology-mapped `.v` present across
+runs; activating an entry selects that run. Floorplan reads the run's
 `2_tech_map.v`, so exporting from Synthesis is required before running the
-floorplan stage.
+floorplan stage. Its settings expose utilization, aspect ratio, optional
+explicit die width/height, placement site, IO horizontal/vertical layers,
+threads, and timeout. Applying settings updates the run configuration and
+invalidates the floorplan, placement, CTS, routing, and final checkpoints so
+stale results are never presented as current.
 
-The `Runs` tab has **Run floorplan** and **Cancel** actions. Run floorplan is
-enabled only when the active run has a successful synthesis and a
-technology-mapped netlist. The run streams OpenROAD output to the Activity
-panel, records `db/2_floorplan.odb`, `def/2_floorplan.def`, the SDC, logs, and
-metrics, and refreshes the ODB preview when it finishes.
+The Placement, CTS, and Routing stage panes use the same pattern:
 
-The right column has an editable `Floorplan` tab instead of the read-only
-Settings JSON. It exposes utilization, aspect ratio, optional explicit die
-width/height, placement site, IO horizontal/vertical layers, threads, and
-timeout. Applying settings updates the run configuration and invalidates the
-floorplan, placement, CTS, routing, and final checkpoints so stale results are
-never presented as current.
-
-The `Placement`, `CTS`, and `Routing` pages use the same pattern:
-
-- `Run placement`, `Run CTS`, and `Run routing` actions with a `Cancel` button;
 - prerequisites are enforced from stage status:
   - placement requires a successful floorplan;
   - CTS requires placement;
@@ -206,7 +205,8 @@ The `Placement`, `CTS`, and `Routing` pages use the same pattern:
   wire density, and **Export CSV** writes placement, routing, or power heat
   maps under the run's `reports/` directory.
 
-The Properties and Metrics tabs continue to show the active run.
+The Properties and Metrics tabs continue to show the active run and selected
+stage.
 
 Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
 still runs and the canvases show an explanatory message. Importing a finished
@@ -672,6 +672,25 @@ anywhere in the window; schematic and layout entries are scoped to their editor
 canvas so the same key can be reused. Conflicts within a scope, or against a
 global shortcut, are rejected. Bindings are stored in the user's Qt settings and
 applied immediately.
+
+## Messages dock
+
+The bottom **Messages** tab is the unified log view. Each log category has its
+own spdlog sink and logger:
+
+- **Application**
+- **Simulation**
+- **Implementation**
+- **DRC**
+- **LVS**
+
+Messages are shown with time, severity, category, and text. The category and
+severity selectors filter the view without changing the stored messages; the
+severity selector shows that level and above. Severity colors distinguish
+warnings and errors. Simulation status, warnings, errors, and stored-run paths
+are written here instead of appearing below the netlist pane. Implementation
+stage output, DRC summaries/violations, LVS summaries/mismatches, and generic
+application messages use the same category-aware sinks.
 
 ## Simulation scripts
 

@@ -6,6 +6,7 @@
 #include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
+#include "icelib/logging.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
@@ -129,6 +130,8 @@
 #include <sstream>
 #include <string>
 #include <utility>
+
+#include <spdlog/spdlog.h>
 
 namespace {
 
@@ -2405,7 +2408,6 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->scene()->clear();
         if (layoutPropertiesPanel_)
             layoutPropertiesPanel_->clearSelection();
-        simulationOutput_->setPlainText(QStringLiteral("No project open."));
         schematicSelector_->clear();
         simulationPlot_->clear();
         if (simulationPanel_)
@@ -7195,13 +7197,14 @@ class DocumentWindow : public QMainWindow {
         loadedCachedRunPath_ = path;
         auto result = std::make_shared<ice::SimulationResult>(std::move(stored->result));
         applySimulationResultToGraphTabs(result);
-        if (simulationOutput_ && result->state != ice::JobState::succeeded) {
-            simulationOutput_->setPlainText(
-                QStringLiteral("Loaded last stored run %1: %2%3")
-                    .arg(QString::fromStdString(stored->runId),
-                         QString::fromStdString(ice::jobStateName(result->state)),
-                         result->error.empty() ? QString()
-                                               : QStringLiteral("\n%1").arg(QString::fromStdString(result->error))));
+        if (result->state != ice::JobState::succeeded) {
+            logMessage(ice::logging::simulation, spdlog::level::err,
+                       QStringLiteral("Loaded last stored run %1: %2%3")
+                           .arg(QString::fromStdString(stored->runId),
+                                QString::fromStdString(ice::jobStateName(result->state)),
+                                result->error.empty()
+                                    ? QString()
+                                    : QStringLiteral("\n%1").arg(QString::fromStdString(result->error))));
         }
     }
 
@@ -7559,10 +7562,32 @@ class DocumentWindow : public QMainWindow {
                   : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     }
 
-    void appendReportMessage(const QString &message) {
-        if (activityPanel_)
-            activityPanel_->appendMessage(message);
+    void logMessage(const char *category, spdlog::level::level_enum level, const QString &message) {
+        if (message.isEmpty())
+            return;
+        if (auto logger = spdlog::get(category))
+            logger->log(level, "{}", message.toStdString());
+        else
+            spdlog::log(level, "{}", message.toStdString());
     }
+
+    void logMessageText(const char *category, const QString &message) {
+        const auto lower = message.toLower();
+        auto level = spdlog::level::info;
+        if (lower.contains(QStringLiteral("critical")))
+            level = spdlog::level::critical;
+        else if (lower.contains(QStringLiteral("error")) || lower.contains(QStringLiteral("failed")) ||
+                 lower.contains(QStringLiteral("cannot")) || lower.contains(QStringLiteral("unable")) ||
+                 lower.contains(QStringLiteral("timed out")))
+            level = spdlog::level::err;
+        else if (lower.contains(QStringLiteral("warning")) || lower.contains(QStringLiteral("warn")))
+            level = spdlog::level::warn;
+        else if (lower.contains(QStringLiteral("debug")))
+            level = spdlog::level::debug;
+        logMessage(category, level, message);
+    }
+
+    void appendReportMessage(const QString &message) { logMessageText(ice::logging::simulation, message); }
 
     void showReportMessages() {
         if (activityDock_)
@@ -8601,28 +8626,42 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Simulation netlist built"));
     }
 
-    static QString formatSimulationReport(const ice::SimulationRequest &request, const ice::SimulationResult &result,
-                                          const QStringList &netlistNotes) {
-        std::ostringstream output;
-        output << "State: " << ice::jobStateName(result.state) << "\n"
-               << "Analysis: " << result.analysis << "\n"
-               << "Simulator: " << result.simulator << " " << result.simulator_version << "\n";
-        if (!request.netlist.empty()) {
-            output << "Netlist:\n";
-            for (const auto &line : request.netlist)
-                output << "  " << line << "\n";
+    void logSimulationResult(const std::string &simulationName, const ice::SimulationRequest &request,
+                             const ice::SimulationResult &result, const QStringList &netlistNotes,
+                             const QString &storedPath) {
+        const auto name = QString::fromStdString(simulationName);
+        logMessage(ice::logging::simulation, spdlog::level::info,
+                   QStringLiteral("Analysis: %1 · Simulator: %2 %3")
+                       .arg(QString::fromStdString(result.analysis), QString::fromStdString(result.simulator),
+                            QString::fromStdString(result.simulator_version)));
+        if (result.state == ice::JobState::succeeded) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s)")
+                           .arg(name)
+                           .arg(result.time.size())
+                           .arg(result.traces.size()));
+        } else {
+            logMessage(ice::logging::simulation,
+                       result.state == ice::JobState::cancelled ? spdlog::level::warn : spdlog::level::err,
+                       QStringLiteral("Simulation '%1' %2%3")
+                           .arg(name, QString::fromStdString(ice::jobStateName(result.state)),
+                                result.error.empty()
+                                    ? QString()
+                                    : QStringLiteral(": %1").arg(QString::fromStdString(result.error))));
         }
-        for (const auto &note : netlistNotes)
-            output << "Note: " << note.toStdString() << "\n";
-        if (!result.error.empty())
-            output << "Error: " << result.error << "\n";
-        if (!result.time.empty() && !result.traces.empty()) {
-            output << "Samples: " << result.time.size() << "\n"
-                   << "Trace: " << result.traces.front().name << "\n"
-                   << "First sample: " << result.traces.front().values.front() << "\n"
-                   << "Last sample: " << result.traces.front().values.back() << "\n";
+        for (const auto &warning : result.warnings) {
+            logMessage(ice::logging::simulation, spdlog::level::warn,
+                       QStringLiteral("Simulation '%1': %2").arg(name, QString::fromStdString(warning)));
         }
-        return QString::fromStdString(output.str());
+        for (const auto &note : netlistNotes) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1': %2").arg(name, note));
+        }
+        if (!storedPath.isEmpty()) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1' stored result: %2").arg(name, storedPath));
+        }
+        (void)request;
     }
 
     void loadVcdGraphs() {
@@ -8730,7 +8769,10 @@ class DocumentWindow : public QMainWindow {
         sim.use_initial_conditions = formSim.use_initial_conditions;
         sim.directives = formSim.directives;
         sim.captureSignals = formSim.captureSignals;
-        simulationOutput_->setPlainText(QStringLiteral("Running simulation..."));
+        logMessage(ice::logging::simulation, spdlog::level::info,
+                   QStringLiteral("Running simulation '%1' (%2, %3)...")
+                       .arg(QString::fromStdString(sim.name), QString::fromStdString(sim.simulator),
+                            QString::fromStdString(sim.analysis)));
         documents_->setCurrentWidget(simulationPage_);
         if (simulationTabs_ && simulationGraphsPage_)
             simulationTabs_->setCurrentWidget(simulationGraphsPage_);
@@ -8741,11 +8783,18 @@ class DocumentWindow : public QMainWindow {
         try {
             request = buildSimulationRequest(sim, netlistNotes);
         } catch (const ice::ProjectError &error) {
+            logMessage(ice::logging::simulation, spdlog::level::err,
+                       QStringLiteral("Simulation '%1' could not start: %2")
+                           .arg(QString::fromStdString(sim.name), QString::fromStdString(error.what())));
+            showReportMessages();
             QMessageBox::critical(this, QStringLiteral("Run Simulation"), QString::fromStdString(error.what()));
             return;
         }
         const auto timeout = request.simulator == "mixed" ? std::chrono::seconds(120) : std::chrono::seconds(10);
-        auto result = ice::SimulationRunner().run(request, timeout);
+        auto result = ice::SimulationRunner().run(request, timeout, [this](const ice::SimulationProgress &progress) {
+            if (!progress.message.empty())
+                logMessage(ice::logging::simulation, spdlog::level::info, QString::fromStdString(progress.message));
+        });
 
         // Populate empty capture and graph fields from the generated traces so
         // the first run produces a usable plot, including for digital VCDs.
@@ -8764,7 +8813,6 @@ class DocumentWindow : public QMainWindow {
                     sim = updated->second;
             }
         }
-        auto report = formatSimulationReport(request, result, netlistNotes);
         QString storedPath;
 
         const auto projectRoot = projectPath_.isEmpty()
@@ -8790,14 +8838,19 @@ class DocumentWindow : public QMainWindow {
             try {
                 const auto artifact = ice::writeSimulationRun(context, result);
                 storedPath = QString::fromStdString(artifact.path.string());
-                report += QStringLiteral("\nStored result: %1\n").arg(storedPath);
             } catch (const ice::ProjectError &error) {
-                report += QStringLiteral("\nUnable to store result: %1\n").arg(QString::fromStdString(error.what()));
+                logMessage(ice::logging::simulation, spdlog::level::warn,
+                           QStringLiteral("Simulation '%1': unable to store result: %2")
+                               .arg(QString::fromStdString(sim.name), QString::fromStdString(error.what())));
             }
         } else {
-            report += QStringLiteral("\nResult not stored: save the project first.\n");
+            logMessage(ice::logging::simulation, spdlog::level::warn,
+                       QStringLiteral("Simulation '%1': result not stored; save the project first.")
+                           .arg(QString::fromStdString(sim.name)));
         }
-        simulationOutput_->setPlainText(report);
+        logSimulationResult(sim.name, request, result, netlistNotes, storedPath);
+        if (result.state != ice::JobState::succeeded)
+            showReportMessages();
 
         if (graphsUpdated) {
             QSignalBlocker blocker(signalsCapture_);
@@ -11523,17 +11576,8 @@ class DocumentWindow : public QMainWindow {
         simulationNetlist_->setReadOnly(true);
         simulationNetlist_->setLineWrapMode(QPlainTextEdit::NoWrap);
         simulationNetlist_->setPlaceholderText(QStringLiteral("Build the netlist to see it here."));
-        simulationOutput_ = new QPlainTextEdit;
-        simulationOutput_->setReadOnly(true);
-        simulationOutput_->setPlaceholderText(QStringLiteral("Simulation status and result summary"));
-        auto *rightSplitter = new QSplitter(Qt::Vertical);
-        rightSplitter->setChildrenCollapsible(false);
-        rightSplitter->addWidget(simulationNetlist_);
-        rightSplitter->addWidget(simulationOutput_);
-        rightSplitter->setStretchFactor(0, 1);
-        rightSplitter->setStretchFactor(1, 1);
         propertiesColumns->addLayout(propertiesColumn, 1);
-        propertiesColumns->addWidget(rightSplitter, 1);
+        propertiesColumns->addWidget(simulationNetlist_, 1);
         propertiesLayout->addLayout(propertiesColumns, 1);
         simulationTabs_->addTab(propertiesPage, QStringLiteral("Properties"));
 
@@ -11741,8 +11785,8 @@ class DocumentWindow : public QMainWindow {
         implementationController_ = new ImplementationUiController(this);
         implementationController_->addLogListener([this](ice::ImplementationStage, const QString &text) {
             const auto line = text.trimmed();
-            if (!line.isEmpty() && activityPanel_)
-                activityPanel_->appendMessage(line);
+            if (!line.isEmpty())
+                logMessageText(ice::logging::implementation, line);
         });
         implementationController_->setOnChanged([this] {
             if (implementationController_ && implementationController_->busy())
@@ -11818,10 +11862,6 @@ class DocumentWindow : public QMainWindow {
         const std::pair<ice::ImplementationStage, const char *> implementationTabs[] = {
             {ice::ImplementationStage::created, "HDL Schematic"},
             {ice::ImplementationStage::synthesis, "Synthesis"},
-            {ice::ImplementationStage::floorplan, "Floorplan"},
-            {ice::ImplementationStage::placement, "Placement"},
-            {ice::ImplementationStage::cts, "CTS"},
-            {ice::ImplementationStage::routing, "Routing"},
         };
         int implementationIndex = 1;
         for (const auto &[stage, label] : implementationTabs) {
@@ -11842,45 +11882,23 @@ class DocumentWindow : public QMainWindow {
                 page->setExportVerilogCallback([this](ice::ObjectId id) { exportTechMappedVerilog(id); });
                 page->setRemoveRunCallback([this](ice::ObjectId id) { removeHdlRun(id); });
             }
-            if (stage == ice::ImplementationStage::floorplan || stage == ice::ImplementationStage::placement ||
-                stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing) {
-                const auto pageStage = stage;
-                page->setApplyConfigCallback(
-                    [this, pageStage](ice::ObjectId id, const ice::ImplementationConfig &config) {
-                        applyStageConfig(id, config, pageStage);
-                    });
-            }
             implementationPages_.push_back(page);
             const auto tab = documents->insertTab(implementationIndex++, page, QString::fromLatin1(label));
-            const char *iconName = "hdl-schematic";
-            switch (stage) {
-            case ice::ImplementationStage::created:
-                iconName = "hdl-schematic";
-                break;
-            case ice::ImplementationStage::elaboration:
-                iconName = "synthesis";
-                break;
-            case ice::ImplementationStage::synthesis:
-                iconName = "synthesis";
-                break;
-            case ice::ImplementationStage::floorplan:
-                iconName = "floorplan";
-                break;
-            case ice::ImplementationStage::placement:
-                iconName = "placement";
-                break;
-            case ice::ImplementationStage::cts:
-                iconName = "cts";
-                break;
-            case ice::ImplementationStage::routing:
-                iconName = "routing";
-                break;
-            case ice::ImplementationStage::final:
-                iconName = "layout";
-                break;
-            }
+            const auto iconName = stage == ice::ImplementationStage::created ? "hdl-schematic" : "synthesis";
             documents->setTabIcon(tab, ice::tabIcon(QString::fromLatin1(iconName), 16));
         }
+
+        physicalDesignPage_ = new PhysicalDesignPage(implementationController_);
+        for (auto *page : physicalDesignPage_->pages()) {
+            const auto pageStage = page->stage();
+            page->setApplyConfigCallback([this, pageStage](ice::ObjectId id, const ice::ImplementationConfig &config) {
+                applyStageConfig(id, config, pageStage);
+            });
+            implementationPages_.push_back(page);
+        }
+        const auto physicalTab =
+            documents->insertTab(implementationIndex++, physicalDesignPage_, QStringLiteral("Physical Design"));
+        documents->setTabIcon(physicalTab, ice::tabIcon(QStringLiteral("floorplan"), 16));
 
         auto *reportsView = new QWidget;
         reportsView_ = reportsView;
@@ -13172,11 +13190,11 @@ class DocumentWindow : public QMainWindow {
     QWidget *schematicPage_ = nullptr;
     ImplementationUiController *implementationController_ = nullptr;
     std::vector<ImplementationPage *> implementationPages_;
+    PhysicalDesignPage *physicalDesignPage_ = nullptr;
     QWidget *layoutPage_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
-    QPlainTextEdit *simulationOutput_ = nullptr;
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationTestbenchPage_ = nullptr;

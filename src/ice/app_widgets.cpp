@@ -1,5 +1,6 @@
 #include "app_widgets.hpp"
 
+#include "icelib/logging.hpp"
 #include "icelib/verification.hpp"
 
 #include "agent_events.hpp"
@@ -43,6 +44,7 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -52,10 +54,13 @@
 #include <QTableWidget>
 #include <QTextCursor>
 #include <QThreadPool>
+#include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
 
 #ifdef ICE_HAVE_AGENTSDK
 #include <agentsdk/acp/acp_agent_manager.hpp>
@@ -65,6 +70,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -73,8 +79,79 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+namespace {
+
+QString messageLevelName(int level) {
+    switch (static_cast<spdlog::level::level_enum>(level)) {
+    case spdlog::level::trace:
+    case spdlog::level::debug:
+        return QStringLiteral("Debug");
+    case spdlog::level::info:
+        return QStringLiteral("Info");
+    case spdlog::level::warn:
+        return QStringLiteral("Warning");
+    case spdlog::level::err:
+        return QStringLiteral("Error");
+    case spdlog::level::critical:
+        return QStringLiteral("Critical");
+    case spdlog::level::off:
+        return QStringLiteral("Off");
+    case spdlog::level::n_levels:
+        break;
+    }
+    return QStringLiteral("Info");
+}
+
+QColor messageLevelColor(int level) {
+    switch (static_cast<spdlog::level::level_enum>(level)) {
+    case spdlog::level::warn:
+        return QColor(QStringLiteral("#d97706"));
+    case spdlog::level::err:
+        return QColor(QStringLiteral("#dc2626"));
+    case spdlog::level::critical:
+        return QColor(QStringLiteral("#b91c1c"));
+    case spdlog::level::trace:
+    case spdlog::level::debug:
+        return ice::uiColor(ice::UiColor::Text2);
+    default:
+        return ice::uiColor(ice::UiColor::Text1);
+    }
+}
+
+// A spdlog sink that forwards one category to the Qt message view. Each
+// category gets its own sink and logger so filtering can be done without
+// parsing prefixes out of mixed text.
+class QtMessageSink final : public spdlog::sinks::base_sink<std::mutex> {
+  public:
+    using Callback = std::function<void(const QString &, int, const QString &, const QString &)>;
+
+    QtMessageSink(QString category, Callback callback)
+        : category_(std::move(category)), callback_(std::move(callback)) {}
+
+  protected:
+    void sink_it_(const spdlog::details::log_msg &message) override {
+        if (!callback_)
+            return;
+        const auto payload = message.payload;
+        const QString text = QString::fromUtf8(payload.data(), static_cast<int>(payload.size()));
+        if (text.isEmpty())
+            return;
+        const auto time = QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz"));
+        callback_(time, static_cast<int>(message.level), category_, text);
+    }
+
+    void flush_() override {}
+
+  private:
+    QString category_;
+    Callback callback_;
+};
+
+} // namespace
 
 DiagnosticsPanel::DiagnosticsPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
@@ -361,10 +438,36 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     auto *messagesLayout = new QVBoxLayout(messagesPage);
     auto *messagesHeader = new QHBoxLayout;
     messagesHeader->setSpacing(6);
-    auto *messagesHint = new QLabel(QStringLiteral("Structured application and external-tool messages"));
-    messagesHint->setWordWrap(true);
+    auto *messagesHint = new QLabel(QStringLiteral("spdlog sinks by category"));
+    messagesHint->setWordWrap(false);
     messagesHint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    messagesHeader->addWidget(messagesHint, 1);
+    messagesHeader->addWidget(messagesHint);
+    messageCategoryFilter_ = new QComboBox;
+    messageCategoryFilter_->setAccessibleName(QStringLiteral("Message category filter"));
+    messageCategoryFilter_->setToolTip(QStringLiteral("Filter messages by spdlog category"));
+    messageCategoryFilter_->addItem(QStringLiteral("All categories"), QString{});
+    for (const auto &[name, label] :
+         std::array<std::pair<const char *, const char *>, 5>{{{ice::logging::application, "Application"},
+                                                               {ice::logging::simulation, "Simulation"},
+                                                               {ice::logging::implementation, "Implementation"},
+                                                               {ice::logging::drc, "DRC"},
+                                                               {ice::logging::lvs, "LVS"}}})
+        messageCategoryFilter_->addItem(QString::fromLatin1(label), QString::fromLatin1(label));
+    messagesHeader->addWidget(messageCategoryFilter_);
+    messageSeverityFilter_ = new QComboBox;
+    messageSeverityFilter_->setAccessibleName(QStringLiteral("Message severity filter"));
+    messageSeverityFilter_->setToolTip(QStringLiteral("Show messages at or above this severity"));
+    messageSeverityFilter_->addItem(QStringLiteral("All levels"), static_cast<int>(spdlog::level::trace));
+    messageSeverityFilter_->addItem(QStringLiteral("Debug"), static_cast<int>(spdlog::level::debug));
+    messageSeverityFilter_->addItem(QStringLiteral("Info"), static_cast<int>(spdlog::level::info));
+    messageSeverityFilter_->addItem(QStringLiteral("Warning"), static_cast<int>(spdlog::level::warn));
+    messageSeverityFilter_->addItem(QStringLiteral("Error"), static_cast<int>(spdlog::level::err));
+    messageSeverityFilter_->addItem(QStringLiteral("Critical"), static_cast<int>(spdlog::level::critical));
+    messagesHeader->addWidget(messageSeverityFilter_);
+    messagesCount_ = new QLabel(QStringLiteral("0 messages"));
+    messagesCount_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    messagesHeader->addWidget(messagesCount_, 0, Qt::AlignVCenter);
+    messagesHeader->addStretch(1);
     auto *clearMessagesButton = new QPushButton;
     clearMessagesButton->setAccessibleName(QStringLiteral("Clear messages"));
     clearMessagesButton->setToolTip(QStringLiteral("Clear messages"));
@@ -372,16 +475,32 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     clearMessagesButton->setFixedSize(24, 24);
     messagesHeader->addWidget(clearMessagesButton, 0, Qt::AlignTop);
     messagesLayout->addLayout(messagesHeader);
-    messages_ = new QPlainTextEdit;
-    messages_->setReadOnly(true);
-    messages_->setPlaceholderText(QStringLiteral("No messages yet."));
-    messages_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    messagesLayout->addWidget(messages_, 1);
+
+    messagesTable_ = new QTableWidget(0, 4);
+    messagesTable_->setAccessibleName(QStringLiteral("Messages"));
+    messagesTable_->setHorizontalHeaderLabels(
+        {QStringLiteral("Time"), QStringLiteral("Level"), QStringLiteral("Category"), QStringLiteral("Message")});
+    messagesTable_->verticalHeader()->setVisible(false);
+    messagesTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    messagesTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    messagesTable_->setWordWrap(false);
+    messagesTable_->setShowGrid(false);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    messagesTable_->setTextElideMode(Qt::ElideRight);
+    messagesLayout->addWidget(messagesTable_, 1);
     messagesTabIndex_ = tabs->addTab(messagesPage, QStringLiteral("Messages"));
     connect(clearMessagesButton, &QPushButton::clicked, this, [this] {
-        if (messages_)
-            messages_->clear();
+        messageEntries_.clear();
+        rebuildMessageView();
     });
+    connect(messageCategoryFilter_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { rebuildMessageView(); });
+    connect(messageSeverityFilter_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { rebuildMessageView(); });
+    installMessageSinks();
 
     auto *drcPage = new QWidget;
     auto *drcLayout = new QVBoxLayout(drcPage);
@@ -476,6 +595,8 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
 }
 
 ActivityPanel::~ActivityPanel() {
+    if (messageSinkAlive_)
+        messageSinkAlive_->store(false);
     if (!agentBackend_)
         return;
     agentBackend_->alive.store(false);
@@ -2045,6 +2166,16 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
     if (!reportPath.isEmpty())
         summary += QStringLiteral(" Report: %1").arg(reportPath);
     drcSummary_->setText(summary);
+    if (auto logger = spdlog::get(ice::logging::drc)) {
+        logger->log(errors > 0 ? spdlog::level::warn : spdlog::level::info, "{}", summary.toStdString());
+        for (const auto &violation : report.drc) {
+            const auto level = violation.severity == ice::VerificationSeverity::error
+                                   ? spdlog::level::err
+                                   : (violation.severity == ice::VerificationSeverity::warning ? spdlog::level::warn
+                                                                                               : spdlog::level::info);
+            logger->log(level, "[{}] {}: {}", violation.rule, violation.cell, violation.message);
+        }
+    }
     showDrcTab();
 }
 
@@ -2053,7 +2184,10 @@ void ActivityPanel::setDrcRunning(const QString &message) {
         return;
     drcViolations_.clear();
     drcTable_->setRowCount(0);
-    drcSummary_->setText(message.isEmpty() ? QStringLiteral("Running gdscheck...") : message);
+    const auto text = message.isEmpty() ? QStringLiteral("Running gdscheck...") : message;
+    drcSummary_->setText(text);
+    if (auto logger = spdlog::get(ice::logging::drc))
+        logger->info("{}", text.toStdString());
     showDrcTab();
 }
 
@@ -2063,6 +2197,8 @@ void ActivityPanel::setDrcError(const QString &message) {
     drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message);
+    if (auto logger = spdlog::get(ice::logging::drc))
+        logger->error("{}", message.toStdString());
     showDrcTab();
 }
 
@@ -2112,16 +2248,28 @@ void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
                      .arg(infos);
     }
     lvsReport_->setPlainText(lines.join(QLatin1Char('\n')));
+    QString summary;
     if (lvsSummary_) {
         if (report.mismatches.empty()) {
-            lvsSummary_->setText(
-                QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
-                    .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout)));
+            summary = QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
+                          .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout));
         } else {
-            lvsSummary_->setText(QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s).")
-                                     .arg(errors)
-                                     .arg(warnings)
-                                     .arg(infos));
+            summary = QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s).")
+                          .arg(errors)
+                          .arg(warnings)
+                          .arg(infos);
+        }
+        lvsSummary_->setText(summary);
+    }
+    if (auto logger = spdlog::get(ice::logging::lvs)) {
+        logger->log(errors > 0 ? spdlog::level::warn : spdlog::level::info, "{}", summary.toStdString());
+        for (const auto &mismatch : report.mismatches) {
+            const auto level = mismatch.severity == ice::VerificationSeverity::error
+                                   ? spdlog::level::err
+                                   : (mismatch.severity == ice::VerificationSeverity::warning ? spdlog::level::warn
+                                                                                              : spdlog::level::info);
+            logger->log(level, "[{}] {}: {}", mismatch.category, mismatch.schematicObject.value_or(0),
+                        mismatch.message);
         }
     }
     showLvsTab();
@@ -2133,6 +2281,8 @@ void ActivityPanel::setLvsError(const QString &message) {
     lvsReport_->setPlainText(message);
     if (lvsSummary_)
         lvsSummary_->setText(message);
+    if (auto logger = spdlog::get(ice::logging::lvs))
+        logger->error("{}", message.toStdString());
     showLvsTab();
 }
 
@@ -2146,11 +2296,152 @@ void ActivityPanel::showAgentTab() {
         tabs_->setCurrentIndex(agentTabIndex_);
 }
 
-void ActivityPanel::appendMessage(const QString &message) {
-    if (!messages_)
+void ActivityPanel::installMessageSinks() {
+    messageSinkAlive_ = std::make_shared<std::atomic<bool>>(true);
+    const std::pair<const char *, const char *> categories[] = {
+        {ice::logging::application, "Application"},
+        {ice::logging::simulation, "Simulation"},
+        {ice::logging::implementation, "Implementation"},
+        {ice::logging::drc, "DRC"},
+        {ice::logging::lvs, "LVS"},
+    };
+    for (const auto &[name, label] : categories) {
+        QPointer<ActivityPanel> self(this);
+        const auto alive = messageSinkAlive_;
+        auto sink = std::make_shared<QtMessageSink>(
+            QString::fromLatin1(label),
+            [self, alive](const QString &time, int level, const QString &category, const QString &message) {
+                if (!alive->load())
+                    return;
+                auto *context = self.data();
+                if (!context)
+                    return;
+                QMetaObject::invokeMethod(
+                    context,
+                    [self, time, level, category, message] {
+                        if (self)
+                            self->appendLogEntry(time, level, category, message);
+                    },
+                    Qt::QueuedConnection);
+            });
+        auto logger = std::make_shared<spdlog::logger>(name, std::move(sink));
+        logger->set_pattern("%v");
+        logger->set_level(spdlog::level::trace);
+        logger->flush_on(spdlog::level::trace);
+        spdlog::drop(name);
+        spdlog::register_logger(logger);
+        if (std::string_view(name) == ice::logging::application)
+            spdlog::set_default_logger(logger);
+    }
+}
+
+bool ActivityPanel::messagePassesFilters(const QString &category, int level) const {
+    if (messageCategoryFilter_) {
+        const auto wanted = messageCategoryFilter_->currentData().toString();
+        if (!wanted.isEmpty() && wanted != category)
+            return false;
+    }
+    if (messageSeverityFilter_) {
+        const auto minimum = messageSeverityFilter_->currentData().toInt();
+        if (level < minimum)
+            return false;
+    }
+    return true;
+}
+
+void ActivityPanel::appendLogEntry(const QString &time, int level, const QString &category, const QString &message) {
+    if (!messagesTable_)
         return;
-    messages_->appendPlainText(message);
-    messages_->moveCursor(QTextCursor::End);
+    const auto atBottom = !messagesTable_->verticalScrollBar() || messagesTable_->verticalScrollBar()->value() >=
+                                                                      messagesTable_->verticalScrollBar()->maximum();
+    auto lines = message.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+    for (auto line : lines) {
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+        if (line.isEmpty())
+            continue;
+        MessageEntry entry;
+        entry.time = time;
+        entry.level = level;
+        entry.category = category;
+        entry.message = line;
+        messageEntries_.push_back(entry);
+        if (messagePassesFilters(entry.category, entry.level)) {
+            const int row = messagesTable_->rowCount();
+            messagesTable_->insertRow(row);
+            auto *timeItem = new QTableWidgetItem(entry.time);
+            auto *levelItem = new QTableWidgetItem(messageLevelName(entry.level));
+            levelItem->setForeground(QBrush(messageLevelColor(entry.level)));
+            if (entry.level >= static_cast<int>(spdlog::level::err)) {
+                auto font = levelItem->font();
+                font.setBold(true);
+                levelItem->setFont(font);
+            }
+            auto *categoryItem = new QTableWidgetItem(entry.category);
+            auto *messageItem = new QTableWidgetItem(entry.message);
+            messageItem->setToolTip(entry.message);
+            messagesTable_->setItem(row, 0, timeItem);
+            messagesTable_->setItem(row, 1, levelItem);
+            messagesTable_->setItem(row, 2, categoryItem);
+            messagesTable_->setItem(row, 3, messageItem);
+        }
+    }
+    constexpr std::size_t limit = 5000;
+    while (messageEntries_.size() > limit) {
+        const auto &oldest = messageEntries_.front();
+        if (messagePassesFilters(oldest.category, oldest.level) && messagesTable_->rowCount() > 0)
+            messagesTable_->removeRow(0);
+        messageEntries_.pop_front();
+    }
+    if (atBottom)
+        messagesTable_->scrollToBottom();
+    if (messagesCount_) {
+        const auto shown = messagesTable_->rowCount();
+        const auto total = static_cast<int>(messageEntries_.size());
+        messagesCount_->setText(shown == total ? QStringLiteral("%1 messages").arg(total)
+                                               : QStringLiteral("%1 / %2 messages").arg(shown).arg(total));
+    }
+}
+
+void ActivityPanel::rebuildMessageView() {
+    if (!messagesTable_)
+        return;
+    messagesTable_->setRowCount(0);
+    for (const auto &entry : messageEntries_) {
+        if (!messagePassesFilters(entry.category, entry.level))
+            continue;
+        const int row = messagesTable_->rowCount();
+        messagesTable_->insertRow(row);
+        auto *timeItem = new QTableWidgetItem(entry.time);
+        auto *levelItem = new QTableWidgetItem(messageLevelName(entry.level));
+        levelItem->setForeground(QBrush(messageLevelColor(entry.level)));
+        if (entry.level >= static_cast<int>(spdlog::level::err)) {
+            auto font = levelItem->font();
+            font.setBold(true);
+            levelItem->setFont(font);
+        }
+        auto *categoryItem = new QTableWidgetItem(entry.category);
+        auto *messageItem = new QTableWidgetItem(entry.message);
+        messageItem->setToolTip(entry.message);
+        messagesTable_->setItem(row, 0, timeItem);
+        messagesTable_->setItem(row, 1, levelItem);
+        messagesTable_->setItem(row, 2, categoryItem);
+        messagesTable_->setItem(row, 3, messageItem);
+    }
+    messagesTable_->scrollToBottom();
+    if (messagesCount_) {
+        const auto shown = messagesTable_->rowCount();
+        const auto total = static_cast<int>(messageEntries_.size());
+        messagesCount_->setText(shown == total ? QStringLiteral("%1 messages").arg(total)
+                                               : QStringLiteral("%1 / %2 messages").arg(shown).arg(total));
+    }
+}
+
+void ActivityPanel::appendMessage(const QString &message) {
+    if (auto logger = spdlog::get(ice::logging::application))
+        logger->info("{}", message.toStdString());
+    else
+        spdlog::info("{}", message.toStdString());
 }
 
 void ActivityPanel::showMessagesTab() {

@@ -4,6 +4,7 @@
 #include "icelib/interchange.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
+#include "icons.hpp"
 #include "layout_canvas.hpp"
 #include "layout_render.hpp"
 #include "text_document_editor.hpp"
@@ -50,6 +51,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStandardPaths>
 #include <QSvgRenderer>
 #include <QTabBar>
@@ -165,6 +167,47 @@ QString runStatusColor(ice::ImplementationStatus status) {
     }
     return QStringLiteral("#4b5563");
 }
+
+namespace {
+
+QString stageSummaryText(const ice::ImplementationRun *run, ice::ImplementationStage stage) {
+    if (!run)
+        return {};
+    const auto metric = [&](const char *name) -> std::optional<double> {
+        const auto found = run->metrics.find(name);
+        return found == run->metrics.end() ? std::nullopt : std::optional<double>(found->second);
+    };
+    QStringList parts;
+    if (const auto instances = metric("design__instance__count"))
+        parts << QStringLiteral("%1 instances").arg(static_cast<qulonglong>(std::max(0.0, *instances)));
+    if (stage == ice::ImplementationStage::floorplan) {
+        if (const auto die = metric("design__die__area"))
+            parts << QStringLiteral("die %1 µm²").arg(*die, 0, 'f', 0);
+        if (const auto core = metric("design__core__area"))
+            parts << QStringLiteral("core %1 µm²").arg(*core, 0, 'f', 0);
+    } else if (stage == ice::ImplementationStage::placement || stage == ice::ImplementationStage::cts) {
+        if (const auto wns = metric("timing__setup__ws")) {
+            if (std::abs(*wns) > 1.0e20)
+                parts << QStringLiteral("timing unconstrained");
+            else
+                parts << QStringLiteral("setup WNS %1 ns").arg(*wns * 1.0e9, 0, 'f', 3);
+        }
+    } else if (stage == ice::ImplementationStage::routing) {
+        if (const auto drc = metric("route__drc_errors"))
+            parts << QStringLiteral("%1 DRC").arg(static_cast<qulonglong>(std::max(0.0, *drc)));
+        if (const auto wirelength = metric("route__wirelength"))
+            parts << QStringLiteral("%1 µm wirelength").arg(*wirelength, 0, 'f', 0);
+        if (const auto vias = metric("route__vias"))
+            parts << QStringLiteral("%1 vias").arg(static_cast<qulonglong>(std::max(0.0, *vias)));
+        if (const auto antenna = metric("antenna__violating__nets"))
+            parts << QStringLiteral("%1 antenna nets").arg(static_cast<qulonglong>(std::max(0.0, *antenna)));
+    }
+    if (parts.isEmpty())
+        return {};
+    return QStringLiteral("%1 succeeded · %2").arg(stageTitle(stage), parts.join(QStringLiteral(" · ")));
+}
+
+} // namespace
 
 std::string stageDefPath(ice::ImplementationStage stage) {
     switch (stage) {
@@ -1174,8 +1217,8 @@ void ImplementationUiController::finishRun(int exitCode, int exitStatus) {
 }
 
 ImplementationPage::ImplementationPage(ice::ImplementationStage stage, ImplementationUiController *controller,
-                                       QWidget *parent)
-    : QWidget(parent), stage_(stage), controller_(controller) {
+                                       QWidget *parent, bool embedded)
+    : QWidget(parent), stage_(stage), controller_(controller), embedded_(embedded) {
     buildUi();
     refresh();
 }
@@ -1271,36 +1314,80 @@ void ImplementationPage::buildUi() {
             netlistList_ = new QListWidget;
             netlistList_->setAlternatingRowColors(true);
             netlistList_->setToolTip(QStringLiteral("Technology-mapped netlists exported from Synthesis runs"));
-            leftTabs_->addTab(netlistList_, QStringLiteral("Netlists"));
         }
         runTree_ = new QTreeWidget;
         runTree_->setHeaderLabels({QStringLiteral("Run / Stage"), QStringLiteral("Status")});
         runTree_->setRootIsDecorated(true);
         runTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
         runTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        QWidget *runsPage = nullptr;
         if (physicalStageMode()) {
-            auto *runsPage = new QWidget;
+            runsPage = new QWidget;
             auto *runsLayout = new QVBoxLayout(runsPage);
-            runsLayout->setContentsMargins(0, 0, 0, 0);
+            runsLayout->setContentsMargins(4, 4, 4, 4);
             runsLayout->setSpacing(4);
+            if (embedded_) {
+                auto *runRow = new QHBoxLayout;
+                runRow->setSpacing(3);
+                runCombo_ = new QComboBox;
+                runCombo_->setMinimumContentsLength(8);
+                runCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                runCombo_->setToolTip(QStringLiteral("Active implementation run"));
+                runCombo_->setAccessibleName(QStringLiteral("Active implementation run"));
+                runRow->addWidget(runCombo_, 1);
+
+                const auto addIconButton = [&](const QString &icon, const QString &tooltip) {
+                    auto *button = new QPushButton;
+                    button->setFlat(true);
+                    button->setFixedSize(22, 22);
+                    button->setToolTip(tooltip);
+                    button->setAccessibleName(tooltip);
+                    setLucideIcon(button, icon, 12);
+                    runRow->addWidget(button);
+                    return button;
+                };
+                runStageButton_ = addIconButton(QStringLiteral("play"), QStringLiteral("Run selected stage"));
+                runFromHereButton_ =
+                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run from this stage through routing"));
+                runAllButton_ =
+                    addIconButton(QStringLiteral("grid-3x3"), QStringLiteral("Run floorplan through routing"));
+                cancelStageButton_ = addIconButton(QStringLiteral("x"), QStringLiteral("Cancel the active process"));
+                cancelStageButton_->setEnabled(false);
+                runsLayout->addLayout(runRow);
+
+                stageHintLabel_ = new QLabel;
+                stageHintLabel_->setObjectName(QStringLiteral("physicalStageHint"));
+                stageHintLabel_->setWordWrap(true);
+                stageHintLabel_->setContentsMargins(1, 0, 1, 2);
+                auto hintFont = stageHintLabel_->font();
+                hintFont.setPointSizeF(std::max(7.0, hintFont.pointSizeF() - 1.0));
+                stageHintLabel_->setFont(hintFont);
+                runsLayout->addWidget(stageHintLabel_);
+            }
             runsLayout->addWidget(runTree_, 1);
-            auto *runActions = new QHBoxLayout;
-            runActions->setSpacing(4);
-            const auto runLabel =
-                stage_ == ice::ImplementationStage::cts ? QStringLiteral("CTS") : stageTitle(stage_).toLower();
-            runStageButton_ = new QPushButton(QStringLiteral("Run %1").arg(runLabel));
-            cancelStageButton_ = new QPushButton(QStringLiteral("Cancel"));
-            cancelStageButton_->setEnabled(false);
-            runActions->addWidget(runStageButton_, 1);
-            runActions->addWidget(cancelStageButton_);
-            runsLayout->addLayout(runActions);
+            if (!embedded_) {
+                auto *runActions = new QHBoxLayout;
+                runActions->setSpacing(4);
+                const auto runLabel =
+                    stage_ == ice::ImplementationStage::cts ? QStringLiteral("CTS") : stageTitle(stage_).toLower();
+                runStageButton_ = new QPushButton(QStringLiteral("Run %1").arg(runLabel));
+                cancelStageButton_ = new QPushButton(QStringLiteral("Cancel"));
+                cancelStageButton_->setEnabled(false);
+                runActions->addWidget(runStageButton_, 1);
+                runActions->addWidget(cancelStageButton_);
+                runsLayout->addLayout(runActions);
+            }
             leftTabs_->addTab(runsPage, QStringLiteral("Runs"));
         } else {
             leftTabs_->addTab(runTree_, QStringLiteral("Runs"));
         }
+        if (netlistList_)
+            leftTabs_->addTab(netlistList_, QStringLiteral("Netlists"));
         artifactsList_ = new QListWidget;
         leftTabs_->addTab(artifactsList_, QStringLiteral("Artifacts"));
-        if (netlistList_)
+        if (runsPage && embedded_)
+            leftTabs_->setCurrentWidget(runsPage);
+        else if (netlistList_)
             leftTabs_->setCurrentWidget(netlistList_);
     }
     contentLayout->addWidget(leftTabs_, 0);
@@ -1468,8 +1555,12 @@ void ImplementationPage::buildUi() {
         rightTabs_->addTab(propertiesTree_, QStringLiteral("Properties"));
         metricsTable_ = new QTableWidget(0, 2);
         metricsTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
-        metricsTable_->horizontalHeader()->setStretchLastSection(true);
-        metricsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        metricsTable_->horizontalHeader()->setStretchLastSection(false);
+        metricsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        metricsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        metricsTable_->verticalHeader()->setVisible(false);
+        metricsTable_->setAlternatingRowColors(true);
+        metricsTable_->setWordWrap(false);
         metricsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
         rightTabs_->addTab(metricsTable_, QStringLiteral("Metrics"));
         if (physicalStageMode()) {
@@ -1561,7 +1652,9 @@ void ImplementationPage::buildUi() {
             applyStageButton_ = new QPushButton(QStringLiteral("Apply %1 settings").arg(stageTitle(stage_)));
             outer->addWidget(applyStageButton_);
             outer->addStretch(1);
-            rightTabs_->addTab(formPage, stageTitle(stage_));
+            const auto settingsIndex = rightTabs_->addTab(formPage, stageTitle(stage_));
+            rightTabs_->tabBar()->moveTab(settingsIndex, 0);
+            rightTabs_->setCurrentIndex(0);
         }
     }
     contentLayout->addWidget(rightTabs_, 0);
@@ -1691,9 +1784,12 @@ void ImplementationPage::buildUi() {
                              if (!item)
                                  return;
                              const auto value = item->data(0, Qt::UserRole);
+                             const auto stageValue = item->data(0, Qt::UserRole + 1);
                              if (!value.isValid())
                                  return;
                              controller_->setActiveRunId(static_cast<ice::ObjectId>(value.toULongLong()));
+                             if (stageValue.isValid() && stageActivatedCallback_)
+                                 stageActivatedCallback_(static_cast<ice::ImplementationStage>(stageValue.toInt()));
                          });
         if (netlistList_) {
             QObject::connect(netlistList_, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
@@ -1718,6 +1814,29 @@ void ImplementationPage::buildUi() {
                 controller_->run(stage_, stage_);
             });
         }
+        if (runFromHereButton_) {
+            QObject::connect(runFromHereButton_, &QPushButton::clicked, this, [this] {
+                if (!controller_->activeRun() || controller_->busy())
+                    return;
+                controller_->run(stage_, ice::ImplementationStage::routing);
+            });
+        }
+        if (runAllButton_) {
+            QObject::connect(runAllButton_, &QPushButton::clicked, this, [this] {
+                if (!controller_->activeRun() || controller_->busy())
+                    return;
+                controller_->run(ice::ImplementationStage::floorplan, ice::ImplementationStage::routing);
+            });
+        }
+        if (runCombo_) {
+            QObject::connect(runCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+                if (!runCombo_)
+                    return;
+                const auto id = static_cast<ice::ObjectId>(runCombo_->currentData().toULongLong());
+                if (id != 0)
+                    controller_->setActiveRunId(id);
+            });
+        }
         if (cancelStageButton_) {
             QObject::connect(cancelStageButton_, &QPushButton::clicked, this, [this] { controller_->cancel(); });
         }
@@ -1728,11 +1847,16 @@ void ImplementationPage::buildUi() {
 }
 
 void ImplementationPage::refreshRunTree() {
+    refreshRunCombo();
     QSignalBlocker blocker(runTree_);
     runTree_->clear();
     const auto *project = controller_->project();
     if (!project)
         return;
+    const auto isPhysicalStage = [](ice::ImplementationStage stage) {
+        return stage == ice::ImplementationStage::floorplan || stage == ice::ImplementationStage::placement ||
+               stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing;
+    };
     QTreeWidgetItem *activeItem = nullptr;
     for (const auto &[id, run] : project->implementationRuns) {
         auto *item = new QTreeWidgetItem(runTree_);
@@ -1744,6 +1868,8 @@ void ImplementationPage::refreshRunTree() {
                                 .arg(QString::fromStdString(run.config.top), QString::fromStdString(run.config.pdk),
                                      QString::fromStdString(run.config.stack), QString::fromStdString(run.directory)));
         for (const auto stage : ice::implementationStages()) {
+            if (physicalStageMode() && !isPhysicalStage(stage))
+                continue;
             const auto state = run.stages.find(stage);
             if (state == run.stages.end())
                 continue;
@@ -1762,6 +1888,33 @@ void ImplementationPage::refreshRunTree() {
     }
     if (activeItem)
         runTree_->setCurrentItem(activeItem);
+}
+
+void ImplementationPage::refreshRunCombo() {
+    if (!runCombo_)
+        return;
+    QSignalBlocker blocker(runCombo_);
+    runCombo_->clear();
+    const auto *project = controller_->project();
+    if (!project) {
+        runCombo_->addItem(QStringLiteral("No project"));
+        runCombo_->setEnabled(false);
+        return;
+    }
+    int activeIndex = -1;
+    for (const auto &[id, run] : project->implementationRuns) {
+        runCombo_->addItem(QString::fromStdString(run.name) + QStringLiteral("  ·  ") + runStatusText(run.status),
+                           static_cast<qulonglong>(id));
+        if (id == controller_->activeRunId())
+            activeIndex = runCombo_->count() - 1;
+    }
+    if (runCombo_->count() == 0) {
+        runCombo_->addItem(QStringLiteral("No implementation runs"));
+        runCombo_->setEnabled(false);
+        return;
+    }
+    runCombo_->setEnabled(true);
+    runCombo_->setCurrentIndex(activeIndex >= 0 ? activeIndex : 0);
 }
 
 void ImplementationPage::refreshNetlistExplorer() {
@@ -1930,14 +2083,57 @@ void ImplementationPage::updateStageActions() {
                                                    : QStringLiteral("Run placement first."));
         }
     }
+    stageReady_ = run && ready;
+    stageHint_ = hint;
+    const bool flowReady =
+        run && (status(ice::ImplementationStage::floorplan) == ice::ImplementationStageStatus::succeeded ||
+                (stage_ == ice::ImplementationStage::floorplan && ready));
     if (runStageButton_) {
         runStageButton_->setEnabled(run && !busy && ready);
         runStageButton_->setToolTip(hint);
+    }
+    if (runFromHereButton_) {
+        runFromHereButton_->setEnabled(run && !busy && ready);
+        runFromHereButton_->setToolTip(QStringLiteral("Run %1 through routing.").arg(stageTitle(stage_)));
+    }
+    if (runAllButton_) {
+        runAllButton_->setEnabled(!busy && flowReady);
+        runAllButton_->setToolTip(QStringLiteral("Run floorplan through routing."));
     }
     if (cancelStageButton_)
         cancelStageButton_->setEnabled(busy);
     if (applyStageButton_)
         applyStageButton_->setEnabled(run && !busy);
+    if (stageHintLabel_) {
+        if (busy) {
+            stageHintLabel_->setText(QStringLiteral("Running %1…").arg(stageTitle(controller_->runningStage())));
+            stageHintLabel_->setStyleSheet(QStringLiteral("color: #2563eb;"));
+        } else if (!run) {
+            stageHintLabel_->setText(hint);
+            stageHintLabel_->setStyleSheet({});
+        } else {
+            const auto state = run->stages.find(stage_);
+            const auto statusValue =
+                state == run->stages.end() ? ice::ImplementationStageStatus::pending : state->second.status;
+            if (statusValue == ice::ImplementationStageStatus::failed) {
+                const auto message = state != run->stages.end() && !state->second.error.empty()
+                                         ? QStringLiteral("%1 failed: %2")
+                                               .arg(stageTitle(stage_), QString::fromStdString(state->second.error))
+                                         : QStringLiteral("%1 failed. Check the Activity log.").arg(stageTitle(stage_));
+                stageHintLabel_->setText(message);
+                stageHintLabel_->setStyleSheet(QStringLiteral("color: #b91c1c;"));
+            } else if (statusValue == ice::ImplementationStageStatus::succeeded) {
+                const auto summary = stageSummaryText(run, stage_);
+                stageHintLabel_->setText(summary.isEmpty() ? QStringLiteral("%1 succeeded.").arg(stageTitle(stage_))
+                                                           : summary);
+                stageHintLabel_->setStyleSheet(QStringLiteral("color: #15803d;"));
+            } else {
+                stageHintLabel_->setText(hint);
+                stageHintLabel_->setStyleSheet(ready ? QStringLiteral("color: #15803d;")
+                                                     : QStringLiteral("color: #a16207;"));
+            }
+        }
+    }
 }
 
 void ImplementationPage::applyStageForm() {
@@ -2859,7 +3055,9 @@ void ImplementationPage::refreshMetrics() {
     for (const auto &[name, value] : run->metrics) {
         metricsTable_->insertRow(row);
         metricsTable_->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(name)));
-        metricsTable_->setItem(row, 1, new QTableWidgetItem(QString::number(value, 'g', 12)));
+        auto *valueItem = new QTableWidgetItem(QString::number(value, 'g', 12));
+        valueItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        metricsTable_->setItem(row, 1, valueItem);
         ++row;
     }
 }
@@ -2954,4 +3152,59 @@ void ImplementationPage::refreshPreview() {
     auto preview = controller_->stagePreview(stage_);
     previewCanvas_->setPreview(preview.project, preview.cell, preview.message, preview.model,
                                preview.project ? preview.project.get() : controller_->project());
+}
+
+PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent) : QWidget(parent) {
+    stages_ = {ice::ImplementationStage::floorplan, ice::ImplementationStage::placement, ice::ImplementationStage::cts,
+               ice::ImplementationStage::routing};
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    stageStack_ = new QStackedWidget;
+    for (const auto stage : stages_) {
+        auto *page = new ImplementationPage(stage, controller, stageStack_, true);
+        page->setStageActivatedCallback([this](ice::ImplementationStage activated) { setCurrentStage(activated); });
+        pages_.push_back(page);
+        stageStack_->addWidget(page);
+    }
+    layout->addWidget(stageStack_, 1);
+    stageStack_->setCurrentIndex(0);
+}
+
+void PhysicalDesignPage::setCurrentStage(ice::ImplementationStage stage) {
+    const auto index = stageIndex(stage);
+    if (index < 0 || !stageStack_)
+        return;
+    stageStack_->setCurrentIndex(index);
+}
+
+ice::ImplementationStage PhysicalDesignPage::currentStage() const {
+    return stageAt(stageStack_ ? stageStack_->currentIndex() : 0);
+}
+
+std::vector<ImplementationPage *> PhysicalDesignPage::pages() const { return pages_; }
+
+ImplementationPage *PhysicalDesignPage::pageForStage(ice::ImplementationStage stage) const {
+    const auto index = stageIndex(stage);
+    return index >= 0 && index < static_cast<int>(pages_.size()) ? pages_[index] : nullptr;
+}
+
+void PhysicalDesignPage::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    if (auto *page = pageForStage(currentStage()))
+        page->refresh();
+}
+
+int PhysicalDesignPage::stageIndex(ice::ImplementationStage stage) const {
+    for (int index = 0; index < static_cast<int>(stages_.size()); ++index) {
+        if (stages_[index] == stage)
+            return index;
+    }
+    return -1;
+}
+
+ice::ImplementationStage PhysicalDesignPage::stageAt(int index) const {
+    if (index < 0 || index >= static_cast<int>(stages_.size()))
+        return ice::ImplementationStage::floorplan;
+    return stages_[index];
 }

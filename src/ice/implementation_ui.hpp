@@ -19,11 +19,14 @@ class QListWidget;
 class QComboBox;
 class QCheckBox;
 class QDoubleSpinBox;
+class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QSpinBox;
+class QStackedWidget;
+class QTabBar;
 class QTabWidget;
 class QTableWidget;
 class QTreeWidget;
@@ -122,9 +125,11 @@ class ImplementationUiController {
 class ImplementationPage : public QWidget {
   public:
     ImplementationPage(ice::ImplementationStage stage, ImplementationUiController *controller,
-                       QWidget *parent = nullptr);
+                       QWidget *parent = nullptr, bool embedded = false);
 
     ice::ImplementationStage stage() const noexcept { return stage_; }
+    bool stageReady() const noexcept { return stageReady_; }
+    const QString &stageHint() const noexcept { return stageHint_; }
     void refresh();
     void setCreateHdlBlockCallback(std::function<void()> callback) { createHdlBlockCallback_ = std::move(callback); }
     void setDeleteHdlBlockCallback(std::function<void(ice::ObjectId)> callback) {
@@ -143,6 +148,9 @@ class ImplementationPage : public QWidget {
     void setApplyConfigCallback(std::function<void(ice::ObjectId, const ice::ImplementationConfig &)> callback) {
         applyConfigCallback_ = std::move(callback);
     }
+    void setStageActivatedCallback(std::function<void(ice::ImplementationStage)> callback) {
+        stageActivatedCallback_ = std::move(callback);
+    }
     void selectHdlCell(ice::ObjectId id);
 
   protected:
@@ -151,6 +159,7 @@ class ImplementationPage : public QWidget {
   private:
     void buildUi();
     void refreshRunTree();
+    void refreshRunCombo();
     void refreshNetlistExplorer();
     void refreshExplorer();
     void applyHdlFilter(const QString &text);
@@ -189,6 +198,9 @@ class ImplementationPage : public QWidget {
 
     ice::ImplementationStage stage_;
     ImplementationUiController *controller_ = nullptr;
+    bool embedded_ = false;
+    bool stageReady_ = false;
+    QString stageHint_;
     QTabWidget *leftTabs_ = nullptr;
     QTreeWidget *runTree_ = nullptr;
     QListWidget *netlistList_ = nullptr;
@@ -241,6 +253,10 @@ class ImplementationPage : public QWidget {
     QPushButton *applyStageButton_ = nullptr;
     QPushButton *runStageButton_ = nullptr;
     QPushButton *cancelStageButton_ = nullptr;
+    QPushButton *runFromHereButton_ = nullptr;
+    QPushButton *runAllButton_ = nullptr;
+    QComboBox *runCombo_ = nullptr;
+    QLabel *stageHintLabel_ = nullptr;
     QComboBox *heatMapCombo_ = nullptr;
     ImplementationPreviewCanvas *previewCanvas_ = nullptr;
     std::map<std::string, QWidget *> artifactTabs_;
@@ -252,4 +268,28 @@ class ImplementationPage : public QWidget {
     std::function<void(ice::ObjectId)> exportVerilogCallback_;
     std::function<void(ice::ObjectId)> removeRunCallback_;
     std::function<void(ice::ObjectId, const ice::ImplementationConfig &)> applyConfigCallback_;
+    std::function<void(ice::ImplementationStage)> stageActivatedCallback_;
+};
+
+// One top-level workspace that hosts the four physical stages. Stage
+// selection lives in each pane's Runs tree; the page itself only swaps panes.
+class PhysicalDesignPage : public QWidget {
+  public:
+    explicit PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent = nullptr);
+
+    void setCurrentStage(ice::ImplementationStage stage);
+    ice::ImplementationStage currentStage() const;
+    std::vector<ImplementationPage *> pages() const;
+    ImplementationPage *pageForStage(ice::ImplementationStage stage) const;
+
+  protected:
+    void showEvent(QShowEvent *event) override;
+
+  private:
+    int stageIndex(ice::ImplementationStage stage) const;
+    ice::ImplementationStage stageAt(int index) const;
+
+    QStackedWidget *stageStack_ = nullptr;
+    std::vector<ImplementationPage *> pages_;
+    std::vector<ice::ImplementationStage> stages_;
 };
