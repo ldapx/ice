@@ -35,7 +35,9 @@ ready; `all_pdks_ready` means every installed PDK is ready. Passing a project
 makes `doctor` fail when a PDK used by the project is not simulation-ready.
 `--probe` additionally runs a minimal transistor load check.
 `pdk-info` returns the recommended `.lib` line, sections, OSDI and
-package/OpenVAF status; its `--probe` flag runs the same check. `doctor` exits with status `1`
+package/OpenVAF status, plus implementation readiness (`implementation_ready`,
+`implementation_engine`, `implementation_stack`, `implementation_missing`);
+its `--probe` flag runs the same simulation check. `doctor` exits with status `1`
 when `ok` is false, so scripts and agents can fail fast on a broken PDK setup.
 
 ## Schematic
@@ -162,6 +164,92 @@ converts matching TEXT records into pins. `layout-import-lef` and
 `layout-import-def` create a new project from a macro or design's pins and
 nets.
 
+## Implementation runs
+
+`implementation-*` commands manage RTL-to-GDS runs. A run stores its configured
+top module, PDK, stack, RTL sources, constraints, and physical policy in
+`impl/*.iceimpl`; generated configuration and stage scripts are written under
+`build/impl/<run>/`.
+
+```sh
+ice-cli implementation-create <project> <name> --top <module> --pdk <pdk> \
+  [--stack <stack>] [--source <file>]... [--source-cell <cell>]... \
+  [--sdc <file>] [--std-cell-lib <name>] [--corner <corner>] \
+  [--utilization <value>] [--aspect-ratio <value>] \
+  [--placement-density <value>] [--threads <n>] [--backend <name>]
+ice-cli implementation-list <project>
+ice-cli implementation-status <project> <run>
+ice-cli implementation-prepare <project> <run>
+ice-cli implementation-run <project> <run> [--from <stage>] [--to <stage>] [--timeout <seconds>] [--verbose]
+ice-cli implementation-map <project> <run> [--output <path>] [--verbose]
+ice-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]
+ice-cli implementation-cancel <project> <run>
+ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]
+ice-cli implementation-toolchain
+ice-cli implementation-delete <project> <run>
+```
+
+`implementation-create` resolves the package default stack when `--stack` is
+omitted. `--source-cell` refers to an existing SystemVerilog source cell in the
+project; `--source` refers to an external Verilog/SystemVerilog file.
+`implementation-prepare` resolves the package's implementation platform, copies
+the RTL and SDC inputs into the run directory, and generates:
+
+- `scripts/00-synth.ys` for Yosys synthesis;
+- `scripts/01-techmap.ys` for technology mapping (`implementation-map`);
+- `scripts/01-floorplan.tcl`;
+- `scripts/02-place.tcl`;
+- `scripts/03-cts.tcl`;
+- `scripts/04-route.tcl`;
+- `scripts/05-final.tcl`.
+
+`implementation-run` executes those scripts through the cancellable process
+runner. When the C++ backend is available (`ice-openroad` next to `ice-cli` or
+set through `ICE_OPENROAD_HELPER`), the OpenROAD physical stages use the
+OpenROAD C++ APIs instead of generated Tcl. Set `ICE_OPENROAD_BACKEND=tcl` to
+force the legacy backend or `ICE_OPENROAD_BACKEND=cpp` to require the C++
+backend. The same helper provides read-only ODB tooling (`ice-openroad
+odb-info`, `ice-openroad odb-preview`) and native heat-map CSV export
+(`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). Build
+and install it with `xmake openroad-sdk` or
+`scripts/build-ice-openroad.sh --sdk-install <prefix>`; see
+`openroad_sdk/README.md`. Yosys synthesis is technology-independent and writes
+the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform
+standard cells with `dfflibmap`/`abc`, writes `synth/2_tech_map.v`, records
+`logs/01-techmap.log` and `scripts/01-techmap.ys`, and copies the result to
+`--output` when provided. Floorplan consumes `synth/2_tech_map.v`, so a run must
+be mapped before starting the physical stages. Re-running synthesis deletes the
+stale mapped netlist. When Graphviz (`dot`) is available, Yosys also writes
+`reports/elaboration.svg` and `reports/synthesis.svg`. Each stage records
+start/finish timestamps, status, merged log, artifact paths, and OpenROAD
+`-metrics` JSON. Yosys statistics are stored as
+`synth.cells`, `synth.wires`, `synth.chip_area_um2`, and related keys. A failed stage
+keeps the preceding ODB checkpoint intact, and rerunning from a stage resets
+only that stage and the stages after it.
+
+`--from` defaults to `synthesis`, `--to` defaults to `final`, and `--timeout`
+sets the per-stage timeout. HDL runs may start at `elaboration`; when Graphviz
+is available that stage writes `reports/elaboration.svg`. Ctrl-C cancels the
+child process group and records the stage as cancelled. From another terminal, `implementation-cancel` reads the
+PID recorded under `build/impl/<run>/run.pid` and sends SIGTERM after checking
+that the process is OpenROAD or Yosys.
+
+`implementation-log` prints the bounded merged log for one stage; `--tail` keeps
+only the last N lines. `implementation-import` reads the newest available DEF
+checkpoint (`6_final.def` down to `2_floorplan.def`), creates package-mapped
+layers, top-level pins and nets, standard-cell instances, and routed paths, and
+stores the new layout id on the run. `--replace` reuses the previously imported
+layout instead of creating another cell.
+
+`implementation-toolchain` reports the resolved `openroad`, `yosys`, and
+`klayout` executables. Set `ICE_OPENROAD`, `ICE_YOSYS`, or `ICE_KLAYOUT` to
+override discovery.
+
+When a package declares `[pdk.implementation.orfs]`, ICE resolves missing LEF,
+Liberty, site, IO-layer, routing, and OpenRCX rule defaults from
+`OPENROAD_FLOW_SCRIPTS`/`ICE_OPENROAD_FLOW_SCRIPTS`. The helper falls back to
+`$HOME/repositories/OpenROAD-flow-scripts` for local development.
+
 ## Verification
 
 ```sh
@@ -172,8 +260,8 @@ ice-cli pex <project> <layout> [schematic-name]
 
 `project-repair` loads a project with recovery enabled: malformed sidecar files
 are moved under `build/recovery/`, the valid cells are kept, and the project is
-saved again. Use it when a hand-edited or partially written `sch/`, `lay/`, or
-`sim/` file prevents normal loading. Strict load errors now include the exact
+saved again. Use it when a hand-edited or partially written `sch/`, `lay/`,
+`impl/`, or `sim/` file prevents normal loading. Strict load errors now include the exact
 repair/recovery hint instead of requiring the user to guess.
 
 `ice-mcp --project <path> --recover` provides the same recovery at MCP startup.

@@ -2,6 +2,8 @@
 #include "app_widgets.hpp"
 #include "icelib/core.hpp"
 #include "icelib/drc.hpp"
+#include "icelib/hdl.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
 #include "icelib/operations.hpp"
@@ -26,6 +28,7 @@
 #include "appearance.hpp"
 #include "file_labels.hpp"
 #include "icons.hpp"
+#include "implementation_ui.hpp"
 #include "package_ui.hpp"
 #include "procedural_layout.hpp"
 #include "simulation_plot.hpp"
@@ -113,6 +116,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -1229,6 +1233,15 @@ class DocumentWindow : public QMainWindow {
         });
     }
 
+    ~DocumentWindow() override {
+        if (implementationController_) {
+            if (implementationController_->busy())
+                implementationController_->cancel();
+            delete implementationController_;
+            implementationController_ = nullptr;
+        }
+    }
+
     static bool directoryHasSymbols(const std::filesystem::path &directory) {
         std::error_code status;
         if (!std::filesystem::is_directory(directory, status) || status)
@@ -1399,8 +1412,9 @@ class DocumentWindow : public QMainWindow {
         // known sets so the first refresh does not treat every existing file
         // as newly-created and open it automatically.
         if (project_) {
-            for (const auto &[id, _] : project_->project().schematicCells)
-                knownSchematicCells_.insert(id);
+            for (const auto &[id, cell] : project_->project().schematicCells)
+                if (!cell.systemVerilogSchematic)
+                    knownSchematicCells_.insert(id);
             for (const auto &[id, _] : project_->project().layoutCells)
                 knownLayoutCells_.insert(id);
             for (const auto &[id, _] : project_->project().proceduralLayouts)
@@ -1411,7 +1425,6 @@ class DocumentWindow : public QMainWindow {
             layoutSelectTool_->setChecked(true);
         if (layoutCanvas_)
             layoutCanvas_->setTool(LayoutCanvas::Tool::select);
-        projectPath_.clear();
         schematicSymbolsLoaded_ = false;
         schematicSymbolsPdk_.clear();
         if (schematicNetlistPanel_)
@@ -1427,6 +1440,8 @@ class DocumentWindow : public QMainWindow {
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
         statusBar_->setProjectName(QString::fromStdString(project_->project().name));
         statusBar()->showMessage(QStringLiteral("Project loaded"));
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
         showWorkspace();
         return true;
     }
@@ -1435,6 +1450,8 @@ class DocumentWindow : public QMainWindow {
         if (path.isEmpty()) {
             projectPath_.clear();
             clearProjectWatcher();
+            if (implementationController_)
+                implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
             return;
         }
         const QFileInfo info(path);
@@ -1442,6 +1459,8 @@ class DocumentWindow : public QMainWindow {
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
         configureProjectWatcher();
+        if (implementationController_)
+            implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
     }
 
   private:
@@ -1556,6 +1575,8 @@ class DocumentWindow : public QMainWindow {
         if (!setProject(std::move(project)))
             return;
         projectPath_ = QString::fromStdString(projectFile.string());
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
         if (activityPanel_)
             activityPanel_->setProjectPath(QString::fromStdString(root.string()));
         configureProjectWatcher();
@@ -1581,6 +1602,8 @@ class DocumentWindow : public QMainWindow {
             if (!setProject(std::move(project)))
                 return;
             projectPath_ = projectPath;
+            if (implementationController_)
+                implementationController_->setProject(&project_->project(), projectPath_);
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
             configureProjectWatcher();
@@ -2339,6 +2362,8 @@ class DocumentWindow : public QMainWindow {
         loadedCachedRunPath_.clear();
         lastSchematicPlacementDevice_.reset();
         project_.reset();
+        if (implementationController_)
+            implementationController_->setProject(nullptr, QString());
         savedSchematicSignatures_.clear();
         savedLayoutSignatures_.clear();
         savedProceduralSignatures_.clear();
@@ -2482,15 +2507,11 @@ class DocumentWindow : public QMainWindow {
         setLucideIcon(schematicAction, QStringLiteral("microchip"));
         auto *textAction = menu.addAction(QStringLiteral("Text SPICE Schematic"));
         setLucideIcon(textAction, QStringLiteral("notebook-text"));
-        auto *svBlockAction = menu.addAction(QStringLiteral("SystemVerilog Block"));
-        setLucideIcon(svBlockAction, QStringLiteral("notebook-text"));
         const auto *chosen = menu.exec(QCursor::pos());
         if (chosen == schematicAction)
             createSchematic();
         else if (chosen == textAction)
             createTextSchematic();
-        else if (chosen == svBlockAction)
-            createSystemVerilogBlock();
     }
 
     static QString systemVerilogIdentifier(QString text) {
@@ -2545,30 +2566,206 @@ class DocumentWindow : public QMainWindow {
             .arg(name, module);
     }
 
-    void createSystemVerilogBlock() {
+    std::string uniqueHdlRunName(const std::string &base) const {
+        if (!project_)
+            return base;
+        const auto taken = [&](const std::string &candidate) {
+            for (const auto &[_, run] : project_->project().implementationRuns) {
+                if (run.name == candidate)
+                    return true;
+            }
+            return false;
+        };
+        if (!taken(base))
+            return base;
+        for (int index = 2;; ++index) {
+            const auto candidate = base + " " + std::to_string(index);
+            if (!taken(candidate))
+                return candidate;
+        }
+    }
+
+    std::string hdlTopName(const ice::SchematicCell &cell) const {
+        const auto parsed = ice::parseSystemVerilogModule(cell);
+        return parsed.ok ? parsed.module.name : cell.name;
+    }
+
+    void elaborateHdlDesign(ice::ObjectId sourceCell, const std::string &pdk) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto cell = project_->project().schematicCells.find(sourceCell);
+        if (cell == project_->project().schematicCells.end() || !cell->second.systemVerilogSchematic) {
+            QMessageBox::information(this, QStringLiteral("Elaborate Design"),
+                                     QStringLiteral("Select a SystemVerilog source file first."));
+            return;
+        }
+        ice::ImplementationConfig config;
+        config.name = uniqueHdlRunName(cell->second.name + " run");
+        config.top = hdlTopName(cell->second);
+        config.pdk = pdk;
+        config.sourceCells = {sourceCell};
+        config.threads = 2;
+        ice::ObjectId runId = 0;
+        try {
+            project_->execute("create HDL run", [&](ice::Project &project) {
+                runId = ice::createImplementationRun(project, config);
+                auto &run = project.implementationRuns.at(runId);
+                run.currentStage = ice::ImplementationStage::elaboration;
+                run.status = ice::ImplementationStatus::running;
+                run.stages[ice::ImplementationStage::elaboration].status = ice::ImplementationStageStatus::running;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Elaborate Design"), QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Created HDL run " + config.name);
+        refreshProject();
+        implementationController_->setActiveRunId(runId);
+        implementationController_->run(ice::ImplementationStage::elaboration, ice::ImplementationStage::elaboration);
+        statusBar()->showMessage(QStringLiteral("Elaborating %1 with %2")
+                                     .arg(QString::fromStdString(cell->second.name), QString::fromStdString(pdk)));
+    }
+
+    void synthesizeHdlRun(ice::ObjectId runId, const std::string &pdk) {
+        if (!project_)
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        const bool pdkChanged = found->second.config.pdk != pdk;
+        try {
+            project_->execute("configure HDL synthesis", [&](ice::Project &project) {
+                auto &run = project.implementationRuns.at(runId);
+                run.config.pdk = pdk;
+                if (pdkChanged)
+                    run.config.stack.clear();
+                run.currentStage = ice::ImplementationStage::synthesis;
+                run.status = ice::ImplementationStatus::running;
+                run.stages[ice::ImplementationStage::synthesis].status = ice::ImplementationStageStatus::running;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Synthesize Design"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        implementationController_->setActiveRunId(runId);
+        implementationController_->run(pdkChanged ? ice::ImplementationStage::elaboration
+                                                  : ice::ImplementationStage::synthesis,
+                                       ice::ImplementationStage::synthesis);
+        const auto name = project_->project().implementationRuns.at(runId).name;
+        statusBar()->showMessage(
+            QStringLiteral("Synthesizing %1 with %2").arg(QString::fromStdString(name), QString::fromStdString(pdk)));
+    }
+
+    void exportTechMappedVerilog(ice::ObjectId runId) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        const auto synthesis = found->second.stages.find(ice::ImplementationStage::synthesis);
+        if (synthesis == found->second.stages.end() ||
+            synthesis->second.status != ice::ImplementationStageStatus::succeeded) {
+            QMessageBox::information(this, QStringLiteral("Export Verilog"),
+                                     QStringLiteral("Run Synthesize before exporting a technology-mapped netlist."));
+            return;
+        }
+        if (implementationController_ && implementationController_->busy())
+            return;
+        implementationController_->setActiveRunId(runId);
+        implementationController_->exportMapped(runId, QString());
+        statusBar()->showMessage(
+            QStringLiteral("Technology mapping %1…").arg(QString::fromStdString(found->second.name)));
+    }
+
+    void applyStageConfig(ice::ObjectId runId, const ice::ImplementationConfig &config,
+                          ice::ImplementationStage stage) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto diagnostics = ice::validateImplementationConfig(project_->project(), config);
+        const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+            return diagnostic.severity == ice::Diagnostic::Severity::error;
+        });
+        if (fatal != diagnostics.end()) {
+            QMessageBox::warning(this, QStringLiteral("Stage Settings"), QString::fromStdString(fatal->message));
+            return;
+        }
+        try {
+            project_->execute("update stage settings", [&](ice::Project &project) {
+                auto &run = project.implementationRuns.at(runId);
+                ice::updateImplementationConfig(run, config, stage);
+            });
+            project_->save(projectPath_.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Stage Settings"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Stage settings updated; downstream checkpoints were invalidated."),
+                                 10000);
+    }
+
+    void removeHdlRun(ice::ObjectId runId) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        if (implementationController_ && implementationController_->busy())
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        const auto name = found->second.name;
+        const auto directory = found->second.directory;
+        if (QMessageBox::question(this, QStringLiteral("Remove Run"),
+                                  QStringLiteral("Remove the run \"%1\" and delete its build directory?")
+                                      .arg(QString::fromStdString(name)),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        try {
+            project_->execute("remove implementation run",
+                              [&](ice::Project &project) { ice::removeImplementationRun(project, runId); });
+            project_->save(projectPath_.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Remove Run"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (!directory.empty()) {
+            std::error_code status;
+            const auto root = std::filesystem::path(projectPath_.toStdString()).parent_path();
+            const auto target = (root / directory).lexically_normal();
+            const auto buildImpl = (root / "build" / "impl").lexically_normal();
+            if (target.generic_string().starts_with(buildImpl.generic_string() + "/"))
+                std::filesystem::remove_all(target, status);
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Removed run %1").arg(QString::fromStdString(name)));
+    }
+
+    ice::ObjectId createSystemVerilogBlock(bool openInSchematicTab = true) {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Create SystemVerilog Block"),
                                      QStringLiteral("Create or open a project first."));
-            return;
+            return 0;
         }
-        const auto installDirectory = configuredPackageInstallDirectory();
-        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName() + QStringLiteral(" Block"), this);
-        dialog.setWindowTitle(QStringLiteral("Create SystemVerilog Block"));
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        createSystemVerilogCell(dialog.schematicName(), dialog.pdkId(), false);
+        bool accepted = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Create SystemVerilog Block"), QStringLiteral("Block name:"),
+                                  QLineEdit::Normal, nextSchematicDefaultName() + QStringLiteral(" Block"), &accepted);
+        if (!accepted || name.trimmed().isEmpty())
+            return 0;
+        return createSystemVerilogCell(name, ice::genericPdkId, false, openInSchematicTab);
     }
 
-    void createSystemVerilogCell(const QString &name, const std::string &pdk, bool testbench) {
+    ice::ObjectId createSystemVerilogCell(const QString &name, const std::string &pdk, bool testbench,
+                                          bool openInSchematicTab = true) {
         if (!project_)
-            return;
+            return 0;
         const auto trimmedName = name.trimmed();
         if (trimmedName.isEmpty())
-            return;
+            return 0;
         QString pdkLabel;
         bool addDependency = false;
         if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
-            return;
+            return 0;
         ice::ObjectId createdId = 0;
         try {
             project_->execute("create SystemVerilog cell", [&](ice::Project &project) {
@@ -2578,18 +2775,21 @@ class DocumentWindow : public QMainWindow {
                                                          systemVerilogTemplate(trimmedName, testbench).toStdString());
             });
             project_->setLastHistoryLabel("Created SystemVerilog cell " + trimmedName.toStdString());
-            activeSchematicId_ = createdId;
-            refreshProject();
-            selectSchematicTab(createdId);
-            if (documents_ && schematicPage_)
-                documents_->setCurrentWidget(schematicPage_);
+            if (openInSchematicTab) {
+                refreshProject();
+                openHdlSchematic(createdId);
+            } else {
+                refreshProject();
+            }
             statusBar()->showMessage(
                 QStringLiteral("SystemVerilog %1 created with %2")
                     .arg(testbench ? QStringLiteral("testbench") : QStringLiteral("block"), pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create SystemVerilog Cell"),
                                   QString::fromStdString(error.what()));
+            return 0;
         }
+        return createdId;
     }
 
     void createTextSchematic() {
@@ -2925,9 +3125,33 @@ class DocumentWindow : public QMainWindow {
         updateEmptyWorkspaceState();
     }
 
+    ImplementationPage *hdlSchematicPage() const {
+        for (auto *page : implementationPages_) {
+            if (page->stage() == ice::ImplementationStage::created)
+                return page;
+        }
+        return nullptr;
+    }
+
+    void openHdlSchematic(ice::ObjectId id) {
+        auto *page = hdlSchematicPage();
+        if (!page)
+            return;
+        page->selectHdlCell(id);
+        if (documents_)
+            documents_->setCurrentWidget(page);
+    }
+
     void selectSchematicTab(ice::ObjectId id) {
         if (!schematicCellTabs_)
             return;
+        if (project_) {
+            const auto cell = project_->project().schematicCells.find(id);
+            if (cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic) {
+                openHdlSchematic(id);
+                return;
+            }
+        }
         if (project_ && project_->project().schematicCells.contains(id) && !openSchematicTabs_.contains(id)) {
             openSchematicTabs_.insert(id);
             knownSchematicCells_.insert(id);
@@ -8928,6 +9152,8 @@ class DocumentWindow : public QMainWindow {
         refreshLayout();
         updateHistoryPanels();
         updateSimulationNetlistState();
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
     }
 
     struct SectionHistoryEntry {
@@ -9133,7 +9359,9 @@ class DocumentWindow : public QMainWindow {
         }
         std::set<ice::ObjectId> schematicIds;
         ice::ObjectId newlyDiscoveredSchematic = 0;
-        for (const auto &[id, _] : project_->project().schematicCells) {
+        for (const auto &[id, cell] : project_->project().schematicCells) {
+            if (cell.systemVerilogSchematic)
+                continue;
             schematicIds.insert(id);
             if (knownSchematicCells_.insert(id).second) {
                 openSchematicTabs_.insert(id);
@@ -9228,6 +9456,10 @@ class DocumentWindow : public QMainWindow {
     void openSchematicFile(ice::ObjectId id) {
         if (!project_ || !project_->project().schematicCells.contains(id))
             return;
+        if (project_->project().schematicCells.at(id).systemVerilogSchematic) {
+            openHdlSchematic(id);
+            return;
+        }
         openSchematicTabs_.insert(id);
         knownSchematicCells_.insert(id);
         refreshEmbeddedPanels();
@@ -9270,7 +9502,7 @@ class DocumentWindow : public QMainWindow {
             const auto selected = activeSchematicId_;
             schematicCellTabs_->clear();
             for (const auto &[id, cell] : project.schematicCells) {
-                if (!openSchematicTabs_.contains(id))
+                if (!openSchematicTabs_.contains(id) || cell.systemVerilogSchematic)
                     continue;
                 const int tab = schematicCellTabs_->count();
                 schematicCellTabs_->addTab(
@@ -9457,53 +9689,52 @@ class DocumentWindow : public QMainWindow {
             return std::nullopt;
         const auto last = text.find_last_not_of(" \t\r\n");
         const auto trimmed = text.substr(first, last - first + 1);
-        try {
-            std::size_t consumed = 0;
-            const auto value = std::stod(trimmed, &consumed);
-            while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
-                ++consumed;
-            double scale = 1.0;
-            if (consumed < trimmed.size()) {
-                switch (trimmed[consumed]) {
-                case 'f':
-                    scale = 1.0e-15;
-                    break;
-                case 'p':
-                    scale = 1.0e-12;
-                    break;
-                case 'n':
-                    scale = 1.0e-9;
-                    break;
-                case 'u':
-                    scale = 1.0e-6;
-                    break;
-                case 'm':
-                    scale = 1.0e-3;
-                    break;
-                case 'k':
-                    scale = 1.0e3;
-                    break;
-                case 'M':
-                    scale = 1.0e6;
-                    break;
-                case 'G':
-                    scale = 1.0e9;
-                    break;
-                default:
-                    return std::nullopt;
-                }
-                ++consumed;
-                while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
-                    ++consumed;
-                if (consumed != trimmed.size())
-                    return std::nullopt;
-            }
-            if (!std::isfinite(value))
-                return std::nullopt;
-            return value * scale;
-        } catch (const std::exception &) {
+        double value = 0.0;
+        const auto parsed = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr == trimmed.data())
             return std::nullopt;
+        std::size_t consumed = static_cast<std::size_t>(parsed.ptr - trimmed.data());
+        while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
+            ++consumed;
+        double scale = 1.0;
+        if (consumed < trimmed.size()) {
+            switch (trimmed[consumed]) {
+            case 'f':
+                scale = 1.0e-15;
+                break;
+            case 'p':
+                scale = 1.0e-12;
+                break;
+            case 'n':
+                scale = 1.0e-9;
+                break;
+            case 'u':
+                scale = 1.0e-6;
+                break;
+            case 'm':
+                scale = 1.0e-3;
+                break;
+            case 'k':
+                scale = 1.0e3;
+                break;
+            case 'M':
+                scale = 1.0e6;
+                break;
+            case 'G':
+                scale = 1.0e9;
+                break;
+            default:
+                return std::nullopt;
+            }
+            ++consumed;
+            while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
+                ++consumed;
+            if (consumed != trimmed.size())
+                return std::nullopt;
         }
+        if (!std::isfinite(value))
+            return std::nullopt;
+        return value * scale;
     }
 
     static QString formatQuantityValue(double value) {
@@ -9626,11 +9857,22 @@ class DocumentWindow : public QMainWindow {
             schematicSymbolsPdk_.clear();
             return;
         }
+        const auto firstDrawable = [&]() {
+            return std::find_if(project_->project().schematicCells.begin(), project_->project().schematicCells.end(),
+                                [](const auto &entry) { return !entry.second.systemVerilogSchematic; });
+        };
         auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
-        if (cellIt == project_->project().schematicCells.end())
-            cellIt = project_->project().schematicCells.begin();
-        if (cellIt == project_->project().schematicCells.end())
+        if (cellIt == project_->project().schematicCells.end() || cellIt->second.systemVerilogSchematic)
+            cellIt = firstDrawable();
+        if (cellIt == project_->project().schematicCells.end()) {
+            if (schematicSymbolsPanel_)
+                schematicSymbolsPanel_->clear();
+            if (schematicNetlistPanel_)
+                schematicNetlistPanel_->clear();
+            schematicSymbolsLoaded_ = false;
+            schematicSymbolsPdk_.clear();
             return;
+        }
         const auto &cell = cellIt->second;
         if (cell.isTextSource()) {
             if (schematicViewStack_ && textSchematicEditorPage_)
@@ -10759,10 +11001,13 @@ class DocumentWindow : public QMainWindow {
             } else {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
                 if (project_) {
-                    for (const auto &[id, cell] : project_->project().schematicCells)
+                    for (const auto &[id, cell] : project_->project().schematicCells) {
+                        if (cell.systemVerilogSchematic)
+                            continue;
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
                                                                  schematicFileExtension(cell), schematicFileDirty(id),
                                                                  conflictedSchematicFiles_.contains(id)));
+                    }
                 }
                 schematicEmptyPanel_->setOpenCandidates(candidates);
                 schematicEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
@@ -10800,6 +11045,7 @@ class DocumentWindow : public QMainWindow {
         documents_ = new QTabWidget;
         auto *documents = documents_;
         documents->setTabsClosable(false);
+        documents->setIconSize(QSize(16, 16));
         auto *schematicPage = new QWidget;
         schematicPage_ = schematicPage;
         auto *schematicLayout = new QVBoxLayout(schematicPage);
@@ -10811,6 +11057,7 @@ class DocumentWindow : public QMainWindow {
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
         schematicHierarchy_ = new ProjectPanel(false, false, false, true);
+        schematicHierarchy_->setHideSystemVerilog(true);
         schematicHierarchy_->setOnAddClicked([this] { showAddSchematicMenu(); });
         schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
         schematicHierarchy_->setOnMakeLayoutFromSchematic([this](ice::ObjectId id) { makeLayoutFromSchematic(id); });
@@ -10896,7 +11143,8 @@ class DocumentWindow : public QMainWindow {
         schematicProperties->addTab(schematicHistoryPanel_, QStringLiteral("History"));
         schematicContentLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
-        documents->addTab(schematicPage, QStringLiteral("Schematic"));
+        const auto schematicTab = documents->addTab(schematicPage, QStringLiteral("A/MS Schematic"));
+        documents->setTabIcon(schematicTab, ice::tabIcon(QStringLiteral("ams-schematic"), 16));
 
         auto *layoutPage = new QWidget;
         layoutPage_ = layoutPage;
@@ -11113,7 +11361,8 @@ class DocumentWindow : public QMainWindow {
         layoutRightTabs->addTab(layoutHistoryPanel_, QStringLiteral("History"));
         layoutContentLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);
-        documents->addTab(layoutPage, QStringLiteral("Layout"));
+        const auto layoutTab = documents->addTab(layoutPage, QStringLiteral("Layout"));
+        documents->setTabIcon(layoutTab, ice::tabIcon(QStringLiteral("layout"), 16));
 
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setOnDeviceSelected([this](const ice::LayoutDeviceCell *cell) {
@@ -11486,7 +11735,152 @@ class DocumentWindow : public QMainWindow {
         });
 
         connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
-        documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+        const auto simulationTab = documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+        documents->setTabIcon(simulationTab, ice::tabIcon(QStringLiteral("simulation"), 16));
+
+        implementationController_ = new ImplementationUiController(this);
+        implementationController_->addLogListener([this](ice::ImplementationStage, const QString &text) {
+            const auto line = text.trimmed();
+            if (!line.isEmpty() && activityPanel_)
+                activityPanel_->appendMessage(line);
+        });
+        implementationController_->setOnChanged([this] {
+            if (implementationController_ && implementationController_->busy())
+                suppressProjectWatcher_ = true;
+            for (auto *page : implementationPages_)
+                page->refresh();
+        });
+        implementationController_->setOnHdlTextEdited([this](ice::ObjectId id, const std::string &text) {
+            if (!project_)
+                return;
+            auto &cells = project_->project().schematicCells;
+            const auto cell = cells.find(id);
+            if (cell == cells.end() || !cell->second.systemVerilogSchematic)
+                return;
+            if (cell->second.systemVerilogText == text)
+                return;
+            cell->second.systemVerilogText = text;
+            project_->markDirty();
+            updateFileTabDirtyIndicators();
+        });
+        implementationController_->setOnProjectChanged([this] {
+            suppressProjectWatcher_ = false;
+            if (project_ && !projectPath_.isEmpty())
+                reloadProjectFromDisk(false);
+            else if (implementationController_)
+                implementationController_->refresh();
+        });
+        implementationController_->setOnRunFinished([this](int exitCode) {
+            if (exitCode != 0)
+                statusBar()->showMessage(
+                    QStringLiteral("Implementation command failed (exit code %1). See the Activity log.").arg(exitCode),
+                    10000);
+            if (exitCode == 0 || !project_ || projectPath_.isEmpty())
+                return;
+            const auto runId = implementationController_->activeRunId();
+            auto found = project_->project().implementationRuns.find(runId);
+            if (found == project_->project().implementationRuns.end() ||
+                found->second.status != ice::ImplementationStatus::running)
+                return;
+            project_->execute("mark implementation run failed", [&](ice::Project &project) {
+                auto &run = project.implementationRuns.at(runId);
+                run.status = ice::ImplementationStatus::failed;
+                run.lastError = "ice-cli exited with code " + std::to_string(exitCode);
+                auto &stage = run.stages[run.currentStage];
+                if (stage.status == ice::ImplementationStageStatus::running) {
+                    stage.status = ice::ImplementationStageStatus::failed;
+                    stage.error = run.lastError;
+                    stage.finishedAt = run.updatedAt;
+                }
+            });
+            try {
+                project_->save(projectPath_.toStdString());
+            } catch (const ice::ProjectError &) {
+            }
+            refreshProject();
+        });
+        implementationController_->setBeforeRun([this] {
+            if (!project_ || projectPath_.isEmpty())
+                return false;
+            try {
+                project_->save(projectPath_.toStdString());
+                captureSavedFileBaselines();
+                projectDiskChangePending_ = false;
+                suppressProjectWatcher_ = true;
+                return true;
+            } catch (const ice::ProjectError &error) {
+                QMessageBox::warning(this, QStringLiteral("Implementation"),
+                                     QStringLiteral("Unable to save the project before running: %1")
+                                         .arg(QString::fromStdString(error.what())));
+                return false;
+            }
+        });
+        const std::pair<ice::ImplementationStage, const char *> implementationTabs[] = {
+            {ice::ImplementationStage::created, "HDL Schematic"},
+            {ice::ImplementationStage::synthesis, "Synthesis"},
+            {ice::ImplementationStage::floorplan, "Floorplan"},
+            {ice::ImplementationStage::placement, "Placement"},
+            {ice::ImplementationStage::cts, "CTS"},
+            {ice::ImplementationStage::routing, "Routing"},
+        };
+        int implementationIndex = 1;
+        for (const auto &[stage, label] : implementationTabs) {
+            auto *page = new ImplementationPage(stage, implementationController_);
+            if (stage == ice::ImplementationStage::created) {
+                page->setCreateHdlBlockCallback([this, page] {
+                    const auto id = createSystemVerilogBlock(false);
+                    if (id != 0)
+                        page->selectHdlCell(id);
+                });
+                page->setDeleteHdlBlockCallback([this](ice::ObjectId id) { removeSchematic(id); });
+            }
+            if (stage == ice::ImplementationStage::synthesis) {
+                page->setElaborateDesignCallback(
+                    [this](ice::ObjectId id, const std::string &pdk) { elaborateHdlDesign(id, pdk); });
+                page->setSynthesizeRunCallback(
+                    [this](ice::ObjectId id, const std::string &pdk) { synthesizeHdlRun(id, pdk); });
+                page->setExportVerilogCallback([this](ice::ObjectId id) { exportTechMappedVerilog(id); });
+                page->setRemoveRunCallback([this](ice::ObjectId id) { removeHdlRun(id); });
+            }
+            if (stage == ice::ImplementationStage::floorplan || stage == ice::ImplementationStage::placement ||
+                stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing) {
+                const auto pageStage = stage;
+                page->setApplyConfigCallback(
+                    [this, pageStage](ice::ObjectId id, const ice::ImplementationConfig &config) {
+                        applyStageConfig(id, config, pageStage);
+                    });
+            }
+            implementationPages_.push_back(page);
+            const auto tab = documents->insertTab(implementationIndex++, page, QString::fromLatin1(label));
+            const char *iconName = "hdl-schematic";
+            switch (stage) {
+            case ice::ImplementationStage::created:
+                iconName = "hdl-schematic";
+                break;
+            case ice::ImplementationStage::elaboration:
+                iconName = "synthesis";
+                break;
+            case ice::ImplementationStage::synthesis:
+                iconName = "synthesis";
+                break;
+            case ice::ImplementationStage::floorplan:
+                iconName = "floorplan";
+                break;
+            case ice::ImplementationStage::placement:
+                iconName = "placement";
+                break;
+            case ice::ImplementationStage::cts:
+                iconName = "cts";
+                break;
+            case ice::ImplementationStage::routing:
+                iconName = "routing";
+                break;
+            case ice::ImplementationStage::final:
+                iconName = "layout";
+                break;
+            }
+            documents->setTabIcon(tab, ice::tabIcon(QString::fromLatin1(iconName), 16));
+        }
 
         auto *reportsView = new QWidget;
         reportsView_ = reportsView;
@@ -12776,6 +13170,8 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId drcLayoutId_ = 0;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
+    ImplementationUiController *implementationController_ = nullptr;
+    std::vector<ImplementationPage *> implementationPages_;
     QWidget *layoutPage_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;

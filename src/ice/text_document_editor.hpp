@@ -16,7 +16,9 @@ class TextDocumentEditor : public QWidget {
 
     void setText(const QString &text);
     QString text() const;
+    void setReadOnly(bool readOnly);
     void setLanguage(TextDocumentLanguage language);
+    void goToLine(int line);
     void refreshSyntaxColors();
     void setOnTextEdited(std::function<void(const QString &)> callback);
 

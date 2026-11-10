@@ -1,6 +1,7 @@
 #include "icelib/agent_api.hpp"
 #include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
@@ -702,6 +703,46 @@ std::string resolveLayoutStack(const std::string &pdk, const std::string &reques
     if (!package.pdk)
         return requested;
     return ice::resolvePdkStack(*package.pdk, requested);
+}
+
+std::optional<ice::PackageSpec> implementationPackageForPdk(const std::string &pdk) {
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return std::nullopt;
+    const auto pdks = ice::findPdks(pdk);
+    if (pdks.empty())
+        return std::nullopt;
+    return ice::PackageManager::readManifest(pdks.front().packageRoot);
+}
+
+ice::ObjectId resolveImplementationRun(const ice::Project &project, const json &value) {
+    return lookupByIdOrName(project.implementationRuns, value, "implementation run");
+}
+
+json implementationRunSummaryJson(const ice::ImplementationRun &run) {
+    return {{"id", run.id},
+            {"name", run.name},
+            {"top", run.config.top},
+            {"pdk", run.config.pdk},
+            {"stack", run.config.stack},
+            {"backend", run.config.backend},
+            {"status", ice::implementationStatusName(run.status)},
+            {"current_stage", ice::implementationStageName(run.currentStage)},
+            {"directory", run.directory},
+            {"config_hash", run.configHash},
+            {"result_layout", run.resultLayout}};
+}
+
+ice::ImplementationStage implementationStageArgument(const json &arguments, const char *key,
+                                                     ice::ImplementationStage fallback) {
+    const auto it = arguments.find(key);
+    if (it == arguments.end() || it->is_null())
+        return fallback;
+    if (!it->is_string())
+        throw ToolError(std::string("Argument must be a stage string: ") + key);
+    const auto parsed = ice::parseImplementationStage(it->get<std::string>());
+    if (!parsed || *parsed == ice::ImplementationStage::created)
+        throw ToolError(std::string("Invalid implementation stage for ") + key);
+    return *parsed;
 }
 
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
@@ -2994,6 +3035,185 @@ class IceMcpServer {
             return json::parse(ice::serializeLvsReport(report));
         }
 
+        if (name == "implementation_create") {
+            ice::ImplementationConfig config;
+            config.name = requiredString(arguments, "name");
+            config.top = optionalString(arguments, "top", config.name);
+            config.pdk = requiredString(arguments, "pdk");
+            config.stack = optionalString(arguments, "stack");
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            const auto sourcesValue = arguments.find("sources");
+            if (sourcesValue != arguments.end() && !sourcesValue->is_null()) {
+                if (!sourcesValue->is_array())
+                    throw ToolError("Argument 'sources' must be an array of paths.");
+                for (const auto &source : *sourcesValue)
+                    config.sources.emplace_back(source.get<std::string>());
+            }
+            const auto sourceCellsValue = arguments.find("source_cells");
+            if (sourceCellsValue != arguments.end() && !sourceCellsValue->is_null()) {
+                if (!sourceCellsValue->is_array())
+                    throw ToolError("Argument 'source_cells' must be an array.");
+                for (const auto &sourceCell : *sourceCellsValue)
+                    config.sourceCells.push_back(
+                        lookupByIdOrName(session.project().schematicCells, sourceCell, "schematic"));
+            }
+            config.sdc = optionalString(arguments, "sdc");
+            config.corner = optionalString(arguments, "corner", "tt");
+            config.standardCellLibrary = optionalString(arguments, "standard_cell_library");
+            config.utilization = arguments.value("utilization", config.utilization);
+            config.aspectRatio = arguments.value("aspect_ratio", config.aspectRatio);
+            config.placementDensity = arguments.value("placement_density", config.placementDensity);
+            config.threads = static_cast<int>(optionalInteger(arguments, "threads").value_or(config.threads));
+            config.backend = optionalString(arguments, "backend", config.backend);
+            config.ctsEnabled = optionalBoolean(arguments, "cts_enabled", config.ctsEnabled);
+            config.timeoutSeconds =
+                static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(config.timeoutSeconds));
+            ice::ObjectId id = 0;
+            session.execute("mcp implementation-create",
+                            [&](ice::Project &project) { id = ice::createImplementationRun(project, config); });
+            return implementationRunSummaryJson(session.project().implementationRuns.at(id));
+        }
+        if (name == "implementation_list") {
+            json runs = json::array();
+            for (const auto &[_, run] : session.project().implementationRuns)
+                runs.push_back(implementationRunSummaryJson(run));
+            return {{"runs", std::move(runs)}};
+        }
+        if (name == "implementation_status") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            return ice::implementationRunJson(session.project().implementationRuns.at(runId));
+        }
+        if (name == "implementation_run") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            auto &run = session.project().implementationRuns.at(runId);
+            const auto package = implementationPackageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ToolError("No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> platformDiagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, platformDiagnostics);
+            for (const auto &diagnostic : platformDiagnostics) {
+                if (diagnostic.severity == ice::Diagnostic::Severity::error)
+                    throw ToolError(diagnostic.message);
+            }
+            if (const auto timeout = optionalInteger(arguments, "timeout_seconds"); timeout && *timeout > 0)
+                run.config.timeoutSeconds = static_cast<int>(*timeout);
+            ice::ImplementationExecutionOptions options;
+            options.from = implementationStageArgument(arguments, "from", ice::ImplementationStage::synthesis);
+            options.to = implementationStageArgument(arguments, "to", ice::ImplementationStage::final);
+            json progress = json::array();
+            options.progress = [&](const ice::ImplementationProgress &event) {
+                progress.push_back({{"stage", ice::implementationStageName(event.stage)},
+                                    {"status", ice::implementationStageStatusName(event.status)},
+                                    {"message", event.message}});
+            };
+            options.changed = [&](const ice::ImplementationRun &) {
+                try {
+                    session.save(projectPath_);
+                } catch (const ice::ProjectError &) {
+                    // The final save below reports persistent write failures.
+                }
+            };
+            const auto result =
+                ice::executeImplementationRun(session.project(), run, platform, projectRootPath(), options);
+            session.markDirty();
+            json diagnostics = json::array();
+            for (const auto &diagnostic : result.diagnostics)
+                diagnostics.push_back(
+                    {{"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                     {"code", diagnostic.code},
+                     {"message", diagnostic.message}});
+            return {{"success", result.success},
+                    {"cancelled", result.cancelled},
+                    {"completed_stage", result.completedStage == ice::ImplementationStage::created
+                                            ? json(nullptr)
+                                            : json(ice::implementationStageName(result.completedStage))},
+                    {"progress", std::move(progress)},
+                    {"diagnostics", std::move(diagnostics)},
+                    {"run", ice::implementationRunJson(session.project().implementationRuns.at(runId))}};
+        }
+        if (name == "implementation_log") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &run = session.project().implementationRuns.at(runId);
+            auto stage = run.currentStage == ice::ImplementationStage::created ? ice::ImplementationStage::final
+                                                                               : run.currentStage;
+            if (const auto value = arguments.find("stage"); value != arguments.end() && !value->is_null()) {
+                const auto parsed = ice::parseImplementationStage(value->get<std::string>());
+                if (!parsed || *parsed == ice::ImplementationStage::created)
+                    throw ToolError("Invalid implementation stage.");
+                stage = *parsed;
+            }
+            const auto maximumBytes = optionalInteger(arguments, "max_bytes").value_or(1024 * 1024);
+            auto text =
+                ice::readImplementationLog(run, projectRootPath(), stage, static_cast<std::size_t>(maximumBytes));
+            std::size_t maximumLines = 0;
+            if (const auto tail = optionalInteger(arguments, "tail"); tail && *tail > 0)
+                maximumLines = static_cast<std::size_t>(*tail);
+            std::vector<std::string> lines;
+            std::istringstream stream(text);
+            std::string line;
+            while (std::getline(stream, line))
+                lines.push_back(line);
+            if (maximumLines > 0 && lines.size() > maximumLines)
+                lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maximumLines));
+            std::ostringstream output;
+            for (const auto &entry : lines)
+                output << entry << "\n";
+            return {
+                {"stage", ice::implementationStageName(stage)},
+                {"path",
+                 (projectRootPath() / run.directory / ice::implementationStageLogRelativePath(stage)).generic_string()},
+                {"lines", lines.size()},
+                {"text", output.str()}};
+        }
+        if (name == "implementation_cancel") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            std::string error;
+            if (!ice::cancelImplementationRun(session.project().implementationRuns.at(runId), projectRootPath(), error))
+                throw ToolError(error);
+            return {{"run", runId}, {"cancelled", true}};
+        }
+        if (name == "implementation_import_layout") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &currentRun = session.project().implementationRuns.at(runId);
+            const auto package = implementationPackageForPdk(currentRun.config.pdk);
+            if (!package || !package->pdk)
+                throw ToolError("No installed PDK package provides '" + currentRun.config.pdk + "'");
+            const auto layoutName = optionalString(arguments, "layout_name");
+            const bool replace = optionalBoolean(arguments, "replace", false);
+            ice::ObjectId layoutId = 0;
+            std::vector<ice::Diagnostic> diagnostics;
+            session.execute("mcp implementation-import-layout", [&](ice::Project &project) {
+                auto found = project.implementationRuns.find(runId);
+                if (found == project.implementationRuns.end())
+                    return;
+                auto imported = ice::importImplementationLayout(project, found->second, *package, projectRootPath(),
+                                                                layoutName, replace);
+                layoutId = imported.layout;
+                diagnostics = std::move(imported.diagnostics);
+            });
+            if (layoutId == 0) {
+                std::string message = "Unable to import the implementation layout.";
+                for (const auto &diagnostic : diagnostics) {
+                    if (diagnostic.severity == ice::Diagnostic::Severity::error) {
+                        message = diagnostic.message;
+                        break;
+                    }
+                }
+                throw ToolError(message);
+            }
+            const auto &layout = session.project().layoutCells.at(layoutId);
+            return {{"layout", layoutId},
+                    {"name", layout.name},
+                    {"pdk", layout.pdk},
+                    {"stack", layout.stack},
+                    {"shapes", layout.shapes.size()},
+                    {"ports", layout.ports.size()},
+                    {"nets", layout.nets.size()},
+                    {"instances", layout.instances.size()},
+                    {"run", ice::implementationRunJson(session.project().implementationRuns.at(runId))}};
+        }
+
         throw ToolError("Unknown tool: " + name);
     }
 
@@ -3478,6 +3698,49 @@ class IceMcpServer {
             R"("points":{"type":"array","items":{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2},)"
             R"("minItems":3}},"required":["cell","layer","points"]})";
         tools.push_back(std::move(polygon));
+
+        tools.push_back(customTool(
+            "implementation_create", "Create an RTL-to-GDS implementation run for a PDK and stack.",
+            R"({"type":"object","properties":{)"
+            R"("name":{"type":"string"},"top":{"type":"string"},"pdk":{"type":"string"},"stack":{"type":"string"},)"
+            R"("sources":{"type":"array","items":{"type":"string"}},)"
+            R"("source_cells":{"type":"array","items":{}},)"
+            R"("sdc":{"type":"string"},"corner":{"type":"string"},)"
+            R"("standard_cell_library":{"type":"string"},"utilization":{"type":"number"},)"
+            R"("aspect_ratio":{"type":"number"},"placement_density":{"type":"number"},)"
+            R"("threads":{"type":"integer"},"backend":{"type":"string"},"cts_enabled":{"type":"boolean"},)"
+            R"("timeout_seconds":{"type":"integer"}},"required":["name","pdk"]})"));
+        tools.push_back(tool_builder("implementation_list")
+                            .with_description("List RTL-to-GDS implementation runs and stage status.")
+                            .build());
+        tools.push_back(tool_builder("implementation_status")
+                            .with_description("Return stage states, metrics, artifacts, and tool versions for a run.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .build());
+        tools.push_back(tool_builder("implementation_run")
+                            .with_description("Execute Yosys/OpenROAD stages synchronously and return the run state.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_string_param("from", "First stage (default synthesis)", false)
+                            .with_string_param("to", "Last stage (default final)", false)
+                            .with_integer_param("timeout_seconds", "Optional per-stage timeout override", false)
+                            .build());
+        tools.push_back(tool_builder("implementation_log")
+                            .with_description("Return the bounded process log for an implementation stage.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_string_param("stage", "Optional stage name; defaults to the run current stage", false)
+                            .with_integer_param("tail", "Optional maximum number of trailing lines", false)
+                            .with_integer_param("max_bytes", "Optional log byte limit (default 1 MiB)", false)
+                            .build());
+        tools.push_back(tool_builder("implementation_cancel")
+                            .with_description("Cancel the OpenROAD/Yosys process recorded for a run.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .build());
+        tools.push_back(tool_builder("implementation_import_layout")
+                            .with_description("Import the newest implementation DEF as an ICE layout cell.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_string_param("layout_name", "Optional imported layout name", false)
+                            .with_boolean_param("replace", "Replace the layout previously produced by this run", false)
+                            .build());
         return tools;
     }
 

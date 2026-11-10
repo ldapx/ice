@@ -68,9 +68,10 @@ The GUI should support:
 
 Creating a project asks for a project name, a project folder, and whether to
 create a folder named after the project. The project root is initialized with
-`project.icepro`, `sch/`, `lay/`, `sim/`, `scripts/`, `build/`, `.gitignore`,
-and `AGENTS.md`. Schematics, layouts, and simulations are stored as individual
-JSON files with `.icesch`, `.icelay`, and `.icesim` extensions.
+`project.icepro`, `sch/`, `lay/`, `impl/`, `sim/`, `scripts/`, `build/`,
+`.gitignore`, and `AGENTS.md`. Schematics, layouts, implementation runs, and
+simulations are stored as individual JSON files with `.icesch`, `.icelay`,
+`.iceimpl`, and `.icesim` extensions.
 
 Project state, view state, and transient job state should be separate:
 
@@ -91,13 +92,126 @@ form to open an existing file or create a new one. Opening a project starts with
 no schematic or layout file tabs open; open files from the hierarchy or the
 empty workspace form.
 
-The GUI watches `project.icepro` and the `sch/`, `lay/`, and `sim/` directories.
+The GUI watches `project.icepro` and the `sch/`, `lay/`, `impl/`, and `sim/` directories.
 External changes to an open file are reflected immediately when that file has no
 unsaved GUI edits. If the same file has unsaved edits, its tab shows a warning
 and saving asks whether to preserve the local or external version for each
 conflicting file. Clean files are merged from disk even while another file has
 local edits. **File → Reload Project from Disk** reloads explicitly after
 confirmation.
+
+## RTL-to-GDS phase tabs
+
+RTL-to-GDS is part of the main document tab strip, not a separate workspace:
+
+```text
+A/MS Schematic | HDL Schematic | Synthesis | Floorplan | Placement | CTS | Routing | Layout | Simulation
+```
+
+Each top-level document tab has a custom SVG icon. Analog/mixed-signal
+workspaces (`A/MS Schematic`, `Layout`, `Simulation`) use red icons; digital
+workspaces (`HDL Schematic`, `Synthesis`, `Floorplan`, `Placement`, `CTS`,
+`Routing`) use blue icons.
+
+The six implementation tabs are global views over one selected implementation
+run. Selecting a run or stage in the left `Runs` tree changes the active run, so
+multiple runs do not multiply the top-level tab count. Execution remains
+available through `ice-cli implementation-run`, MCP, and `icepy`, and its output
+is reported in the bottom Messages dock.
+
+Each page uses the same three-column shell as Schematic and Layout:
+
+- **Left:** `Runs` tree with every implementation run and stage status, plus an
+  `Artifacts` list for the current stage. Floorplan also has a `Netlists`
+  explorer listing technology-mapped `.v` files. The HDL Schematic page uses an
+  `Explorer` list of `.sv` files instead.
+- **Middle:** a read-only canvas. Floorplan, Placement, CTS, and Routing load
+  their stage ODB through the `ice-openroad` reader, with the legacy DEF import
+  as a fallback; an **Overlay** selector shows embedded placement-density or
+  routing-density maps and **Export CSV** writes native OpenROAD heat maps.
+  Synthesis shows Yosys elaboration and synthesized netlist graphs. The HDL
+  Schematic page uses a SystemVerilog text editor instead.
+- **Right:** `Properties`, `Metrics`, and `Settings` tabs for the active run and
+  stage.
+
+The HDL Schematic page shows the project's `.sv` files in the left `Explorer`,
+with a search field and icon buttons to create (`+`) or delete the selected file.
+Selecting a file opens or activates it in a closable middle tab with its own
+SystemVerilog editor. The right column has `Outline` and `IP/Libraries` tabs.
+`Outline` lists modules, ports, parameters, always blocks, assignments, and
+functions/tasks with click-to-line navigation. `IP/Libraries` lists project
+packages, installed PDK packages, and reusable HDL modules. **New HDL Block**
+creates a new `.sv` entry with a starter module template. SystemVerilog block
+creation lives there, not in the A/MS Schematic tab.
+
+The Synthesis page uses an HDL file Explorer with an **Elaborate design** action
+next to its search bar. Below that Explorer, a `Runs` tab contains a search bar,
+a `Run`/`Stage` table, and **Synthesize**, **Show graph**, **Export .v**, and
+**Remove run** actions. **Elaborate design** prompts for a PDK, creates a run, and runs Yosys
+elaboration; the table shows `elaborating` and then `elaborated`, and the run
+gets an `elaboration.svg` artifact. **Synthesize** prompts for a PDK and
+produces `synthesis.svg` plus the generic synthesized netlist `1_synth.v`.
+**Export .v** runs the Yosys technology-mapping step against the platform
+Liberty files, writes `synth/2_tech_map.v` directly into the run directory, and
+adds it to the synthesis artifact list. **Show graph** opens the elaboration
+and/or synthesis graph as document tabs. **Remove run** deletes the selected
+run from the project and removes its `build/impl` directory. Graph tabs render
+SVG and recolor Graphviz output to match the active dark or light theme.
+
+The Synthesis page uses the same padded Explorer and artifact containers. Its
+left column lists HDL source files. The middle panel has no permanent graph
+tabs: double-clicking an artifact opens one closable tab per file, just like a
+document. Graph artifacts open a zoomable SVG canvas and the technology-mapped
+netlist opens a read-only Verilog editor. The right column lists only the
+`elaboration.svg` graph, the `synthesis.svg` graph, and the technology-mapped
+`2_tech_map.v` netlist. Logs, scripts, and the generic `1_synth.v` stay in the
+run directory but are not shown in this list.
+
+The Floorplan page adds a `Netlists` tab to its left column. It lists every
+`synth/2_tech_map.v` and exported technology-mapped `.v` present across runs;
+activating an entry selects that run. Floorplan reads the run's
+`2_tech_map.v`, so exporting from Synthesis is required before running the
+floorplan stage.
+
+The `Runs` tab has **Run floorplan** and **Cancel** actions. Run floorplan is
+enabled only when the active run has a successful synthesis and a
+technology-mapped netlist. The run streams OpenROAD output to the Activity
+panel, records `db/2_floorplan.odb`, `def/2_floorplan.def`, the SDC, logs, and
+metrics, and refreshes the ODB preview when it finishes.
+
+The right column has an editable `Floorplan` tab instead of the read-only
+Settings JSON. It exposes utilization, aspect ratio, optional explicit die
+width/height, placement site, IO horizontal/vertical layers, threads, and
+timeout. Applying settings updates the run configuration and invalidates the
+floorplan, placement, CTS, routing, and final checkpoints so stale results are
+never presented as current.
+
+The `Placement`, `CTS`, and `Routing` pages use the same pattern:
+
+- `Run placement`, `Run CTS`, and `Run routing` actions with a `Cancel` button;
+- prerequisites are enforced from stage status:
+  - placement requires a successful floorplan;
+  - CTS requires placement;
+  - routing requires CTS, or placement when CTS is disabled;
+- editable settings:
+  - placement: density, timing-driven, routability-driven;
+  - CTS: enable/disable CTS, root buffer, clock buffer list;
+  - routing: minimum/maximum routing layers, antenna repair;
+  - every stage also exposes threads and timeout;
+- applying settings invalidates that stage and every later checkpoint;
+- the middle canvas refreshes from `3_place.odb`, `4_cts.odb`, or `5_route.odb`
+  after the stage completes, and shows pending/failed/skipped messages instead
+  of stale geometry;
+- the **Overlay** selector can color the preview by placement density or routed
+  wire density, and **Export CSV** writes placement, routing, or power heat
+  maps under the run's `reports/` directory.
+
+The Properties and Metrics tabs continue to show the active run.
+
+Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
+still runs and the canvases show an explanatory message. Importing a finished
+DEF into a layout cell is exposed through `ice-cli implementation-import`, MCP,
+and `icepy`.
 
 ## Command and transaction model
 

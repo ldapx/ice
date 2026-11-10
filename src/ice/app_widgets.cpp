@@ -2530,8 +2530,6 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Draw a schematic with symbols and wires on the canvas."));
     addKind(Kind::TextSpice, QStringLiteral("Text Schematic"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a SPICE netlist cell and edit its source directly."));
-    addKind(Kind::SystemVerilog, QStringLiteral("SV Block"), QStringLiteral("circuit-board"),
-            QStringLiteral("Create a SystemVerilog block with a starter module."));
     layout->addLayout(kindRow, 2);
 
     kindDescription_ = new QLabel;

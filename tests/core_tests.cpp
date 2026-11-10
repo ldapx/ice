@@ -1,5 +1,6 @@
 #include "icelib/core.hpp"
 #include "icelib/geometry.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
 #include "icelib/measure.hpp"
@@ -14,10 +15,14 @@
 #include "icelib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <algorithm>
+#include <chrono>
+#include <clocale>
 #include <cmath>
+#include <cstdlib>
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 namespace {
 long double polygonArea(const ice::Polygon &polygon) {
@@ -83,6 +88,647 @@ TEST_CASE("layout cells preserve PDK stack selections") {
     CHECK(roundTrip.proceduralLayouts.at(procedural).stack == "6LM_1TM");
     CHECK(roundTrip.layers.at(layer).stack == "3LM_1TM");
     CHECK(roundTrip.serialize() == project.serialize());
+}
+
+TEST_CASE("implementation runs serialize and persist with the project") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-run-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "implementation-run";
+    project.name = "implementation-run";
+    const auto sourceId = project.nextId();
+    ice::SchematicCell source;
+    source.id = sourceId;
+    source.name = "counter";
+    source.pdk = "example.pdk";
+    source.systemVerilogSchematic = true;
+    source.systemVerilogText = "module counter(input clk); endmodule\n";
+    project.schematicCells.emplace(sourceId, source);
+
+    ice::ImplementationConfig config;
+    config.name = "counter-gf180";
+    config.top = "counter";
+    config.pdk = "example.pdk";
+    config.stack = "base";
+    config.sourceCells = {sourceId};
+    config.utilization = 0.45;
+    const auto runId = ice::createImplementationRun(project, config);
+    CHECK(runId != 0);
+    CHECK(project.implementationRuns.at(runId).name == "counter-gf180");
+    CHECK(project.implementationRuns.at(runId).stages.size() == ice::implementationStages().size());
+    CHECK(!project.implementationRuns.at(runId).configHash.empty());
+    CHECK_THROWS_AS(ice::createImplementationRun(project, config), ice::ProjectError);
+
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.implementationRuns.at(runId).name == "counter-gf180");
+    CHECK(roundTrip.implementationRuns.at(runId).config.top == "counter");
+    CHECK(std::abs(roundTrip.implementationRuns.at(runId).config.utilization - 0.45) < 1e-9);
+    CHECK(roundTrip.implementationRuns.at(runId).stages.at(ice::ImplementationStage::placement).status ==
+          ice::ImplementationStageStatus::pending);
+
+    project.save(root);
+    const auto files = std::filesystem::directory_iterator(root / "impl");
+    bool foundManifest = false;
+    for (const auto &entry : files) {
+        if (entry.path().extension() == ".iceimpl") {
+            foundManifest = true;
+            break;
+        }
+    }
+    CHECK(foundManifest);
+    const auto loaded = ice::Project::load(root);
+    CHECK(loaded.implementationRuns.at(runId).name == "counter-gf180");
+    CHECK(loaded.implementationRuns.at(runId).config.sourceCells.front() == sourceId);
+
+    const auto serialized = ice::serializeImplementationRun(project.implementationRuns.at(runId));
+    const auto parsed = ice::deserializeImplementationRun(serialized);
+    CHECK(parsed.name == "counter-gf180");
+    CHECK(parsed.config.top == "counter");
+    CHECK(parsed.status == ice::ImplementationStatus::pending);
+
+    ice::removeImplementationRun(project, runId);
+    CHECK(!project.implementationRuns.contains(runId));
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("implementation preparation generates backend scripts") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-prepare-test";
+    std::filesystem::remove_all(root);
+    const auto packageRoot = root / "package";
+    std::filesystem::create_directories(packageRoot / "implementation");
+    for (const auto &name : {"tech.lef", "cells.lef", "tt.lib", "example.gds"})
+        std::ofstream(packageRoot / "implementation" / name) << "# test data\n";
+    std::ofstream(packageRoot / "implementation" / "tapcell.tcl") << "# tapcell\n";
+    std::ofstream(packageRoot / "implementation" / "pdn.tcl") << "# pdn\n";
+
+    ice::PackageSpec package;
+    package.name = "example.pdk";
+    package.version = "1.0.0";
+    package.root = packageRoot;
+    ice::PackagePdk pdk;
+    pdk.id = "example.pdk";
+    pdk.defaultStack = "base";
+    pdk.implementation = ice::PackagePdkImplementation{};
+    pdk.implementation->engine = "openroad";
+    pdk.implementation->synthesis = "yosys";
+    ice::PackagePdkStack stack;
+    stack.id = "base";
+    stack.implementation = ice::PackagePdkStackImplementation{
+        "example_site",
+        "implementation/tech.lef",
+        "implementation/cells.lef",
+        "implementation/example.gds",
+        {{"tt", {"implementation/tt.lib"}}},
+        {"Metal2"},
+        {"Metal3"},
+        "Metal1",
+        "Metal3",
+        "implementation/tapcell.tcl",
+        "implementation/pdn.tcl",
+        {},
+        {"FILL1"},
+    };
+    pdk.stacks.push_back(stack);
+    package.pdk = pdk;
+
+    ice::Project project;
+    project.identity = "implementation-prepare";
+    project.name = "implementation-prepare";
+    const auto sourceId = project.nextId();
+    ice::SchematicCell source;
+    source.id = sourceId;
+    source.name = "counter";
+    source.pdk = "example.pdk";
+    source.systemVerilogSchematic = true;
+    source.systemVerilogText = "module counter(input clk); endmodule\n";
+    project.schematicCells.emplace(sourceId, source);
+
+    ice::ImplementationConfig config;
+    config.name = "counter";
+    config.top = "counter";
+    config.pdk = "example.pdk";
+    config.stack = "base";
+    config.sourceCells = {sourceId};
+    config.ctsRootBuffer = "BUF_X4";
+    config.ctsBuffers = {"BUF_X1", "BUF_X2"};
+    const auto runId = ice::createImplementationRun(project, config);
+    auto &run = project.implementationRuns.at(runId);
+
+    std::vector<ice::Diagnostic> diagnostics;
+    const auto platform = ice::resolveImplementationPlatform(package, "base", diagnostics);
+    CHECK(diagnostics.empty());
+    CHECK(platform.site == "example_site");
+    CHECK(platform.liberty.at("tt").front() == packageRoot / "implementation" / "tt.lib");
+
+    const auto preparation = ice::prepareImplementationRun(project, run, platform, root);
+    CHECK(preparation.ready);
+    CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "00-synth.ys"));
+    CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "01-floorplan.tcl"));
+    CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "04-route.tcl"));
+    CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "05-final.tcl"));
+    std::ifstream floorplan(preparation.runDirectory / "scripts" / "01-floorplan.tcl");
+    const std::string floorplanText((std::istreambuf_iterator<char>(floorplan)), {});
+    CHECK(floorplanText.find("initialize_floorplan") != std::string::npos);
+    CHECK(floorplanText.find("place_pins") != std::string::npos);
+    CHECK(floorplanText.find("source") != std::string::npos);
+    std::ifstream route(preparation.runDirectory / "scripts" / "04-route.tcl");
+    const std::string routeText((std::istreambuf_iterator<char>(route)), {});
+    CHECK(routeText.find("global_route") != std::string::npos);
+    CHECK(routeText.find("detailed_route") != std::string::npos);
+    CHECK(routeText.find("4_cts.odb") != std::string::npos);
+    CHECK(routeText.find("5_route.sdc") != std::string::npos);
+    std::ifstream cts(preparation.runDirectory / "scripts" / "03-cts.tcl");
+    const std::string ctsText((std::istreambuf_iterator<char>(cts)), {});
+    CHECK(ctsText.find("clock_tree_synthesis") != std::string::npos);
+    CHECK(ctsText.find("BUF_X4") != std::string::npos);
+
+    run.config.ctsEnabled = false;
+    const auto withoutCts = ice::prepareImplementationRun(project, run, platform, root);
+    CHECK(withoutCts.ready);
+    std::ifstream routeWithoutCts(withoutCts.runDirectory / "scripts" / "04-route.tcl");
+    const std::string routeWithoutCtsText((std::istreambuf_iterator<char>(routeWithoutCts)), {});
+    CHECK(routeWithoutCtsText.find("3_place.odb") != std::string::npos);
+    CHECK(routeWithoutCtsText.find("4_cts.odb") == std::string::npos);
+    std::ifstream finalStage(withoutCts.runDirectory / "scripts" / "05-final.tcl");
+    const std::string finalText((std::istreambuf_iterator<char>(finalStage)), {});
+    CHECK(finalText.find("5_route.sdc") != std::string::npos);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("process runner captures output, timeouts, and cancellation") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-process-runner-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    ice::ProcessOptions options;
+    options.arguments = {"/bin/sh", "-c", "printf 'hello\\n'; printf 'oops\\n' >&2; exit 7"};
+    options.logPath = root / "tool.log";
+    options.logTailBytes = 16;
+    const auto failed = ice::runProcess(options);
+    CHECK(failed.started);
+    CHECK(!failed.succeeded());
+    CHECK(failed.exitCode == 7);
+    CHECK(failed.signal == 0);
+    CHECK(failed.logTail.size() <= 16);
+    CHECK(failed.logTail.find("oops") != std::string::npos);
+    std::ifstream log(options.logPath);
+    const std::string logText((std::istreambuf_iterator<char>(log)), {});
+    CHECK(logText.find("hello") != std::string::npos);
+    CHECK(logText.find("oops") != std::string::npos);
+
+    ice::ProcessOptions timeout;
+    timeout.arguments = {"/bin/sh", "-c", "sleep 5"};
+    timeout.timeoutSeconds = 1;
+    timeout.logPath = root / "timeout.log";
+    const auto timedOut = ice::runProcess(timeout);
+    CHECK(timedOut.started);
+    CHECK(timedOut.timedOut);
+    CHECK(!timedOut.succeeded());
+
+    ice::ProcessCancellation cancellation;
+    std::thread canceller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancellation.cancel();
+    });
+    ice::ProcessOptions cancellable;
+    cancellable.arguments = {"/bin/sh", "-c", "sleep 5"};
+    cancellable.logPath = root / "cancel.log";
+    const auto cancelled = ice::runProcess(cancellable, &cancellation);
+    canceller.join();
+    CHECK(cancelled.started);
+    CHECK(cancelled.cancelled);
+    CHECK(!cancelled.timedOut);
+    CHECK(!cancelled.succeeded());
+
+    std::filesystem::remove_all(root);
+}
+
+namespace {
+
+class ScopedEnvironment {
+  public:
+    ScopedEnvironment(const char *name, const std::string &value) : name_(name) {
+        if (const auto *previous = std::getenv(name)) {
+            previous_ = previous;
+            hadPrevious_ = true;
+        }
+        setenv(name, value.c_str(), 1);
+    }
+    ~ScopedEnvironment() {
+        if (hadPrevious_)
+            setenv(name_.c_str(), previous_.c_str(), 1);
+        else
+            unsetenv(name_.c_str());
+    }
+
+  private:
+    std::string name_;
+    std::string previous_;
+    bool hadPrevious_ = false;
+};
+
+struct TclBackendForTests {
+    TclBackendForTests() { setenv("ICE_OPENROAD_BACKEND", "tcl", 1); }
+} tclBackendForTests;
+
+void writeExecutable(const std::filesystem::path &path, const std::string &text) {
+    std::ofstream(path) << text;
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+                                           std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
+                                           std::filesystem::perms::others_exec);
+}
+
+ice::PackagePdkStackImplementation executableTestPlatformFiles() {
+    return {"unit",
+            "implementation/tech.lef",
+            "implementation/cells.lef",
+            "implementation/example.gds",
+            {{"tt", {"implementation/tt.lib"}}},
+            {"Metal2"},
+            {"Metal3"},
+            "Metal1",
+            "Metal3",
+            {},
+            {},
+            {},
+            {}};
+}
+
+} // namespace
+
+TEST_CASE("implementation execution runs stages and records metrics") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-execute-test";
+    std::filesystem::remove_all(root);
+    const auto packageRoot = root / "package";
+    const auto binRoot = root / "bin";
+    std::filesystem::create_directories(packageRoot / "implementation");
+    std::filesystem::create_directories(binRoot);
+    for (const auto &name : {"tech.lef", "cells.lef", "tt.lib", "example.gds"})
+        std::ofstream(packageRoot / "implementation" / name) << "# test data\n";
+
+    writeExecutable(binRoot / "yosys", R"(#!/bin/sh
+if [ "$1" = "-V" ]; then
+  echo "Fake Yosys 0.99"
+  exit 0
+fi
+mkdir -p synth
+printf 'module counter(input clk); endmodule\n' > synth/1_synth.v
+printf 'module counter(input clk); endmodule\n' > synth/2_tech_map.v
+cat <<'STAT'
+ Number of cells:                 12
+ Number of wires:                 34
+ Chip area for module '\counter':  56.75
+STAT
+exit 0
+)");
+    writeExecutable(binRoot / "openroad", R"(#!/bin/sh
+if [ "$1" = "-version" ]; then
+  echo "Fake OpenROAD 9.99"
+  exit 0
+fi
+metrics=""
+script=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -metrics) metrics="$2"; shift 2 ;;
+    -threads) shift 2 ;;
+    -no_init|-no_splash|-exit) shift ;;
+    *) script="$1"; shift ;;
+  esac
+done
+name=$(basename "$script")
+if [ -n "$FAKE_OPENROAD_FAIL_STAGE" ] && [ "$name" = "$FAKE_OPENROAD_FAIL_STAGE" ]; then
+  echo "fake openroad failure" >&2
+  exit 3
+fi
+mkdir -p db def final reports
+case "$name" in
+  01-floorplan.tcl) touch db/2_floorplan.odb def/2_floorplan.def final/2_floorplan.sdc ;;
+  02-place.tcl) touch db/3_place.odb def/3_place.def final/3_place.sdc ;;
+  03-cts.tcl) touch db/4_cts.odb def/4_cts.def final/4_cts.sdc ;;
+  04-route.tcl) touch db/5_route.odb def/5_route.def final/5_route.sdc final/5_route.spef reports/route.guide ;;
+  05-final.tcl) touch db/6_final.odb def/6_final.def final/6_final.v final/6_final.spef final/6_final.sdc ;;
+esac
+if [ -n "$metrics" ]; then
+  printf '{"design__die__area": 1234.5, "route__wirelength": 42}\n' > "$metrics"
+fi
+echo "fake openroad $name"
+exit 0
+)");
+    ScopedEnvironment yosys("ICE_YOSYS", (binRoot / "yosys").string());
+    ScopedEnvironment openroad("ICE_OPENROAD", (binRoot / "openroad").string());
+
+    ice::PackageSpec package;
+    package.name = "example.pdk";
+    package.version = "1.0.0";
+    package.root = packageRoot;
+    ice::PackagePdk pdk;
+    pdk.id = "example.pdk";
+    pdk.defaultStack = "base";
+    pdk.implementation = ice::PackagePdkImplementation{};
+    ice::PackagePdkStack stack;
+    stack.id = "base";
+    stack.implementation = executableTestPlatformFiles();
+    pdk.stacks.push_back(stack);
+    package.pdk = pdk;
+
+    ice::Project project;
+    project.identity = "implementation-execute";
+    project.name = "implementation-execute";
+    const auto sourceId = project.nextId();
+    ice::SchematicCell source;
+    source.id = sourceId;
+    source.name = "counter";
+    source.pdk = "example.pdk";
+    source.systemVerilogSchematic = true;
+    source.systemVerilogText = "module counter(input clk); endmodule\n";
+    project.schematicCells.emplace(sourceId, source);
+
+    ice::ImplementationConfig config;
+    config.name = "counter";
+    config.top = "counter";
+    config.pdk = "example.pdk";
+    config.stack = "base";
+    config.sourceCells = {sourceId};
+    config.threads = 2;
+    const auto runId = ice::createImplementationRun(project, config);
+    auto &run = project.implementationRuns.at(runId);
+    std::vector<ice::Diagnostic> diagnostics;
+    const auto platform = ice::resolveImplementationPlatform(package, "base", diagnostics);
+    CHECK(diagnostics.empty());
+
+    std::vector<ice::ImplementationProgress> progress;
+    std::size_t changes = 0;
+    ice::ImplementationExecutionOptions options;
+    options.progress = [&](const ice::ImplementationProgress &event) { progress.push_back(event); };
+    options.changed = [&](const ice::ImplementationRun &) { ++changes; };
+    const auto result = ice::executeImplementationRun(project, run, platform, root, options);
+    CHECK(result.success);
+    CHECK(!result.cancelled);
+    CHECK(result.completedStage == ice::ImplementationStage::final);
+    CHECK(run.status == ice::ImplementationStatus::succeeded);
+    for (const auto stage :
+         {ice::ImplementationStage::synthesis, ice::ImplementationStage::floorplan, ice::ImplementationStage::placement,
+          ice::ImplementationStage::cts, ice::ImplementationStage::routing, ice::ImplementationStage::final})
+        CHECK(run.stages.at(stage).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.toolVersions.at("yosys") == "Fake Yosys 0.99");
+    CHECK(run.toolVersions.at("openroad") == "Fake OpenROAD 9.99");
+    CHECK(std::abs(run.metrics.at("synth.cells") - 12.0) < 1e-9);
+    CHECK(std::abs(run.metrics.at("synth.chip_area_um2") - 56.75) < 1e-9);
+    CHECK(std::abs(run.metrics.at("design__die__area") - 1234.5) < 1e-9);
+    CHECK(std::abs(run.metrics.at("route__wirelength") - 42.0) < 1e-9);
+    CHECK(changes > 0);
+    CHECK(!progress.empty());
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "db" / "6_final.odb"));
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "final" / "6_final.v"));
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "logs" / "05-final.log"));
+    CHECK(ice::readImplementationLog(run, root, ice::ImplementationStage::final).find("fake openroad") !=
+          std::string::npos);
+
+    // Rerunning one stage invalidates only that stage and later ones.
+    ice::ImplementationExecutionOptions placementOnly;
+    placementOnly.from = ice::ImplementationStage::placement;
+    placementOnly.to = ice::ImplementationStage::placement;
+    const auto rerun = ice::executeImplementationRun(project, run, platform, root, placementOnly);
+    CHECK(rerun.success);
+    CHECK(run.status == ice::ImplementationStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::synthesis).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::floorplan).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::routing).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.stages.at(ice::ImplementationStage::final).status == ice::ImplementationStageStatus::pending);
+
+    // A failing stage preserves the earlier checkpoint and records the log.
+    setenv("FAKE_OPENROAD_FAIL_STAGE", "04-route.tcl", 1);
+    ice::ImplementationExecutionOptions failure;
+    failure.from = ice::ImplementationStage::routing;
+    failure.to = ice::ImplementationStage::final;
+    const auto failed = ice::executeImplementationRun(project, run, platform, root, failure);
+    unsetenv("FAKE_OPENROAD_FAIL_STAGE");
+    CHECK(!failed.success);
+    CHECK(run.status == ice::ImplementationStatus::failed);
+    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::routing).status == ice::ImplementationStageStatus::failed);
+    CHECK(run.stages.at(ice::ImplementationStage::final).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.lastError.find("04-route") != std::string::npos ||
+          run.lastError.find("Routing failed") != std::string::npos);
+
+    // Exporting maps the generic netlist and records the mapped artifact.
+    const auto mapped = ice::mapImplementationRun(run, platform, root, root / "export" / "counter.v");
+    CHECK(mapped.success);
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "synth" / "2_tech_map.v"));
+    CHECK(std::filesystem::is_regular_file(root / "export" / "counter.v"));
+    const auto &synthArtifacts = run.stages.at(ice::ImplementationStage::synthesis).artifacts;
+    const auto mappedArtifact = run.directory + "/synth/2_tech_map.v";
+    CHECK(std::find(synthArtifacts.begin(), synthArtifacts.end(), mappedArtifact) != synthArtifacts.end());
+    std::ifstream techmapScript(root / run.directory / "scripts" / "01-techmap.ys");
+    const std::string techmapText((std::istreambuf_iterator<char>(techmapScript)), {});
+    CHECK(techmapText.find("dfflibmap -liberty") != std::string::npos);
+    CHECK(techmapText.find("abc -liberty") != std::string::npos);
+
+    // Editing floorplan policy keeps earlier stages and invalidates floorplan
+    // and everything after it without resetting the whole run.
+    auto updatedConfig = run.config;
+    updatedConfig.utilization = 0.7;
+    ice::updateImplementationConfig(run, updatedConfig, ice::ImplementationStage::floorplan);
+    CHECK(run.config.utilization == 0.7);
+    CHECK(run.configHash == ice::implementationConfigHash(run.config));
+    CHECK(run.stages.at(ice::ImplementationStage::synthesis).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(ice::ImplementationStage::floorplan).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.currentStage == ice::ImplementationStage::synthesis);
+    CHECK(run.status == ice::ImplementationStatus::pending);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("DEF import creates pins, instances, nets, and routes") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-def-import-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto techLef = root / "tech.lef";
+    std::ofstream(techLef) << R"(VERSION 5.8 ;
+DATABASE MICRONS 1000 ;
+LAYER Metal1
+  TYPE ROUTING ;
+  WIDTH 0.2 ;
+END Metal1
+LAYER Metal2
+  TYPE ROUTING ;
+  WIDTH 0.4 ;
+END Metal2
+LAYER Via1
+  TYPE CUT ;
+END Via1
+VIA via1 DEFAULT
+  LAYER Metal1 ;
+    RECT -0.1 -0.1 0.1 0.1 ;
+  LAYER Via1 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+  LAYER Metal2 ;
+    RECT -0.1 -0.1 0.1 0.1 ;
+END via1
+END LIBRARY
+)";
+    const auto cellLef = root / "cells.lef";
+    std::ofstream(cellLef) << R"(VERSION 5.8 ;
+MACRO INV
+  CLASS CORE ;
+  SIZE 1 BY 2 ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0 0 0.2 0.2 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0.8 0.8 1 1 ;
+    END
+  END Y
+END INV
+END LIBRARY
+)";
+    const auto def = root / "top.def";
+    std::ofstream(def) << R"(VERSION 5.8 ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 INV + PLACED ( 1000 2000 ) N ;
+- u2 INV + PLACED ( 3000 2000 ) S ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET in1 + DIRECTION INPUT + USE SIGNAL + LAYER Metal1 ( -100 -100 ) ( 100 100 ) ;
+- out1 + NET out1 + DIRECTION OUTPUT + USE SIGNAL + LAYER Metal1 ( 9900 9900 ) ( 10100 10100 ) ;
+END PINS
+NETS 3 ;
+- in1 ( u1 A ) + ROUTED Metal1 ( 0 0 ) ( 1000 2000 ) via1 ( 3000 2000 ) ;
+- out1 ( u2 Y ) + ROUTED Metal2 ( 3000 2000 ) ( 9000 9000 ) ;
+- n1 ( u1 Y ) ( u2 A ) + ROUTED Metal1 ( 2000 2000 ) ( 2500 2000 ) NEW Metal2 ( 2500 2000 ) ( 3000 2000 ) ;
+END NETS
+END DESIGN
+)";
+
+    ice::DefImportOptions options;
+    options.techLef = techLef;
+    options.cellLef = cellLef;
+    options.pdk = "example.pdk";
+    options.stack = "base";
+    options.layers["metal1"] = {34, 0};
+    options.layers["metal2"] = {36, 0};
+    options.layers["via1"] = {35, 0};
+
+    ice::Project project;
+    project.identity = "def-import";
+    project.name = "def-import";
+    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    const auto &cell = project.layoutCells.at(cellId);
+    CHECK(cell.name == "top");
+    CHECK(cell.pdk == "example.pdk");
+    CHECK(cell.stack == "base");
+    CHECK(cell.ports.size() == 2);
+    CHECK(cell.nets.size() == 3);
+    CHECK(cell.instances.size() == 2);
+    CHECK(cell.shapes.size() == 5); // die boundary + four routed paths
+
+    const auto in1 =
+        std::find_if(cell.nets.begin(), cell.nets.end(), [](const auto &entry) { return entry.second.name == "in1"; });
+    CHECK(in1 != cell.nets.end());
+    const auto port = std::find_if(cell.ports.begin(), cell.ports.end(),
+                                   [](const auto &entry) { return entry.second.name == "in1"; });
+    CHECK(port != cell.ports.end());
+    CHECK(port->second.net == in1->second.id);
+    CHECK(port->second.rectangle.width == 200);
+
+    const auto u1 = std::find_if(cell.instances.begin(), cell.instances.end(),
+                                 [](const auto &entry) { return entry.second.name == "u1"; });
+    CHECK(u1 != cell.instances.end());
+    CHECK(u1->second.x == 1000);
+    CHECK(u1->second.y == 2000);
+    CHECK(u1->second.orientation == ice::Orientation::r0);
+    const auto u2 = std::find_if(cell.instances.begin(), cell.instances.end(),
+                                 [](const auto &entry) { return entry.second.name == "u2"; });
+    CHECK(u2 != cell.instances.end());
+    CHECK(u2->second.orientation == ice::Orientation::r180);
+    const auto &master = project.layoutCells.at(u1->second.cell);
+    CHECK(master.name == "INV");
+    CHECK(master.ports.size() == 2);
+    CHECK(master.shapes.size() == 1);
+
+    const auto route = std::find_if(cell.shapes.begin(), cell.shapes.end(), [](const auto &entry) {
+        return entry.second.net && entry.second.centerline.size() == 3 && !entry.second.pointVias.empty();
+    });
+    CHECK(route != cell.shapes.end());
+    if (route != cell.shapes.end()) {
+        CHECK(route->second.width == 200);
+        CHECK(route->second.pointVias.size() == route->second.centerline.size());
+        CHECK(!route->second.pointVias[1].empty());
+    }
+    const auto wideRoute = std::find_if(cell.shapes.begin(), cell.shapes.end(),
+                                        [](const auto &entry) { return entry.second.width == 400; });
+    CHECK(wideRoute != cell.shapes.end());
+    CHECK(project.validate().empty());
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("DEF import is numeric-locale independent") {
+    struct LocaleGuard {
+        std::string previous;
+        ~LocaleGuard() {
+            if (!previous.empty())
+                std::setlocale(LC_NUMERIC, previous.c_str());
+        }
+    } localeGuard;
+    if (const auto *current = std::setlocale(LC_NUMERIC, nullptr))
+        localeGuard.previous = current;
+    // Qt installs the user's numeric locale; decimal commas must not break
+    // LEF/DEF token parsing.
+    if (!std::setlocale(LC_NUMERIC, "es_CL.UTF-8"))
+        return;
+
+    const auto root = std::filesystem::temp_directory_path() / "ice-def-locale-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto techLef = root / "tech.lef";
+    std::ofstream(techLef) << "VERSION 5.8 ;\nDATABASE MICRONS 1000 ;\nLAYER Metal1\n"
+                              "  TYPE ROUTING ;\n  WIDTH 0.2 ;\nEND Metal1\nEND LIBRARY\n";
+    const auto cellLef = root / "cells.lef";
+    std::ofstream(cellLef) << "VERSION 5.8 ;\nMACRO INV\n  CLASS CORE ;\n  SIZE 0.500 BY 1.200 ;\n"
+                              "  PIN A\n    DIRECTION INPUT ;\n    PORT\n      LAYER Metal1 ;\n"
+                              "        RECT 0.100 0.100 0.230 0.230 ;\n    END\n  END A\nEND INV\nEND LIBRARY\n";
+    const auto def = root / "top.def";
+    std::ofstream(def) << "VERSION 5.8 ;\nDESIGN top ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+                          "DIEAREA ( 0 0 ) ( 10500 10500 ) ;\nCOMPONENTS 1 ;\n"
+                          "- u1 INV + PLACED ( 230 345 ) N ;\nEND COMPONENTS\nEND DESIGN\n";
+
+    ice::DefImportOptions options;
+    options.techLef = techLef;
+    options.cellLef = cellLef;
+    options.pdk = "example.pdk";
+    options.stack = "base";
+    options.layers["metal1"] = {34, 0};
+
+    ice::Project project;
+    project.identity = "def-locale";
+    project.name = "def-locale";
+    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    CHECK(cellId != 0);
+    const auto &cell = project.layoutCells.at(cellId);
+    CHECK(cell.instances.size() == 1);
+    CHECK(cell.instances.begin()->second.x == 230);
+    CHECK(cell.instances.begin()->second.y == 345);
+
+    std::filesystem::remove_all(root);
 }
 
 TEST_CASE("text polygon shape groups survive serialization") {
@@ -1037,7 +1683,14 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
         << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n"
            "\n[pdk]\ndisplay_name = \"Example PDK\"\ndefault_schematic = \"example_top\"\n"
-           "default_stack = \"base\"\n\n[[pdk.stack]]\nid = \"base\"\ndisplay_name = \"Base stack\"\n"
+           "default_stack = \"base\"\n"
+           "\n[pdk.implementation]\nengine = \"openroad\"\nsynthesis = \"yosys\"\nmin_openroad = \"2.0\"\n"
+           "site = \"example_site\"\ntech_lef = \"implementation/tech.lef\"\n"
+           "cell_lef = \"implementation/cells.lef\"\nrouting_min_layer = \"Metal1\"\n"
+           "routing_max_layer = \"Metal2\"\n"
+           "\n[pdk.implementation.liberty]\ntt = [\"implementation/tt.lib\"]\n"
+           "\n[pdk.implementation.orfs]\nplatform = \"example\"\nmetal_option = \"base\"\n"
+           "\n[[pdk.stack]]\nid = \"base\"\ndisplay_name = \"Base stack\"\n"
            "layers = [\"diff.drawing\", \"metal1.drawing\"]\n"
            "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\n"
            "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\n";
@@ -1070,6 +1723,24 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
         CHECK(ice::resolvePdkStack(*pdk.pdk, "") == "base");
         CHECK(ice::resolvePdkStack(*pdk.pdk, "base") == "base");
         CHECK_THROWS_AS(ice::resolvePdkStack(*pdk.pdk, "missing"), ice::ProjectError);
+        CHECK(pdk.pdk->implementation.has_value());
+        if (pdk.pdk->implementation) {
+            const auto &implementation = *pdk.pdk->implementation;
+            CHECK(implementation.engine == "openroad");
+            CHECK(implementation.synthesis == "yosys");
+            CHECK(implementation.minOpenRoad == "2.0");
+            CHECK(implementation.orfsPlatform == "example");
+            CHECK(implementation.orfsMetalOption == "base");
+            CHECK(implementation.files.has_value());
+            if (implementation.files) {
+                CHECK(implementation.files->site == "example_site");
+                CHECK(implementation.files->techLef == "implementation/tech.lef");
+                CHECK(implementation.files->cellLef == "implementation/cells.lef");
+                CHECK(implementation.files->routingMinLayer == "Metal1");
+                CHECK(implementation.files->routingMaxLayer == "Metal2");
+                CHECK(implementation.files->liberty.at("tt").front() == "implementation/tt.lib");
+            }
+        }
         CHECK(pdk.pdk->layerStyles.size() == 1);
         if (!pdk.pdk->layerStyles.empty()) {
             CHECK(pdk.pdk->layerStyles.front().name == "diff");
@@ -1609,6 +2280,8 @@ TEST_CASE("build info exposes a feature fingerprint") {
     CHECK(std::find(info.features.begin(), info.features.end(), "project_repair") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "simulation_metrics") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "pdk_status") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "implementation_runs") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "implementation_openroad_plan") != info.features.end());
 }
 
 TEST_CASE("generated AGENTS guidance is versioned and stable") {
@@ -1625,7 +2298,7 @@ TEST_CASE("generated AGENTS guidance is versioned and stable") {
         return std::string((std::istreambuf_iterator<char>(input)), {});
     };
     const auto first = read();
-    CHECK(first.find("ICE generated guidance: begin (version 3)") != std::string::npos);
+    CHECK(first.find("ICE generated guidance: begin (version 4)") != std::string::npos);
     CHECK(first.find("simulation_measure") != std::string::npos);
     CHECK(first.find("pdk_info") != std::string::npos);
     CHECK(first.find("ask the user which installed PDK to use") != std::string::npos);

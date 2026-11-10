@@ -115,6 +115,7 @@ target("ice")
                     "/usr/include/qt6/QtGui", "/usr/include/qt6/QtWidgets",
                     "/usr/include/qt6/QtSvg", "/usr/include/qt6/QtSvgWidgets")
     add_syslinks("Qt6Widgets", "Qt6Gui", "Qt6Core", "Qt6Svg", "Qt6SvgWidgets")
+    add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
     add_cxxflags("-fPIC", {force = true})
     add_cxxflags(first_party_warnings)
     add_ldflags("-no-pie", {force = true})
@@ -210,3 +211,9 @@ task("docs")
         os.exec("sphinx-build -b html docs docs/_build")
     end)
     set_menu {usage = "Build the Sphinx documentation site"}
+
+task("openroad-sdk")
+    on_run(function ()
+        os.exec("bash scripts/build-ice-openroad.sh")
+    end)
+    set_menu {usage = "Build the experimental C++ OpenROAD backend"}
