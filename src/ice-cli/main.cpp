@@ -1,6 +1,7 @@
 #include "icelib/agent_api.hpp"
 #include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
@@ -18,7 +19,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +38,13 @@
 namespace {
 
 using json = nlohmann::json;
+
+ice::ProcessCancellation *gActiveCancellation = nullptr;
+
+void handleImplementationSignal(int) {
+    if (gActiveCancellation)
+        gActiveCancellation->cancel();
+}
 
 [[noreturn]] void argumentError(const std::string &message) { throw ice::ProjectError("cli.arguments", message); }
 
@@ -62,8 +72,11 @@ ice::Coordinate parseInteger(const std::string &text, const char *what) {
 
 double parseDouble(const std::string &text, const char *what) {
     try {
-        std::size_t used = 0;
-        const auto value = std::stod(text, &used);
+        double value = 0.0;
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr == text.data())
+            throw std::invalid_argument("invalid number");
+        const auto used = static_cast<std::size_t>(parsed.ptr - text.data());
         auto suffix = text.substr(used);
         std::transform(suffix.begin(), suffix.end(), suffix.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -143,19 +156,47 @@ ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &
     argumentError("Unknown layout or procedural layout: " + text);
 }
 
+std::optional<ice::PackageSpec> packageForPdk(const std::string &pdk) {
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return std::nullopt;
+    const auto pdks = ice::findPdks(pdk);
+    if (pdks.empty())
+        return std::nullopt;
+    return ice::PackageManager::readManifest(pdks.front().packageRoot);
+}
+
 // Fills in the package default when a layout command omits the stack. A
 // request that names an undeclared stack is rejected before the project is
 // modified.
 std::string resolveLayoutStack(const std::string &pdk, const std::string &requested) {
-    if (pdk.empty() || pdk == ice::genericPdkId)
+    const auto package = packageForPdk(pdk);
+    if (!package || !package->pdk)
         return requested;
-    const auto pdks = ice::findPdks(pdk);
-    if (pdks.empty())
-        return requested;
-    const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
-    if (!package.pdk)
-        return requested;
-    return ice::resolvePdkStack(*package.pdk, requested);
+    return ice::resolvePdkStack(*package->pdk, requested);
+}
+
+ice::ObjectId resolveImplementationRun(const ice::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && project.implementationRuns.contains(*id))
+        return *id;
+    for (const auto &[id, run] : project.implementationRuns) {
+        if (run.name == text)
+            return id;
+    }
+    argumentError("Unknown implementation run: " + text);
+}
+
+json implementationSummary(const ice::ImplementationRun &run) {
+    return {{"id", run.id},
+            {"name", run.name},
+            {"top", run.config.top},
+            {"pdk", run.config.pdk},
+            {"stack", run.config.stack},
+            {"backend", run.config.backend},
+            {"status", ice::implementationStatusName(run.status)},
+            {"current_stage", ice::implementationStageName(run.currentStage)},
+            {"directory", run.directory},
+            {"config_hash", run.configHash},
+            {"result_layout", run.resultLayout}};
 }
 
 ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
@@ -932,6 +973,21 @@ void printHelp() {
               << "  layout-import-gds <input.gds> <project> [pin-label-layer]\n"
               << "  layout-import-lef <input.lef> <project>\n"
               << "  layout-import-def <input.def> <project>\n\n"
+              << "Implementation:\n"
+              << "  implementation-create <project> <name> --top <module> --pdk <pdk> [--stack <stack>] "
+                 "[--source <file>]... [--source-cell <cell>]... [--sdc <file>] [--std-cell-lib <name>] "
+                 "[--corner <corner>] [--utilization <value>] [--threads <n>]\n"
+              << "  implementation-list <project>\n"
+              << "  implementation-status <project> <run>\n"
+              << "  implementation-prepare <project> <run>\n"
+              << "  implementation-run <project> <run> [--from <stage>] [--to <stage>] [--timeout <seconds>] "
+                 "[--verbose]\n"
+              << "  implementation-map <project> <run> [--output <path>] [--verbose]\n"
+              << "  implementation-log <project> <run> [--stage <stage>] [--tail <lines>]\n"
+              << "  implementation-cancel <project> <run>\n"
+              << "  implementation-import <project> <run> [--layout-name <name>] [--replace]\n"
+              << "  implementation-toolchain\n"
+              << "  implementation-delete <project> <run>\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n"
@@ -2293,6 +2349,373 @@ int main(int argc, char **argv) {
                                   {"connections", group.connections}});
             }
             printJson({{"cell", cell}, {"nets", std::move(groups)}});
+            return 0;
+        }
+
+        if (command == "implementation-create") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-create <project> <name> --top <module> --pdk <pdk> "
+                              "[--stack <stack>] [--source <file>]...");
+            auto project = ice::Project::load(args[1]);
+            ice::ImplementationConfig config;
+            config.name = args[2];
+            config.top = args[2];
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--top")
+                    config.top = value();
+                else if (option == "--pdk")
+                    config.pdk = value();
+                else if (option == "--stack")
+                    config.stack = value();
+                else if (option == "--source")
+                    config.sources.emplace_back(value());
+                else if (option == "--source-cell")
+                    config.sourceCells.push_back(resolveSchematic(project, value()));
+                else if (option == "--sdc")
+                    config.sdc = value();
+                else if (option == "--std-cell-lib")
+                    config.standardCellLibrary = value();
+                else if (option == "--corner")
+                    config.corner = value();
+                else if (option == "--utilization")
+                    config.utilization = parseDouble(value(), "utilization");
+                else if (option == "--aspect-ratio")
+                    config.aspectRatio = parseDouble(value(), "aspect ratio");
+                else if (option == "--placement-density")
+                    config.placementDensity = parseDouble(value(), "placement density");
+                else if (option == "--threads")
+                    config.threads = static_cast<int>(parseInteger(value(), "threads"));
+                else if (option == "--backend")
+                    config.backend = value();
+                else
+                    argumentError("Unknown implementation-create option: " + option);
+            }
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            ice::ObjectId id = 0;
+            ice::ProjectSession session(project);
+            session.execute("create implementation run",
+                            [&](ice::Project &p) { id = ice::createImplementationRun(p, config); });
+            session.save(args[1]);
+            printJson(implementationSummary(session.project().implementationRuns.at(id)));
+            return 0;
+        }
+
+        if (command == "implementation-list") {
+            expectArguments(args, 2, 2, "implementation-list <project>");
+            const auto project = ice::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[_, run] : project.implementationRuns)
+                result.push_back(implementationSummary(run));
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "implementation-status") {
+            expectArguments(args, 3, 3, "implementation-status <project> <run>");
+            const auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            printJson(ice::implementationRunJson(project.implementationRuns.at(runId)));
+            return 0;
+        }
+
+        if (command == "implementation-toolchain") {
+            expectArguments(args, 1, 1, "implementation-toolchain");
+            printJson(ice::implementationToolchainJson(ice::discoverImplementationToolchain()));
+            return 0;
+        }
+
+        if (command == "implementation-prepare") {
+            expectArguments(args, 3, 3, "implementation-prepare <project> <run>");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ice::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            auto preparation = ice::prepareImplementationRun(project, run, platform, projectRootForCli(args[1]));
+            diagnostics.insert(diagnostics.end(), preparation.diagnostics.begin(), preparation.diagnostics.end());
+            ice::ProjectSession session(project);
+            session.save(args[1]);
+            json scripts = json::array();
+            for (const auto &script : preparation.scripts)
+                scripts.push_back(script.generic_string());
+            json rtl = json::array();
+            for (const auto &file : preparation.rtlFiles)
+                rtl.push_back(file);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            printJson({{"ready", preparation.ready},
+                       {"run", implementationSummary(session.project().implementationRuns.at(runId))},
+                       {"run_directory", preparation.runDirectory.generic_string()},
+                       {"scripts", std::move(scripts)},
+                       {"rtl_files", std::move(rtl)},
+                       {"diagnostics", std::move(diagnosticArray)},
+                       {"toolchain", ice::implementationToolchainJson(ice::discoverImplementationToolchain())}});
+            return 0;
+        }
+
+        if (command == "implementation-run") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-run <project> <run> [--from <stage>] [--to <stage>] "
+                              "[--timeout <seconds>] [--verbose]");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            ice::ImplementationExecutionOptions options;
+            bool verbose = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--from") {
+                    const auto parsed = ice::parseImplementationStage(value());
+                    if (!parsed || *parsed == ice::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    options.from = *parsed;
+                } else if (option == "--to") {
+                    const auto parsed = ice::parseImplementationStage(value());
+                    if (!parsed || *parsed == ice::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    options.to = *parsed;
+                } else if (option == "--timeout") {
+                    run.config.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else if (option == "--verbose") {
+                    verbose = true;
+                } else {
+                    argumentError("Unknown implementation-run option: " + option);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ice::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            if (!diagnostics.empty()) {
+                const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                    return diagnostic.severity == ice::Diagnostic::Severity::error;
+                });
+                if (fatal != diagnostics.end())
+                    throw ice::ProjectError(fatal->code, fatal->message);
+            }
+
+            const auto projectRoot = projectRootForCli(args[1]);
+            ice::ProcessCancellation cancellation;
+            options.cancellation = &cancellation;
+            options.progress = [](const ice::ImplementationProgress &progress) {
+                if (!progress.message.empty())
+                    std::cerr << "[" << ice::implementationStageName(progress.stage) << "] " << progress.message
+                              << "\n";
+            };
+            if (verbose) {
+                options.log = [](const std::string &chunk) { std::cerr << chunk; };
+            }
+            options.changed = [&](const ice::ImplementationRun &) { project.save(args[1]); };
+
+            gActiveCancellation = &cancellation;
+            const auto previousInterrupt = std::signal(SIGINT, handleImplementationSignal);
+            const auto previousTerminate = std::signal(SIGTERM, handleImplementationSignal);
+            const auto result = ice::executeImplementationRun(project, run, platform, projectRoot, options);
+            std::signal(SIGINT, previousInterrupt);
+            std::signal(SIGTERM, previousTerminate);
+            gActiveCancellation = nullptr;
+            project.save(args[1]);
+
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : result.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            json response = {{"success", result.success},
+                             {"cancelled", result.cancelled},
+                             {"run", ice::implementationRunJson(project.implementationRuns.at(runId))},
+                             {"diagnostics", std::move(diagnosticArray)}};
+            if (result.completedStage != ice::ImplementationStage::created)
+                response["completed_stage"] = ice::implementationStageName(result.completedStage);
+            printJson(response);
+            return result.success ? 0 : 1;
+        }
+
+        if (command == "implementation-map") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-map <project> <run> [--output <path>] [--verbose]");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::filesystem::path output;
+            bool verbose = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--output")
+                    output = value();
+                else if (option == "--verbose")
+                    verbose = true;
+                else
+                    argumentError("Unknown implementation-map option: " + option);
+            }
+            if (!output.empty() && output.is_relative())
+                output = std::filesystem::absolute(output);
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ice::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            if (!diagnostics.empty()) {
+                const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                    return diagnostic.severity == ice::Diagnostic::Severity::error;
+                });
+                if (fatal != diagnostics.end())
+                    throw ice::ProjectError(fatal->code, fatal->message);
+            }
+            std::function<void(const std::string &)> logger;
+            if (verbose)
+                logger = [](const std::string &chunk) { std::cerr << chunk; };
+            const auto result = ice::mapImplementationRun(run, platform, projectRootForCli(args[1]), output, logger);
+            project.save(args[1]);
+            printJson({{"success", result.success},
+                       {"error", result.error},
+                       {"netlist", result.netlist.generic_string()},
+                       {"run", ice::implementationRunJson(project.implementationRuns.at(runId))}});
+            return result.success ? 0 : 1;
+        }
+
+        if (command == "implementation-log") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            const auto &run = project.implementationRuns.at(runId);
+            auto stage = run.currentStage == ice::ImplementationStage::created ? ice::ImplementationStage::final
+                                                                               : run.currentStage;
+            std::size_t maximumLines = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--stage") {
+                    const auto parsed = ice::parseImplementationStage(value());
+                    if (!parsed || *parsed == ice::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    stage = *parsed;
+                } else if (option == "--tail") {
+                    maximumLines = static_cast<std::size_t>(parseInteger(value(), "tail"));
+                } else {
+                    argumentError("Unknown implementation-log option: " + option);
+                }
+            }
+            auto text = ice::readImplementationLog(run, projectRootForCli(args[1]), stage, 1024 * 1024);
+            std::vector<std::string> lines;
+            std::istringstream stream(text);
+            std::string line;
+            while (std::getline(stream, line))
+                lines.push_back(line);
+            if (maximumLines > 0 && lines.size() > maximumLines)
+                lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maximumLines));
+            const auto relative = ice::implementationStageLogRelativePath(stage);
+            const auto path = projectRootForCli(args[1]) / run.directory / relative;
+            printJson({{"stage", ice::implementationStageName(stage)},
+                       {"path", path.generic_string()},
+                       {"lines", lines.size()},
+                       {"text", [&] {
+                            std::ostringstream output;
+                            for (const auto &entry : lines)
+                                output << entry << "\n";
+                            return output.str();
+                        }()}});
+            return 0;
+        }
+
+        if (command == "implementation-cancel") {
+            expectArguments(args, 3, 3, "implementation-cancel <project> <run>");
+            const auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            std::string error;
+            if (!ice::cancelImplementationRun(project.implementationRuns.at(runId), projectRootForCli(args[1]), error))
+                throw ice::ProjectError("implementation.cancel", error);
+            printJson({{"run", runId}, {"name", project.implementationRuns.at(runId).name}, {"cancelled", true}});
+            return 0;
+        }
+
+        if (command == "implementation-import") {
+            if (args.size() < 3)
+                argumentError(
+                    "Usage: ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::string layoutName;
+            bool replace = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--layout-name") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --layout-name");
+                    layoutName = args[index];
+                } else if (args[index] == "--replace") {
+                    replace = true;
+                } else {
+                    argumentError("Unknown implementation-import option: " + args[index]);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ice::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            auto imported = ice::importImplementationLayout(project, run, *package, projectRootForCli(args[1]),
+                                                            layoutName, replace);
+            if (imported.layout != 0)
+                project.save(args[1]);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : imported.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            json response = {{"layout", imported.layout},
+                             {"def", imported.defPath.generic_string()},
+                             {"run", ice::implementationRunJson(run)},
+                             {"diagnostics", std::move(diagnosticArray)}};
+            if (imported.layout != 0) {
+                const auto &layout = project.layoutCells.at(imported.layout);
+                response["name"] = layout.name;
+                response["pdk"] = layout.pdk;
+                response["stack"] = layout.stack;
+                response["shapes"] = layout.shapes.size();
+                response["ports"] = layout.ports.size();
+                response["nets"] = layout.nets.size();
+                response["instances"] = layout.instances.size();
+            }
+            printJson(response);
+            return imported.layout != 0 ? 0 : 1;
+        }
+
+        if (command == "implementation-delete") {
+            expectArguments(args, 3, 3, "implementation-delete <project> <run>");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            const auto name = project.implementationRuns.at(runId).name;
+            ice::ProjectSession session(project);
+            session.execute("remove implementation run",
+                            [&](ice::Project &p) { ice::removeImplementationRun(p, runId); });
+            session.save(args[1]);
+            printJson({{"id", runId}, {"name", name}, {"deleted", true}});
             return 0;
         }
 

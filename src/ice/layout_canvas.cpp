@@ -54,8 +54,8 @@ class LayoutPreviewGraphicsItem : public QGraphicsItem {
 
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
         ice::LayoutRenderer::PaintOptions options;
-        options.showPorts = false;
-        options.showPlannedDevices = false;
+        options.showPorts = true;
+        options.showPlannedDevices = true;
         options.showLabels = false;
         ice::LayoutRenderer::paintAtOrigin(*painter, model_, styles_, deviceStyles_, QPointF(0.0, 0.0), options);
     }

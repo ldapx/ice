@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <clocale>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include <sstream>
 
 #ifndef _WIN32
+#include <locale.h>
 #include <sys/wait.h>
 #endif
 
@@ -25,6 +27,47 @@ using json = nlohmann::ordered_json;
 
 namespace {
 std::mutex ngspiceMutex;
+
+// Qt installs the user's LC_NUMERIC locale (for example de_DE with a comma
+// decimal separator). ngspice parses netlists and model parameters with the C
+// library's strtod(), so a decimal comma makes values such as 0.5510 parse as
+// two tokens. Force the C numeric locale on the calling thread while ngspice
+// runs, without changing the locale seen by the GUI or other threads.
+class ScopedNumericLocale {
+  public:
+    ScopedNumericLocale() {
+#ifdef _WIN32
+        if (const auto *current = std::setlocale(LC_NUMERIC, nullptr))
+            previous_ = current;
+        std::setlocale(LC_NUMERIC, "C");
+#else
+        locale_ = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+        if (locale_)
+            previous_ = uselocale(locale_);
+#endif
+    }
+    ~ScopedNumericLocale() {
+#ifdef _WIN32
+        if (!previous_.empty())
+            std::setlocale(LC_NUMERIC, previous_.c_str());
+#else
+        if (locale_) {
+            uselocale(previous_);
+            freelocale(locale_);
+        }
+#endif
+    }
+    ScopedNumericLocale(const ScopedNumericLocale &) = delete;
+    ScopedNumericLocale &operator=(const ScopedNumericLocale &) = delete;
+
+  private:
+#ifdef _WIN32
+    std::string previous_;
+#else
+    locale_t locale_ = nullptr;
+    locale_t previous_ = nullptr;
+#endif
+};
 
 struct NgspiceLog {
     std::string text;
@@ -407,6 +450,7 @@ bool CancellationToken::cancelled() const noexcept { return cancelled_.load(); }
 SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const CancellationToken &token,
                                        const ProgressCallback &progress) {
     std::lock_guard lock(ngspiceMutex);
+    ScopedNumericLocale numericLocale;
     SimulationResult result{1, JobState::running, request.analysis, {}, {}, "ngspice", NGSPICE_PACKAGE_VERSION, {}, {}};
     result.input_fingerprint = fingerprintRequest(request);
     if (request.netlist.empty()) {

@@ -377,6 +377,13 @@ void ProjectPanel::setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>
         flattenedLayouts_ = std::move(state);
 }
 
+void ProjectPanel::setHideSystemVerilog(bool hide) {
+    if (hideSystemVerilog_ == hide)
+        return;
+    hideSystemVerilog_ = hide;
+    rebuildTree();
+}
+
 void ProjectPanel::setProject(const ice::Project &project) {
     project_ = project;
     std::erase_if(*flattenedLayouts_, [&](ice::ObjectId id) { return !project.layoutCells.contains(id); });
@@ -404,7 +411,7 @@ void ProjectPanel::rebuildTree() {
     if (!showLayoutHierarchy_) {
         std::map<ice::ObjectId, std::vector<ice::ObjectId>> children;
         for (const auto &[cellId, cell] : project.schematicCells) {
-            if (cell.isTextSource())
+            if (cell.isTextSource() || (hideSystemVerilog_ && cell.systemVerilogSchematic))
                 continue;
             auto &childCells = children[cellId];
             for (const auto &[_, instance] : cell.instances) {
@@ -413,6 +420,8 @@ void ProjectPanel::rebuildTree() {
                     continue;
                 const auto childId = symbol->second.sourceCell;
                 if (childId == 0 || childId == cellId || !project.schematicCells.contains(childId))
+                    continue;
+                if (hideSystemVerilog_ && project.schematicCells.at(childId).systemVerilogSchematic)
                     continue;
                 if (std::find(childCells.begin(), childCells.end(), childId) == childCells.end())
                     childCells.push_back(childId);
@@ -443,6 +452,8 @@ void ProjectPanel::rebuildTree() {
             }
         };
         for (const auto &[id, cell] : project.schematicCells) {
+            if (hideSystemVerilog_ && cell.systemVerilogSchematic)
+                continue;
             const auto cellLabel = schematicFileLabel(cell);
             auto *cellItem = new QTreeWidgetItem(tree_, {cellLabel});
             cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));

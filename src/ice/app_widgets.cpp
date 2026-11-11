@@ -1,5 +1,6 @@
 #include "app_widgets.hpp"
 
+#include "icelib/logging.hpp"
 #include "icelib/verification.hpp"
 
 #include "agent_events.hpp"
@@ -43,6 +44,7 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -52,10 +54,13 @@
 #include <QTableWidget>
 #include <QTextCursor>
 #include <QThreadPool>
+#include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
 
 #ifdef ICE_HAVE_AGENTSDK
 #include <agentsdk/acp/acp_agent_manager.hpp>
@@ -65,6 +70,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -73,8 +79,104 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+namespace {
+
+QString messageLevelName(int level) {
+    switch (static_cast<spdlog::level::level_enum>(level)) {
+    case spdlog::level::trace:
+    case spdlog::level::debug:
+        return QStringLiteral("Debug");
+    case spdlog::level::info:
+        return QStringLiteral("Info");
+    case spdlog::level::warn:
+        return QStringLiteral("Warning");
+    case spdlog::level::err:
+        return QStringLiteral("Error");
+    case spdlog::level::critical:
+        return QStringLiteral("Critical");
+    case spdlog::level::off:
+        return QStringLiteral("Off");
+    case spdlog::level::n_levels:
+        break;
+    }
+    return QStringLiteral("Info");
+}
+
+QString formatJobElapsed(qint64 milliseconds) {
+    const auto totalSeconds = std::max<qint64>(0, milliseconds) / 1000;
+    if (totalSeconds < 3600) {
+        return QStringLiteral("%1:%2")
+            .arg(totalSeconds / 60, 2, 10, QLatin1Char('0'))
+            .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2:%3")
+        .arg(totalSeconds / 3600)
+        .arg((totalSeconds % 3600) / 60, 2, 10, QLatin1Char('0'))
+        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+QColor jobStatusColor(const QString &status) {
+    if (status == QStringLiteral("Running") || status == QStringLiteral("Starting"))
+        return QColor(QStringLiteral("#2563eb"));
+    if (status == QStringLiteral("Succeeded"))
+        return QColor(QStringLiteral("#15803d"));
+    if (status == QStringLiteral("Failed"))
+        return QColor(QStringLiteral("#b91c1c"));
+    if (status == QStringLiteral("Cancelling") || status == QStringLiteral("Cancelled"))
+        return QColor(QStringLiteral("#a16207"));
+    return ice::uiColor(ice::UiColor::Text2);
+}
+
+QColor messageLevelColor(int level) {
+    switch (static_cast<spdlog::level::level_enum>(level)) {
+    case spdlog::level::warn:
+        return QColor(QStringLiteral("#d97706"));
+    case spdlog::level::err:
+        return QColor(QStringLiteral("#dc2626"));
+    case spdlog::level::critical:
+        return QColor(QStringLiteral("#b91c1c"));
+    case spdlog::level::trace:
+    case spdlog::level::debug:
+        return ice::uiColor(ice::UiColor::Text2);
+    default:
+        return ice::uiColor(ice::UiColor::Text1);
+    }
+}
+
+// A spdlog sink that forwards one category to the Qt message view. Each
+// category gets its own sink and logger so filtering can be done without
+// parsing prefixes out of mixed text.
+class QtMessageSink final : public spdlog::sinks::base_sink<std::mutex> {
+  public:
+    using Callback = std::function<void(const QString &, int, const QString &, const QString &)>;
+
+    QtMessageSink(QString category, Callback callback)
+        : category_(std::move(category)), callback_(std::move(callback)) {}
+
+  protected:
+    void sink_it_(const spdlog::details::log_msg &message) override {
+        if (!callback_)
+            return;
+        const auto payload = message.payload;
+        const QString text = QString::fromUtf8(payload.data(), static_cast<int>(payload.size()));
+        if (text.isEmpty())
+            return;
+        const auto time = QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz"));
+        callback_(time, static_cast<int>(message.level), category_, text);
+    }
+
+    void flush_() override {}
+
+  private:
+    QString category_;
+    Callback callback_;
+};
+
+} // namespace
 
 DiagnosticsPanel::DiagnosticsPanel(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
@@ -361,10 +463,36 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     auto *messagesLayout = new QVBoxLayout(messagesPage);
     auto *messagesHeader = new QHBoxLayout;
     messagesHeader->setSpacing(6);
-    auto *messagesHint = new QLabel(QStringLiteral("Structured application and external-tool messages"));
-    messagesHint->setWordWrap(true);
+    auto *messagesHint = new QLabel(QStringLiteral("spdlog sinks by category"));
+    messagesHint->setWordWrap(false);
     messagesHint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    messagesHeader->addWidget(messagesHint, 1);
+    messagesHeader->addWidget(messagesHint);
+    messageCategoryFilter_ = new QComboBox;
+    messageCategoryFilter_->setAccessibleName(QStringLiteral("Message category filter"));
+    messageCategoryFilter_->setToolTip(QStringLiteral("Filter messages by spdlog category"));
+    messageCategoryFilter_->addItem(QStringLiteral("All categories"), QString{});
+    for (const auto &[name, label] :
+         std::array<std::pair<const char *, const char *>, 5>{{{ice::logging::application, "Application"},
+                                                               {ice::logging::simulation, "Simulation"},
+                                                               {ice::logging::implementation, "Implementation"},
+                                                               {ice::logging::drc, "DRC"},
+                                                               {ice::logging::lvs, "LVS"}}})
+        messageCategoryFilter_->addItem(QString::fromLatin1(label), QString::fromLatin1(label));
+    messagesHeader->addWidget(messageCategoryFilter_);
+    messageSeverityFilter_ = new QComboBox;
+    messageSeverityFilter_->setAccessibleName(QStringLiteral("Message severity filter"));
+    messageSeverityFilter_->setToolTip(QStringLiteral("Show messages at or above this severity"));
+    messageSeverityFilter_->addItem(QStringLiteral("All levels"), static_cast<int>(spdlog::level::trace));
+    messageSeverityFilter_->addItem(QStringLiteral("Debug"), static_cast<int>(spdlog::level::debug));
+    messageSeverityFilter_->addItem(QStringLiteral("Info"), static_cast<int>(spdlog::level::info));
+    messageSeverityFilter_->addItem(QStringLiteral("Warning"), static_cast<int>(spdlog::level::warn));
+    messageSeverityFilter_->addItem(QStringLiteral("Error"), static_cast<int>(spdlog::level::err));
+    messageSeverityFilter_->addItem(QStringLiteral("Critical"), static_cast<int>(spdlog::level::critical));
+    messagesHeader->addWidget(messageSeverityFilter_);
+    messagesCount_ = new QLabel(QStringLiteral("0 messages"));
+    messagesCount_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    messagesHeader->addWidget(messagesCount_, 0, Qt::AlignVCenter);
+    messagesHeader->addStretch(1);
     auto *clearMessagesButton = new QPushButton;
     clearMessagesButton->setAccessibleName(QStringLiteral("Clear messages"));
     clearMessagesButton->setToolTip(QStringLiteral("Clear messages"));
@@ -372,16 +500,32 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     clearMessagesButton->setFixedSize(24, 24);
     messagesHeader->addWidget(clearMessagesButton, 0, Qt::AlignTop);
     messagesLayout->addLayout(messagesHeader);
-    messages_ = new QPlainTextEdit;
-    messages_->setReadOnly(true);
-    messages_->setPlaceholderText(QStringLiteral("No messages yet."));
-    messages_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    messagesLayout->addWidget(messages_, 1);
+
+    messagesTable_ = new QTableWidget(0, 4);
+    messagesTable_->setAccessibleName(QStringLiteral("Messages"));
+    messagesTable_->setHorizontalHeaderLabels(
+        {QStringLiteral("Time"), QStringLiteral("Level"), QStringLiteral("Category"), QStringLiteral("Message")});
+    messagesTable_->verticalHeader()->setVisible(false);
+    messagesTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    messagesTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    messagesTable_->setWordWrap(false);
+    messagesTable_->setShowGrid(false);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    messagesTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    messagesTable_->setTextElideMode(Qt::ElideRight);
+    messagesLayout->addWidget(messagesTable_, 1);
     messagesTabIndex_ = tabs->addTab(messagesPage, QStringLiteral("Messages"));
     connect(clearMessagesButton, &QPushButton::clicked, this, [this] {
-        if (messages_)
-            messages_->clear();
+        messageEntries_.clear();
+        rebuildMessageView();
     });
+    connect(messageCategoryFilter_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { rebuildMessageView(); });
+    connect(messageSeverityFilter_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { rebuildMessageView(); });
+    installMessageSinks();
 
     auto *drcPage = new QWidget;
     auto *drcLayout = new QVBoxLayout(drcPage);
@@ -447,35 +591,83 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
 
     auto *jobsPage = new QWidget;
     auto *jobsLayout = new QVBoxLayout(jobsPage);
-    auto *jobsHint = new QLabel(QStringLiteral("Long-running application and simulation tasks appear here."));
-    jobsHint->setWordWrap(true);
-    jobsHint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    jobsLayout->addWidget(jobsHint);
-    auto *jobsList = new QListWidget;
-    jobsList->setAccessibleName(QStringLiteral("Jobs"));
-    jobsList->setAlternatingRowColors(true);
-    auto *noJobs = new QListWidgetItem(QStringLiteral("No active jobs"), jobsList);
-    noJobs->setFlags(Qt::NoItemFlags);
-    jobsLayout->addWidget(jobsList, 1);
+    jobsLayout->setContentsMargins(6, 6, 6, 6);
+    jobsLayout->setSpacing(4);
+    auto *jobsHeader = new QHBoxLayout;
+    jobsHeader->setSpacing(6);
+    jobsSummary_ = new QLabel(QStringLiteral("No jobs yet"));
+    jobsSummary_->setStyleSheet(QStringLiteral("font-weight: 600;"));
+    jobsHeader->addWidget(jobsSummary_, 1);
+    clearJobsButton_ = new QPushButton(QStringLiteral("Clear finished"));
+    clearJobsButton_->setToolTip(QStringLiteral("Remove completed jobs from the list"));
+    clearJobsButton_->setEnabled(false);
+    jobsHeader->addWidget(clearJobsButton_);
+    jobsLayout->addLayout(jobsHeader);
+
+    jobsTable_ = new QTableWidget(0, 5);
+    jobsTable_->setAccessibleName(QStringLiteral("Jobs"));
+    jobsTable_->setHorizontalHeaderLabels({QStringLiteral("Job"), QStringLiteral("Stage"), QStringLiteral("Status"),
+                                           QStringLiteral("Elapsed"), QStringLiteral("Detail")});
+    jobsTable_->verticalHeader()->setVisible(false);
+    jobsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    jobsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    jobsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    jobsTable_->setWordWrap(false);
+    jobsTable_->setShowGrid(false);
+    jobsTable_->setAlternatingRowColors(true);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    jobsTable_->setTextElideMode(Qt::ElideRight);
+    jobsLayout->addWidget(jobsTable_, 1);
+
     auto *jobsFooter = new QHBoxLayout;
     jobsFooter->setSpacing(6);
-    auto *progress = new QProgressBar;
-    progress->setRange(0, 100);
-    progress->setValue(0);
-    progress->setFormat(QStringLiteral("Ready"));
-    progress->setMaximumHeight(16);
-    jobsFooter->addWidget(progress, 1);
-    auto *cancelJobButton = new QPushButton(QStringLiteral("Cancel selected job"));
-    cancelJobButton->setEnabled(false);
-    jobsFooter->addWidget(cancelJobButton);
+    jobsProgress_ = new QProgressBar;
+    jobsProgress_->setRange(0, 100);
+    jobsProgress_->setValue(0);
+    jobsProgress_->setFormat(QStringLiteral("Idle"));
+    jobsProgress_->setMaximumHeight(16);
+    jobsFooter->addWidget(jobsProgress_, 1);
+    cancelJobButton_ = new QPushButton(QStringLiteral("Cancel selected job"));
+    cancelJobButton_->setEnabled(false);
+    jobsFooter->addWidget(cancelJobButton_);
     jobsLayout->addLayout(jobsFooter);
-    tabs->addTab(jobsPage, QStringLiteral("Jobs"));
+    jobsTabIndex_ = tabs->addTab(jobsPage, QStringLiteral("Jobs"));
+
+    jobsTimer_ = new QTimer(this);
+    jobsTimer_->setInterval(1000);
+    connect(jobsTimer_, &QTimer::timeout, this, [this] { refreshJobsTable(); });
+    connect(jobsTable_, &QTableWidget::itemSelectionChanged, this, [this] { updateJobsFooter(); });
+    connect(cancelJobButton_, &QPushButton::clicked, this, [this] {
+        const auto id = selectedJobId();
+        if (id.isEmpty() || !onCancelJob_)
+            return;
+        for (auto &job : jobs_) {
+            if (job.id == id && job.running) {
+                job.status = QStringLiteral("Cancelling");
+                break;
+            }
+        }
+        onCancelJob_(id);
+        refreshJobsTable();
+    });
+    connect(clearJobsButton_, &QPushButton::clicked, this, [this] {
+        jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](const auto &job) { return !job.running; }),
+                    jobs_.end());
+        refreshJobsTable();
+    });
+    updateJobsFooter();
 
     layout->addWidget(tabs);
     tabs_ = tabs;
 }
 
 ActivityPanel::~ActivityPanel() {
+    if (messageSinkAlive_)
+        messageSinkAlive_->store(false);
     if (!agentBackend_)
         return;
     agentBackend_->alive.store(false);
@@ -2045,6 +2237,16 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
     if (!reportPath.isEmpty())
         summary += QStringLiteral(" Report: %1").arg(reportPath);
     drcSummary_->setText(summary);
+    if (auto logger = spdlog::get(ice::logging::drc)) {
+        logger->log(errors > 0 ? spdlog::level::warn : spdlog::level::info, "{}", summary.toStdString());
+        for (const auto &violation : report.drc) {
+            const auto level = violation.severity == ice::VerificationSeverity::error
+                                   ? spdlog::level::err
+                                   : (violation.severity == ice::VerificationSeverity::warning ? spdlog::level::warn
+                                                                                               : spdlog::level::info);
+            logger->log(level, "[{}] {}: {}", violation.rule, violation.cell, violation.message);
+        }
+    }
     showDrcTab();
 }
 
@@ -2053,7 +2255,10 @@ void ActivityPanel::setDrcRunning(const QString &message) {
         return;
     drcViolations_.clear();
     drcTable_->setRowCount(0);
-    drcSummary_->setText(message.isEmpty() ? QStringLiteral("Running gdscheck...") : message);
+    const auto text = message.isEmpty() ? QStringLiteral("Running gdscheck...") : message;
+    drcSummary_->setText(text);
+    if (auto logger = spdlog::get(ice::logging::drc))
+        logger->info("{}", text.toStdString());
     showDrcTab();
 }
 
@@ -2063,6 +2268,8 @@ void ActivityPanel::setDrcError(const QString &message) {
     drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message);
+    if (auto logger = spdlog::get(ice::logging::drc))
+        logger->error("{}", message.toStdString());
     showDrcTab();
 }
 
@@ -2112,16 +2319,28 @@ void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
                      .arg(infos);
     }
     lvsReport_->setPlainText(lines.join(QLatin1Char('\n')));
+    QString summary;
     if (lvsSummary_) {
         if (report.mismatches.empty()) {
-            lvsSummary_->setText(
-                QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
-                    .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout)));
+            summary = QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
+                          .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout));
         } else {
-            lvsSummary_->setText(QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s).")
-                                     .arg(errors)
-                                     .arg(warnings)
-                                     .arg(infos));
+            summary = QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s).")
+                          .arg(errors)
+                          .arg(warnings)
+                          .arg(infos);
+        }
+        lvsSummary_->setText(summary);
+    }
+    if (auto logger = spdlog::get(ice::logging::lvs)) {
+        logger->log(errors > 0 ? spdlog::level::warn : spdlog::level::info, "{}", summary.toStdString());
+        for (const auto &mismatch : report.mismatches) {
+            const auto level = mismatch.severity == ice::VerificationSeverity::error
+                                   ? spdlog::level::err
+                                   : (mismatch.severity == ice::VerificationSeverity::warning ? spdlog::level::warn
+                                                                                              : spdlog::level::info);
+            logger->log(level, "[{}] {}: {}", mismatch.category, mismatch.schematicObject.value_or(0),
+                        mismatch.message);
         }
     }
     showLvsTab();
@@ -2133,6 +2352,8 @@ void ActivityPanel::setLvsError(const QString &message) {
     lvsReport_->setPlainText(message);
     if (lvsSummary_)
         lvsSummary_->setText(message);
+    if (auto logger = spdlog::get(ice::logging::lvs))
+        logger->error("{}", message.toStdString());
     showLvsTab();
 }
 
@@ -2146,16 +2367,326 @@ void ActivityPanel::showAgentTab() {
         tabs_->setCurrentIndex(agentTabIndex_);
 }
 
-void ActivityPanel::appendMessage(const QString &message) {
-    if (!messages_)
+void ActivityPanel::installMessageSinks() {
+    messageSinkAlive_ = std::make_shared<std::atomic<bool>>(true);
+    const std::pair<const char *, const char *> categories[] = {
+        {ice::logging::application, "Application"},
+        {ice::logging::simulation, "Simulation"},
+        {ice::logging::implementation, "Implementation"},
+        {ice::logging::drc, "DRC"},
+        {ice::logging::lvs, "LVS"},
+    };
+    for (const auto &[name, label] : categories) {
+        QPointer<ActivityPanel> self(this);
+        const auto alive = messageSinkAlive_;
+        auto sink = std::make_shared<QtMessageSink>(
+            QString::fromLatin1(label),
+            [self, alive](const QString &time, int level, const QString &category, const QString &message) {
+                if (!alive->load())
+                    return;
+                auto *context = self.data();
+                if (!context)
+                    return;
+                QMetaObject::invokeMethod(
+                    context,
+                    [self, time, level, category, message] {
+                        if (self)
+                            self->appendLogEntry(time, level, category, message);
+                    },
+                    Qt::QueuedConnection);
+            });
+        auto logger = std::make_shared<spdlog::logger>(name, std::move(sink));
+        logger->set_pattern("%v");
+        logger->set_level(spdlog::level::trace);
+        logger->flush_on(spdlog::level::trace);
+        spdlog::drop(name);
+        spdlog::register_logger(logger);
+        if (std::string_view(name) == ice::logging::application)
+            spdlog::set_default_logger(logger);
+    }
+}
+
+bool ActivityPanel::messagePassesFilters(const QString &category, int level) const {
+    if (messageCategoryFilter_) {
+        const auto wanted = messageCategoryFilter_->currentData().toString();
+        if (!wanted.isEmpty() && wanted != category)
+            return false;
+    }
+    if (messageSeverityFilter_) {
+        const auto minimum = messageSeverityFilter_->currentData().toInt();
+        if (level < minimum)
+            return false;
+    }
+    return true;
+}
+
+void ActivityPanel::appendLogEntry(const QString &time, int level, const QString &category, const QString &message) {
+    if (!messagesTable_)
         return;
-    messages_->appendPlainText(message);
-    messages_->moveCursor(QTextCursor::End);
+    const auto atBottom = !messagesTable_->verticalScrollBar() || messagesTable_->verticalScrollBar()->value() >=
+                                                                      messagesTable_->verticalScrollBar()->maximum();
+    auto lines = message.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+    for (auto line : lines) {
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+        if (line.isEmpty())
+            continue;
+        MessageEntry entry;
+        entry.time = time;
+        entry.level = level;
+        entry.category = category;
+        entry.message = line;
+        messageEntries_.push_back(entry);
+        if (messagePassesFilters(entry.category, entry.level)) {
+            const int row = messagesTable_->rowCount();
+            messagesTable_->insertRow(row);
+            auto *timeItem = new QTableWidgetItem(entry.time);
+            auto *levelItem = new QTableWidgetItem(messageLevelName(entry.level));
+            levelItem->setForeground(QBrush(messageLevelColor(entry.level)));
+            if (entry.level >= static_cast<int>(spdlog::level::err)) {
+                auto font = levelItem->font();
+                font.setBold(true);
+                levelItem->setFont(font);
+            }
+            auto *categoryItem = new QTableWidgetItem(entry.category);
+            auto *messageItem = new QTableWidgetItem(entry.message);
+            messageItem->setToolTip(entry.message);
+            messagesTable_->setItem(row, 0, timeItem);
+            messagesTable_->setItem(row, 1, levelItem);
+            messagesTable_->setItem(row, 2, categoryItem);
+            messagesTable_->setItem(row, 3, messageItem);
+        }
+    }
+    constexpr std::size_t limit = 5000;
+    while (messageEntries_.size() > limit) {
+        const auto &oldest = messageEntries_.front();
+        if (messagePassesFilters(oldest.category, oldest.level) && messagesTable_->rowCount() > 0)
+            messagesTable_->removeRow(0);
+        messageEntries_.pop_front();
+    }
+    if (atBottom)
+        messagesTable_->scrollToBottom();
+    if (messagesCount_) {
+        const auto shown = messagesTable_->rowCount();
+        const auto total = static_cast<int>(messageEntries_.size());
+        messagesCount_->setText(shown == total ? QStringLiteral("%1 messages").arg(total)
+                                               : QStringLiteral("%1 / %2 messages").arg(shown).arg(total));
+    }
+}
+
+void ActivityPanel::rebuildMessageView() {
+    if (!messagesTable_)
+        return;
+    messagesTable_->setRowCount(0);
+    for (const auto &entry : messageEntries_) {
+        if (!messagePassesFilters(entry.category, entry.level))
+            continue;
+        const int row = messagesTable_->rowCount();
+        messagesTable_->insertRow(row);
+        auto *timeItem = new QTableWidgetItem(entry.time);
+        auto *levelItem = new QTableWidgetItem(messageLevelName(entry.level));
+        levelItem->setForeground(QBrush(messageLevelColor(entry.level)));
+        if (entry.level >= static_cast<int>(spdlog::level::err)) {
+            auto font = levelItem->font();
+            font.setBold(true);
+            levelItem->setFont(font);
+        }
+        auto *categoryItem = new QTableWidgetItem(entry.category);
+        auto *messageItem = new QTableWidgetItem(entry.message);
+        messageItem->setToolTip(entry.message);
+        messagesTable_->setItem(row, 0, timeItem);
+        messagesTable_->setItem(row, 1, levelItem);
+        messagesTable_->setItem(row, 2, categoryItem);
+        messagesTable_->setItem(row, 3, messageItem);
+    }
+    messagesTable_->scrollToBottom();
+    if (messagesCount_) {
+        const auto shown = messagesTable_->rowCount();
+        const auto total = static_cast<int>(messageEntries_.size());
+        messagesCount_->setText(shown == total ? QStringLiteral("%1 messages").arg(total)
+                                               : QStringLiteral("%1 / %2 messages").arg(shown).arg(total));
+    }
+}
+
+void ActivityPanel::appendMessage(const QString &message) {
+    if (auto logger = spdlog::get(ice::logging::application))
+        logger->info("{}", message.toStdString());
+    else
+        spdlog::info("{}", message.toStdString());
 }
 
 void ActivityPanel::showMessagesTab() {
     if (tabs_ && messagesTabIndex_ >= 0)
         tabs_->setCurrentIndex(messagesTabIndex_);
+}
+QString ActivityPanel::startJob(const QString &title, const QString &stage, const QString &detail) {
+    JobEntry job;
+    job.id = QStringLiteral("job-%1").arg(nextJobNumber_++);
+    job.title = title;
+    job.stage = stage;
+    job.status = QStringLiteral("Running");
+    job.detail = detail;
+    job.startedMs = QDateTime::currentMSecsSinceEpoch();
+    job.running = true;
+    jobs_.push_back(job);
+    if (jobsTimer_ && !jobsTimer_->isActive())
+        jobsTimer_->start();
+    refreshJobsTable();
+    showJobsTab();
+    return job.id;
+}
+
+void ActivityPanel::updateJobStatus(const QString &id, const QString &status, const QString &detail) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        job.status = status;
+        if (!detail.isEmpty())
+            job.detail = detail;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::updateJobStage(const QString &id, const QString &stage) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        job.stage = stage;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::updateJobDetail(const QString &id, const QString &detail) {
+    if (id.isEmpty() || !jobsTable_)
+        return;
+    for (auto &job : jobs_) {
+        if (job.id == id) {
+            job.detail = detail;
+            break;
+        }
+    }
+    for (int row = 0; row < jobsTable_->rowCount(); ++row) {
+        const auto *item = jobsTable_->item(row, 0);
+        if (!item || item->data(Qt::UserRole).toString() != id)
+            continue;
+        if (auto *detailItem = jobsTable_->item(row, 4)) {
+            detailItem->setText(detail);
+            detailItem->setToolTip(detail);
+        }
+        break;
+    }
+}
+
+void ActivityPanel::finishJob(const QString &id, bool success, const QString &detail) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        const bool wasCancelling = job.status == QStringLiteral("Cancelling");
+        job.running = false;
+        job.finishedMs = QDateTime::currentMSecsSinceEpoch();
+        job.status = wasCancelling ? QStringLiteral("Cancelled")
+                                   : (success ? QStringLiteral("Succeeded") : QStringLiteral("Failed"));
+        if (!detail.isEmpty() && !wasCancelling)
+            job.detail = detail;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::showJobsTab() {
+    if (tabs_ && jobsTabIndex_ >= 0)
+        tabs_->setCurrentIndex(jobsTabIndex_);
+}
+
+QString ActivityPanel::selectedJobId() const {
+    if (!jobsTable_)
+        return {};
+    const auto row = jobsTable_->currentRow();
+    if (row < 0)
+        return {};
+    const auto *item = jobsTable_->item(row, 0);
+    return item ? item->data(Qt::UserRole).toString() : QString{};
+}
+
+void ActivityPanel::refreshJobsTable() {
+    if (!jobsTable_)
+        return;
+    const auto selected = selectedJobId();
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    jobsTable_->setRowCount(0);
+    int selectedRow = -1;
+    for (auto iterator = jobs_.rbegin(); iterator != jobs_.rend(); ++iterator) {
+        const auto &job = *iterator;
+        const int row = jobsTable_->rowCount();
+        jobsTable_->insertRow(row);
+        auto *titleItem = new QTableWidgetItem(job.title);
+        titleItem->setData(Qt::UserRole, job.id);
+        auto *stageItem = new QTableWidgetItem(job.stage);
+        auto *statusItem = new QTableWidgetItem(job.status);
+        statusItem->setForeground(QBrush(jobStatusColor(job.status)));
+        if (job.running) {
+            auto font = statusItem->font();
+            font.setBold(true);
+            statusItem->setFont(font);
+        }
+        auto *elapsedItem =
+            new QTableWidgetItem(formatJobElapsed((job.finishedMs > 0 ? job.finishedMs : now) - job.startedMs));
+        auto *detailItem = new QTableWidgetItem(job.detail);
+        detailItem->setToolTip(job.detail);
+        jobsTable_->setItem(row, 0, titleItem);
+        jobsTable_->setItem(row, 1, stageItem);
+        jobsTable_->setItem(row, 2, statusItem);
+        jobsTable_->setItem(row, 3, elapsedItem);
+        jobsTable_->setItem(row, 4, detailItem);
+        if (job.id == selected)
+            selectedRow = row;
+    }
+    if (selectedRow >= 0)
+        jobsTable_->setCurrentCell(selectedRow, 0);
+    updateJobsFooter();
+    const bool hasRunning = std::any_of(jobs_.begin(), jobs_.end(), [](const auto &job) { return job.running; });
+    if (jobsTimer_) {
+        if (hasRunning && !jobsTimer_->isActive())
+            jobsTimer_->start();
+        else if (!hasRunning)
+            jobsTimer_->stop();
+    }
+}
+
+void ActivityPanel::updateJobsFooter() {
+    if (!jobsSummary_ || !jobsProgress_)
+        return;
+    const auto running = std::count_if(jobs_.begin(), jobs_.end(), [](const auto &job) { return job.running; });
+    const auto finished = static_cast<int>(jobs_.size()) - static_cast<int>(running);
+    if (jobs_.empty()) {
+        jobsSummary_->setText(QStringLiteral("No jobs yet"));
+    } else if (running > 0) {
+        jobsSummary_->setText(QStringLiteral("%1 running · %2 finished").arg(running).arg(finished));
+    } else {
+        jobsSummary_->setText(QStringLiteral("%1 finished").arg(finished));
+    }
+    if (running > 0) {
+        jobsProgress_->setRange(0, 0);
+        jobsProgress_->setFormat(QStringLiteral("Running"));
+    } else {
+        jobsProgress_->setRange(0, 100);
+        jobsProgress_->setValue(0);
+        jobsProgress_->setFormat(QStringLiteral("Idle"));
+    }
+    const auto id = selectedJobId();
+    bool selectedRunning = false;
+    for (const auto &job : jobs_) {
+        if (job.id == id && job.running) {
+            selectedRunning = true;
+            break;
+        }
+    }
+    if (cancelJobButton_)
+        cancelJobButton_->setEnabled(selectedRunning);
+    if (clearJobsButton_)
+        clearJobsButton_->setEnabled(finished > 0);
 }
 
 CommandPalette::CommandPalette(const QList<QAction *> &actions, QWidget *parent) : QDialog(parent) {
@@ -2530,8 +3061,6 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Draw a schematic with symbols and wires on the canvas."));
     addKind(Kind::TextSpice, QStringLiteral("Text Schematic"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a SPICE netlist cell and edit its source directly."));
-    addKind(Kind::SystemVerilog, QStringLiteral("SV Block"), QStringLiteral("circuit-board"),
-            QStringLiteral("Create a SystemVerilog block with a starter module."));
     layout->addLayout(kindRow, 2);
 
     kindDescription_ = new QLabel;

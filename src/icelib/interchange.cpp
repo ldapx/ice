@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -536,15 +537,14 @@ std::vector<std::string> tokenizeInterchange(const std::string &text) {
 }
 
 double parseInterchangeNumber(const std::string &token) {
-    try {
-        std::size_t consumed = 0;
-        const auto value = std::stod(token, &consumed);
-        if (consumed != token.size())
-            throw std::invalid_argument("trailing characters");
-        return value;
-    } catch (const std::exception &) {
+    // Use from_chars so exchange files remain locale-independent. Qt switches
+    // the numeric locale at startup (for example es_CL uses a comma decimal
+    // separator), which makes std::stod reject "0.230".
+    double value = 0.0;
+    const auto result = std::from_chars(token.data(), token.data() + token.size(), value);
+    if (result.ec != std::errc{} || result.ptr != token.data() + token.size())
         throw ProjectError("interchange.parse", "Invalid interchange coordinate: " + token);
-    }
+    return value;
 }
 
 std::string uppercase(std::string text) {
@@ -606,6 +606,342 @@ std::string readInterchangeFile(const std::filesystem::path &path, const char *k
         throw ProjectError("interchange.import", std::string("Unable to open ") + kind + " input");
     return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 }
+
+std::string lowercaseInterchange(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return text;
+}
+
+struct ParsedLefPin {
+    std::string name;
+    std::string layer;
+    PortDirection direction = PortDirection::inout;
+    Rect rectangle;
+    bool hasRectangle = false;
+};
+
+struct ParsedLefMacro {
+    std::string name;
+    Rect bounds;
+    std::vector<ParsedLefPin> pins;
+};
+
+struct ParsedLef {
+    std::map<std::string, ParsedLefMacro> macros;
+    // Lower-case routing layer name -> width in database units.
+    std::map<std::string, Coordinate> layerWidths;
+    // Lower-case via name -> lower-case cut layer name.
+    std::map<std::string, std::string> viaLayers;
+};
+
+void mergeParsedLef(ParsedLef &target, ParsedLef source) {
+    for (auto &[name, macro] : source.macros)
+        target.macros.emplace(name, std::move(macro));
+    for (auto &[name, width] : source.layerWidths)
+        target.layerWidths.emplace(name, width);
+    for (auto &[name, layer] : source.viaLayers)
+        target.viaLayers.emplace(name, layer);
+}
+
+bool readLefPoint(const std::vector<std::string> &tokens, std::size_t &index, double &x, double &y) {
+    if (index + 3 >= tokens.size() || tokens[index] != "(" || tokens[index + 3] != ")")
+        return false;
+    x = parseInterchangeNumber(tokens[index + 1]);
+    y = parseInterchangeNumber(tokens[index + 2]);
+    index += 4;
+    return true;
+}
+
+// DEF routing may omit one coordinate with `( x * )` to reuse the previous
+// point's Y (or X). Keep the running coordinate while parsing a path.
+bool readDefPoint(const std::vector<std::string> &tokens, std::size_t &index, double &lastX, double &lastY, double &x,
+                  double &y) {
+    if (index + 3 >= tokens.size() || tokens[index] != "(" || tokens[index + 3] != ")")
+        return false;
+    if (tokens[index + 1] == "*")
+        x = lastX;
+    else
+        x = parseInterchangeNumber(tokens[index + 1]);
+    if (tokens[index + 2] == "*")
+        y = lastY;
+    else
+        y = parseInterchangeNumber(tokens[index + 2]);
+    lastX = x;
+    lastY = y;
+    index += 4;
+    return true;
+}
+
+void parseLefPin(const std::vector<std::string> &tokens, std::size_t &index, ParsedLefMacro &macro, double toDatabase) {
+    const auto pinName = tokens[index + 1];
+    ParsedLefPin pin;
+    pin.name = pinName;
+    std::string currentLayer;
+    std::size_t cursor = index + 2;
+    while (cursor + 1 < tokens.size()) {
+        if (tokens[cursor] == "END" && tokens[cursor + 1] == pinName) {
+            cursor += 2;
+            break;
+        }
+        if (tokens[cursor] == "DIRECTION" && cursor + 1 < tokens.size()) {
+            if (const auto direction = portDirectionFromInterchange(tokens[cursor + 1]))
+                pin.direction = *direction;
+            cursor += 2;
+            continue;
+        }
+        if (tokens[cursor] == "USE" && cursor + 1 < tokens.size()) {
+            const auto use = uppercase(tokens[cursor + 1]);
+            if (use == "POWER")
+                pin.direction = PortDirection::power;
+            else if (use == "GROUND")
+                pin.direction = PortDirection::ground;
+            cursor += 2;
+            continue;
+        }
+        if (tokens[cursor] == "LAYER" && cursor + 1 < tokens.size()) {
+            currentLayer = tokens[cursor + 1];
+            cursor += 2;
+            continue;
+        }
+        if (tokens[cursor] == "RECT" && !pin.hasRectangle) {
+            std::vector<double> values;
+            std::size_t valueCursor = cursor + 1;
+            while (valueCursor < tokens.size() && tokens[valueCursor] != ";" && values.size() < 4) {
+                if (tokens[valueCursor] == "(" || tokens[valueCursor] == ")") {
+                    ++valueCursor;
+                    continue;
+                }
+                try {
+                    values.push_back(parseInterchangeNumber(tokens[valueCursor]));
+                } catch (const ProjectError &) {
+                    break;
+                }
+                ++valueCursor;
+            }
+            if (values.size() == 4) {
+                const auto x1 = static_cast<Coordinate>(std::llround(values[0] * toDatabase));
+                const auto y1 = static_cast<Coordinate>(std::llround(values[1] * toDatabase));
+                const auto x2 = static_cast<Coordinate>(std::llround(values[2] * toDatabase));
+                const auto y2 = static_cast<Coordinate>(std::llround(values[3] * toDatabase));
+                pin.rectangle = {std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1), std::abs(y2 - y1)};
+                pin.hasRectangle = pin.rectangle.valid();
+            }
+            cursor = valueCursor;
+            continue;
+        }
+        ++cursor;
+    }
+    pin.layer = currentLayer;
+    if (!pin.layer.empty() && pin.hasRectangle)
+        macro.pins.push_back(std::move(pin));
+    index = cursor;
+}
+
+ParsedLef parseLefFile(const std::filesystem::path &path) {
+    ParsedLef result;
+    const auto tokens = tokenizeInterchange(readInterchangeFile(path, "LEF"));
+    double databaseMicrons = 1000.0;
+    for (std::size_t index = 0; index + 2 < tokens.size(); ++index) {
+        if (tokens[index] == "DATABASE" && tokens[index + 1] == "MICRONS") {
+            databaseMicrons = parseInterchangeNumber(tokens[index + 2]);
+            break;
+        }
+    }
+    if (databaseMicrons <= 0)
+        throw ProjectError("interchange.parse", "LEF database units must be positive");
+    // LEF coordinates are expressed in microns. ICE uses nanometres.
+    constexpr double toDatabase = 1000.0;
+
+    std::size_t index = 0;
+    while (index + 1 < tokens.size()) {
+        if (tokens[index] == "PROPERTYDEFINITIONS") {
+            std::size_t cursor = index + 1;
+            while (cursor + 1 < tokens.size()) {
+                if (tokens[cursor] == "END" && tokens[cursor + 1] == "PROPERTYDEFINITIONS") {
+                    cursor += 2;
+                    break;
+                }
+                ++cursor;
+            }
+            index = cursor;
+            continue;
+        }
+        if (tokens[index] == "VIARULE" || tokens[index] == "NONDEFAULTRULES") {
+            const auto sectionName = tokens[index];
+            const auto name = tokens[index + 1];
+            std::size_t cursor = index + 2;
+            while (cursor + 1 < tokens.size()) {
+                if (tokens[cursor] == "END" && (tokens[cursor + 1] == name || tokens[cursor + 1] == sectionName)) {
+                    cursor += 2;
+                    break;
+                }
+                ++cursor;
+            }
+            index = cursor;
+            continue;
+        }
+        if (tokens[index] == "LAYER") {
+            const auto layerName = tokens[index + 1];
+            std::size_t cursor = index + 2;
+            while (cursor + 1 < tokens.size()) {
+                if (tokens[cursor] == "END" && tokens[cursor + 1] == layerName) {
+                    cursor += 2;
+                    break;
+                }
+                if (tokens[cursor] == "WIDTH" && cursor + 1 < tokens.size()) {
+                    const auto width =
+                        static_cast<Coordinate>(std::llround(parseInterchangeNumber(tokens[cursor + 1]) * toDatabase));
+                    result.layerWidths[lowercaseInterchange(layerName)] = std::max<Coordinate>(1, width);
+                    cursor += 2;
+                    continue;
+                }
+                ++cursor;
+            }
+            index = cursor;
+            continue;
+        }
+        if (tokens[index] == "VIA") {
+            const auto viaName = tokens[index + 1];
+            std::size_t cursor = index + 2;
+            std::string cutLayer;
+            std::string currentLayer;
+            while (cursor + 1 < tokens.size()) {
+                if (tokens[cursor] == "END" && tokens[cursor + 1] == viaName) {
+                    cursor += 2;
+                    break;
+                }
+                if (tokens[cursor] == "LAYER" && cursor + 1 < tokens.size()) {
+                    currentLayer = tokens[cursor + 1];
+                    const auto lower = lowercaseInterchange(currentLayer);
+                    if (cutLayer.empty() &&
+                        (lower.find("via") != std::string::npos || lower.find("cut") != std::string::npos))
+                        cutLayer = currentLayer;
+                    cursor += 2;
+                    continue;
+                }
+                ++cursor;
+            }
+            if (!cutLayer.empty())
+                result.viaLayers[lowercaseInterchange(viaName)] = lowercaseInterchange(cutLayer);
+            index = cursor;
+            continue;
+        }
+        if (tokens[index] == "MACRO" && index + 1 < tokens.size()) {
+            ParsedLefMacro macro;
+            macro.name = tokens[index + 1];
+            double width = 0.0;
+            double height = 0.0;
+            std::size_t cursor = index + 2;
+            while (cursor + 1 < tokens.size()) {
+                if (tokens[cursor] == "END" && tokens[cursor + 1] == macro.name) {
+                    cursor += 2;
+                    break;
+                }
+                if (tokens[cursor] == "SIZE" && cursor + 3 < tokens.size() && tokens[cursor + 2] == "BY") {
+                    width = parseInterchangeNumber(tokens[cursor + 1]);
+                    height = parseInterchangeNumber(tokens[cursor + 3]);
+                    cursor += 4;
+                    continue;
+                }
+                if (tokens[cursor] == "PIN" && cursor + 1 < tokens.size()) {
+                    parseLefPin(tokens, cursor, macro, toDatabase);
+                    continue;
+                }
+                ++cursor;
+            }
+            if (width > 0.0 && height > 0.0) {
+                macro.bounds = {0, 0, static_cast<Coordinate>(std::llround(width * toDatabase)),
+                                static_cast<Coordinate>(std::llround(height * toDatabase))};
+            }
+            result.macros[macro.name] = std::move(macro);
+            index = cursor;
+            continue;
+        }
+        ++index;
+    }
+    return result;
+}
+
+Orientation defOrientation(const std::string &value) {
+    const auto text = uppercase(value);
+    if (text == "S")
+        return Orientation::r180;
+    if (text == "W")
+        return Orientation::r90;
+    if (text == "E")
+        return Orientation::r270;
+    if (text == "FN")
+        return Orientation::my;
+    if (text == "FS")
+        return Orientation::mx;
+    if (text == "FW")
+        return Orientation::m135;
+    if (text == "FE")
+        return Orientation::m45;
+    return Orientation::r0;
+}
+
+ObjectId findLayerByName(const Project &project, const std::string &name, const std::string &pdk,
+                         const std::string &stack) {
+    const auto key = lowercaseInterchange(name);
+    for (const auto &[id, layer] : project.layers) {
+        if (lowercaseInterchange(layer.name) != key)
+            continue;
+        if (!pdk.empty() && !layer.pdk.empty() && layer.pdk != pdk)
+            continue;
+        if (!stack.empty() && !layer.stack.empty() && layer.stack != stack)
+            continue;
+        return id;
+    }
+    return 0;
+}
+
+ObjectId findLayoutCellByName(const Project &project, const std::string &name, const std::string &pdk,
+                              const std::string &stack) {
+    for (const auto &[id, cell] : project.layoutCells) {
+        if (cell.name == name && cell.pdk == pdk && cell.stack == stack)
+            return id;
+    }
+    return 0;
+}
+
+std::string uniqueLayoutName(const Project &project, const std::string &name) {
+    const auto taken = [&](const std::string &candidate) {
+        for (const auto &[_, cell] : project.layoutCells)
+            if (cell.name == candidate)
+                return true;
+        return false;
+    };
+    if (!taken(name))
+        return name;
+    for (int suffix = 2;; ++suffix) {
+        const auto candidate = name + " " + std::to_string(suffix);
+        if (!taken(candidate))
+            return candidate;
+    }
+}
+
+Rect boundsForPoints(const std::vector<LayoutPoint> &points, Coordinate margin) {
+    if (points.empty())
+        return {};
+    Coordinate minX = points.front().x;
+    Coordinate minY = points.front().y;
+    Coordinate maxX = points.front().x;
+    Coordinate maxY = points.front().y;
+    for (const auto &point : points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    minX -= margin;
+    minY -= margin;
+    maxX += margin;
+    maxY += margin;
+    return {minX, minY, std::max<Coordinate>(1, maxX - minX), std::max<Coordinate>(1, maxY - minY)};
+}
+
 } // namespace
 
 Project LayoutInterchange::importLef(const std::filesystem::path &path) {
@@ -703,22 +1039,36 @@ Project LayoutInterchange::importLef(const std::filesystem::path &path) {
     return project;
 }
 
-Project LayoutInterchange::importDef(const std::filesystem::path &path) {
+Project LayoutInterchange::importDef(const std::filesystem::path &path, const DefImportOptions &options) {
+    Project project;
+    project.identity = path.stem().string();
+    project.name = project.identity;
+    importDefIntoProject(project, path, options);
+    return project;
+}
+
+ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::filesystem::path &path,
+                                                 const DefImportOptions &options) {
     const auto tokens = tokenizeInterchange(readInterchangeFile(path, "DEF"));
     double unitsPerMicron = 1000.0;
     std::string designName;
     Rect dieArea;
     for (std::size_t index = 0; index + 1 < tokens.size(); ++index) {
-        if (tokens[index] == "DISTANCE" && tokens[index + 1] == "MICRONS" && index + 2 < tokens.size())
-            unitsPerMicron = parseInterchangeNumber(tokens[index + 2]);
-        else if (tokens[index] == "DESIGN" && designName.empty())
+        if (tokens[index] == "UNITS" && tokens[index + 1] == "DISTANCE" && index + 3 < tokens.size() &&
+            tokens[index + 2] == "MICRONS") {
+            unitsPerMicron = parseInterchangeNumber(tokens[index + 3]);
+        } else if (tokens[index] == "DESIGN" && designName.empty()) {
             designName = tokens[index + 1];
-        else if (tokens[index] == "DIEAREA") {
+        } else if (tokens[index] == "DIEAREA") {
             std::vector<double> values;
             for (std::size_t cursor = index + 1; cursor < tokens.size() && tokens[cursor] != ";"; ++cursor) {
                 if (tokens[cursor] == "(" || tokens[cursor] == ")")
                     continue;
-                values.push_back(parseInterchangeNumber(tokens[cursor]));
+                try {
+                    values.push_back(parseInterchangeNumber(tokens[cursor]));
+                } catch (const ProjectError &) {
+                    break;
+                }
             }
             if (values.size() >= 4) {
                 const auto x1 = values[0];
@@ -736,28 +1086,148 @@ Project LayoutInterchange::importDef(const std::filesystem::path &path) {
         designName = path.stem().string();
     if (unitsPerMicron <= 0)
         throw ProjectError("interchange.parse", "DEF distance units must be positive");
-
-    Project project;
-    project.identity = designName;
-    project.name = designName;
-    const auto cellId = project.nextId();
-    project.layoutCells.emplace(cellId, LayoutCell{cellId, designName});
-    auto &layout = project.layoutCells.at(cellId);
-    std::map<std::string, ObjectId> layers;
-    std::map<std::string, ObjectId> nets;
-
     const auto toDatabase = [unitsPerMicron](double value) {
         return static_cast<Coordinate>(std::llround(value * 1000.0 / unitsPerMicron));
     };
 
-    std::size_t pinsIndex = tokens.size();
-    for (std::size_t index = 0; index + 1 < tokens.size(); ++index) {
-        if (tokens[index] == "PINS" && tokens[index + 1] != ";") {
-            pinsIndex = index + 1;
-            break;
+    ParsedLef lef;
+    std::error_code fileStatus;
+    if (!options.techLef.empty() && std::filesystem::is_regular_file(options.techLef, fileStatus) && !fileStatus)
+        mergeParsedLef(lef, parseLefFile(options.techLef));
+    if (!options.cellLef.empty() && std::filesystem::is_regular_file(options.cellLef, fileStatus) && !fileStatus)
+        mergeParsedLef(lef, parseLefFile(options.cellLef));
+
+    std::map<std::string, ObjectId> importedLayers;
+    const auto layerFor = [&](const std::string &name) {
+        const auto key = lowercaseInterchange(name);
+        if (const auto existing = importedLayers.find(key); existing != importedLayers.end())
+            return existing->second;
+        if (const auto existing = findLayerByName(project, name, options.pdk, options.stack); existing != 0) {
+            importedLayers.emplace(key, existing);
+            return existing;
         }
+        int number = 0;
+        int datatype = 0;
+        if (const auto definition = options.layers.find(key); definition != options.layers.end()) {
+            number = definition->second.number;
+            datatype = definition->second.datatype;
+        } else {
+            std::size_t start = name.size();
+            while (start > 0 && std::isdigit(static_cast<unsigned char>(name[start - 1])))
+                --start;
+            if (start < name.size()) {
+                number = std::stoi(name.substr(start));
+            } else {
+                number = static_cast<int>(project.layers.size()) + 1;
+            }
+        }
+        const auto id = addLayer(project, name, std::max(0, number), 0, options.pdk, datatype, options.stack);
+        importedLayers.emplace(key, id);
+        return id;
+    };
+
+    ObjectId boundaryLayer = 0;
+    const auto boundaryLayerFor = [&] {
+        if (boundaryLayer != 0)
+            return boundaryLayer;
+        if (const auto existing = findLayerByName(project, "Cell boundary", {}, {}); existing != 0) {
+            boundaryLayer = existing;
+            return boundaryLayer;
+        }
+        boundaryLayer = addLayer(project, "Cell boundary", 0);
+        project.layers.at(boundaryLayer).color = "#6b7280";
+        return boundaryLayer;
+    };
+
+    ObjectId cellId = options.replaceCell;
+    if (cellId != 0) {
+        if (!project.layoutCells.contains(cellId))
+            throw ProjectError("interchange.import", "Layout cell to replace does not exist");
+        auto &cell = project.layoutCells.at(cellId);
+        cell.shapes.clear();
+        cell.ports.clear();
+        cell.nets.clear();
+        cell.instances.clear();
+        cell.plannedDevices.clear();
+        cell.plannedConnections.clear();
+        cell.generatedBy = 0;
+        cell.pdk = options.pdk;
+        cell.stack = options.stack;
+    } else {
+        auto name = options.cellName.empty() ? designName : options.cellName;
+        if (name.empty())
+            name = "DEF import";
+        cellId = createLayoutCell(project, uniqueLayoutName(project, name), options.pdk, options.stack);
     }
-    std::size_t index = pinsIndex;
+    auto &cell = project.layoutCells.at(cellId);
+    if (!dieArea.valid() && !tokens.empty()) {
+        // A DEF without DIEAREA still gets a boundary from the imported
+        // geometry once components and routes are known.
+    }
+
+    struct DefComponent {
+        std::string name;
+        std::string master;
+        Coordinate x = 0;
+        Coordinate y = 0;
+        Orientation orientation = Orientation::r0;
+    };
+    std::vector<DefComponent> components;
+    std::size_t index = 0;
+    while (index < tokens.size() && tokens[index] != "COMPONENTS")
+        ++index;
+    if (index < tokens.size())
+        ++index;
+    while (index < tokens.size()) {
+        if (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "COMPONENTS")
+            break;
+        if (tokens[index] != "-" || index + 2 >= tokens.size()) {
+            ++index;
+            continue;
+        }
+        DefComponent component;
+        component.name = tokens[index + 1];
+        component.master = tokens[index + 2];
+        index += 3;
+        bool placed = false;
+        while (index < tokens.size() && tokens[index] != ";") {
+            if (tokens[index] == "PLACED" || tokens[index] == "FIXED" || tokens[index] == "COVER") {
+                ++index;
+                if (index + 3 < tokens.size() && tokens[index] == "(" && tokens[index + 3] == ")") {
+                    component.x = toDatabase(parseInterchangeNumber(tokens[index + 1]));
+                    component.y = toDatabase(parseInterchangeNumber(tokens[index + 2]));
+                    index += 4;
+                    placed = true;
+                }
+                continue;
+            }
+            if (placed && component.orientation == Orientation::r0) {
+                const auto orientation = uppercase(tokens[index]);
+                if (orientation == "N" || orientation == "S" || orientation == "E" || orientation == "W" ||
+                    orientation == "FN" || orientation == "FS" || orientation == "FE" || orientation == "FW") {
+                    component.orientation = defOrientation(orientation);
+                    ++index;
+                    continue;
+                }
+            }
+            ++index;
+        }
+        if (index < tokens.size() && tokens[index] == ";")
+            ++index;
+        if (placed)
+            components.push_back(std::move(component));
+    }
+
+    struct DefPin {
+        Port port;
+        std::string netName;
+    };
+    std::vector<DefPin> pins;
+    index = 0;
+    while (index < tokens.size() && tokens[index] != "PINS")
+        ++index;
+    if (index < tokens.size())
+        ++index;
     while (index < tokens.size()) {
         if (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "PINS")
             break;
@@ -765,93 +1235,271 @@ Project LayoutInterchange::importDef(const std::filesystem::path &path) {
             ++index;
             continue;
         }
-        const auto pinName = tokens[index + 1];
+        DefPin pin;
+        pin.port.name = tokens[index + 1];
+        pin.port.label = pin.port.name;
         index += 2;
-        Port port;
-        port.name = pinName;
-        port.label = pinName;
-        std::string netName;
-        bool haveRectangle = false;
+        std::string currentLayer;
         while (index < tokens.size()) {
             if (tokens[index] == "-" ||
                 (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "PINS"))
                 break;
-            if (tokens[index] == "+") {
-                ++index;
-                continue;
-            }
             if (tokens[index] == "NET" && index + 1 < tokens.size()) {
-                netName = tokens[index + 1];
-                if (netName == "*")
-                    netName.clear();
+                pin.netName = tokens[index + 1];
                 index += 2;
                 continue;
             }
             if (tokens[index] == "DIRECTION" && index + 1 < tokens.size()) {
                 if (const auto direction = portDirectionFromInterchange(tokens[index + 1]))
-                    port.direction = *direction;
+                    pin.port.direction = *direction;
                 index += 2;
                 continue;
             }
             if (tokens[index] == "USE" && index + 1 < tokens.size()) {
                 const auto use = uppercase(tokens[index + 1]);
                 if (use == "POWER")
-                    port.direction = PortDirection::power;
+                    pin.port.direction = PortDirection::power;
                 else if (use == "GROUND")
-                    port.direction = PortDirection::ground;
+                    pin.port.direction = PortDirection::ground;
                 index += 2;
                 continue;
             }
             if (tokens[index] == "LAYER" && index + 1 < tokens.size()) {
-                port.layer = interchangeLayer(project, layers, tokens[index + 1]);
+                currentLayer = tokens[index + 1];
                 index += 2;
-                if (!haveRectangle) {
-                    std::vector<double> values;
-                    while (index < tokens.size() && values.size() < 4) {
-                        if (tokens[index] == "(" || tokens[index] == ")") {
-                            ++index;
-                            continue;
-                        }
-                        if (tokens[index] == "+" || tokens[index] == ";" || tokens[index] == "PLACED" ||
-                            tokens[index] == "FIXED" || tokens[index] == "COVER")
-                            break;
-                        try {
-                            values.push_back(parseInterchangeNumber(tokens[index]));
-                        } catch (const ProjectError &) {
-                            break;
-                        }
-                        ++index;
-                    }
-                    if (values.size() == 4) {
-                        const auto x1 = toDatabase(values[0]);
-                        const auto y1 = toDatabase(values[1]);
-                        const auto x2 = toDatabase(values[2]);
-                        const auto y2 = toDatabase(values[3]);
-                        port.rectangle = {std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1), std::abs(y2 - y1)};
-                        haveRectangle = port.rectangle.valid();
+                if (index < tokens.size() && tokens[index] == "(") {
+                    double x1 = 0.0;
+                    double y1 = 0.0;
+                    double x2 = 0.0;
+                    double y2 = 0.0;
+                    auto cursor = index;
+                    if (readLefPoint(tokens, cursor, x1, y1) && readLefPoint(tokens, cursor, x2, y2)) {
+                        const auto left = toDatabase(std::min(x1, x2));
+                        const auto bottom = toDatabase(std::min(y1, y2));
+                        const auto right = toDatabase(std::max(x1, x2));
+                        const auto top = toDatabase(std::max(y1, y2));
+                        pin.port.rectangle = {left, bottom, right - left, top - bottom};
+                        index = cursor;
                     }
                 }
                 continue;
             }
             ++index;
         }
-        if (port.layer != 0 && haveRectangle) {
-            if (!netName.empty()) {
-                if (!nets.contains(netName)) {
-                    const auto netId = project.nextId();
-                    layout.nets.emplace(netId, LayoutNet{netId, netName});
-                    nets.emplace(netName, netId);
-                }
-                port.net = nets.at(netName);
-            }
-            const auto bounds = dieArea.valid() ? dieArea : port.rectangle;
-            port.side = sideForRectangle(port.rectangle, bounds);
-            const auto id = project.nextId();
-            port.id = id;
-            layout.ports.emplace(id, std::move(port));
+        if (!currentLayer.empty() && pin.port.rectangle.valid()) {
+            pin.port.layer = layerFor(currentLayer);
+            pins.push_back(std::move(pin));
         }
     }
-    return project;
+
+    std::map<std::string, ObjectId> netIds;
+    const auto ensureNet = [&](const std::string &name) {
+        if (name.empty())
+            return ObjectId{0};
+        if (const auto existing = netIds.find(name); existing != netIds.end())
+            return existing->second;
+        const auto id = project.nextId();
+        cell.nets.emplace(id, LayoutNet{id, name});
+        netIds.emplace(name, id);
+        return id;
+    };
+
+    index = 0;
+    while (index < tokens.size() && tokens[index] != "NETS")
+        ++index;
+    if (index < tokens.size())
+        ++index;
+    while (index < tokens.size()) {
+        if (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "NETS")
+            break;
+        if (tokens[index] != "-" || index + 1 >= tokens.size()) {
+            ++index;
+            continue;
+        }
+        const auto netName = tokens[index + 1];
+        index += 2;
+        const auto netId = ensureNet(netName);
+        while (index < tokens.size()) {
+            if (tokens[index] == ";") {
+                ++index;
+                break;
+            }
+            if (tokens[index] == "-" ||
+                (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "NETS"))
+                break;
+            if (tokens[index] == "ROUTED") {
+                ++index;
+                if (index < tokens.size() && tokens[index] != ";" && tokens[index] != "+" && tokens[index] != "-" &&
+                    tokens[index] != "NEW") {
+                    const auto routeLayer = tokens[index++];
+                    std::vector<LayoutPoint> points;
+                    std::vector<std::vector<ObjectId>> pointVias;
+                    double lastX = 0.0;
+                    double lastY = 0.0;
+                    while (index < tokens.size()) {
+                        if (tokens[index] == "(") {
+                            double x = 0.0;
+                            double y = 0.0;
+                            auto cursor = index;
+                            if (readDefPoint(tokens, cursor, lastX, lastY, x, y)) {
+                                points.push_back({toDatabase(x), toDatabase(y)});
+                                pointVias.emplace_back();
+                                index = cursor;
+                                continue;
+                            }
+                        }
+                        if (tokens[index] == "NEW" || tokens[index] == "+" || tokens[index] == ";" ||
+                            tokens[index] == "-" ||
+                            (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "NETS"))
+                            break;
+                        if (const auto via = lef.viaLayers.find(lowercaseInterchange(tokens[index]));
+                            via != lef.viaLayers.end() && !pointVias.empty()) {
+                            pointVias.back().push_back(layerFor(via->second));
+                        }
+                        ++index;
+                    }
+                    if (options.importRoutes && points.size() >= 2) {
+                        Coordinate width = 200;
+                        if (const auto found = lef.layerWidths.find(lowercaseInterchange(routeLayer));
+                            found != lef.layerWidths.end())
+                            width = found->second;
+                        Shape shape;
+                        shape.id = project.nextId();
+                        shape.layer = layerFor(routeLayer);
+                        shape.net = netId;
+                        shape.centerline = points;
+                        shape.width = width;
+                        shape.rectangle = boundsForPoints(points, width / 2);
+                        const auto hasVias = std::any_of(pointVias.begin(), pointVias.end(),
+                                                         [](const auto &entry) { return !entry.empty(); });
+                        if (hasVias)
+                            shape.pointVias = pointVias;
+                        cell.shapes.emplace(shape.id, std::move(shape));
+                    }
+                }
+                continue;
+            }
+            if (tokens[index] == "NEW") {
+                ++index;
+                if (index < tokens.size() && tokens[index] != ";" && tokens[index] != "+" && tokens[index] != "-" &&
+                    tokens[index] != "NEW") {
+                    const auto routeLayer = tokens[index++];
+                    std::vector<LayoutPoint> points;
+                    std::vector<std::vector<ObjectId>> pointVias;
+                    double lastX = 0.0;
+                    double lastY = 0.0;
+                    while (index < tokens.size()) {
+                        if (tokens[index] == "(") {
+                            double x = 0.0;
+                            double y = 0.0;
+                            auto cursor = index;
+                            if (readDefPoint(tokens, cursor, lastX, lastY, x, y)) {
+                                points.push_back({toDatabase(x), toDatabase(y)});
+                                pointVias.emplace_back();
+                                index = cursor;
+                                continue;
+                            }
+                        }
+                        if (tokens[index] == "NEW" || tokens[index] == "+" || tokens[index] == ";" ||
+                            tokens[index] == "-" ||
+                            (tokens[index] == "END" && index + 1 < tokens.size() && tokens[index + 1] == "NETS"))
+                            break;
+                        if (const auto via = lef.viaLayers.find(lowercaseInterchange(tokens[index]));
+                            via != lef.viaLayers.end() && !pointVias.empty())
+                            pointVias.back().push_back(layerFor(via->second));
+                        ++index;
+                    }
+                    if (options.importRoutes && points.size() >= 2) {
+                        Coordinate width = 200;
+                        if (const auto found = lef.layerWidths.find(lowercaseInterchange(routeLayer));
+                            found != lef.layerWidths.end())
+                            width = found->second;
+                        Shape shape;
+                        shape.id = project.nextId();
+                        shape.layer = layerFor(routeLayer);
+                        shape.net = netId;
+                        shape.centerline = points;
+                        shape.width = width;
+                        shape.rectangle = boundsForPoints(points, width / 2);
+                        const auto hasVias = std::any_of(pointVias.begin(), pointVias.end(),
+                                                         [](const auto &entry) { return !entry.empty(); });
+                        if (hasVias)
+                            shape.pointVias = pointVias;
+                        cell.shapes.emplace(shape.id, std::move(shape));
+                    }
+                }
+                continue;
+            }
+            ++index;
+        }
+    }
+
+    std::map<std::string, ObjectId> masterCells;
+    const auto masterCellFor = [&](const std::string &master) {
+        if (const auto cached = masterCells.find(master); cached != masterCells.end())
+            return cached->second;
+        if (const auto existing = findLayoutCellByName(project, master, options.pdk, options.stack); existing != 0) {
+            masterCells.emplace(master, existing);
+            return existing;
+        }
+        const auto masterId = createLayoutCell(project, uniqueLayoutName(project, master), options.pdk, options.stack);
+        auto &masterCell = project.layoutCells.at(masterId);
+        if (options.importMasters) {
+            if (const auto macro = lef.macros.find(master); macro != lef.macros.end()) {
+                if (macro->second.bounds.valid()) {
+                    const auto shapeId = project.nextId();
+                    Shape boundary{shapeId, boundaryLayerFor(), std::nullopt, macro->second.bounds};
+                    boundary.name = "Cell boundary";
+                    masterCell.shapes.emplace(shapeId, std::move(boundary));
+                }
+                for (const auto &pin : macro->second.pins) {
+                    const auto portId = project.nextId();
+                    Port port;
+                    port.id = portId;
+                    port.name = pin.name;
+                    port.label = pin.name;
+                    port.layer = layerFor(pin.layer);
+                    port.rectangle = pin.rectangle;
+                    port.direction = pin.direction;
+                    const auto bounds = macro->second.bounds.valid() ? macro->second.bounds : pin.rectangle;
+                    port.side = sideForRectangle(port.rectangle, bounds);
+                    masterCell.ports.emplace(portId, std::move(port));
+                }
+            }
+        }
+        masterCells.emplace(master, masterId);
+        return masterId;
+    };
+
+    for (const auto &component : components) {
+        const auto instanceId = project.nextId();
+        LayoutInstance instance;
+        instance.id = instanceId;
+        instance.cell = masterCellFor(component.master);
+        instance.name = component.name;
+        instance.x = component.x;
+        instance.y = component.y;
+        instance.orientation = component.orientation;
+        cell.instances.emplace(instanceId, std::move(instance));
+    }
+
+    for (auto &pin : pins) {
+        if (!pin.netName.empty())
+            pin.port.net = ensureNet(pin.netName);
+        const auto bounds = dieArea.valid() ? dieArea : pin.port.rectangle;
+        pin.port.side = sideForRectangle(pin.port.rectangle, bounds);
+        const auto portId = project.nextId();
+        pin.port.id = portId;
+        cell.ports.emplace(portId, std::move(pin.port));
+    }
+
+    if (dieArea.valid()) {
+        const auto shapeId = project.nextId();
+        Shape boundary{shapeId, boundaryLayerFor(), std::nullopt, dieArea};
+        boundary.name = "Die area";
+        cell.shapes.emplace(shapeId, std::move(boundary));
+    }
+    return cellId;
 }
 
 Project LayoutInterchange::importGds(const std::filesystem::path &path, const LayoutImportOptions &options) {

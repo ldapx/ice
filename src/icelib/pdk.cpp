@@ -1,6 +1,7 @@
 #include "icelib/pdk.hpp"
 
 #include "icelib/core.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/simulation.hpp"
 
 #include <algorithm>
@@ -302,6 +303,28 @@ PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
         info.notes.push_back("OSDI compiler is available; run ice-pkg pdk-build " + spec.name);
 
     info.simulationReady = info.missing.empty();
+    if (spec.pdk->implementation) {
+        std::vector<Diagnostic> diagnostics;
+        try {
+            const auto stack = resolvePdkStack(*spec.pdk, {});
+            const auto platform = resolveImplementationPlatform(spec, stack, diagnostics);
+            info.implementationEngine = spec.pdk->implementation->engine;
+            info.implementationStack = stack;
+            info.implementationReady = platform.techLef.generic_string().size() > 0 &&
+                                       platform.cellLef.generic_string().size() > 0 && !platform.liberty.empty() &&
+                                       platform.site.size() > 0;
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == Diagnostic::Severity::error)
+                    info.implementationMissing.push_back(diagnostic.message);
+                else
+                    info.implementationNotes.push_back(diagnostic.message);
+            }
+            if (info.implementationReady)
+                info.implementationNotes.push_back("Implementation platform ready for stack '" + stack + "'");
+        } catch (const ProjectError &error) {
+            info.implementationMissing.push_back(error.what());
+        }
+    }
     return info;
 }
 
@@ -657,6 +680,11 @@ nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
                    {"spiceinit", info.hasSpiceInit ? json(info.spiceInitPath.string()) : json(nullptr)},
                    {"openvaf", info.hasOpenVaf},
                    {"simulation_ready", info.simulationReady},
+                   {"implementation_ready", info.implementationReady},
+                   {"implementation_engine", info.implementationEngine},
+                   {"implementation_stack", info.implementationStack},
+                   {"implementation_missing", info.implementationMissing},
+                   {"implementation_notes", info.implementationNotes},
                    {"missing", info.missing},
                    {"notes", info.notes},
                    {"recommended_lib_line", info.recommendedLibLine},

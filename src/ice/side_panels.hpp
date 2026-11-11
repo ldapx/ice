@@ -49,6 +49,7 @@ class ProjectPanel : public QWidget {
     void setOnRenameShape(RenameChildCallback callback);
     void setOnFlattenChanged(std::function<void()> callback);
     void setLayoutFlattenState(std::shared_ptr<std::set<ice::ObjectId>> state);
+    void setHideSystemVerilog(bool hide);
     void setProject(const ice::Project &project);
 
   private:
@@ -84,6 +85,7 @@ class ProjectPanel : public QWidget {
     RenameChildCallback onRenamePlannedDevice_;
     RenameChildCallback onRenameShape_;
     bool showLayoutHierarchy_ = true;
+    bool hideSystemVerilog_ = false;
     bool rebuildingTree_ = false;
 };
 

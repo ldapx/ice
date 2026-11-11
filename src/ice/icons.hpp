@@ -12,6 +12,9 @@ namespace ice {
 // remain readable on their accent background.
 QIcon lucideIcon(const QString &name, int size = 18);
 
+// Loads one of ICE's own document-tab SVG icons from assets/icons/tabs.
+QIcon tabIcon(const QString &name, int size = 18);
+
 // Loads the application logo. Returns an empty pixmap when the asset cannot be
 // found; callers should handle that by hiding the logo widget.
 QPixmap appLogo(int size = 0);

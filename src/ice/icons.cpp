@@ -52,6 +52,43 @@ QByteArray iconSource(const QString &name) {
     return source;
 }
 
+std::filesystem::path tabIconDirectory() {
+    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
+    const std::vector<std::filesystem::path> candidates = {
+        std::filesystem::path(appDir) / "icons" / "tabs",
+        std::filesystem::path(appDir) / "assets" / "icons" / "tabs",
+        std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "icons" / "tabs",
+#ifdef ICE_SOURCE_DIR
+        std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "icons" / "tabs",
+#endif
+        std::filesystem::path("assets") / "icons" / "tabs",
+        std::filesystem::path("/usr/share/ice/icons/tabs"),
+    };
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        if (std::filesystem::is_directory(candidate, status) && !status)
+            return candidate;
+    }
+    return {};
+}
+
+QByteArray tabIconSource(const QString &name) {
+    static QHash<QString, QByteArray> cache;
+    if (const auto cached = cache.find(name); cached != cache.end())
+        return cached.value();
+
+    QByteArray source;
+    const auto directory = tabIconDirectory();
+    if (!directory.empty()) {
+        const auto path = directory / (name.toStdString() + ".svg");
+        QFile file(QString::fromStdString(path.string()));
+        if (file.open(QIODevice::ReadOnly))
+            source = file.readAll();
+    }
+    cache.insert(name, source);
+    return source;
+}
+
 QPixmap renderIcon(const QByteArray &source, const QColor &color, int size) {
     auto colored = source;
     colored.replace("currentColor", color.name(QColor::HexRgb).toUtf8());
@@ -116,6 +153,13 @@ QIcon symbolArtworkIcon(const QByteArray &svg, int size) {
 
 QIcon lucideIcon(const QString &name, int size) {
     const auto source = iconSource(name);
+    if (source.isEmpty())
+        return {};
+    return buildIcon(source, size);
+}
+
+QIcon tabIcon(const QString &name, int size) {
+    const auto source = tabIconSource(name);
     if (source.isEmpty())
         return {};
     return buildIcon(source, size);

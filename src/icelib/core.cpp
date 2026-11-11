@@ -1,5 +1,7 @@
 #include "icelib/core.hpp"
 
+#include "icelib/implementation.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -98,6 +100,8 @@ ObjectId Project::nextId() {
             update(connectionId);
     }
     for (const auto &[id, _] : proceduralLayouts)
+        update(id);
+    for (const auto &[id, _] : implementationRuns)
         update(id);
     for (const auto &[id, sim] : simulations) {
         update(id);
@@ -316,6 +320,28 @@ std::vector<Diagnostic> Project::validate() const {
         if (!layoutCells.contains(layout.generatedCell))
             result.push_back({Diagnostic::Severity::error, "layout.procedural.generated",
                               "Procedural layout references a missing generated layout cell", layoutId});
+    }
+    std::unordered_set<std::string> implementationNames;
+    for (const auto &[runId, run] : implementationRuns) {
+        if (run.name.empty()) {
+            result.push_back(
+                {Diagnostic::Severity::error, "implementation.name", "Implementation run name is required", runId});
+        } else if (!implementationNames.insert(run.name).second) {
+            result.push_back({Diagnostic::Severity::error, "implementation.name.duplicate",
+                              "Implementation run name is listed more than once: " + run.name, runId});
+        }
+        for (auto diagnostic : validateImplementationConfig(*this, run.config)) {
+            diagnostic.object = runId;
+            result.push_back(std::move(diagnostic));
+        }
+        if (run.resultLayout != 0 && !layoutCells.contains(run.resultLayout))
+            result.push_back({Diagnostic::Severity::error, "implementation.result_layout",
+                              "Implementation run references a missing result layout", runId});
+        const auto normalized = std::filesystem::path(run.directory).lexically_normal();
+        if (!run.directory.empty() && (normalized.empty() || normalized.is_absolute() ||
+                                       (normalized.begin() != normalized.end() && *normalized.begin() == "..")))
+            result.push_back({Diagnostic::Severity::error, "implementation.directory",
+                              "Implementation run directory must stay inside the project", runId});
     }
     std::unordered_set<std::string> reportNames;
     for (const auto &[reportId, report] : reports) {
@@ -577,6 +603,9 @@ std::string Project::serialize() const {
             entry["stack"] = layout.stack;
         j["procedural_layouts"].push_back(std::move(entry));
     }
+    j["implementation_runs"] = json::array();
+    for (const auto &[_, run] : implementationRuns)
+        j["implementation_runs"].push_back(implementationRunJson(run));
     j["simulations"] = json::array();
     for (const auto &[id, sim] : simulations) {
         json s = {{"id", id},
@@ -923,6 +952,13 @@ Project Project::deserialize(const std::string &text) {
                 p.proceduralLayouts.emplace(layoutId, std::move(entry));
             }
         }
+        if (j.contains("implementation_runs")) {
+            for (const auto &run : j.at("implementation_runs")) {
+                auto entry = implementationRunFromJson(run);
+                const auto runId = entry.id;
+                p.implementationRuns.emplace(runId, std::move(entry));
+            }
+        }
         if (j.contains("simulations")) {
             for (const auto &s : j.at("simulations")) {
                 SimulationItem sim;
@@ -1020,6 +1056,7 @@ std::string projectRevision(const std::filesystem::path &root) {
     files.push_back(root / "project.icepro");
     addDirectory(root / "sch", ".icesch");
     addDirectory(root / "lay", ".icelay");
+    addDirectory(root / "impl", ".iceimpl");
     addDirectory(root / "sim", ".icesim");
     std::sort(files.begin(), files.end());
 
@@ -1185,16 +1222,17 @@ void ensureGitignore(const std::filesystem::path &root) {
 
 std::string generatedAgentsGuidance() {
     std::ostringstream output;
-    output << "<!-- ICE generated guidance: begin (version 3) -->\n"
+    output << "<!-- ICE generated guidance: begin (version 4) -->\n"
            << "This directory is an ICE project.\n\n"
            << "- `project.icepro` contains project metadata.\n"
            << "- `sch/*.icesch` contains schematic cells.\n"
            << "- `lay/*.icelay` contains layout cells and procedural layouts.\n"
+           << "- `impl/*.iceimpl` contains RTL-to-GDS implementation runs.\n"
            << "- `sim/*.icesim` contains simulations.\n"
            << "- `scripts/*.py` contains project-level simulation scripts.\n"
-           << "- `build/` contains generated simulation results.\n\n"
+           << "- `build/` contains generated simulation and implementation artifacts.\n\n"
            << "Never write or edit the split project files (`sch/*.icesch`, `lay/*.icelay`, "
-              "`sim/*.icesim`) by hand. Use the ICE MCP, CLI, or GUI tools. If a project fails to "
+              "`impl/*.iceimpl`, `sim/*.icesim`) by hand. Use the ICE MCP, CLI, or GUI tools. If a project fails to "
               "load, use `project_repair` or `project_open` with recovery instead of deleting files "
               "with the shell.\n\n"
            << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
@@ -1362,18 +1400,22 @@ void Project::save(const std::filesystem::path &path) const {
     const auto &schematicCells = full.at("schematic_cells");
     const auto &layoutCells = full.at("layout_cells");
     const auto &proceduralLayouts = full.at("procedural_layouts");
+    const auto &implementationRuns = full.at("implementation_runs");
     const auto &simulations = full.at("simulations");
     projectJson.erase("schematic_cells");
     projectJson.erase("layout_cells");
     projectJson.erase("procedural_layouts");
+    projectJson.erase("implementation_runs");
     projectJson.erase("simulations");
 
     std::filesystem::create_directories(root);
     const auto schematicDir = root / "sch";
     const auto layoutDir = root / "lay";
+    const auto implementationDir = root / "impl";
     const auto simulationDir = root / "sim";
     prepareDirectory(schematicDir, ".icesch");
     prepareDirectory(layoutDir, ".icelay");
+    prepareDirectory(implementationDir, ".iceimpl");
     prepareDirectory(simulationDir, ".icesim");
     std::filesystem::create_directories(root / "scripts");
     std::filesystem::create_directories(root / "build");
@@ -1402,6 +1444,16 @@ void Project::save(const std::filesystem::path &path) const {
         const auto stem = uniqueStem(layout.value("name", std::string{}), id, usedLayouts);
         writeJsonFile(layoutDir / (stem + ".icelay"),
                       json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", layout}});
+    }
+
+    for (const auto &run : implementationRuns) {
+        const auto id = run.at("id").get<ObjectId>();
+        ImplementationRun summary;
+        summary.id = id;
+        summary.name = run.value("name", std::string{});
+        const auto stem = implementationRunStem(summary);
+        writeJsonFile(implementationDir / (stem + ".iceimpl"),
+                      json{{"format", "ice-implementation"}, {"schema_version", 1}, {"run", run}});
     }
 
     std::set<std::string> usedSimulations;
@@ -1435,6 +1487,7 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
     full["schematic_cells"] = json::array();
     full["layout_cells"] = json::array();
     full["procedural_layouts"] = json::array();
+    full["implementation_runs"] = json::array();
     full["simulations"] = json::array();
 
     const auto quarantine = [&](const std::filesystem::path &file, const std::string &message) {
@@ -1506,6 +1559,14 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
         else
             throw ProjectError("project.format",
                                "Invalid layout file: expected a 'layout' or 'procedural_layout' object");
+    });
+    readDirectory(root / "impl", ".iceimpl", [&](const json &document) {
+        if (document.value("format", std::string{}) != "ice-implementation" ||
+            document.value("schema_version", 0) != 1 || !document.contains("run"))
+            throw ProjectError("project.format",
+                               "Invalid implementation file: expected an 'ice-implementation' envelope with a "
+                               "'run' object");
+        full["implementation_runs"].push_back(document.at("run"));
     });
     readDirectory(root / "sim", ".icesim", [&](const json &document) {
         if (document.value("format", std::string{}) != "ice-simulation" || !document.contains("simulation"))
@@ -1673,7 +1734,12 @@ BuildInfo buildInfo() {
                      "spice_import",
                      "simulation_trace",
                      "dependency_delete",
-                     "simulation_templates"};
+                     "simulation_templates",
+                     "implementation_runs",
+                     "implementation_openroad_plan",
+                     "implementation_toolchain",
+                     "implementation_execute",
+                     "implementation_import"};
     return info;
 }
 } // namespace ice

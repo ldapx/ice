@@ -53,6 +53,11 @@ struct PdkInfo {
     bool hasOpenVaf = false;
 
     bool simulationReady = false;
+    bool implementationReady = false;
+    std::string implementationEngine;
+    std::string implementationStack;
+    std::vector<std::string> implementationMissing;
+    std::vector<std::string> implementationNotes;
     std::vector<std::string> missing;
     std::vector<std::string> notes;
     // A ready-to-use top-level .lib directive, or empty when the PDK does not

@@ -44,11 +44,51 @@ struct PackageLayerStyle {
     int visible = -1;
 };
 
+struct PackagePdkStackImplementation {
+    std::string site;
+    std::filesystem::path techLef;
+    std::filesystem::path cellLef;
+    std::filesystem::path gds;
+    // Timing corner id -> Liberty files, relative to the package root.
+    std::map<std::string, std::vector<std::filesystem::path>> liberty;
+    std::vector<std::string> ioHorizontalLayers;
+    std::vector<std::string> ioVerticalLayers;
+    std::string routingMinLayer;
+    std::string routingMaxLayer;
+    std::filesystem::path tapcellScript;
+    std::filesystem::path pdnScript;
+    std::filesystem::path rcScript;
+    std::vector<std::string> fillCells;
+    // OpenRCX extraction rule deck. Takes precedence over an ORFS-resolved
+    // deck when both are available.
+    std::filesystem::path rcxRules;
+};
+
+struct PackagePdkImplementation {
+    std::string engine = "openroad";
+    std::string synthesis = "yosys";
+    std::string minOpenRoad;
+    std::string minYosys;
+    // Optional OpenROAD-flow-scripts compatibility mapping. Explicit
+    // per-stack file paths take precedence when both are present.
+    std::string orfsPlatform;
+    std::string orfsMetalOption;
+    std::string orfsTrackOption;
+    std::string orfsPowerOption;
+    std::string orfsCorner;
+    // Optional filename substring used to pick a Liberty corner from the ORFS
+    // platform library directory, e.g. "tt_025C_5v00".
+    std::string orfsLibertyPattern;
+    // Fallback physical data for PDKs without stack variants.
+    std::optional<PackagePdkStackImplementation> files;
+};
+
 struct PackagePdkStack {
     std::string id;
     std::string displayName;
     // Empty means all PDK layers are available in this stack.
     std::vector<std::string> layers;
+    std::optional<PackagePdkStackImplementation> implementation;
 };
 
 struct PackagePdk {
@@ -62,6 +102,7 @@ struct PackagePdk {
     std::string defaultStack;
     std::vector<PackagePdkStack> stacks;
     std::vector<PackageLayerStyle> layerStyles;
+    std::optional<PackagePdkImplementation> implementation;
     std::optional<PackagePdkSimulation> simulation;
 };
 

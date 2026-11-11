@@ -35,8 +35,7 @@ std::vector<std::string> readStringArray(const toml::table &table, std::string_v
     return result;
 }
 
-std::filesystem::path readRelativePath(const toml::table &table, std::string_view key, std::string_view fieldName) {
-    const auto text = readString(table, key);
+std::filesystem::path relativePackagePath(const std::string &text, std::string_view fieldName) {
     if (text.empty())
         return {};
     const std::filesystem::path path(text);
@@ -44,6 +43,43 @@ std::filesystem::path readRelativePath(const toml::table &table, std::string_vie
         throw ProjectError("package.manifest",
                            std::string(fieldName) + " must be a relative path inside the package: " + text);
     return path.lexically_normal();
+}
+
+std::filesystem::path readRelativePath(const toml::table &table, std::string_view key, std::string_view fieldName) {
+    return relativePackagePath(readString(table, key), fieldName);
+}
+
+PackagePdkStackImplementation readStackImplementation(const toml::table &table, const std::string &prefix) {
+    PackagePdkStackImplementation implementation;
+    implementation.site = readString(table, "site");
+    implementation.techLef = readRelativePath(table, "tech_lef", prefix + ".tech_lef");
+    implementation.cellLef = readRelativePath(table, "cell_lef", prefix + ".cell_lef");
+    implementation.gds = readRelativePath(table, "gds", prefix + ".gds");
+    implementation.ioHorizontalLayers = readStringArray(table, "io_horizontal_layers");
+    implementation.ioVerticalLayers = readStringArray(table, "io_vertical_layers");
+    implementation.routingMinLayer = readString(table, "routing_min_layer");
+    implementation.routingMaxLayer = readString(table, "routing_max_layer");
+    implementation.tapcellScript = readRelativePath(table, "tapcell_script", prefix + ".tapcell_script");
+    implementation.pdnScript = readRelativePath(table, "pdn_script", prefix + ".pdn_script");
+    implementation.rcScript = readRelativePath(table, "rc_script", prefix + ".rc_script");
+    implementation.fillCells = readStringArray(table, "fill_cells");
+    implementation.rcxRules = readRelativePath(table, "rcx_rules", prefix + ".rcx_rules");
+    if (const auto *liberty = table["liberty"].as_table()) {
+        for (const auto &[corner, value] : *liberty) {
+            const auto *files = value.as_array();
+            if (!files)
+                throw ProjectError("package.manifest", prefix + ".liberty entries must be arrays");
+            std::vector<std::filesystem::path> corners;
+            for (const auto &file : *files) {
+                const auto text = file.value<std::string>();
+                if (!text)
+                    throw ProjectError("package.manifest", "Liberty file entries must be strings");
+                corners.push_back(relativePackagePath(*text, prefix + ".liberty." + std::string(corner)));
+            }
+            implementation.liberty.emplace(std::string(corner), std::move(corners));
+        }
+    }
+    return implementation;
 }
 
 std::vector<int> parseVersionParts(const std::string &version) {
@@ -308,6 +344,27 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                 }
             }
             pdkSpec.defaultStack = readString(*pdk, "default_stack");
+            if (const auto *implementation = (*pdk)["implementation"].as_table()) {
+                PackagePdkImplementation entry;
+                entry.engine = readString(*implementation, "engine", "openroad");
+                entry.synthesis = readString(*implementation, "synthesis", "yosys");
+                entry.minOpenRoad = readString(*implementation, "min_openroad");
+                entry.minYosys = readString(*implementation, "min_yosys");
+                if (const auto *orfs = (*implementation)["orfs"].as_table()) {
+                    entry.orfsPlatform = readString(*orfs, "platform");
+                    entry.orfsMetalOption = readString(*orfs, "metal_option");
+                    entry.orfsTrackOption = readString(*orfs, "track_option");
+                    entry.orfsPowerOption = readString(*orfs, "power_option");
+                    entry.orfsCorner = readString(*orfs, "corner");
+                    entry.orfsLibertyPattern = readString(*orfs, "liberty_pattern");
+                }
+                auto files = readStackImplementation(*implementation, "pdk.implementation");
+                if (!files.site.empty() || !files.techLef.empty() || !files.cellLef.empty() || !files.gds.empty() ||
+                    !files.liberty.empty() || !files.tapcellScript.empty() || !files.pdnScript.empty() ||
+                    !files.rcScript.empty())
+                    entry.files = std::move(files);
+                pdkSpec.implementation = std::move(entry);
+            }
             if (const auto *stacks = (*pdk)["stack"].as_array()) {
                 std::set<std::string> stackIds;
                 for (const auto &item : *stacks) {
@@ -322,6 +379,8 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                     if (!stackIds.insert(entry.id).second)
                         throw ProjectError("package.manifest", "Duplicate PDK stack id: " + entry.id);
                     entry.layers = readStringArray(*stack, "layers");
+                    if (const auto *implementation = (*stack)["implementation"].as_table())
+                        entry.implementation = readStackImplementation(*implementation, "pdk.stack.implementation");
                     pdkSpec.stacks.push_back(std::move(entry));
                 }
             }

@@ -1447,20 +1447,22 @@ project/
 │   └── <cell>.icesch    # one schematic cell per file
 ├── lay/
 │   └── <cell>.icelay    # one layout cell or procedural layout per file
+├── impl/
+│   └── <run>.iceimpl    # one RTL-to-GDS implementation run per file
 ├── sim/
 │   └── <sim>.icesim     # one simulation per file
 ├── scripts/
 │   └── <script>.py      # project-level simulation script
-├── build/               # generated simulation runs, ignored by Git
+├── build/               # generated simulation/implementation artifacts, ignored by Git
 ├── .gitignore           # ignores build/
 └── AGENTS.md
 ```
 
 The `.icepro` file contains identity, name, units, grid, package
 dependencies, layer metadata, and project-level simulation script associations.
-It does not contain schematic, layout, or simulation objects. Simulation
-scripts are project source files; generated run data goes under `build/` and is
-ignored by Git.
+It does not contain schematic, layout, implementation-run, or simulation
+objects. Simulation scripts are project source files; generated simulation and
+implementation artifacts go under `build/` and are ignored by Git.
 
 A lockfile should eventually record exact package/PDK versions used by the project.
 

@@ -37,6 +37,18 @@ void TextDocumentEditor::setText(const QString &text) {
 
 QString TextDocumentEditor::text() const { return editor_->toPlainText(); }
 
+void TextDocumentEditor::setReadOnly(bool readOnly) { editor_->setReadOnly(readOnly); }
+
+void TextDocumentEditor::goToLine(int line) {
+    const auto block = editor_->document()->findBlockByNumber(std::max(0, line - 1));
+    if (!block.isValid())
+        return;
+    QTextCursor cursor(block);
+    editor_->setTextCursor(cursor);
+    editor_->centerCursor();
+    editor_->setFocus();
+}
+
 void TextDocumentEditor::setLanguage(TextDocumentLanguage language) {
     if (language_ == language)
         return;

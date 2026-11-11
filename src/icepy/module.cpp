@@ -1,4 +1,5 @@
 #include "icelib/core.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
@@ -7,6 +8,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/filesystem.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -233,6 +235,43 @@ std::string resolveLayoutStack(const std::string &pdk, const std::string &reques
     return resolvePdkStack(*package.pdk, requested);
 }
 
+std::optional<PackageSpec> implementationPackageForPdk(const std::string &pdk) {
+    if (pdk.empty() || pdk == genericPdkId)
+        return std::nullopt;
+    const auto pdks = findPdks(pdk);
+    if (pdks.empty())
+        return std::nullopt;
+    return PackageManager::readManifest(pdks.front().packageRoot);
+}
+
+ImplementationStage parseImplementationStageArgument(const std::string &text, const char *label) {
+    const auto parsed = parseImplementationStage(text);
+    if (!parsed || *parsed == ImplementationStage::created)
+        throw ProjectError("icepy.implementation", std::string("Invalid implementation stage: ") + label);
+    return *parsed;
+}
+
+ImplementationExecutionResult executeImplementationForPython(Project &project, ObjectId runId,
+                                                             const std::string &projectRoot,
+                                                             const std::string &fromText, const std::string &toText) {
+    auto *run = findImplementationRun(project, runId);
+    if (!run)
+        throw ProjectError("icepy.implementation", "Implementation run does not exist");
+    const auto package = implementationPackageForPdk(run->config.pdk);
+    if (!package || !package->pdk)
+        throw ProjectError("icepy.implementation", "No installed PDK package provides '" + run->config.pdk + "'");
+    std::vector<Diagnostic> diagnostics;
+    const auto platform = resolveImplementationPlatform(*package, run->config.stack, diagnostics);
+    for (const auto &diagnostic : diagnostics) {
+        if (diagnostic.severity == Diagnostic::Severity::error)
+            throw ProjectError(diagnostic.code, diagnostic.message);
+    }
+    ImplementationExecutionOptions options;
+    options.from = parseImplementationStageArgument(fromText, "from");
+    options.to = parseImplementationStageArgument(toText, "to");
+    return executeImplementationRun(project, *run, platform, projectRoot, options);
+}
+
 } // namespace
 
 NB_MODULE(icepy, module) {
@@ -350,6 +389,119 @@ NB_MODULE(icepy, module) {
         .def_rw("x", &LayoutInstance::x)
         .def_rw("y", &LayoutInstance::y)
         .def_rw("orientation", &LayoutInstance::orientation);
+
+    nb::enum_<ImplementationStage>(module, "ImplementationStage")
+        .value("created", ImplementationStage::created)
+        .value("elaboration", ImplementationStage::elaboration)
+        .value("synthesis", ImplementationStage::synthesis)
+        .value("floorplan", ImplementationStage::floorplan)
+        .value("placement", ImplementationStage::placement)
+        .value("cts", ImplementationStage::cts)
+        .value("routing", ImplementationStage::routing)
+        .value("final", ImplementationStage::final);
+
+    nb::enum_<ImplementationStatus>(module, "ImplementationStatus")
+        .value("pending", ImplementationStatus::pending)
+        .value("running", ImplementationStatus::running)
+        .value("succeeded", ImplementationStatus::succeeded)
+        .value("failed", ImplementationStatus::failed)
+        .value("cancelled", ImplementationStatus::cancelled);
+
+    nb::enum_<ImplementationStageStatus>(module, "ImplementationStageStatus")
+        .value("pending", ImplementationStageStatus::pending)
+        .value("running", ImplementationStageStatus::running)
+        .value("succeeded", ImplementationStageStatus::succeeded)
+        .value("failed", ImplementationStageStatus::failed)
+        .value("skipped", ImplementationStageStatus::skipped)
+        .value("cancelled", ImplementationStageStatus::cancelled);
+
+    nb::class_<ImplementationMacroPlacement>(module, "ImplementationMacroPlacement")
+        .def(nb::init<>())
+        .def_rw("cell", &ImplementationMacroPlacement::cell)
+        .def_rw("x", &ImplementationMacroPlacement::x)
+        .def_rw("y", &ImplementationMacroPlacement::y)
+        .def_rw("orientation", &ImplementationMacroPlacement::orientation);
+
+    nb::class_<ImplementationConfig>(module, "ImplementationConfig")
+        .def(nb::init<>())
+        .def_rw("name", &ImplementationConfig::name)
+        .def_rw("top", &ImplementationConfig::top)
+        .def_rw("pdk", &ImplementationConfig::pdk)
+        .def_rw("stack", &ImplementationConfig::stack)
+        .def_rw("standard_cell_library", &ImplementationConfig::standardCellLibrary)
+        .def_rw("corner", &ImplementationConfig::corner)
+        .def_rw("sources", &ImplementationConfig::sources)
+        .def_rw("source_cells", &ImplementationConfig::sourceCells)
+        .def_rw("sdc", &ImplementationConfig::sdc)
+        .def_rw("die_area", &ImplementationConfig::dieArea)
+        .def_rw("core_area", &ImplementationConfig::coreArea)
+        .def_rw("utilization", &ImplementationConfig::utilization)
+        .def_rw("aspect_ratio", &ImplementationConfig::aspectRatio)
+        .def_rw("site", &ImplementationConfig::site)
+        .def_rw("io_horizontal_layers", &ImplementationConfig::ioHorizontalLayers)
+        .def_rw("io_vertical_layers", &ImplementationConfig::ioVerticalLayers)
+        .def_rw("macros", &ImplementationConfig::macros)
+        .def_rw("placement_density", &ImplementationConfig::placementDensity)
+        .def_rw("timing_driven", &ImplementationConfig::timingDriven)
+        .def_rw("routability_driven", &ImplementationConfig::routabilityDriven)
+        .def_rw("cts_enabled", &ImplementationConfig::ctsEnabled)
+        .def_rw("cts_root_buffer", &ImplementationConfig::ctsRootBuffer)
+        .def_rw("cts_buffers", &ImplementationConfig::ctsBuffers)
+        .def_rw("routing_min_layer", &ImplementationConfig::routingMinLayer)
+        .def_rw("routing_max_layer", &ImplementationConfig::routingMaxLayer)
+        .def_rw("antenna_repair", &ImplementationConfig::antennaRepair)
+        .def_rw("backend", &ImplementationConfig::backend)
+        .def_rw("threads", &ImplementationConfig::threads)
+        .def_rw("seed", &ImplementationConfig::seed)
+        .def_rw("timeout_seconds", &ImplementationConfig::timeoutSeconds);
+
+    nb::class_<ImplementationStageState>(module, "ImplementationStageState")
+        .def(nb::init<>())
+        .def_rw("stage", &ImplementationStageState::stage)
+        .def_rw("status", &ImplementationStageState::status)
+        .def_rw("started_at", &ImplementationStageState::startedAt)
+        .def_rw("finished_at", &ImplementationStageState::finishedAt)
+        .def_rw("error", &ImplementationStageState::error)
+        .def_rw("artifacts", &ImplementationStageState::artifacts);
+
+    nb::class_<ImplementationRun>(module, "ImplementationRun")
+        .def(nb::init<>())
+        .def_ro("id", &ImplementationRun::id)
+        .def_rw("name", &ImplementationRun::name)
+        .def_rw("config", &ImplementationRun::config)
+        .def_rw("current_stage", &ImplementationRun::currentStage)
+        .def_rw("status", &ImplementationRun::status)
+        .def_prop_ro("stages",
+                     [](const ImplementationRun &run) {
+                         std::vector<ImplementationStageState> states;
+                         for (const auto stage : implementationStages()) {
+                             const auto found = run.stages.find(stage);
+                             if (found != run.stages.end())
+                                 states.push_back(found->second);
+                             else {
+                                 ImplementationStageState state;
+                                 state.stage = stage;
+                                 states.push_back(std::move(state));
+                             }
+                         }
+                         return states;
+                     })
+        .def_rw("directory", &ImplementationRun::directory)
+        .def_rw("config_hash", &ImplementationRun::configHash)
+        .def_rw("tool_versions", &ImplementationRun::toolVersions)
+        .def_rw("metrics", &ImplementationRun::metrics)
+        .def_rw("artifacts", &ImplementationRun::artifacts)
+        .def_rw("result_layout", &ImplementationRun::resultLayout)
+        .def_rw("last_error", &ImplementationRun::lastError)
+        .def_rw("created_at", &ImplementationRun::createdAt)
+        .def_rw("updated_at", &ImplementationRun::updatedAt);
+
+    nb::class_<ImplementationExecutionResult>(module, "ImplementationExecutionResult")
+        .def_ro("success", &ImplementationExecutionResult::success)
+        .def_ro("cancelled", &ImplementationExecutionResult::cancelled)
+        .def_prop_ro("completed_stage",
+                     [](const ImplementationExecutionResult &result) { return result.completedStage; })
+        .def_prop_ro("diagnostics", [](const ImplementationExecutionResult &result) { return result.diagnostics; });
 
     nb::class_<LayoutCell>(module, "LayoutCell")
         .def(nb::init<>())
@@ -486,6 +638,67 @@ NB_MODULE(icepy, module) {
             },
             nb::arg("id"), nb::keep_alive<0, 1>())
         .def("remove_layout_cell", [](Project &project, ObjectId id) { return project.layoutCells.erase(id) != 0; })
+        .def_prop_ro("implementation_runs",
+                     [](const Project &project) {
+                         std::vector<ImplementationRun> runs;
+                         runs.reserve(project.implementationRuns.size());
+                         for (const auto &[_, run] : project.implementationRuns)
+                             runs.push_back(run);
+                         return runs;
+                     })
+        .def(
+            "implementation_run",
+            [](const Project &project, const std::string &name) {
+                const auto *run = findImplementationRun(project, name);
+                if (!run)
+                    throw ProjectError("icepy.implementation", "Implementation run does not exist: " + name);
+                return *run;
+            },
+            nb::arg("name"))
+        .def(
+            "implementation_run_by_id",
+            [](const Project &project, ObjectId id) {
+                const auto *run = findImplementationRun(project, id);
+                if (!run)
+                    throw ProjectError("icepy.implementation", "Implementation run does not exist");
+                return *run;
+            },
+            nb::arg("id"))
+        .def(
+            "create_implementation",
+            [](Project &project, const ImplementationConfig &config) {
+                const auto id = createImplementationRun(project, config);
+                return project.implementationRuns.at(id);
+            },
+            nb::arg("config"))
+        .def(
+            "run_implementation",
+            [](Project &project, ObjectId runId, const std::string &projectRoot, const std::string &fromStage,
+               const std::string &toStage) {
+                const auto root = projectRoot.empty() ? std::filesystem::current_path().string() : projectRoot;
+                return executeImplementationForPython(project, runId, root, fromStage, toStage);
+            },
+            nb::arg("run_id"), nb::arg("project_root") = "", nb::arg("from_stage") = "synthesis",
+            nb::arg("to_stage") = "final")
+        .def(
+            "import_implementation_layout",
+            [](Project &project, ObjectId runId, const std::string &projectRoot, const std::string &layoutName,
+               bool replace) {
+                auto *run = findImplementationRun(project, runId);
+                if (!run)
+                    throw ProjectError("icepy.implementation", "Implementation run does not exist");
+                const auto package = implementationPackageForPdk(run->config.pdk);
+                if (!package || !package->pdk)
+                    throw ProjectError("icepy.implementation",
+                                       "No installed PDK package provides '" + run->config.pdk + "'");
+                auto imported = importImplementationLayout(project, *run, *package, projectRoot, layoutName, replace);
+                for (const auto &diagnostic : imported.diagnostics) {
+                    if (diagnostic.severity == Diagnostic::Severity::error)
+                        throw ProjectError(diagnostic.code, diagnostic.message);
+                }
+                return imported.layout;
+            },
+            nb::arg("run_id"), nb::arg("project_root"), nb::arg("layout_name") = "", nb::arg("replace") = false)
         .def("next_id", &Project::nextId)
         .def("validate", [](const Project &project) { return project.validate().size(); })
         .def("diagnostics", [](const Project &project) { return project.validate(); })

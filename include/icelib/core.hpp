@@ -333,6 +333,91 @@ struct ProceduralLayout {
     ObjectId generatedCell = 0;
 };
 
+enum class ImplementationStage { created, elaboration, synthesis, floorplan, placement, cts, routing, final };
+
+enum class ImplementationStatus { pending, running, succeeded, failed, cancelled };
+
+enum class ImplementationStageStatus { pending, running, succeeded, failed, skipped, cancelled };
+
+struct ImplementationMacroPlacement {
+    std::string cell;
+    Coordinate x = 0;
+    Coordinate y = 0;
+    std::string orientation = "r0";
+};
+
+// User-facing configuration for one RTL-to-GDS run. The same structure feeds
+// the direct OpenROAD backend and, later, alternative backends such as
+// LibreLane. It must stay free of backend-specific file formats.
+struct ImplementationConfig {
+    std::string name;
+    std::string top;
+    std::string pdk = genericPdkId;
+    std::string stack;
+    std::string standardCellLibrary;
+    std::string corner = "tt";
+    std::vector<std::filesystem::path> sources;
+    std::vector<ObjectId> sourceCells;
+    std::filesystem::path sdc;
+
+    // Floorplan policy. Zero/empty values mean "use the platform default".
+    std::optional<Rect> dieArea;
+    std::optional<Rect> coreArea;
+    double utilization = 0.5;
+    double aspectRatio = 1.0;
+    std::string site;
+    std::vector<std::string> ioHorizontalLayers;
+    std::vector<std::string> ioVerticalLayers;
+    std::vector<ImplementationMacroPlacement> macros;
+
+    // Placement/CTS/routing policy.
+    double placementDensity = 0.0;
+    bool timingDriven = false;
+    bool routabilityDriven = false;
+    bool ctsEnabled = true;
+    std::string ctsRootBuffer;
+    std::vector<std::string> ctsBuffers;
+    std::string routingMinLayer;
+    std::string routingMaxLayer;
+    bool antennaRepair = true;
+
+    // Execution policy.
+    std::string backend = "openroad";
+    int threads = 1;
+    std::uint32_t seed = 1;
+    int timeoutSeconds = 3600;
+};
+
+struct ImplementationStageState {
+    ImplementationStage stage = ImplementationStage::created;
+    ImplementationStageStatus status = ImplementationStageStatus::pending;
+    std::string startedAt;
+    std::string finishedAt;
+    std::string error;
+    std::vector<std::string> artifacts;
+};
+
+// A persistent RTL-to-GDS run. Heavy stage artifacts live under
+// build/impl/<run>/ and are referenced by relative path; the run manifest
+// itself is stored in impl/<run>.iceimpl.
+struct ImplementationRun {
+    ObjectId id = 0;
+    std::string name;
+    ImplementationConfig config;
+    ImplementationStage currentStage = ImplementationStage::created;
+    ImplementationStatus status = ImplementationStatus::pending;
+    std::map<ImplementationStage, ImplementationStageState> stages;
+    std::string directory;
+    std::string configHash;
+    std::map<std::string, std::string> toolVersions;
+    std::map<std::string, double> metrics;
+    std::vector<std::string> artifacts;
+    ObjectId resultLayout = 0;
+    std::string lastError;
+    std::string createdAt;
+    std::string updatedAt;
+};
+
 struct SimulationGraph {
     ObjectId id = 0;
     std::string name;
@@ -405,6 +490,7 @@ class Project {
     std::map<ObjectId, Layer> layers;
     std::map<ObjectId, LayoutCell> layoutCells;
     std::map<ObjectId, ProceduralLayout> proceduralLayouts;
+    std::map<ObjectId, ImplementationRun> implementationRuns;
     std::map<ObjectId, SimulationItem> simulations;
     std::map<ObjectId, ProjectReport> reports;
 

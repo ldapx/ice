@@ -1,0 +1,74 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+
+cc_library(
+    name = "ice_openroad_odb",
+    srcs = ["src/odb_reader.cpp"],
+    hdrs = [
+        "include/ice_openroad/odb_reader.hpp",
+        "include/ice_openroad/types.hpp",
+    ],
+    includes = ["include"],
+    copts = [
+        "-fopenmp",
+        "-Wno-error",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/odb/src/db",
+    ],
+)
+
+cc_library(
+    name = "ice_openroad",
+    srcs = ["src/engine.cpp"],
+    hdrs = [
+        "include/ice_openroad/engine.hpp",
+        "include/ice_openroad/heatmap.hpp",
+        "include/ice_openroad/odb_reader.hpp",
+        "include/ice_openroad/types.hpp",
+    ],
+    includes = ["include"],
+    copts = [
+        "-fopenmp",
+        "-Wno-error",
+    ],
+    defines = ["BUILD_GUI=false"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//:openroad_lib",
+        "//bazel:tcl_library_init",
+        "@tcl_lang//:tcl",
+    ],
+)
+
+cc_binary(
+    name = "ice-openroad",
+    srcs = ["src/worker_main.cpp"],
+    copts = [
+        "-fopenmp",
+        "-Wno-error",
+    ],
+    defines = ["BUILD_GUI=false"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ice_openroad",
+        ":ice_openroad_odb",
+        "//bazel:tcl_library_init",
+        "@tcl_lang//:tcl",
+    ],
+)
+
+# Installable shared SDK. The harness above links the static library so the
+# command-line tool remains self-contained; applications that want the C++
+# API can link this shared object instead.
+cc_shared_library(
+    name = "ice_openroad_shared",
+    deps = [
+        ":ice_openroad",
+        ":ice_openroad_odb",
+    ],
+    shared_lib_name = "libice_openroad.so",
+    visibility = ["//visibility:public"],
+)
