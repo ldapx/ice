@@ -12,7 +12,6 @@
 #include <fstream>
 #include <set>
 #include <sstream>
-#include <string_view>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -46,7 +45,7 @@ std::string normalizeId(std::string value) {
     return value;
 }
 
-std::string readPrefix(const std::filesystem::path &path, std::size_t limit = 512 * 1024) {
+std::string readPrefix(const std::filesystem::path &path, std::size_t limit = std::size_t{512} * 1024) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
         return {};
@@ -551,7 +550,7 @@ PdkProbeResult probePdk(const PdkInfo &info, std::chrono::milliseconds timeout) 
                          " timeout " + std::to_string(seconds) + "s ngspice -b -o " + shellQuote(logPath.string()) +
                          " " + shellQuote(netlist.string()) + " >/dev/null 2>&1";
     const auto exitCode = std::system(command.c_str());
-    const auto log = readPrefix(logPath, 64 * 1024);
+    const auto log = readPrefix(logPath, std::size_t{64} * 1024);
     result.log = log.size() > 4000 ? "..." + log.substr(log.size() - 4000) : log;
     result.ok = exitCode == 0 && !logLooksLikeFailure(log);
     result.summary =

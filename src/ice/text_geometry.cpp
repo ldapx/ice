@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <limits>
 #include <numbers>
 #include <utility>
 #include <vector>
@@ -40,8 +39,7 @@ Point octilinearDirection(Coordinate dx, Coordinate dy) {
     const auto angle = std::atan2(static_cast<double>(dy), static_cast<double>(dx));
     auto index = static_cast<int>(std::llround(angle / (std::numbers::pi / 4.0)));
     index = (index % 8 + 8) % 8;
-    static const Point directions[8] = {{1, 0},  {1, 1},  {0, 1},  {-1, 1},
-                                        {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+    static const Point directions[8] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
     return directions[index];
 }
 

@@ -489,9 +489,7 @@ class ToolBlock : public QWidget {
     void update(const AgentToolUpdate &update) {
         if (!update.id.isEmpty())
             id_ = update.id;
-        if (!update.title.isEmpty() && update.title != QStringLiteral("execute"))
-            title_ = update.title;
-        else if (title_.isEmpty())
+        if (!update.title.isEmpty() && (update.title != QStringLiteral("execute") || title_.isEmpty()))
             title_ = update.title;
         if (!update.kind.isEmpty())
             kind_ = update.kind;
@@ -573,8 +571,6 @@ class ToolBlock : public QWidget {
         if (!rowName.isEmpty() || !invocation.arguments.isEmpty()) {
             if (failed)
                 icon = QStringLiteral("\u2717");
-            else if (invocation.status == QStringLiteral("completed"))
-                icon = QStringLiteral("\u203a");
             else if (invocation.status == QStringLiteral("pending") ||
                      invocation.status == QStringLiteral("in_progress"))
                 icon = QStringLiteral("\u22ef");

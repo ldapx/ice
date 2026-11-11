@@ -34,10 +34,8 @@ class GeometryKernel {
 
 class Clipper2Adapter final : public GeometryKernel {
   public:
-    MultiPolygon unionPolygons(const MultiPolygon &left, const MultiPolygon &right) const;
     MultiPolygon difference(const MultiPolygon &left, const MultiPolygon &right) const;
     MultiPolygon intersection(const MultiPolygon &left, const MultiPolygon &right) const;
-    MultiPolygon xorPolygons(const MultiPolygon &left, const MultiPolygon &right) const;
 };
 
 struct Transform {
@@ -70,6 +68,5 @@ class SpatialIndex {
 };
 
 MultiPolygon transformArray(const MultiPolygon &geometry, const Transform &transform, const ArraySpec &array);
-std::string booleanOperationName(BooleanOperation operation);
 
 } // namespace ice

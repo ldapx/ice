@@ -200,8 +200,8 @@ the shared Python runner. The project-level script view inside the Simulation
 workspace edits the Python source; generated graphs appear in tabs below the
 editor, while runner messages, errors, and Markdown output are appended to the
 **Messages** tab. Generated graphs are cached under
-`build/simulation-scripts/` and reload when the script is selected. The legacy
-`build_report` function name is still accepted.
+`build/simulation-scripts/` and reload when the script is selected. Simulation
+scripts must define `build_script(ctx)`.
 
 ## CLI
 

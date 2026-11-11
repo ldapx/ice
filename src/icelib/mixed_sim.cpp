@@ -117,7 +117,7 @@ const SimulationTrace *findTraceEndingWith(const SimulationResult &result, const
 
 std::string normalizedNode(std::string name) {
     name = lowerCopy(trimCopy(std::move(name)));
-    if (name.starts_with("v(") && name.ends_with(")"))
+    if (name.starts_with("v(") && name.ends_with(')'))
         name = name.substr(2, name.size() - 3);
     return name;
 }

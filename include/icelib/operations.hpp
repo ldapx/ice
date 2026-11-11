@@ -45,21 +45,22 @@ char spiceElementForSymbol(const std::string &symbolName);
 // Returns how many defaults were added.
 std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
                                   const std::vector<Parameter> &defaults);
-ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = genericPdkId);
+ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = genericPdkId, std::string stack = {});
 // Creates a procedural layout and its generated static layout cell. The
 // generated cell is an ordinary layout cell marked with generatedBy. Names are
 // made unique across static and procedural layouts. Returns the procedural
 // layout id, not the generated cell id.
 ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk = genericPdkId,
-                                std::string script = {});
+                                std::string script = {}, std::string stack = {});
 // Creates a layout cell using the schematic's technology and projects every
 // schematic instance into a movable planned-device box. Nets are projected as
 // straight connections between those boxes. The layout name defaults to the
 // schematic name and is made unique when that name is already in use. Returns
 // the new layout cell id.
-ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {});
+ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {},
+                                   std::string stack = {});
 ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout = 0, std::string pdk = {},
-                  int datatype = 0);
+                  int datatype = 0, std::string stack = {});
 std::string nextShapeName(const LayoutCell &cell, const std::string &type);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);

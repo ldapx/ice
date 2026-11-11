@@ -37,10 +37,10 @@ VerificationReport LocalVerificationAdapter::run(const Project &project, std::op
             } else {
                 const auto left = std::min(contentBounds.x, shape.rectangle.x);
                 const auto bottom = std::min(contentBounds.y, shape.rectangle.y);
-                const auto right = std::max(contentBounds.x + contentBounds.width,
-                                            shape.rectangle.x + shape.rectangle.width);
-                const auto top = std::max(contentBounds.y + contentBounds.height,
-                                          shape.rectangle.y + shape.rectangle.height);
+                const auto right =
+                    std::max(contentBounds.x + contentBounds.width, shape.rectangle.x + shape.rectangle.width);
+                const auto top =
+                    std::max(contentBounds.y + contentBounds.height, shape.rectangle.y + shape.rectangle.height);
                 contentBounds = {left, bottom, right - left, top - bottom};
             }
             if (!project.layers.contains(shape.layer))
@@ -52,19 +52,19 @@ VerificationReport LocalVerificationAdapter::run(const Project &project, std::op
         }
         for (const auto &[portId, port] : layout.ports) {
             if (!port.rectangle.valid()) {
-                report.drc.push_back({1, VerificationSeverity::error, "pin-area",
-                                      "Pin has non-positive area", portId, port.rectangle});
+                report.drc.push_back(
+                    {1, VerificationSeverity::error, "pin-area", "Pin has non-positive area", portId, port.rectangle});
                 continue;
             }
             if (!project.layers.contains(port.layer))
-                report.drc.push_back({1, VerificationSeverity::error, "pin-layer",
-                                      "Pin references a missing layer", portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::error, "pin-layer", "Pin references a missing layer",
+                                      portId, port.rectangle});
             if (port.rectangle.width < project.grid || port.rectangle.height < project.grid)
                 report.drc.push_back({1, VerificationSeverity::warning, "pin-min-width",
                                       "Pin is narrower than the project grid", portId, port.rectangle});
             if (port.net != 0 && !layout.nets.contains(port.net))
-                report.drc.push_back({1, VerificationSeverity::error, "pin-net",
-                                      "Pin references a missing layout net", portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::error, "pin-net", "Pin references a missing layout net",
+                                      portId, port.rectangle});
             if (haveContentBounds &&
                 (port.rectangle.x < contentBounds.x || port.rectangle.y < contentBounds.y ||
                  port.rectangle.x + port.rectangle.width > contentBounds.x + contentBounds.width ||
@@ -144,10 +144,4 @@ std::string serializeVerificationReport(const VerificationReport &report) {
     return output.dump(2) + "\n";
 }
 
-SimulationRequest applyParasitics(const SimulationRequest &request, const VerificationReport &report) {
-    auto result = request;
-    for (const auto &element : report.pex)
-        result.time_constant += element.resistance * element.capacitance;
-    return result;
-}
 } // namespace ice

@@ -13,7 +13,6 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <vector>
 
 namespace ice {
@@ -217,10 +216,11 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
                 const auto &point = shape.centerline[index];
                 for (const auto viaLayer : shape.pointVias[index]) {
                     const auto [layerNumber, datatype] = layerStream(project, viaLayer);
-                    writeBoundary(layerNumber, datatype, {{point.x - half, point.y - half},
-                                                          {point.x + half, point.y - half},
-                                                          {point.x + half, point.y + half},
-                                                          {point.x - half, point.y + half}});
+                    writeBoundary(layerNumber, datatype,
+                                  {{point.x - half, point.y - half},
+                                   {point.x + half, point.y - half},
+                                   {point.x + half, point.y + half},
+                                   {point.x - half, point.y + half}});
                 }
             }
             continue;
@@ -245,10 +245,11 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
         if (datatype < 0 || datatype > 65535)
             throw ProjectError("interchange.export", "Layer datatype out of GDSII range");
         const auto &rect = port.rectangle;
-        writeBoundary(layerNumber, datatype, {{rect.x, rect.y},
-                                              {rect.x + rect.width, rect.y},
-                                              {rect.x + rect.width, rect.y + rect.height},
-                                              {rect.x, rect.y + rect.height}});
+        writeBoundary(layerNumber, datatype,
+                      {{rect.x, rect.y},
+                       {rect.x + rect.width, rect.y},
+                       {rect.x + rect.width, rect.y + rect.height},
+                       {rect.x, rect.y + rect.height}});
         const auto layerValue = static_cast<std::uint32_t>(layerNumber);
         const auto datatypeValue = static_cast<std::uint32_t>(datatype);
         writeEmptyRecord(output, kText);
@@ -396,7 +397,6 @@ std::string lefDirection(PortDirection direction) {
     case PortDirection::output:
         return "OUTPUT";
     case PortDirection::inout:
-        return "INOUT";
     case PortDirection::power:
     case PortDirection::ground:
         return "INOUT";
@@ -656,7 +656,7 @@ Project LayoutInterchange::importLef(const std::filesystem::path &path) {
         }
         if (tokens[index] != "PIN" || index + 1 >= tokens.size())
             continue;
-        const auto pinName = tokens[index + 1];
+        const auto &pinName = tokens[index + 1];
         Port port;
         port.name = pinName;
         port.label = pinName;
@@ -929,11 +929,8 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
                     std::max<Coordinate>(1, static_cast<Coordinate>(std::llround(static_cast<double>(textValue.size()) *
                                                                                  static_cast<double>(height) * 0.6)));
                 const auto shapeId = project.nextId();
-                Shape shape{shapeId,
-                            layerId,
-                            std::nullopt,
-                            {textOrigin.first, textOrigin.second - height, width, height},
-                            {}};
+                Shape shape{
+                    shapeId, layerId, std::nullopt, {textOrigin.first, textOrigin.second - height, width, height}, {}};
                 shape.text = textValue;
                 layout.shapes.emplace(shapeId, std::move(shape));
                 if (options.pinLabelLayer && *options.pinLabelLayer == static_cast<int>(currentLayer)) {
@@ -991,8 +988,7 @@ Project LayoutInterchange::importGds(const std::filesystem::path &path, const La
             const auto shapeId = project.nextId();
             layout.shapes.emplace(
                 shapeId,
-                Shape{
-                    shapeId, layerId, std::nullopt, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
+                Shape{shapeId, layerId, std::nullopt, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
             inBoundary = false;
         }
     }

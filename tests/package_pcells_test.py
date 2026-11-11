@@ -93,6 +93,17 @@ def check_library(name: str, root: Path) -> None:
         assert layer_names[(5, 2)] == "GatPoly.pin"
         assert layer_names[(8, 2)] == "Metal1.pin"
         assert layer_names[(51, 0)] == "HeatTrans"
+    elif name == "ice-pkg-sky130":
+        assert layer_names[(68, 20)] == "met1.drawing"
+        assert layer_names[(68, 16)] == "met1.pin"
+        assert layer_names[(65, 13)] == "diff.res"
+        assert layer_names[(89, 44)] == "capm.drawing"
+    elif name == "ice-pkg-gf180mcu":
+        assert layer_names[(34, 0)] == "metal1"
+        assert layer_names[(34, 4)] == "metal1.dummy"
+        assert layer_names[(34, 10)] == "metal1.label"
+
+    if name == "ice-pkg-ihp-sg13g2":
         expected = {
             "nmos.toml": {
                 "model": "sg13_lv_nmos",
@@ -171,6 +182,16 @@ def check_library(name: str, root: Path) -> None:
     assert generated["bounds"][3] > generated["bounds"][1]
     assert generated["bounds"][2] - generated["bounds"][0] < 1_000_000
     assert generated["bounds"][3] - generated["bounds"][1] < 1_000_000
+    for shape in generated["shapes"]:
+        assert (shape["layer"], shape["datatype"]) in layer_names, (
+            f"{name}: generated shape uses undeclared stream "
+            f"{shape['layer']}/{shape['datatype']}"
+        )
+    for port in generated["ports"]:
+        assert (port["layer"], port["datatype"]) in layer_names, (
+            f"{name}: generated port uses undeclared stream "
+            f"{port['layer']}/{port['datatype']}"
+        )
 
     if name != "ice-pkg-ihp-sg13g2":
         # SPICE-style length suffixes must reach the geometry, not silently fall

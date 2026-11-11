@@ -78,31 +78,91 @@ Build the OSDI cache once with:
 ice-pkg pdk-build ihp.sg13g2
 ```
 
-A package may also declare its display name, default schematic, and layout
-layer stack:
+A package may also declare its display name, default schematic, layout layers,
+and one or more process stack variants:
 
 ```toml
 [pdk]
 display_name = "SkyWater SKY130"
 default_schematic = "sky130_top"
+default_stack = "5LM_1TM"
 
 [[pdk.layer]]
-name = "nwell"
+name = "nwell.drawing"
 number = 64
+datatype = 20
 
 [[pdk.layer]]
-name = "diff"
+name = "diff.drawing"
 number = 65
+datatype = 20
+
+[[pdk.stack]]
+id = "3LM_1TM"
+display_name = "3 metal layers + 1 thick top"
+layers = ["nwell.drawing", "diff.drawing", "metal1.drawing"]
+
+[[pdk.stack]]
+id = "6LM_1TM"
+display_name = "5 metal layers + MetalTop"
+layers = ["nwell.drawing", "diff.drawing", "metal1.drawing",
+          "metal2.drawing", "metal3.drawing", "metal4.drawing",
+          "metal5.drawing", "metaltop.drawing"]
 ```
+
+Each stack lists the PDK layers it exposes. Entries may name either a full
+layer (`metal1.drawing`) or its base (`metal1`); purpose layers such as
+`metal1.pin` follow their base entry. A layout cell stores exactly one PDK and
+one stack; layers added for that layout carry the same stack and only appear in
+layouts using it. `default_stack` is preselected when a layout is
+created and is used when a layout is generated from a schematic. A PDK
+without `[[pdk.stack]]` entries has a single implicit stack and works as
+before. Projects may use layouts from several PDKs, but a layout instance
+must reference a child with the same PDK and stack as its parent.
 
 Activating the package adds these layers to the Layout editor, records the
 package as a project dependency, and creates the default schematic when the
 project has no schematics yet. Layout layers store both the GDS number and
-datatype. Creating a layout adds the package's full device-library layer set,
-so placing devices only reuses existing layers. Device libraries use
-purpose-qualified names such as `GatPoly.pin` and `Metal1.nofill`; non-zero
-datatypes and marker layers start hidden, and the Layers panel groups them
-under their base layer number.
+datatype. Creating a layout adds the package's full device-library layer set
+for the selected stack, so placing devices only reuses existing layers.
+Device libraries use purpose-qualified names such as `GatPoly.pin` and
+`Metal1.nofill`; purpose layers with non-zero datatypes and marker layers
+start hidden, while drawing purposes remain visible. The Layers panel groups
+purposes under their base layer number.
+
+### Layer styles
+
+A PDK package can ship default colors, patterns, and visibility for its layers
+in `layout/layer-styles.json`. ICE discovers the file automatically from the
+package root; it is not listed in `package.toml`.
+
+```json
+{
+  "schema_version": 1,
+  "layers": [
+    {
+      "name": "Metal1",
+      "color": "#3498db",
+      "pattern": "Solid",
+      "visible": true
+    },
+    {
+      "name": "Metal1.pin",
+      "color": "#3498db",
+      "pattern": "Dense dots",
+      "visible": false
+    }
+  ]
+}
+```
+
+`name` matches either a full layer name or its base name before the first
+`.`; a base-name entry applies to every purpose of that layer unless the full
+name has its own entry. `pattern` accepts the names shown in the layer pattern
+menu (for example `Solid`, `Diagonal /`, `Cross hatch`, `Sparse dots`).
+Styles are applied when the package's layers are added to a project. Layers
+without a style entry keep the built-in number-based palette. The IHP SG13G2,
+Sky130, and GF180MCU packages ship style files derived from their layer maps.
 
 ## Package indexes
 

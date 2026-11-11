@@ -70,7 +70,6 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -102,6 +101,37 @@ struct ActivityPanel::AgentBackend {
 };
 
 namespace {
+
+constexpr int kDrcViolationIndexRole = Qt::UserRole + 1;
+
+// Fill a layout-stack selector for the selected PDK. Returns true when the
+// package declares at least one stack, so callers can hide the row otherwise.
+bool populateStackCombo(QComboBox *combo, const std::filesystem::path &installDirectory, const QString &pdkId) {
+    if (!combo)
+        return false;
+    const QSignalBlocker blocker(combo);
+    combo->clear();
+    const auto pdk = pdkId.toStdString();
+    const auto packages = installedPdkPackages(installDirectory);
+    const auto package = std::find_if(packages.begin(), packages.end(),
+                                      [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, pdk); });
+    if (package == packages.end() || !package->spec.pdk || package->spec.pdk->stacks.empty()) {
+        combo->addItem(QStringLiteral("Default"), QString{});
+        return false;
+    }
+    int selected = 0;
+    const auto defaultStack = QString::fromStdString(package->spec.pdk->defaultStack);
+    for (const auto &stack : package->spec.pdk->stacks) {
+        auto label = QString::fromStdString(stack.displayName.empty() ? stack.id : stack.displayName);
+        if (label != QString::fromStdString(stack.id))
+            label += QStringLiteral("  (%1)").arg(QString::fromStdString(stack.id));
+        combo->addItem(label, QString::fromStdString(stack.id));
+        if (QString::fromStdString(stack.id) == defaultStack)
+            selected = combo->count() - 1;
+    }
+    combo->setCurrentIndex(selected);
+    return true;
+}
 
 QString jsonString(const nlohmann::json &object, const char *key, const QString &fallback = {}) {
     const auto it = object.find(key);
@@ -373,6 +403,17 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     drcTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     drcTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     drcTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    connect(drcTable_, &QTableWidget::cellClicked, this, [this](int row, int) {
+        if (!onDrcViolationActivated_)
+            return;
+        const auto *item = drcTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(kDrcViolationIndexRole).toInt();
+        if (index < 0 || index >= static_cast<int>(drcViolations_.size()))
+            return;
+        onDrcViolationActivated_(drcViolations_[static_cast<std::size_t>(index)]);
+    });
     drcLayout->addWidget(drcTable_, 1);
     drcTabIndex_ = tabs->addTab(drcPage, QStringLiteral("DRC Report"));
 
@@ -450,6 +491,10 @@ void ActivityPanel::setProjectPath(const QString &path) { projectPath_ = path; }
 
 void ActivityPanel::setProjectChangedCallback(std::function<void()> callback) {
     projectChangedCallback_ = std::move(callback);
+}
+
+void ActivityPanel::setOnDrcViolationActivated(std::function<void(const ice::DrcViolation &)> callback) {
+    onDrcViolationActivated_ = std::move(callback);
 }
 
 ActivityPanel::AgentSession *ActivityPanel::activeAgentSession() {
@@ -1953,6 +1998,8 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
         return;
     drcTable_->setSortingEnabled(false);
     drcTable_->setRowCount(0);
+    drcViolations_.clear();
+    drcViolations_.reserve(report.drc.size());
     int errors = 0;
     int warnings = 0;
     int infos = 0;
@@ -1968,6 +2015,8 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
             ++infos;
             break;
         }
+        const auto violationIndex = static_cast<int>(drcViolations_.size());
+        drcViolations_.push_back(violation);
         const int row = drcTable_->rowCount();
         drcTable_->insertRow(row);
         auto *severity = new QTableWidgetItem(drcSeverityLabel(violation.severity));
@@ -1976,6 +2025,7 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
         auto *cell = new QTableWidgetItem(QString::fromStdString(violation.cell));
         auto *location = new QTableWidgetItem(drcLocationLabel(violation.location));
         severity->setData(Qt::UserRole, static_cast<int>(violation.severity));
+        severity->setData(kDrcViolationIndexRole, violationIndex);
         drcTable_->setItem(row, 0, severity);
         drcTable_->setItem(row, 1, rule);
         drcTable_->setItem(row, 2, message);
@@ -2001,6 +2051,7 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
 void ActivityPanel::setDrcRunning(const QString &message) {
     if (!drcSummary_ || !drcTable_)
         return;
+    drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message.isEmpty() ? QStringLiteral("Running gdscheck...") : message);
     showDrcTab();
@@ -2009,6 +2060,7 @@ void ActivityPanel::setDrcRunning(const QString &message) {
 void ActivityPanel::setDrcError(const QString &message) {
     if (!drcSummary_ || !drcTable_)
         return;
+    drcViolations_.clear();
     drcTable_->setRowCount(0);
     drcSummary_->setText(message);
     showDrcTab();
@@ -2454,8 +2506,8 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     layout->setSpacing(12);
 
     layout->addWidget(heading(QStringLiteral("Create a schematic")));
-    description_ = new QLabel(
-        QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
+    description_ =
+        new QLabel(QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);
@@ -2543,8 +2595,7 @@ void EmptySchematicPanel::updateKindUi() {
         return;
     switch (kind_) {
     case Kind::SchematicDrawing:
-        kindDescription_->setText(
-            QStringLiteral("Draw a schematic on the canvas using symbols, wires, and ports."));
+        kindDescription_->setText(QStringLiteral("Draw a schematic on the canvas using symbols, wires, and ports."));
         createButton_->setText(QStringLiteral("Create Schematic"));
         break;
     case Kind::TextSpice:
@@ -2626,8 +2677,8 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     layout->setSpacing(12);
 
     layout->addWidget(heading(QStringLiteral("Create a layout")));
-    description_ = new QLabel(
-        QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
+    description_ =
+        new QLabel(QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);
@@ -2676,8 +2727,12 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     connect(name_, &QLineEdit::textEdited, this, [this](const QString &) { nameEdited_ = true; });
     pdk_ = new QComboBox;
     pdk_->setAccessibleName(QStringLiteral("Layout PDK"));
+    stack_ = new QComboBox;
+    stack_->setAccessibleName(QStringLiteral("Layout stack"));
+    stackLabel_ = new QLabel(QStringLiteral("Stack"));
     form->addRow(QStringLiteral("Layout cell name"), name_);
     form->addRow(QStringLiteral("PDK"), pdk_);
+    form->addRow(stackLabel_, stack_);
     detailsLayout->addLayout(form);
     auto *buttonRow = new QHBoxLayout;
     buttonRow->addStretch();
@@ -2693,6 +2748,7 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
             [this](int id) { selectKind(static_cast<Kind>(id)); });
     connect(createButton_, &QPushButton::clicked, this, [this] { submit(); });
     connect(name_, &QLineEdit::returnPressed, this, [this] { submit(); });
+    connect(pdk_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { refreshStacks(); });
     connect(openButton, &QPushButton::clicked, this, [this] {
         const auto id = static_cast<ice::ObjectId>(open_->currentData().toULongLong());
         if (id != 0 && onOpen_)
@@ -2745,21 +2801,34 @@ void EmptyLayoutPanel::setOpenCandidates(const std::vector<std::pair<ice::Object
 }
 
 void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory) {
+    installDirectory_ = installDirectory;
     const auto current = pdk_->currentData().toString();
-    QSignalBlocker blocker(pdk_);
-    pdk_->clear();
-    pdk_->addItem(QStringLiteral("Generic PDK"), QString::fromLatin1(ice::genericPdkId));
-    for (const auto &entry : installedPdkPackages(installDirectory)) {
-        const auto packageName = QString::fromStdString(entry.spec.name);
-        auto label = packagePdkDisplayName(entry.spec);
-        if (label != packageName)
-            label += QStringLiteral("  (%1)").arg(packageName);
-        pdk_->addItem(label, QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
-                                                                                                  : entry.spec.name));
+    {
+        QSignalBlocker blocker(pdk_);
+        pdk_->clear();
+        pdk_->addItem(QStringLiteral("Generic PDK"), QString::fromLatin1(ice::genericPdkId));
+        for (const auto &entry : installedPdkPackages(installDirectory)) {
+            const auto packageName = QString::fromStdString(entry.spec.name);
+            auto label = packagePdkDisplayName(entry.spec);
+            if (label != packageName)
+                label += QStringLiteral("  (%1)").arg(packageName);
+            pdk_->addItem(label,
+                          QString::fromStdString(entry.spec.pdk && !entry.spec.pdk->id.empty() ? entry.spec.pdk->id
+                                                                                               : entry.spec.name));
+        }
+        const auto index = pdk_->findData(current);
+        if (index >= 0)
+            pdk_->setCurrentIndex(index);
     }
-    const auto index = pdk_->findData(current);
-    if (index >= 0)
-        pdk_->setCurrentIndex(index);
+    refreshStacks();
+}
+
+void EmptyLayoutPanel::refreshStacks() {
+    if (!stack_ || !stackLabel_)
+        return;
+    const bool hasStacks = populateStackCombo(stack_, installDirectory_, pdk_->currentData().toString());
+    stackLabel_->setVisible(hasStacks);
+    stack_->setVisible(hasStacks);
 }
 
 void EmptyLayoutPanel::prepareForDisplay() {
@@ -2782,20 +2851,21 @@ void EmptyLayoutPanel::submit() {
         return;
     }
     if (onCreate_)
-        onCreate_(kind_, name, pdk_->currentData().toString().toStdString());
+        onCreate_(kind_, name, pdk_->currentData().toString().toStdString(),
+                  stack_ && stack_->isVisible() ? stack_->currentData().toString().toStdString() : std::string{});
 }
 
 CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
                                        QWidget *parent)
-    : QDialog(parent) {
+    : QDialog(parent), installDirectory_(installDirectory) {
     setWindowTitle(QStringLiteral("Create Layout Cell"));
     setModal(true);
-    resize(600, 300);
+    resize(600, 330);
 
     auto *layout = new QVBoxLayout(this);
     auto *description =
-        new QLabel(QStringLiteral("Choose the PDK used by this layout cell. Generic PDKs use the built-in layer set; "
-                                  "package PDKs add their technology metadata."));
+        new QLabel(QStringLiteral("Choose the PDK and stack variant used by this layout cell. Generic PDKs use the "
+                                  "built-in layer set; package PDKs add their technology metadata."));
     description->setWordWrap(true);
     layout->addWidget(description);
 
@@ -2821,7 +2891,11 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
             detail = QString::fromStdString(entry.spec.description) + QStringLiteral("  ") + detail;
         pdk_->setItemData(pdk_->count() - 1, detail, Qt::ToolTipRole);
     }
+    stack_ = new QComboBox;
+    stack_->setAccessibleName(QStringLiteral("Layout stack"));
+    stackLabel_ = new QLabel(QStringLiteral("Stack"));
     form->addRow(QStringLiteral("PDK"), pdk_);
+    form->addRow(stackLabel_, stack_);
     layout->addLayout(form);
 
     pdkDescription_ = new QLabel;
@@ -2834,8 +2908,10 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Create"));
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Cancel"));
     layout->addWidget(buttons);
-    connect(pdk_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this](int) { pdkDescription_->setText(pdk_->currentData(Qt::ToolTipRole).toString()); });
+    connect(pdk_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        pdkDescription_->setText(pdk_->currentData(Qt::ToolTipRole).toString());
+        updateStacks();
+    });
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
         if (name_->text().trimmed().isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Create Layout Cell"),
@@ -2847,12 +2923,24 @@ CreateLayoutDialog::CreateLayoutDialog(const std::filesystem::path &installDirec
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     pdkDescription_->setText(pdk_->currentData(Qt::ToolTipRole).toString());
+    updateStacks();
     name_->selectAll();
     name_->setFocus();
 }
 
+void CreateLayoutDialog::updateStacks() {
+    if (!stack_ || !stackLabel_)
+        return;
+    const bool hasStacks = populateStackCombo(stack_, installDirectory_, pdk_->currentData().toString());
+    stackLabel_->setVisible(hasStacks);
+    stack_->setVisible(hasStacks);
+}
+
 QString CreateLayoutDialog::layoutName() const { return name_->text().trimmed(); }
 std::string CreateLayoutDialog::pdkId() const { return pdk_->currentData().toString().toStdString(); }
+std::string CreateLayoutDialog::stackId() const {
+    return stack_ && stack_->isVisible() ? stack_->currentData().toString().toStdString() : std::string{};
+}
 
 CreateLayerDialog::CreateLayerDialog(const QString &defaultName, int layerNumber, const LayerStyle &suggestedStyle,
                                      QWidget *parent)

@@ -98,8 +98,8 @@ and ask the user to rebuild/restart ICE.
 | `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. Use `bus_mode="flatten"` for buses. |
 | `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
 | `schematic_validate_hierarchy` | Validate HDL instances, pin/port mapping, nets, buses, and mixed-signal support. |
-| `layout_create` | Create a static layout cell. |
-| `layout_create_from_schematic` | Generate a layout from a schematic. |
+| `layout_create` | Create a static layout cell; accepts optional `pdk` and `stack`. |
+| `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 | `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |
 | `layout_add_rectangle` | Add a rectangle shape. |
@@ -138,7 +138,11 @@ and ask the user to rebuild/restart ICE.
 | `simulation_script_delete` | Delete script metadata; the file remains. |
 
 Cells, layers, simulations, graphs, and simulation scripts may be referenced by
-name or numeric id. Coordinates are integer database units. `lvs_run` accepts a
+name or numeric id. Coordinates are integer database units. Layout tools expose
+the cell's `pdk` and `stack`; `layout_create` and
+`layout_create_from_schematic` accept an optional `stack` (for example
+`"3LM_1TM"`), defaulting to the package's `default_stack`. Instances must use
+the same PDK and stack as their parent layout. `lvs_run` accepts a
 layout name or id and an optional schematic; when the schematic is omitted, ICE
 infers it from planned-device links or matching layout/schematic names.
 `pex_run` accepts a layout plus optional coefficient overrides
@@ -216,8 +220,8 @@ transistor-level load check.
 
 ## Source schematics
 
-Use `schematic_create` with `kind: "text"` (or the `schematic_create_text` /
-`schematic_add_text` aliases) when a text SPICE cell is intended. Use
+Use `schematic_create` with `kind: "text"` (or `schematic_create_text`) when a
+text SPICE cell is intended. Use
 `kind: "systemverilog"` or `schematic_create_systemverilog` for a digital HDL
 cell. Do not create a drawn cell and then write its sidecar by hand.
 
@@ -308,7 +312,7 @@ the newer files. Reload or reopen the project and retry.
 `simulation_script_run` executes the script through the shared Python runner and
 returns `exit_code`, `timed_out`, `stdout`, `stderr`, and generated graph data,
 so agents can inspect analysis results and adjust the schematic in the same
-session. The legacy `report_*` tool names remain accepted as aliases.
+session.
 
 ## Resources
 

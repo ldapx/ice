@@ -7,7 +7,7 @@
 
 namespace ice {
 
-enum class PluginState { discovered, loaded, initialized, enabled, disabled, unloaded, failed };
+enum class PluginState { discovered, initialized, enabled, disabled, unloaded, failed };
 
 struct PermissionScope {
     bool readProject = true;
@@ -18,7 +18,6 @@ struct PermissionScope {
 };
 
 struct PluginManifest {
-    int schemaVersion = 1;
     std::string name;
     std::string version;
     std::string iceTarget;
@@ -42,12 +41,9 @@ class PluginManager {
     void disable(const std::string &name);
     void unload(const std::string &name);
     const PluginRecord &get(const std::string &name) const;
-    const std::map<std::string, PluginRecord> &records() const noexcept;
 
   private:
     std::map<std::string, PluginRecord> records_;
 };
-
-std::string pluginStateName(PluginState state);
 
 } // namespace ice

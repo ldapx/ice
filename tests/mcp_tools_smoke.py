@@ -122,7 +122,6 @@ def main() -> int:
                 "pdk_info",
                 "pdk_build",
                 "project_migrate",
-                "schematic_add_text",
                 "schematic_create_systemverilog",
                 "schematic_hdl_ports",
                 "schematic_add_hdl_instance",
@@ -295,12 +294,6 @@ def main() -> int:
                 text="* kind text\nV1 in 0 1\nR1 in out 1k\nC1 out 0 1p\n.end\n",
             )
             assert kind_text["kind"] == "text", kind_text
-            alias_text = mcp.tool(
-                "schematic_add_text",
-                name="alias_text",
-                text="* alias text\nV1 in 0 1\nR1 in out 1k\nC1 out 0 1p\n.end\n",
-            )
-            assert alias_text["kind"] == "text", alias_text
             mcp.tool("schematic_create", name="convert_me")
             converted = mcp.tool(
                 "schematic_set_text",
@@ -623,7 +616,6 @@ def main() -> int:
             assert "pdks" in doctor
             assert "simulation_model_libraries" in doctor
             assert "timing_libraries" in doctor
-            assert "model_libraries" in doctor
             assert "ngspice_executable_available" in doctor
             assert "build" in doctor and doctor["build"].get("commit"), doctor
 

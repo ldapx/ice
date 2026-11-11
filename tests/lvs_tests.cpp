@@ -151,7 +151,7 @@ TEST_CASE("LVS rejects text SPICE schematics and read-only layout cells") {
 
 namespace {
 ice::ObjectId addSchematicPort(ice::Project &project, ice::ObjectId cell, const std::string &type,
-                              const std::string &name, const std::string &netName) {
+                               const std::string &name, const std::string &netName) {
     const auto symbol = ice::addSymbol(project, cell, type);
     auto &symbolEntry = project.schematicCells.at(cell).symbols.at(symbol);
     const auto pin = project.nextId();
@@ -169,6 +169,14 @@ ice::ObjectId addSchematicPort(ice::Project &project, ice::ObjectId cell, const 
 ice::ObjectId layoutNetNamed(const ice::Project &project, ice::ObjectId cell, const std::string &name) {
     for (const auto &[id, net] : project.layoutCells.at(cell).nets) {
         if (net.name == name)
+            return id;
+    }
+    return 0;
+}
+
+ice::ObjectId schematicInstanceNamed(const ice::Project &project, ice::ObjectId cell, const std::string &name) {
+    for (const auto &[id, instance] : project.schematicCells.at(cell).instances) {
+        if (instance.name == name)
             return id;
     }
     return 0;
@@ -194,6 +202,14 @@ TEST_CASE("LVS matches top-level schematic ports to layout pins") {
     const auto output = ice::addPort(fixture.project, fixture.layout, "B", layer, {800, 0, 400, 400},
                                      ice::PortDirection::output, ice::PortSide::right, outNet, "B");
     CHECK(input != 0);
+
+    // Ports produced by Convert to Pin carry the schematic-instance link.
+    const auto inputInstance = schematicInstanceNamed(fixture.project, fixture.schematic, "A");
+    const auto outputInstance = schematicInstanceNamed(fixture.project, fixture.schematic, "B");
+    CHECK(inputInstance != 0);
+    CHECK(outputInstance != 0);
+    fixture.project.layoutCells.at(fixture.layout).ports.at(input).schematicInstance = inputInstance;
+    fixture.project.layoutCells.at(fixture.layout).ports.at(output).schematicInstance = outputInstance;
 
     auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
     CHECK(report.matched());

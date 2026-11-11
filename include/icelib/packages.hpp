@@ -11,6 +11,7 @@ namespace ice {
 struct PackageLayer {
     std::string name;
     int number = 0;
+    int datatype = 0;
 };
 
 struct PackagePdkOsdiSource {
@@ -36,6 +37,20 @@ struct PackagePdkSimulation {
     std::map<std::string, std::string> devices;
 };
 
+struct PackageLayerStyle {
+    std::string name;
+    std::string color;
+    std::string pattern;
+    int visible = -1;
+};
+
+struct PackagePdkStack {
+    std::string id;
+    std::string displayName;
+    // Empty means all PDK layers are available in this stack.
+    std::vector<std::string> layers;
+};
+
 struct PackagePdk {
     // Canonical PDK id. Package names are separate because a package may be
     // named `ihp.sg13g2` while schematics store `ihp-sg13g2`.
@@ -44,6 +59,9 @@ struct PackagePdk {
     std::string displayName;
     std::string defaultSchematic;
     std::vector<PackageLayer> layers;
+    std::string defaultStack;
+    std::vector<PackagePdkStack> stacks;
+    std::vector<PackageLayerStyle> layerStyles;
     std::optional<PackagePdkSimulation> simulation;
 };
 
@@ -123,5 +141,10 @@ std::string serializeLockfile(const Lockfile &lockfile);
 
 // True when the package exposes the requested PDK id, name, or alias.
 bool packageMatchesPdk(const PackageSpec &package, const std::string &pdkId);
+
+// Resolves the stack used by a new layout. An empty request selects the PDK's
+// default stack. Returns an empty id for a PDK without stack variants and
+// throws when the request names an undeclared stack.
+std::string resolvePdkStack(const PackagePdk &pdk, const std::string &requested);
 
 } // namespace ice

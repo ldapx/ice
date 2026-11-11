@@ -82,8 +82,10 @@ Project state, view state, and transient job state should be separate:
 
 Schematic and layout file tabs are closable. Their labels include the file
 extension (`.sp` for text SPICE schematics, `.sv` for SystemVerilog source
-cells, `.icesch` for drawn schematics, or `.icelay` for layouts) and a leading
-`●` while that file has unsaved edits. If
+cells, `.icesch` for drawn schematics, `.icelay` for static layouts, or `.py`
+for procedural layouts) and a leading `●` while that file has unsaved edits.
+Hierarchy file entries use the same extensions; nested instance entries keep
+their instance names. If
 every schematic or layout file tab is closed, the central editor area shows a
 form to open an existing file or create a new one. Opening a project starts with
 no schematic or layout file tabs open; open files from the hierarchy or the
@@ -143,7 +145,7 @@ The schematic editor should initially provide:
 - an infinite panning canvas with origin axes;
 - pan, zoom, grid, snapping, and fit-to-view;
 - symbol placement and movement;
-- wire and net-label creation;
+- wire and net-label creation, with double-click rename for net labels;
 - pin and net inspection;
 - instance/property editing;
 - hierarchy navigation;
@@ -153,12 +155,27 @@ The schematic editor should initially provide:
 
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
+Scroll the mouse wheel to zoom around the cursor.
+Connecting two pins merges their nets, and schematic wire routes are cached per
+net and branch. Editing a connection re-routes only the affected net, while
+moving or rotating a symbol re-routes nets attached to it or whose wires
+intersect its new geometry. Unrelated nets keep their existing routing.
+Dragging a net label stores a route-relative anchor: the branch endpoints, the
+normalized distance along that branch, and the label side (A or B). Labels
+therefore follow translated or re-routed wires, survive save/load, and do not
+depend on volatile segment numbering. Source reference labels sit to the left
+of their symbols. Passive values are shown below resistors, capacitors, and
+inductors. Source values are shown to the right, with sine sources displaying
+amplitude and period. Selecting a symbol highlights its artwork, reference
+label, and value text without drawing a selection rectangle. Hovering over a
+symbol highlights its artwork, and hovering over a net highlights its wires.
 The **+** button in Schematic **Hierarchy** offers **Schematic**, **Text SPICE
 Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
 notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and
 open a plain-text SPICE editor in place of the canvas and canvas toolbar.
 SystemVerilog cells use a notebook-text icon, appear with a `.sv` extension, and
-open the same source editor with SystemVerilog templates.
+open the same source editor with SystemVerilog templates and syntax
+highlighting.
 Their source is stored directly in the project and saved with it. Source cells
 are not projected into generated hierarchy symbols, but they can be selected as
 the source for a simulation. For a text schematic, simulation uses the stored
@@ -172,7 +189,8 @@ Testbench…**, and **Add Simulation Script…**. **Add SystemVerilog Testbench�
 creates the testbench source cell and a simulation that targets it with the
 **Icarus Verilog (SystemVerilog)** simulator and **Digital / VCD** analysis, then
 opens the **Testbench** tab in the simulation editor. The tab edits the source
-directly and has its own **Run Simulation** button. Selecting a SystemVerilog
+directly with SystemVerilog syntax highlighting and has its own **Run
+Simulation** button. Selecting a SystemVerilog
 cell created elsewhere in the Simulation tab switches the simulator and analysis
 the same way. The source is compiled with `iverilog`, run with `vvp`, and the
 generated VCD is loaded as the result traces. If the source has no
@@ -212,14 +230,22 @@ The layout editor should initially provide:
 - undo/redo.
 
 The Layout left column contains **Hierarchy** and **Devices** tabs; the right
-column contains **Properties** and **Layers**. Creating a layout with a packaged
-PDK adds that package's complete device-library layer set up front; placing
-devices reuses those layers instead of adding new ones. The **Layers** panel
+column contains **Properties** and **Layers**. The layout creation dialog asks
+for the layout PDK and, when that package declares stack variants, the stack
+(for example GF180MCU `3LM_1TM` through `6LM_1TM`). The package's default stack
+is preselected. The selected PDK and stack are stored on the layout cell and
+shown in its properties; a layout instance must use the same PDK and stack as
+its parent. Creating a layout with a packaged PDK adds that package's complete
+device-library layer set for the selected stack up front; placing devices
+reuses those layers instead of adding new ones. The **Layers** panel
 groups GDS purpose variants under their base layer number: for example
 `Metal1.pin` and `Metal1.nofill` appear under `Metal1`. Pin, mask,
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
-checkbox. Creating a custom layer opens a form with the layer name, assigned
+checkbox. PDK packages may supply default layer colors, patterns, and
+visibility in `layout/layer-styles.json`; these styles are applied when the
+package's layers are added, and layers without an entry keep the built-in
+number-based palette. Creating a custom layer opens a form with the layer name, assigned
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
 next to the search field can show only drawing layers or only pin layers. Its
 single eye button shows all layers when any layer is hidden and switches to
@@ -233,7 +259,9 @@ flattened instance geometry instead of only the layout cell's own shapes.
 Right-clicking a schematic in the Schematic **Hierarchy** tab offers **Make
 Layout from Schematic**. This creates a layout with the schematic's technology
 and projects every schematic instance into a movable **Planned Device** box
-under the new layout. Nets are drawn as straight connections between the boxes;
+under the new layout. The boxes keep the relative positions the symbols had in
+the schematic instead of being arranged in a grid. Nets are drawn as straight
+connections between the boxes;
 planned devices use a box icon in the hierarchy and can be selected and moved
 directly on the canvas. Use **Hierarchy Go Up** and **Hierarchy Go Down** in the
 left layout tool column to open the parent layout or the selected child
@@ -249,8 +277,8 @@ information.
 
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
-Python script editor in the middle view, and contain a generated static layout
-as their child. The canvas tool columns are hidden while a procedural layout
+Python script editor with syntax highlighting in the middle view, and contain a
+generated static layout as their child. The canvas tool columns are hidden while a procedural layout
 tab is active. The script runs with a `layout` builder that exposes
 `layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
 procedural layout and choose **Regenerate layout** (or use the editor's
@@ -339,9 +367,17 @@ Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
 Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
 stored as one path shape
 with an editable centerline, width, and cached outline; it moves as a single
-object rather than as independent segment rectangles. Select a path to show its
-point handles. Drag a handle to move a point, double-click a segment to insert a
-point, and right-click a handle to delete it. Changing layers while drawing
+object rather than as independent segment rectangles. The Draw Path tool and
+manually drawn paths use the waypoints icon, while automatically routed paths
+are listed as Routed Path shapes with the route icon. Select a manual path to
+show its point handles; drag a handle to move a point, double-click a segment to
+insert a point, and right-click a handle to delete it. Automatically routed
+paths expose handles only at their endpoints; drag an endpoint to a different
+border of its pin to change which side the route attaches to. Routing avoids
+other automatically routed paths on different nets by choosing another metal
+layer, trying an alternate Manhattan trace, or bridging a segment through an
+adjacent layer with vias. If no conflict-free route exists, the direct route is
+kept. Changing layers while drawing
 keeps the same path and records the layer for each segment; changing the width
 starts a new path at the current endpoint. Corners and endpoints are square,
 not rounded. Layer-change vias are stored with the path and move with it.
@@ -411,10 +447,40 @@ pin-label TEXT records; use `-1` to import text as ordinary text shapes only.
 **Save Layout Interchange** writes the active cell as GDSII. LEF and DEF pin
 exchange is available through `ice-cli` and `ice-mcp`.
 
+Select a planned device box to highlight it. Double-click it, or right-click it,
+to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
+sources, ground symbols, and `Input`/`Output` port symbols instead offer
+**Convert to Pin**: a dialog lets you choose the pin
+layer, then the block is replaced by a single layout pin (an existing pin on the
+connection's net is reused when there is only one net), and all planned
+connections from the block are retargeted to that pin. Converted `Input` and
+`Output` pins keep the corresponding port direction and name. The placement
+dialog lists the active PDK's PCells, suggests
+devices by model and pin compatibility, and lets you edit the PCell parameters
+before placement. Placing the device replaces the planned box with a layout
+instance and rewires the existing planned connections from the box to the new
+PCell pins. After placement, select the instance and edit its PCell parameters
+in **Properties**. Select a planned connection to highlight it. Double-click it,
+or right-click it, to choose **Draw Connection Manually** or **Route
+Automatically**. Automatic routing is enabled when both
+ends are placed device pins or layout pins; it routes on metal drawing layers,
+transitions from non-metal pins through the required contact/via stack, and
+leaves/enters rectangular pins from the middle of their narrowest sides. Automatically routed
+paths are recomputed when either endpoint moves, rotates, snaps, or is
+regenerated from changed PCell parameters, so the route stays attached to the
+device pins. The route leaves each pin outwards, turns with Manhattan segments,
+and can be edited with the normal path tools; moving either endpoint recomputes
+it and replaces those manual edits. Undo the routing to restore the planned
+connection.
+Manual connection removes the logical planned connection and switches to the
+path tool.
+
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
 the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
 the activity dock with severity, rule, message, cell, and location columns.
+Clicking a violation row opens the checked layout and centers the canvas on
+the reported location with a temporary highlight.
 
 **Tools → Run LVS** compares the active layout against its source schematic.
 ICE infers the schematic from planned-device links, then from matching layout
@@ -423,10 +489,13 @@ checks device presence, reference names, device types, shared parameters on
 placed device instances, and net topology from planned connections. Device
 parameters are compared numerically when both sides use compatible quantity
 values, so `0.15u` and `150n` are equivalent. If the layout has no planned
-connectivity, LVS reports a warning and compares devices only. Top-level
-schematic ports created with `Input`/`Output` symbols are matched to layout pins
-by name; missing pins, extra pins, direction changes, and net-binding changes
-are reported. Results appear in the **LVS Report** tab with mismatch categories
+connectivity, LVS reports a warning and compares devices only. Primitive
+sources and ground symbols are treated as external references rather than
+layout devices, and pins converted from them are not compared as schematic
+ports. Top-level schematic ports created with `Input`/`Output` symbols are
+matched to layout pins by name, including pins produced by **Convert to Pin**;
+missing pins, extra pins, direction changes, and net-binding changes are
+reported. Results appear in the **LVS Report** tab with mismatch categories
 and schematic/layout object ids. Text SPICE and SystemVerilog source cells are
 not supported by LVS yet.
 

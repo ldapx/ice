@@ -130,16 +130,6 @@ bool ShortcutRegistry::setShortcut(const QString &id, const QKeySequence &sequen
     return true;
 }
 
-void ShortcutRegistry::resetAll() {
-    QSettings settings;
-    settings.remove(QStringLiteral("shortcuts"));
-    for (auto &entry : entries_) {
-        entry.sequence = entry.defaultSequence;
-        if (entry.action)
-            entry.action->setShortcut(entry.defaultSequence);
-    }
-}
-
 QVector<ShortcutEntry> ShortcutRegistry::entries() const {
     auto result = entries_;
     std::sort(result.begin(), result.end(), [](const ShortcutEntry &left, const ShortcutEntry &right) {

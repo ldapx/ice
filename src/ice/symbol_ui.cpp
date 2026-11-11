@@ -41,6 +41,8 @@
 #include <map>
 #include <set>
 
+namespace {
+
 std::filesystem::path symbolLibraryDirectory() {
     const auto appDir = QCoreApplication::applicationDirPath().toStdString();
     std::vector<std::filesystem::path> candidates = {
@@ -76,6 +78,8 @@ std::vector<SymbolDefinition> toDefinitions(std::vector<ice::FileSymbol> fileSym
     }
     return definitions;
 }
+
+} // namespace
 
 std::vector<SymbolDefinition> genericSymbolLibrary() {
     return toDefinitions(ice::SymbolLibrary::load(symbolLibraryDirectory()));

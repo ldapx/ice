@@ -5,28 +5,34 @@
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
+#include <QAbstractItemView>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QHBoxLayout>
+#include <QHeaderView>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <functional>
 #include <limits>
 #include <set>
@@ -37,21 +43,91 @@ namespace {
 // activation can apply the same purpose/marker visibility rules.
 bool layerHiddenByDefault(const std::string &name, int datatype);
 
-void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk) {
+const ice::PackagePdkStack *findPdkStack(const ice::PackagePdk &pdk, const std::string &id) {
+    for (const auto &stack : pdk.stacks)
+        if (stack.id == id)
+            return &stack;
+    return nullptr;
+}
+
+std::string effectivePdkStack(const ice::PackagePdk &pdk, const std::string &requested) {
+    const auto id = !requested.empty() ? requested : pdk.defaultStack;
+    if (id.empty())
+        return {};
+    if (!findPdkStack(pdk, id))
+        throw ice::ProjectError("layout.stack", "Unknown stack '" + id + "' for PDK '" + pdk.id + "'");
+    return id;
+}
+
+bool stackAllowsLayer(const ice::PackagePdkStack *stack, const std::string &name) {
+    if (!stack || stack->layers.empty())
+        return true;
+    if (std::find(stack->layers.begin(), stack->layers.end(), name) != stack->layers.end())
+        return true;
+    const auto dot = name.find('.');
+    const auto base = name.substr(0, dot);
+    return std::find(stack->layers.begin(), stack->layers.end(), base) != stack->layers.end();
+}
+
+std::optional<int> layerPatternIndex(const std::string &name) {
+    if (name.empty())
+        return std::nullopt;
+    const auto &options = layerPatternOptions();
+    for (std::size_t index = 0; index < options.size(); ++index)
+        if (options[index].name.compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0)
+            return static_cast<int>(index);
+    return std::nullopt;
+}
+
+const ice::PackageLayerStyle *findLayerStyle(const ice::PackagePdk &pdk, const std::string &name) {
+    const auto exact = std::find_if(pdk.layerStyles.begin(), pdk.layerStyles.end(),
+                                    [&](const auto &style) { return style.name == name; });
+    if (exact != pdk.layerStyles.end())
+        return &*exact;
+    const auto dot = name.find('.');
+    if (dot == std::string::npos)
+        return nullptr;
+    const auto base = name.substr(0, dot);
+    const auto inherited = std::find_if(pdk.layerStyles.begin(), pdk.layerStyles.end(),
+                                        [&](const auto &style) { return style.name == base; });
+    return inherited == pdk.layerStyles.end() ? nullptr : &*inherited;
+}
+
+void applyPdkLayerStyles(ice::Project &project, const ice::PackagePdk &pdk, const std::string &technology,
+                         const std::string &stack) {
+    for (auto &[_, layer] : project.layers) {
+        if (layer.layout != 0 || layer.pdk != technology || layer.stack != stack)
+            continue;
+        const auto *style = findLayerStyle(pdk, layer.name);
+        if (!style)
+            continue;
+        if (!style->color.empty())
+            layer.color = style->color;
+        if (const auto pattern = layerPatternIndex(style->pattern))
+            layer.pattern = *pattern;
+        if (style->visible >= 0)
+            layer.visible = style->visible != 0;
+    }
+}
+
+void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk, const std::string &stack,
+                                  const ice::PackagePdkStack *stackInfo) {
     const auto path = layoutDeviceLibraryPath(pdk);
     if (path.empty())
         return;
     try {
         const auto library = ice::LayoutDeviceLibrary::load(path);
         for (const auto &layer : library.layers) {
+            if (!stackAllowsLayer(stackInfo, layer.name))
+                continue;
             const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
                 const auto &existing = entry.second;
                 return existing.number == layer.number && existing.datatype == layer.datatype &&
-                       existing.name == layer.name && existing.layout == 0 &&
+                       existing.name == layer.name && existing.stack == stack && existing.layout == 0 &&
                        (existing.pdk.empty() || existing.pdk == pdk);
             });
             if (exists == project.layers.end()) {
-                const auto id = ice::addLayer(project, layer.name, layer.number, 0, pdk, layer.datatype);
+                const auto id = ice::addLayer(project, layer.name, layer.number, 0, pdk, layer.datatype, stack);
                 if (layerHiddenByDefault(layer.name, layer.datatype))
                     project.layers.at(id).visible = false;
             } else if (exists->second.pdk.empty()) {
@@ -65,45 +141,52 @@ void addLayoutDeviceLibraryLayers(ice::Project &project, const std::string &pdk)
 }
 } // namespace
 
-void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk) {
+void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::string &layoutPdk,
+                  const std::string &stack) {
     const auto technology = layoutPdk.empty() ? pdk.id : layoutPdk;
+    const auto stackId = effectivePdkStack(pdk, stack);
+    const auto *stackInfo = findPdkStack(pdk, stackId);
     for (const auto &layer : pdk.layers) {
+        if (!stackAllowsLayer(stackInfo, layer.name))
+            continue;
         const auto exists = std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
             const auto &existing = entry.second;
-            return existing.name == layer.name && existing.layout == 0 &&
+            return existing.name == layer.name && existing.number == layer.number &&
+                   existing.datatype == layer.datatype && existing.stack == stackId && existing.layout == 0 &&
                    (existing.pdk.empty() || existing.pdk == technology);
         });
-        if (exists == project.layers.end()) {
-            ice::addLayer(project, layer.name, layer.number, 0, technology);
-        } else if (exists->second.pdk.empty()) {
-            // Tag legacy technology layers when opening an older project so
-            // they do not leak into layouts using another PDK.
-            exists->second.pdk = technology;
-        }
+        if (exists != project.layers.end())
+            continue;
+        const auto id = ice::addLayer(project, layer.name, layer.number, 0, technology, layer.datatype, stackId);
+        if (layerHiddenByDefault(layer.name, layer.datatype))
+            project.layers.at(id).visible = false;
     }
     // The device library is the complete layer map for the technology. Adding
     // it here means creating a PDK layout exposes every layer up front and
     // placing devices only reuses existing entries.
-    addLayoutDeviceLibraryLayers(project, technology);
+    addLayoutDeviceLibraryLayers(project, technology, stackId, stackInfo);
+    applyPdkLayerStyles(project, pdk, technology, stackId);
 }
 
 void ensureLayoutPdkLayers(ice::Project &project, const std::filesystem::path &installDirectory) {
-    std::vector<std::string> pdkNames;
+    std::vector<std::pair<std::string, std::string>> technologies;
     for (const auto &[_, cell] : project.layoutCells) {
         if (cell.pdk.empty() || cell.pdk == ice::genericPdkId)
             continue;
-        if (std::find(pdkNames.begin(), pdkNames.end(), cell.pdk) == pdkNames.end())
-            pdkNames.push_back(cell.pdk);
+        const auto key = std::make_pair(cell.pdk, cell.stack);
+        if (std::find(technologies.begin(), technologies.end(), key) == technologies.end())
+            technologies.push_back(key);
     }
-    if (pdkNames.empty())
+    if (technologies.empty())
         return;
     const auto packages = installedPackages(installDirectory);
-    for (const auto &pdkName : pdkNames) {
+    for (const auto &[pdkName, stack] : technologies) {
         const auto package = std::find_if(packages.begin(), packages.end(), [&](const auto &entry) {
             return ice::packageMatchesPdk(entry.spec, pdkName);
         });
-        if (package != packages.end() && package->spec.pdk)
-            addPdkLayers(project, *package->spec.pdk, pdkName);
+        if (package == packages.end() || !package->spec.pdk)
+            continue;
+        addPdkLayers(project, *package->spec.pdk, pdkName, stack);
     }
 }
 
@@ -243,9 +326,6 @@ const ice::LayoutDeviceCell *findLayoutDevice(const ice::LayoutDeviceLibrary &li
     return it == library.cells.end() ? nullptr : &*it;
 }
 
-const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
-                                                         const std::string &cellName);
-
 const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibrary &library,
                                                      const ice::LayoutCell &cell) {
     if (!cell.device.empty()) {
@@ -320,35 +400,8 @@ ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCel
     return cloneId;
 }
 
-std::filesystem::path ihpSourceRoot() {
-    const auto valid = [](const std::filesystem::path &path) {
-        std::error_code status;
-        return std::filesystem::is_directory(path / "cni", status) && !status &&
-               std::filesystem::is_directory(path / "ihp" / "refs" / "ihp_pycell", status) && !status;
-    };
-    std::vector<std::filesystem::path> candidates;
-    const auto configured = qEnvironmentVariable("ICE_IHP_ROOT");
-    if (!configured.isEmpty())
-        candidates.emplace_back(configured.toStdString());
-#ifdef ICE_SOURCE_DIR
-    candidates.push_back(std::filesystem::path(ICE_SOURCE_DIR).parent_path() / "IHP");
-#endif
-    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
-    candidates.push_back(std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / ".." / "IHP");
-    candidates.push_back(std::filesystem::current_path() / "IHP");
-    candidates.push_back(std::filesystem::current_path().parent_path() / "IHP");
-    candidates.push_back(std::filesystem::path(QDir::homePath().toStdString()) / "repositories" / "IHP");
-    for (const auto &candidate : candidates) {
-        std::error_code status;
-        const auto normalized = std::filesystem::weakly_canonical(candidate, status);
-        if (!status && valid(normalized))
-            return normalized;
-    }
-    return {};
-}
-
 QString pythonExecutable() {
-    const auto configured = qEnvironmentVariable("ICE_PYTHON");
+    auto configured = qEnvironmentVariable("ICE_PYTHON");
     if (!configured.isEmpty())
         return configured;
     for (const auto &candidate : {QStringLiteral("python3"), QStringLiteral("python")}) {
@@ -362,9 +415,9 @@ QString pythonExecutable() {
 namespace {
 bool layerHiddenByDefault(const std::string &name, int datatype) {
     // Non-zero datatypes are purposes such as pin, nofill, noqrc, or mask.
-    // They are part of the device geometry but should not clutter the canvas
-    // unless the user explicitly enables them.
-    if (datatype != 0)
+    // Drawing purposes remain visible even when their PDK uses a non-zero
+    // datatype, as SKY130 does.
+    if (datatype != 0 && !name.ends_with(".drawing"))
         return true;
     const auto dot = name.find('.');
     const auto base = name.substr(0, dot);
@@ -374,9 +427,9 @@ bool layerHiddenByDefault(const std::string &name, int datatype) {
     return markers.contains(base);
 }
 
-ice::ObjectId layoutDeviceLayerId(ice::Project &project,
-                                 std::map<std::pair<int, int>, std::string> &layerNames,
-                                 std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype) {
+ice::ObjectId layoutDeviceLayerId(ice::Project &project, std::map<std::pair<int, int>, std::string> &layerNames,
+                                  std::map<std::pair<int, int>, ice::ObjectId> &layerIds, int number, int datatype,
+                                  const std::string &pdk, const std::string &stack) {
     const auto key = std::make_pair(number, datatype);
     if (const auto existing = layerIds.find(key); existing != layerIds.end())
         return existing->second;
@@ -390,13 +443,20 @@ ice::ObjectId layoutDeviceLayerId(ice::Project &project,
         layerName = "Layer " + std::to_string(number) + " (dt " + std::to_string(datatype) + ")";
     ice::ObjectId layerId = 0;
     for (const auto &[id, layer] : project.layers) {
-        if (layer.number == number && layer.datatype == datatype && layer.name == layerName) {
+        if (layer.number == number && layer.datatype == datatype && layer.name == layerName && layer.pdk == pdk &&
+            layer.stack == stack) {
             layerId = id;
             break;
         }
     }
     if (layerId == 0) {
-        layerId = ice::addLayer(project, layerName, number, 0, {}, datatype);
+        // A stack-scoped package must declare the layer first. Silently
+        // creating an undeclared purpose would bypass the stack filter.
+        if (!pdk.empty() && !stack.empty()) {
+            layerIds.emplace(key, 0);
+            return 0;
+        }
+        layerId = ice::addLayer(project, layerName, number, 0, pdk, datatype, stack);
         if (layerHiddenByDefault(layerName, datatype)) {
             if (const auto layer = project.layers.find(layerId); layer != project.layers.end())
                 layer->second.visible = false;
@@ -410,6 +470,9 @@ ice::ObjectId layoutDeviceLayerId(ice::Project &project,
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                              const std::vector<ice::LayoutDeviceShape> &sourceShapes,
                              const std::vector<ice::LayoutDevicePort> &sourcePorts) {
+    std::map<std::string, ice::Port> existingPorts;
+    for (const auto &[_, port] : cell.ports)
+        existingPorts.emplace(port.name, port);
     cell.shapes.clear();
     cell.ports.clear();
     cell.instances.clear();
@@ -418,12 +481,14 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     const auto layerIdFor = [&](int number, int datatype) {
-        return layoutDeviceLayerId(project, layerNames, layerIds, number, datatype);
+        return layoutDeviceLayerId(project, layerNames, layerIds, number, datatype, cell.pdk, cell.stack);
     };
     for (const auto &sourceShape : sourceShapes) {
         if (sourceShape.polygon.size() < 3)
             continue;
         const auto layerId = layerIdFor(sourceShape.layer, sourceShape.datatype);
+        if (layerId == 0)
+            continue;
         ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate minY = std::numeric_limits<ice::Coordinate>::max();
         ice::Coordinate maxX = std::numeric_limits<ice::Coordinate>::lowest();
@@ -443,11 +508,23 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
                                                 ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
     }
     for (const auto &sourcePort : sourcePorts) {
-        const auto id = project.nextId();
-        ice::Port port{id, sourcePort.name, layerIdFor(sourcePort.layer, sourcePort.datatype), sourcePort.rectangle};
+        const auto layerId = layerIdFor(sourcePort.layer, sourcePort.datatype);
+        if (layerId == 0)
+            continue;
+        const auto existing = existingPorts.find(sourcePort.name);
+        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
+        ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
+        if (existing != existingPorts.end()) {
+            port.net = existing->second.net;
+            port.visible = existing->second.visible;
+            port.locked = existing->second.locked;
+            port.sourceInstance = existing->second.sourceInstance;
+            port.sourcePort = existing->second.sourcePort;
+            existingPorts.erase(existing);
+        }
         cell.ports.emplace(id, std::move(port));
     }
 }
@@ -456,20 +533,33 @@ void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const 
                             const std::vector<ice::LayoutDevicePort> &sourcePorts) {
     if (sourcePorts.empty())
         return;
+    std::map<std::string, ice::Port> existingPorts;
+    for (const auto &[_, port] : cell.ports)
+        existingPorts.emplace(port.name, port);
     cell.ports.clear();
     std::map<std::pair<int, int>, std::string> layerNames;
     for (const auto &layer : library.layers)
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     for (const auto &sourcePort : sourcePorts) {
-        const auto id = project.nextId();
-        ice::Port port{
-            id, sourcePort.name,
-            layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype),
-            sourcePort.rectangle};
+        const auto layerId = layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype,
+                                                 cell.pdk, cell.stack);
+        if (layerId == 0)
+            continue;
+        const auto existing = existingPorts.find(sourcePort.name);
+        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
+        ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
         port.label = sourcePort.label.empty() ? sourcePort.name : sourcePort.label;
+        if (existing != existingPorts.end()) {
+            port.net = existing->second.net;
+            port.visible = existing->second.visible;
+            port.locked = existing->second.locked;
+            port.sourceInstance = existing->second.sourceInstance;
+            port.sourcePort = existing->second.sourcePort;
+            existingPorts.erase(existing);
+        }
         cell.ports.emplace(id, std::move(port));
     }
 }
@@ -563,7 +653,7 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
                 message = QStringLiteral("The PCell generator exited with code %1.").arg(process.exitCode());
             if (message.size() > 4000)
                 message = message.right(4000);
-            *error = message;
+            *error = std::move(message);
         }
         return std::nullopt;
     }
@@ -623,6 +713,279 @@ void LayoutDevicePreview::paintEvent(QPaintEvent *) {
     options.outlineWidth = 0.6;
     ice::LayoutRenderer::paintFitted(painter, model_, styles_, deviceStyles_, rect().adjusted(10, 10, -10, -10),
                                      options);
+}
+
+namespace {
+std::string lowerDeviceText(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return value;
+}
+} // namespace
+
+LayoutDevicePlacementDialog::LayoutDevicePlacementDialog(const ice::LayoutDeviceLibrary &library,
+                                                         const std::string &suggestedName,
+                                                         const std::vector<std::string> &schematicPins,
+                                                         const std::map<std::string, std::string> &initialParameters,
+                                                         QWidget *parent)
+    : QDialog(parent), library_(library), suggestedName_(suggestedName), schematicPins_(schematicPins),
+      initialParameters_(initialParameters) {
+    setWindowTitle(QStringLiteral("Place Layout Device"));
+    setModal(true);
+    auto *root = new QVBoxLayout(this);
+    hint_ = new QLabel(
+        QStringLiteral("Choose the layout PCell that represents %1. The parameter values apply to the new instance.")
+            .arg(QString::fromStdString(suggestedName.empty() ? std::string("this device") : suggestedName)),
+        this);
+    hint_->setWordWrap(true);
+    root->addWidget(hint_);
+
+    auto *filters = new QHBoxLayout;
+    search_ = new QLineEdit(this);
+    search_->setPlaceholderText(QStringLiteral("Search layout devices…"));
+    search_->setClearButtonEnabled(true);
+    category_ = new QComboBox(this);
+    filters->addWidget(search_, 1);
+    filters->addWidget(category_, 0);
+    root->addLayout(filters);
+
+    auto *content = new QHBoxLayout;
+    auto *listColumn = new QVBoxLayout;
+    list_ = new QListWidget(this);
+    list_->setAccessibleName(QStringLiteral("Layout devices for planned device"));
+    listColumn->addWidget(list_, 1);
+    preview_ = new LayoutDevicePreview(this);
+    preview_->setMinimumSize(260, 260);
+    content->addLayout(listColumn, 1);
+    content->addWidget(preview_, 1);
+    root->addLayout(content, 1);
+
+    parameters_ = new QTableWidget(0, 2, this);
+    parameters_->setHorizontalHeaderLabels({QStringLiteral("Parameter"), QStringLiteral("Value")});
+    parameters_->horizontalHeader()->setStretchLastSection(true);
+    parameters_->verticalHeader()->setVisible(false);
+    parameters_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    parameters_->setSelectionMode(QAbstractItemView::SingleSelection);
+    root->addWidget(parameters_, 1);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (selectedDevice())
+            accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(search_, &QLineEdit::textChanged, this, [this] { rebuildList(); });
+    connect(category_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { rebuildList(); });
+    connect(list_, &QListWidget::currentItemChanged, this,
+            [this](QListWidgetItem *, QListWidgetItem *) { updateSelection(); });
+
+    category_->addItem(QStringLiteral("All categories"), QString());
+    std::set<std::string> categories;
+    for (const auto &device : library_.cells)
+        if (!device.category.empty())
+            categories.insert(device.category);
+    for (const auto &category : categories)
+        category_->addItem(QString::fromStdString(category), QString::fromStdString(category));
+
+    if (library_.cells.empty()) {
+        hint_->setText(QStringLiteral("No layout device library is installed for this PDK. "
+                                      "Use Draw Layout Manually instead."));
+        search_->setEnabled(false);
+        category_->setEnabled(false);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    }
+    rebuildList();
+    resize(820, 680);
+}
+
+int LayoutDevicePlacementDialog::scoreDevice(const ice::LayoutDeviceCell &device) const {
+    int score = 0;
+    if (device.ports.empty())
+        score -= 1000;
+    const auto lowerName = lowerDeviceText(device.name);
+    const auto suggested = lowerDeviceText(suggestedName_);
+
+    if (const auto model = initialParameters_.find("model"); model != initialParameters_.end()) {
+        for (const auto &parameter : device.parameters) {
+            if (parameter.name == "model" && parameter.value == model->second) {
+                score += 1000;
+                break;
+            }
+        }
+    }
+    if (!suggested.empty()) {
+        if (suggested == lowerName)
+            score += 200;
+        else if (suggested.find(lowerName) != std::string::npos || lowerName.find(suggested) != std::string::npos)
+            score += 80;
+        if (suggested.find("resistor") != std::string::npos &&
+            (lowerName.find("res") != std::string::npos || lowerName.starts_with("rhigh") ||
+             lowerName.starts_with("rppd") || lowerName.starts_with("rsil")))
+            score += 40;
+        if (suggested.find("capacitor") != std::string::npos &&
+            (lowerName.find("cap") != std::string::npos || lowerName.find("cmim") != std::string::npos))
+            score += 40;
+        if (suggested.find("inductor") != std::string::npos && lowerName.find("ind") != std::string::npos)
+            score += 40;
+        if (suggested.find("diode") != std::string::npos &&
+            (lowerName.find("diode") != std::string::npos || lowerName.find("dantenna") != std::string::npos ||
+             lowerName.find("dpantenna") != std::string::npos))
+            score += 40;
+    }
+    const auto voltage =
+        suggested.find("6v") != std::string::npos
+            ? std::string("6")
+            : (suggested.find("10v") != std::string::npos
+                   ? std::string("10")
+                   : (suggested.find("3.3v") != std::string::npos ? std::string("3.3") : std::string{}));
+    if (!voltage.empty()) {
+        for (const auto &parameter : device.parameters) {
+            if (lowerDeviceText(parameter.name) != "volt")
+                continue;
+            const auto value = lowerDeviceText(parameter.value);
+            if (value.find(voltage) != std::string::npos) {
+                score += 60;
+                break;
+            }
+        }
+    }
+
+    for (const auto &pin : schematicPins_) {
+        const auto wanted = lowerDeviceText(pin);
+        for (const auto &port : device.ports) {
+            const auto portName = lowerDeviceText(port.name);
+            const auto portLabel = lowerDeviceText(port.label);
+            if (portName == wanted || portLabel == wanted) {
+                score += 10;
+                break;
+            }
+            if ((wanted == "1" && (portName == "plus" || portName == "a" || portName == "p" || portName == "1")) ||
+                (wanted == "2" &&
+                 (portName == "minus" || portName == "b" || portName == "n" || portName == "2" || portName == "k"))) {
+                score += 8;
+                break;
+            }
+        }
+    }
+    return score;
+}
+
+std::string LayoutDevicePlacementDialog::initialValue(const std::string &parameterName) const {
+    const auto find = [&](const std::string &name) -> std::string {
+        const auto wanted = lowerDeviceText(name);
+        for (const auto &[candidate, value] : initialParameters_) {
+            if (lowerDeviceText(candidate) == wanted)
+                return value;
+        }
+        return {};
+    };
+    auto value = find(parameterName);
+    if (!value.empty())
+        return value;
+    const auto parameter = lowerDeviceText(parameterName);
+    if (parameter == "r")
+        return find("resistance");
+    if (parameter == "c")
+        return find("capacitance");
+    if (parameter == "nf")
+        return find("m");
+    return {};
+}
+
+void LayoutDevicePlacementDialog::rebuildList() {
+    if (!list_)
+        return;
+    const auto query = search_ ? search_->text().trimmed().toLower() : QString{};
+    const auto category = category_ ? category_->currentData().toString() : QString{};
+    const auto previous = selectedDevice() ? selectedDevice()->name : std::string{};
+    std::vector<int> indices;
+    for (int index = 0; index < static_cast<int>(library_.cells.size()); ++index) {
+        const auto &device = library_.cells[static_cast<std::size_t>(index)];
+        if (!category.isEmpty() && QString::fromStdString(device.category) != category)
+            continue;
+        if (!query.isEmpty()) {
+            const auto haystack = QString::fromStdString(device.name + " " + device.category).toLower();
+            if (!haystack.contains(query))
+                continue;
+        }
+        indices.push_back(index);
+    }
+    std::sort(indices.begin(), indices.end(), [&](int left, int right) {
+        const auto &a = library_.cells[static_cast<std::size_t>(left)];
+        const auto &b = library_.cells[static_cast<std::size_t>(right)];
+        const auto leftScore = scoreDevice(a);
+        const auto rightScore = scoreDevice(b);
+        if (leftScore != rightScore)
+            return leftScore > rightScore;
+        return a.name < b.name;
+    });
+
+    QSignalBlocker blocker(list_);
+    list_->clear();
+    int selectedRow = indices.empty() ? -1 : 0;
+    for (int row = 0; row < static_cast<int>(indices.size()); ++row) {
+        const auto index = indices[static_cast<std::size_t>(row)];
+        const auto &device = library_.cells[static_cast<std::size_t>(index)];
+        auto *item = new QListWidgetItem(QString::fromStdString(device.name));
+        item->setData(Qt::UserRole, index);
+        item->setToolTip(QString::fromStdString(device.category));
+        list_->addItem(item);
+        if (!previous.empty() && device.name == previous)
+            selectedRow = row;
+    }
+    blocker.unblock();
+    if (selectedRow >= 0)
+        list_->setCurrentRow(selectedRow);
+    updateSelection();
+}
+
+void LayoutDevicePlacementDialog::updateSelection() {
+    if (!preview_ || !parameters_)
+        return;
+    const auto *device = selectedDevice();
+    preview_->setCell(device);
+    parameters_->setRowCount(0);
+    if (auto *buttons = findChild<QDialogButtonBox *>())
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(device != nullptr);
+    if (!device)
+        return;
+    for (const auto &parameter : device->parameters) {
+        const auto row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
+        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+        auto *value = new QTableWidgetItem(QString::fromStdString(
+            initialValue(parameter.name).empty() ? parameter.value : initialValue(parameter.name)));
+        parameters_->setItem(row, 0, name);
+        parameters_->setItem(row, 1, value);
+    }
+    parameters_->resizeColumnToContents(0);
+}
+
+const ice::LayoutDeviceCell *LayoutDevicePlacementDialog::selectedDevice() const {
+    if (!list_)
+        return nullptr;
+    const auto *item = list_->currentItem();
+    if (!item || !item->data(Qt::UserRole).isValid())
+        return nullptr;
+    const auto index = item->data(Qt::UserRole).toInt();
+    if (index < 0 || index >= static_cast<int>(library_.cells.size()))
+        return nullptr;
+    return &library_.cells[static_cast<std::size_t>(index)];
+}
+
+std::map<std::string, std::string> LayoutDevicePlacementDialog::parameterValues() const {
+    std::map<std::string, std::string> values;
+    if (!parameters_)
+        return values;
+    for (int row = 0; row < parameters_->rowCount(); ++row) {
+        const auto *name = parameters_->item(row, 0);
+        const auto *value = parameters_->item(row, 1);
+        if (name && value)
+            values[name->text().toStdString()] = value->text().toStdString();
+    }
+    return values;
 }
 
 LayoutDevicesPanel::LayoutDevicesPanel(QWidget *parent) : QWidget(parent) {

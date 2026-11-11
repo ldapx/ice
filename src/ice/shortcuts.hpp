@@ -34,7 +34,6 @@ class ShortcutRegistry {
                             const QKeySequence &defaultSequence = {});
     void attachScope(ShortcutScope scope, QWidget *widget);
     bool setShortcut(const QString &id, const QKeySequence &sequence, QString *error = nullptr);
-    void resetAll();
     QVector<ShortcutEntry> entries() const;
 
     static QString scopeLabel(ShortcutScope scope);

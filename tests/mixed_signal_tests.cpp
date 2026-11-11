@@ -141,7 +141,7 @@ TEST_CASE("SystemVerilog block instances get generated symbols and a mixed plan"
     const auto parent = ice::createSchematicCell(project, "top");
 
     ice::ObjectId hdlSymbol = 0;
-    const auto hdlInstance = ice::addSystemVerilogInstance(project, parent, block, "U1", 0, 0, &hdlSymbol);
+    ice::addSystemVerilogInstance(project, parent, block, "U1", 0, 0, &hdlSymbol);
     const auto &cell = project.schematicCells.at(parent);
     CHECK(hdlSymbol != 0);
     CHECK(cell.symbols.at(hdlSymbol).sourceCell == block);

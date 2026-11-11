@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <fstream>
-#include <iomanip>
 #include <map>
 #include <set>
 #include <sstream>
@@ -154,7 +152,7 @@ VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
             } catch (const std::exception &) {
                 signal.width = 1;
             }
-            const auto id = tokens[3];
+            const auto &id = tokens[3];
             std::string reference = tokens[4];
             if (!scope.empty()) {
                 std::ostringstream full;
@@ -192,11 +190,11 @@ VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
             data.timescaleSeconds = parseTimescale(tokens, sawTimescale);
         } else if (line.starts_with("$enddefinitions")) {
             inDefinitions = false;
-        } else if (line.starts_with("#")) {
+        } else if (line.starts_with('#')) {
             inDefinitions = false;
             currentTime = parseTimeValue(line.substr(1));
             times.insert(currentTime);
-        } else if (line.starts_with("$")) {
+        } else if (line.starts_with('$')) {
             // $dumpvars, $dumpall, $dumpon, $dumpoff, $comment, $date,
             // $version, $end, ...
             continue;
@@ -215,7 +213,7 @@ VcdData parseVcdText(const std::string &text, const std::string &sourceName) {
                 } else if ((token.front() == 'b' || token.front() == 'B' || token.front() == 'r' ||
                             token.front() == 'R') &&
                            index + 1 < tokens.size()) {
-                    const auto id = tokens[index + 1];
+                    const auto &id = tokens[index + 1];
                     if (signalById.contains(id)) {
                         events[id].emplace_back(currentTime, token);
                         eventTimes.insert(currentTime);

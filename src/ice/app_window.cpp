@@ -24,6 +24,7 @@
 #include "side_panels.hpp"
 
 #include "appearance.hpp"
+#include "file_labels.hpp"
 #include "icons.hpp"
 #include "package_ui.hpp"
 #include "procedural_layout.hpp"
@@ -70,6 +71,7 @@
 #include <QGraphicsView>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -118,6 +120,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
@@ -133,7 +136,11 @@ bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId
         return false;
     if (layer.layout != 0)
         return layer.layout == layoutId;
-    return !layer.pdk.empty() && layer.pdk == cell->second.pdk;
+    if (layer.pdk.empty() || layer.pdk != cell->second.pdk)
+        return false;
+    if (cell->second.stack.empty() || layer.stack.empty())
+        return true;
+    return layer.stack == cell->second.stack;
 }
 
 std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Project &project,
@@ -218,6 +225,185 @@ QPointF layoutPlannedEdgeScenePoint(const QRectF &rect, const QPointF &toward) {
     return center + delta * std::min(scaleX, scaleY);
 }
 
+QRectF layoutRectToScene(const ice::Rect &rect) {
+    return QRectF(static_cast<qreal>(rect.x), -static_cast<qreal>(rect.y) - static_cast<qreal>(rect.height),
+                  static_cast<qreal>(rect.width), static_cast<qreal>(rect.height));
+}
+
+std::optional<ice::Rect> layoutInstanceBounds(const ice::Project &project, const ice::LayoutInstance &instance) {
+    const auto child = project.layoutCells.find(instance.cell);
+    if (child == project.layoutCells.end())
+        return std::nullopt;
+    const ice::Transform transform{instance.x, instance.y, instance.orientation};
+    bool havePoint = false;
+    ice::Point minimum;
+    ice::Point maximum;
+    const auto add = [&](ice::Point point) {
+        const auto mapped = transform.apply(point);
+        if (!havePoint) {
+            minimum = maximum = mapped;
+            havePoint = true;
+            return;
+        }
+        minimum.x = std::min(minimum.x, mapped.x);
+        minimum.y = std::min(minimum.y, mapped.y);
+        maximum.x = std::max(maximum.x, mapped.x);
+        maximum.y = std::max(maximum.y, mapped.y);
+    };
+    for (const auto &[_, shape] : child->second.shapes) {
+        if (shape.isPath()) {
+            for (const auto &point : shape.centerline)
+                add({point.x, point.y});
+        } else if (!shape.polygon.empty()) {
+            for (const auto &point : shape.polygon)
+                add({point.x, point.y});
+        } else {
+            add({shape.rectangle.x, shape.rectangle.y});
+            add({shape.rectangle.x + shape.rectangle.width, shape.rectangle.y + shape.rectangle.height});
+        }
+    }
+    for (const auto &[_, port] : child->second.ports) {
+        add({port.rectangle.x, port.rectangle.y});
+        add({port.rectangle.x + port.rectangle.width, port.rectangle.y + port.rectangle.height});
+    }
+    if (!havePoint)
+        return ice::Rect{instance.x, instance.y, 0, 0};
+    return ice::Rect{static_cast<ice::Coordinate>(std::floor(minimum.x)),
+                     static_cast<ice::Coordinate>(std::floor(minimum.y)),
+                     static_cast<ice::Coordinate>(std::ceil(maximum.x - minimum.x)),
+                     static_cast<ice::Coordinate>(std::ceil(maximum.y - minimum.y))};
+}
+
+std::optional<ice::Rect> layoutInstancePortRect(const ice::Project &project, const ice::LayoutInstance &instance,
+                                                ice::ObjectId portId) {
+    const auto child = project.layoutCells.find(instance.cell);
+    if (child == project.layoutCells.end() || portId == 0)
+        return std::nullopt;
+    const auto port = child->second.ports.find(portId);
+    if (port == child->second.ports.end())
+        return std::nullopt;
+    const ice::Transform transform{instance.x, instance.y, instance.orientation};
+    const auto first = transform.apply({port->second.rectangle.x, port->second.rectangle.y});
+    const auto second = transform.apply({port->second.rectangle.x + port->second.rectangle.width,
+                                         port->second.rectangle.y + port->second.rectangle.height});
+    return ice::Rect{static_cast<ice::Coordinate>(std::floor(std::min(first.x, second.x))),
+                     static_cast<ice::Coordinate>(std::floor(std::min(first.y, second.y))),
+                     static_cast<ice::Coordinate>(std::ceil(std::abs(second.x - first.x))),
+                     static_cast<ice::Coordinate>(std::ceil(std::abs(second.y - first.y)))};
+}
+
+std::optional<QRectF> layoutConnectionEndpointSceneRect(const ice::Project &project, const ice::LayoutCell &cell,
+                                                        ice::ObjectId endpoint, ice::ObjectId port) {
+    if (const auto device = cell.plannedDevices.find(endpoint); device != cell.plannedDevices.end())
+        return layoutPlannedDeviceSceneRect(device->second);
+    if (const auto pin = cell.ports.find(endpoint); pin != cell.ports.end())
+        return layoutRectToScene(pin->second.rectangle);
+    const auto instance = cell.instances.find(endpoint);
+    if (instance == cell.instances.end())
+        return std::nullopt;
+    if (const auto rect = layoutInstancePortRect(project, instance->second, port))
+        return layoutRectToScene(*rect);
+    if (const auto rect = layoutInstanceBounds(project, instance->second))
+        return layoutRectToScene(*rect);
+    return std::nullopt;
+}
+
+char plannedDeviceSpiceElement(const ice::Project &project, const ice::PlannedDevice &device) {
+    if (device.schematicInstance != 0) {
+        for (const auto &[_, schematic] : project.schematicCells) {
+            const auto instance = schematic.instances.find(device.schematicInstance);
+            if (instance == schematic.instances.end())
+                continue;
+            const auto symbol = schematic.symbols.find(instance->second.symbol);
+            if (symbol != schematic.symbols.end()) {
+                auto symbolName = symbol->second.name;
+                std::transform(symbolName.begin(), symbolName.end(), symbolName.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                if (symbolName == "gnd" || symbolName == "gnd!" || symbolName == "0")
+                    return 'G';
+                if (symbolName == "input" || symbolName == "output")
+                    return 'P';
+                if (symbol->second.sourceCell != 0)
+                    return 'X';
+                return ice::spiceElementForSymbol(symbol->second.name);
+            }
+            break;
+        }
+    }
+    auto name = device.name;
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    if (name == "gnd" || name == "gnd!" || name == "0")
+        return 'G';
+    if (name == "input" || name == "output")
+        return 'P';
+    return ice::spiceElementForSymbol(device.name);
+}
+
+std::optional<ice::PortDirection> plannedDevicePortDirection(const ice::Project &project,
+                                                             const ice::PlannedDevice &device) {
+    if (device.schematicInstance != 0) {
+        for (const auto &[_, schematic] : project.schematicCells) {
+            const auto instance = schematic.instances.find(device.schematicInstance);
+            if (instance == schematic.instances.end())
+                continue;
+            const auto symbol = schematic.symbols.find(instance->second.symbol);
+            if (symbol != schematic.symbols.end()) {
+                auto symbolName = symbol->second.name;
+                std::transform(symbolName.begin(), symbolName.end(), symbolName.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                if (symbolName == "input")
+                    return ice::PortDirection::input;
+                if (symbolName == "output")
+                    return ice::PortDirection::output;
+            }
+            break;
+        }
+    }
+    auto name = device.name;
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    if (name == "input")
+        return ice::PortDirection::input;
+    if (name == "output")
+        return ice::PortDirection::output;
+    return std::nullopt;
+}
+
+ice::ObjectId layoutPortForSchematicPin(const ice::LayoutCell &child, const std::string &pin) {
+    const auto normalized = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    };
+    const auto wanted = normalized(pin);
+    if (wanted.empty())
+        return 0;
+    for (const auto &[id, port] : child.ports) {
+        if (normalized(port.name) == wanted || normalized(port.label) == wanted)
+            return id;
+    }
+
+    std::set<std::string> aliases;
+    if (wanted == "1" || wanted == "a" || wanted == "plus" || wanted == "p")
+        aliases = {"plus", "p", "a", "1", "left", "l"};
+    else if (wanted == "2" || wanted == "b" || wanted == "minus" || wanted == "n" || wanted == "k")
+        aliases = {"minus", "n", "b", "2", "k", "right", "r"};
+    else if (wanted == "g" || wanted == "gate")
+        aliases = {"g", "gate"};
+    else if (wanted == "d" || wanted == "drain")
+        aliases = {"d", "drain"};
+    else if (wanted == "s" || wanted == "source")
+        aliases = {"s", "source"};
+    else if (wanted == "b" || wanted == "bulk" || wanted == "body")
+        aliases = {"b", "bulk", "body"};
+    for (const auto &[id, port] : child.ports) {
+        if (aliases.contains(normalized(port.name)) || aliases.contains(normalized(port.label)))
+            return id;
+    }
+    return 0;
+}
+
 struct LayoutConnectivity {
     std::set<ice::ObjectId> conductors;
     std::map<ice::ObjectId, std::set<ice::ObjectId>> viaConductors;
@@ -243,6 +429,115 @@ std::string layerKey(std::string name) {
             result.push_back(static_cast<char>(std::tolower(value)));
     }
     return result;
+}
+
+ice::ObjectId drawingLayerForPin(const ice::Project &project, ice::ObjectId cellId, ice::ObjectId layerId) {
+    const auto pin = project.layers.find(layerId);
+    if (pin == project.layers.end())
+        return 0;
+    if (!layerIsPinLayer(pin->second))
+        return layerId;
+
+    auto baseName = pin->second.name;
+    if (const auto dot = baseName.find('.'); dot != std::string::npos)
+        baseName = baseName.substr(0, dot);
+    const auto baseKey = layerKey(baseName);
+    for (const auto &[id, layer] : project.layers) {
+        if (id == layerId || layer.number != pin->second.number || layerIsPinLayer(layer))
+            continue;
+        if (!layerAvailableForLayout(project, cellId, layer))
+            continue;
+        if (layerKey(layer.name) == baseKey || layer.name == baseName)
+            return id;
+    }
+    for (const auto &[id, layer] : project.layers) {
+        if (id == layerId || layer.number != pin->second.number || layerIsPinLayer(layer))
+            continue;
+        if (layerAvailableForLayout(project, cellId, layer))
+            return id;
+    }
+    return 0;
+}
+
+struct LayoutRouteEndpoint {
+    ice::Rect rect;
+    ice::ObjectId layer = 0;
+};
+
+std::optional<LayoutRouteEndpoint> layoutRouteEndpoint(const ice::Project &project, const ice::LayoutCell &cell,
+                                                       ice::ObjectId endpointId, ice::ObjectId portId) {
+    // Top-level layout pins, including converted source/ground pins.
+    if (const auto pin = cell.ports.find(endpointId); pin != cell.ports.end()) {
+        if (!pin->second.rectangle.valid() || pin->second.layer == 0)
+            return std::nullopt;
+        return LayoutRouteEndpoint{pin->second.rectangle, pin->second.layer};
+    }
+    const auto instance = cell.instances.find(endpointId);
+    if (instance == cell.instances.end() || portId == 0)
+        return std::nullopt;
+    const auto child = project.layoutCells.find(instance->second.cell);
+    if (child == project.layoutCells.end() || !child->second.library || child->second.device.empty())
+        return std::nullopt;
+    const auto port = child->second.ports.find(portId);
+    if (port == child->second.ports.end())
+        return std::nullopt;
+    const auto rect = layoutInstancePortRect(project, instance->second, portId);
+    if (!rect)
+        return std::nullopt;
+    return LayoutRouteEndpoint{*rect, port->second.layer};
+}
+
+ice::PortSide layoutPointSide(const ice::Rect &rect, ice::LayoutPoint point) {
+    const auto centerX = static_cast<double>(rect.x) + rect.width * 0.5;
+    const auto centerY = static_cast<double>(rect.y) + rect.height * 0.5;
+    const auto dx = point.x - centerX;
+    const auto dy = point.y - centerY;
+    const auto halfWidth = std::max(1.0, rect.width * 0.5);
+    const auto halfHeight = std::max(1.0, rect.height * 0.5);
+    if (std::abs(dx) / halfWidth >= std::abs(dy) / halfHeight)
+        return dx >= 0.0 ? ice::PortSide::right : ice::PortSide::left;
+    return dy >= 0.0 ? ice::PortSide::top : ice::PortSide::bottom;
+}
+
+struct PinRoutePoint {
+    ice::LayoutPoint point;
+    ice::LayoutPoint normal;
+};
+
+PinRoutePoint pinRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
+                            std::optional<ice::PortSide> preferredSide = std::nullopt) {
+    if (rect.width <= 0 || rect.height <= 0)
+        return {{rect.x + rect.width / 2, rect.y + rect.height / 2}, {0, 0}};
+    const auto centerX = rect.x + rect.width / 2;
+    const auto centerY = rect.y + rect.height / 2;
+    if (preferredSide) {
+        switch (*preferredSide) {
+        case ice::PortSide::left:
+            return {{rect.x, centerY}, {-1, 0}};
+        case ice::PortSide::right:
+            return {{rect.x + rect.width, centerY}, {1, 0}};
+        case ice::PortSide::bottom:
+            return {{centerX, rect.y}, {0, -1}};
+        case ice::PortSide::top:
+            return {{centerX, rect.y + rect.height}, {0, 1}};
+        }
+    }
+    const auto dx = toward.x - centerX;
+    const auto dy = toward.y - centerY;
+    if (rect.width < rect.height) {
+        return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}}
+                       : PinRoutePoint{{centerX, rect.y}, {0, -1}};
+    }
+    if (rect.height < rect.width) {
+        return dx >= 0 ? PinRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
+                       : PinRoutePoint{{rect.x, centerY}, {-1, 0}};
+    }
+    const auto absDx = dx >= 0 ? dx : -dx;
+    const auto absDy = dy >= 0 ? dy : -dy;
+    if (absDx >= absDy)
+        return dx >= 0 ? PinRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
+                       : PinRoutePoint{{rect.x, centerY}, {-1, 0}};
+    return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}} : PinRoutePoint{{centerX, rect.y}, {0, -1}};
 }
 
 bool parseIndexedLayer(const std::string &key, const std::string &prefix, int &index) {
@@ -312,8 +607,6 @@ LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
             std::string viaKey;
             if (!stack[index].second && !stack[index + 1].second)
                 viaKey = "via" + std::to_string(stack[index].first);
-            else if (!stack[index].second && stack[index + 1].second)
-                viaKey = "topvia" + std::to_string(stack[index + 1].first);
             else
                 viaKey = "topvia" + std::to_string(stack[index + 1].first);
             const auto viaLayer = layerFor(viaKey);
@@ -368,6 +661,546 @@ LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
     }
     return connectivity;
 }
+
+struct AutoRouteGeometry {
+    ice::ObjectId layer = 0;
+    std::vector<ice::LayoutPoint> points;
+    std::vector<ice::ObjectId> segmentLayers;
+    std::vector<std::vector<ice::ObjectId>> pointVias;
+};
+
+struct AutoRouteObstacleSegment {
+    ice::LayoutPoint a;
+    ice::LayoutPoint b;
+    ice::ObjectId layer = 0;
+    ice::Coordinate halfWidth = 1;
+};
+
+struct AutoRouteObstacleVia {
+    ice::LayoutPoint point;
+    std::set<ice::ObjectId> conductorLayers;
+    ice::Coordinate halfWidth = 1;
+};
+
+struct AutoRouteObstacles {
+    std::vector<AutoRouteObstacleSegment> segments;
+    std::vector<AutoRouteObstacleVia> vias;
+};
+
+bool routeSegmentsConflict(ice::LayoutPoint a, ice::LayoutPoint b, ice::Coordinate halfWidth,
+                           const AutoRouteObstacleSegment &obstacle, ice::Coordinate margin) {
+    const auto clearance = static_cast<double>(halfWidth + obstacle.halfWidth + margin);
+    const auto aHorizontal = a.y == b.y;
+    const auto bHorizontal = obstacle.a.y == obstacle.b.y;
+    const auto minAX = std::min(a.x, b.x);
+    const auto maxAX = std::max(a.x, b.x);
+    const auto minAY = std::min(a.y, b.y);
+    const auto maxAY = std::max(a.y, b.y);
+    const auto minBX = std::min(obstacle.a.x, obstacle.b.x);
+    const auto maxBX = std::max(obstacle.a.x, obstacle.b.x);
+    const auto minBY = std::min(obstacle.a.y, obstacle.b.y);
+    const auto maxBY = std::max(obstacle.a.y, obstacle.b.y);
+    if (aHorizontal && bHorizontal) {
+        return std::abs(static_cast<double>(a.y) - obstacle.a.y) <= clearance &&
+               std::max(minAX, minBX) <= std::min(maxAX, maxBX) + clearance;
+    }
+    if (!aHorizontal && !bHorizontal) {
+        return std::abs(static_cast<double>(a.x) - obstacle.a.x) <= clearance &&
+               std::max(minAY, minBY) <= std::min(maxAY, maxBY) + clearance;
+    }
+    if (aHorizontal) {
+        return obstacle.a.x >= minAX - clearance && obstacle.a.x <= maxAX + clearance && a.y >= minBY - clearance &&
+               a.y <= maxBY + clearance;
+    }
+    return a.x >= minBX - clearance && a.x <= maxBX + clearance && obstacle.a.y >= minAY - clearance &&
+           obstacle.a.y <= maxAY + clearance;
+}
+
+double routePointSegmentDistance(ice::LayoutPoint point, ice::LayoutPoint a, ice::LayoutPoint b) {
+    const auto minX = static_cast<double>(std::min(a.x, b.x));
+    const auto maxX = static_cast<double>(std::max(a.x, b.x));
+    const auto minY = static_cast<double>(std::min(a.y, b.y));
+    const auto maxY = static_cast<double>(std::max(a.y, b.y));
+    const auto x = std::clamp(static_cast<double>(point.x), minX, maxX);
+    const auto y = std::clamp(static_cast<double>(point.y), minY, maxY);
+    return std::hypot(static_cast<double>(point.x) - x, static_cast<double>(point.y) - y);
+}
+
+AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::PlannedConnection &connection,
+                                      const LayoutConnectivity &connectivity) {
+    AutoRouteObstacles result;
+    for (const auto &[_, shape] : cell.shapes) {
+        if (shape.routedConnection == 0 || shape.routedConnection == connection.id)
+            continue;
+        const auto other = cell.plannedConnections.find(shape.routedConnection);
+        if (other != cell.plannedConnections.end() && !other->second.routed)
+            continue;
+        const auto otherNet = other != cell.plannedConnections.end() ? other->second.net : shape.net.value_or(0);
+        if (connection.net != 0 && otherNet != 0 && connection.net == otherNet)
+            continue;
+        if (shape.centerline.size() < 2)
+            continue;
+        const auto halfWidth = std::max<ice::Coordinate>(1, shape.width) / 2;
+        for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+            if (shape.centerline[index].x == shape.centerline[index + 1].x &&
+                shape.centerline[index].y == shape.centerline[index + 1].y)
+                continue;
+            result.segments.push_back(
+                {shape.centerline[index], shape.centerline[index + 1], shape.layerForSegment(index), halfWidth});
+        }
+        for (std::size_t index = 0; index < shape.centerline.size() && index < shape.pointVias.size(); ++index) {
+            for (const auto via : shape.pointVias[index]) {
+                AutoRouteObstacleVia obstacle;
+                obstacle.point = shape.centerline[index];
+                obstacle.halfWidth = halfWidth;
+                if (const auto entry = connectivity.viaConductors.find(via); entry != connectivity.viaConductors.end())
+                    obstacle.conductorLayers = entry->second;
+                else
+                    obstacle.conductorLayers.insert(via);
+                result.vias.push_back(std::move(obstacle));
+            }
+        }
+    }
+    return result;
+}
+
+int autoRouteConflictCount(const std::vector<ice::LayoutPoint> &points, const std::vector<ice::ObjectId> &segmentLayers,
+                           const std::vector<std::vector<ice::ObjectId>> &pointVias, ice::Coordinate width,
+                           const AutoRouteObstacles &obstacles, const LayoutConnectivity &connectivity,
+                           ice::Coordinate margin) {
+    if (points.size() < 2 || segmentLayers.size() + 1 != points.size())
+        return std::numeric_limits<int>::max() / 2;
+    const auto halfWidth = std::max<ice::Coordinate>(1, width) / 2;
+    int conflicts = 0;
+    for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+        for (const auto &obstacle : obstacles.segments) {
+            if (obstacle.layer != segmentLayers[index])
+                continue;
+            if (routeSegmentsConflict(points[index], points[index + 1], halfWidth, obstacle, margin))
+                ++conflicts;
+        }
+        for (const auto &via : obstacles.vias) {
+            if (!via.conductorLayers.contains(segmentLayers[index]))
+                continue;
+            if (routePointSegmentDistance(via.point, points[index], points[index + 1]) <=
+                halfWidth + via.halfWidth + margin)
+                ++conflicts;
+        }
+    }
+    for (std::size_t index = 0; index < points.size() && index < pointVias.size(); ++index) {
+        for (const auto viaLayer : pointVias[index]) {
+            const auto via = connectivity.viaConductors.find(viaLayer);
+            if (via == connectivity.viaConductors.end())
+                continue;
+            for (const auto &obstacle : obstacles.segments) {
+                if (!via->second.contains(obstacle.layer))
+                    continue;
+                if (routePointSegmentDistance(points[index], obstacle.a, obstacle.b) <=
+                    halfWidth + obstacle.halfWidth + margin)
+                    ++conflicts;
+            }
+        }
+    }
+    return conflicts;
+}
+
+std::vector<ice::LayoutPoint> buildAutoRoutePoints(const PinRoutePoint &start, const PinRoutePoint &end,
+                                                   const ice::LayoutPoint &startStub, const ice::LayoutPoint &endStub,
+                                                   std::optional<ice::Coordinate> variant) {
+    std::vector<ice::LayoutPoint> points;
+    const auto append = [&](ice::LayoutPoint point) {
+        if (points.empty() || points.back().x != point.x || points.back().y != point.y)
+            points.push_back(point);
+    };
+    append(start.point);
+    append(startStub);
+    if (start.normal.x != 0) {
+        const auto x = variant.value_or(startStub.x);
+        append({x, startStub.y});
+        append({x, endStub.y});
+    } else if (start.normal.y != 0) {
+        const auto y = variant.value_or(startStub.y);
+        append({startStub.x, y});
+        append({endStub.x, y});
+    } else if (end.normal.x == 0) {
+        const auto middleY = (startStub.y + endStub.y) / 2;
+        append({startStub.x, middleY});
+        append({endStub.x, middleY});
+    } else {
+        append({endStub.x, startStub.y});
+    }
+    append(endStub);
+    append(end.point);
+    return points;
+}
+
+std::vector<ice::Coordinate> buildAutoRouteVariants(const PinRoutePoint &start, const PinRoutePoint &end,
+                                                    const ice::LayoutPoint &startStub,
+                                                    const ice::LayoutPoint &endStub) {
+    std::vector<ice::Coordinate> variants;
+    const auto add = [&](ice::Coordinate value) {
+        if (std::find(variants.begin(), variants.end(), value) == variants.end())
+            variants.push_back(value);
+    };
+    if (start.normal.x != 0) {
+        const auto mid = startStub.x + (endStub.x - startStub.x) / 2;
+        add(end.normal.x != 0 ? mid : startStub.x);
+        add(startStub.x);
+        add(endStub.x);
+        add(mid);
+        add(startStub.x + (endStub.x - startStub.x) / 4);
+        add(startStub.x + (endStub.x - startStub.x) * 3 / 4);
+    } else if (start.normal.y != 0) {
+        const auto mid = startStub.y + (endStub.y - startStub.y) / 2;
+        add(end.normal.y != 0 ? mid : startStub.y);
+        add(startStub.y);
+        add(endStub.y);
+        add(mid);
+        add(startStub.y + (endStub.y - startStub.y) / 4);
+        add(startStub.y + (endStub.y - startStub.y) * 3 / 4);
+    }
+    return variants;
+}
+
+double autoRouteLength(const std::vector<ice::LayoutPoint> &points) {
+    double length = 0.0;
+    for (std::size_t index = 0; index + 1 < points.size(); ++index)
+        length += std::abs(static_cast<double>(points[index + 1].x - points[index].x)) +
+                  std::abs(static_cast<double>(points[index + 1].y - points[index].y));
+    return length;
+}
+
+std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &project, ice::ObjectId cellId,
+                                                        const ice::PlannedConnection &connection, ice::Coordinate width,
+                                                        std::string *error = nullptr) {
+    const auto fail = [error](const char *message) -> std::optional<AutoRouteGeometry> {
+        if (error)
+            *error = message;
+        return std::nullopt;
+    };
+    const auto cellIt = project.layoutCells.find(cellId);
+    if (cellIt == project.layoutCells.end() || cellIt->second.library)
+        return fail("The layout cell is not editable.");
+
+    const auto source = layoutRouteEndpoint(project, cellIt->second, connection.from, connection.fromPort);
+    const auto target = layoutRouteEndpoint(project, cellIt->second, connection.to, connection.toPort);
+    if (!source || !target)
+        return fail("Automatic routing requires placed device pins or layout pins on both ends.");
+    if (source->layer == 0 || target->layer == 0)
+        return fail("One of the pins has no conductive layer.");
+
+    const auto sourceLayer = drawingLayerForPin(project, cellId, source->layer);
+    const auto targetLayer = drawingLayerForPin(project, cellId, target->layer);
+    if (sourceLayer == 0 || targetLayer == 0)
+        return fail("A pin layer has no drawing layer to route from.");
+
+    const auto connectivity = inferLayoutConnectivity(project);
+    std::map<ice::ObjectId, std::vector<std::pair<ice::ObjectId, ice::ObjectId>>> graph;
+    for (const auto &[via, conductors] : connectivity.viaConductors) {
+        for (const auto left : conductors) {
+            for (const auto right : conductors) {
+                if (left != right)
+                    graph[left].push_back({right, via});
+            }
+        }
+    }
+    const auto bfs = [&](ice::ObjectId sourceLayer, std::map<ice::ObjectId, int> &distance,
+                         std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> &predecessor) {
+        std::queue<ice::ObjectId> queue;
+        distance[sourceLayer] = 0;
+        queue.push(sourceLayer);
+        while (!queue.empty()) {
+            const auto current = queue.front();
+            queue.pop();
+            const auto edges = graph.find(current);
+            if (edges == graph.end())
+                continue;
+            for (const auto &[next, via] : edges->second) {
+                if (distance.contains(next))
+                    continue;
+                distance[next] = distance[current] + 1;
+                predecessor[next] = {current, via};
+                queue.push(next);
+            }
+        }
+    };
+    std::map<ice::ObjectId, int> distanceFrom;
+    std::map<ice::ObjectId, int> distanceTo;
+    std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> predecessorFrom;
+    std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> predecessorTo;
+    bfs(sourceLayer, distanceFrom, predecessorFrom);
+    bfs(targetLayer, distanceTo, predecessorTo);
+
+    const auto viaStack = [&](ice::ObjectId from, ice::ObjectId to,
+                              const std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> &predecessor) {
+        std::vector<ice::ObjectId> vias;
+        auto current = to;
+        while (current != from) {
+            const auto previous = predecessor.find(current);
+            if (previous == predecessor.end())
+                return std::vector<ice::ObjectId>{};
+            vias.push_back(previous->second.second);
+            current = previous->second.first;
+        }
+        std::reverse(vias.begin(), vias.end());
+        return vias;
+    };
+    const auto layerAvailable = [&](ice::ObjectId layer) {
+        const auto layerIt = project.layers.find(layer);
+        return layerIt != project.layers.end() && layerAvailableForLayout(project, cellId, layerIt->second);
+    };
+
+    struct LayerOption {
+        ice::ObjectId layer = 0;
+        int viaCount = 0;
+        std::vector<ice::ObjectId> sourceVias;
+        std::vector<ice::ObjectId> targetVias;
+    };
+    std::vector<LayerOption> layerOptions;
+    for (const auto &[layer, distance] : distanceFrom) {
+        const auto other = distanceTo.find(layer);
+        if (other == distanceTo.end())
+            continue;
+        const auto layerIt = project.layers.find(layer);
+        if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
+            layerIsPinLayer(layerIt->second))
+            continue;
+        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+            continue;
+        const auto sourceVias = viaStack(sourceLayer, layer, predecessorFrom);
+        const auto targetVias = viaStack(targetLayer, layer, predecessorTo);
+        if ((sourceLayer != layer && sourceVias.empty()) || (targetLayer != layer && targetVias.empty()))
+            continue;
+        bool available = layerAvailable(layer);
+        for (const auto via : sourceVias)
+            available = available && layerAvailable(via);
+        for (const auto via : targetVias)
+            available = available && layerAvailable(via);
+        if (!available)
+            continue;
+        layerOptions.push_back({layer, distance + other->second, sourceVias, targetVias});
+    }
+    if (layerOptions.empty())
+        return fail("No metal layer is reachable from both pins.");
+    std::sort(layerOptions.begin(), layerOptions.end(), [](const auto &left, const auto &right) {
+        if (left.viaCount != right.viaCount)
+            return left.viaCount < right.viaCount;
+        return left.layer < right.layer;
+    });
+
+    const ice::LayoutPoint sourceCenter{source->rect.x + source->rect.width / 2,
+                                        source->rect.y + source->rect.height / 2};
+    const ice::LayoutPoint targetCenter{target->rect.x + target->rect.width / 2,
+                                        target->rect.y + target->rect.height / 2};
+    const auto start = pinRoutePoint(source->rect, targetCenter, connection.fromSide);
+    const auto end = pinRoutePoint(target->rect, sourceCenter, connection.toSide);
+    if (start.point.x == end.point.x && start.point.y == end.point.y)
+        return fail("The two pins already touch; no route is needed.");
+
+    // Leave and enter the pins from the outside of their narrow sides so the
+    // route does not run along the pin rectangle. Keep the stubs inside the
+    // gap so they never overshoot into the opposite pin.
+    const auto clearance = std::max<ice::Coordinate>(1, project.snap(400));
+    const auto stub = [&](const PinRoutePoint &pin, ice::LayoutPoint other) {
+        const auto delta = (other.x - pin.point.x) * pin.normal.x + (other.y - pin.point.y) * pin.normal.y;
+        const auto length = delta > 0 ? std::min(clearance, std::max<ice::Coordinate>(1, delta / 2)) : clearance;
+        return ice::LayoutPoint{pin.point.x + pin.normal.x * length, pin.point.y + pin.normal.y * length};
+    };
+    const auto startStub = stub(start, end.point);
+    const auto endStub = stub(end, start.point);
+
+    const auto makeGeometry = [](const LayerOption &option, const std::vector<ice::LayoutPoint> &points) {
+        AutoRouteGeometry geometry;
+        geometry.layer = option.layer;
+        geometry.points = points;
+        geometry.segmentLayers.assign(points.size() > 0 ? points.size() - 1 : 0, option.layer);
+        geometry.pointVias.resize(points.size());
+        if (!points.empty()) {
+            geometry.pointVias.front() = option.sourceVias;
+            geometry.pointVias.back() = option.targetVias;
+        }
+        return geometry;
+    };
+
+    const auto margin = std::max<ice::Coordinate>(1, project.grid);
+    const auto obstacles = autoRouteObstacles(cellIt->second, connection, connectivity);
+    const auto variants = buildAutoRouteVariants(start, end, startStub, endStub);
+
+    AutoRouteGeometry baseline;
+    bool haveBaseline = false;
+    std::optional<AutoRouteGeometry> bestCandidate;
+    int bestViaCount = std::numeric_limits<int>::max();
+    double bestLength = std::numeric_limits<double>::max();
+    std::optional<AutoRouteGeometry> leastConflictCandidate;
+    int leastConflictCount = std::numeric_limits<int>::max();
+    int leastConflictViaCount = std::numeric_limits<int>::max();
+    double leastConflictLength = std::numeric_limits<double>::max();
+    for (const auto &option : layerOptions) {
+        const auto consider = [&](const std::vector<ice::LayoutPoint> &points, bool makeBaseline) {
+            auto geometry = makeGeometry(option, points);
+            if (makeBaseline && !haveBaseline) {
+                baseline = geometry;
+                haveBaseline = true;
+            }
+            const auto conflicts = autoRouteConflictCount(geometry.points, geometry.segmentLayers, geometry.pointVias,
+                                                          width, obstacles, connectivity, margin);
+            const auto length = autoRouteLength(points);
+            if (conflicts < leastConflictCount ||
+                (conflicts == leastConflictCount &&
+                 (option.viaCount < leastConflictViaCount ||
+                  (option.viaCount == leastConflictViaCount && length < leastConflictLength)))) {
+                leastConflictCandidate = geometry;
+                leastConflictCount = conflicts;
+                leastConflictViaCount = option.viaCount;
+                leastConflictLength = length;
+            }
+            if (conflicts != 0)
+                return;
+            if (!bestCandidate || option.viaCount < bestViaCount ||
+                (option.viaCount == bestViaCount && length < bestLength)) {
+                bestCandidate = std::move(geometry);
+                bestViaCount = option.viaCount;
+                bestLength = length;
+            }
+        };
+        if (variants.empty()) {
+            consider(buildAutoRoutePoints(start, end, startStub, endStub, std::nullopt), true);
+            continue;
+        }
+        for (std::size_t index = 0; index < variants.size(); ++index)
+            consider(buildAutoRoutePoints(start, end, startStub, endStub, variants[index]), index == 0);
+    }
+    if (!haveBaseline)
+        return fail("No route could be generated.");
+    if (bestCandidate)
+        return bestCandidate;
+
+    // No conflict-free route was found. Try short layer bridges on interior
+    // segments before falling back to the original overlapping route.
+    const auto &bridgeBase = leastConflictCandidate ? *leastConflictCandidate : baseline;
+    const auto viaStackBetween = [&](ice::ObjectId from,
+                                     ice::ObjectId to) -> std::optional<std::vector<ice::ObjectId>> {
+        std::map<ice::ObjectId, int> distance;
+        std::map<ice::ObjectId, std::pair<ice::ObjectId, ice::ObjectId>> predecessor;
+        bfs(from, distance, predecessor);
+        if (!distance.contains(to))
+            return std::nullopt;
+        return viaStack(from, to, predecessor);
+    };
+    const auto makeBridgeGeometry =
+        [&](const std::vector<ice::ObjectId> &segmentLayers) -> std::optional<AutoRouteGeometry> {
+        if (segmentLayers.size() + 1 != bridgeBase.points.size() || segmentLayers.empty())
+            return std::nullopt;
+        if (segmentLayers.front() != bridgeBase.layer || segmentLayers.back() != bridgeBase.layer)
+            return std::nullopt;
+        AutoRouteGeometry geometry;
+        geometry.layer = bridgeBase.layer;
+        geometry.points = bridgeBase.points;
+        geometry.segmentLayers = segmentLayers;
+        geometry.pointVias.resize(bridgeBase.points.size());
+        geometry.pointVias.front() = bridgeBase.pointVias.front();
+        geometry.pointVias.back() = bridgeBase.pointVias.back();
+        for (std::size_t index = 1; index + 1 < bridgeBase.points.size(); ++index) {
+            if (segmentLayers[index - 1] == segmentLayers[index])
+                continue;
+            const auto stack = viaStackBetween(segmentLayers[index - 1], segmentLayers[index]);
+            if (!stack)
+                return std::nullopt;
+            geometry.pointVias[index] = *stack;
+        }
+        for (const auto &vias : geometry.pointVias)
+            for (const auto via : vias)
+                if (!layerAvailable(via))
+                    return std::nullopt;
+        return geometry;
+    };
+
+    std::vector<ice::ObjectId> bridgeLayers{bridgeBase.layer};
+    for (const auto &[neighbor, via] : graph[bridgeBase.layer]) {
+        const auto layerIt = project.layers.find(neighbor);
+        if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
+            layerIsPinLayer(layerIt->second))
+            continue;
+        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+            continue;
+        if (std::find(bridgeLayers.begin(), bridgeLayers.end(), neighbor) == bridgeLayers.end())
+            bridgeLayers.push_back(neighbor);
+    }
+    std::sort(bridgeLayers.begin(), bridgeLayers.end(), [&](ice::ObjectId left, ice::ObjectId right) {
+        if (left == bridgeBase.layer)
+            return false;
+        if (right == bridgeBase.layer)
+            return true;
+        return left < right;
+    });
+    if (bridgeBase.points.size() >= 3 && bridgeLayers.size() > 1) {
+        std::vector<ice::ObjectId> segmentLayers(bridgeBase.points.size() - 1, bridgeBase.layer);
+        auto currentConflicts = autoRouteConflictCount(bridgeBase.points, segmentLayers, bridgeBase.pointVias, width,
+                                                       obstacles, connectivity, margin);
+        std::optional<AutoRouteGeometry> bestBridge;
+        int bestBridgeConflicts = currentConflicts;
+        for (int pass = 0; pass < 3 && bestBridgeConflicts > 0; ++pass) {
+            bool changed = false;
+            for (std::size_t index = 1; index + 1 < segmentLayers.size(); ++index) {
+                const auto original = segmentLayers[index];
+                auto segmentBest = original;
+                auto segmentBestConflicts = bestBridgeConflicts;
+                std::optional<AutoRouteGeometry> segmentBestGeometry;
+                for (const auto alt : bridgeLayers) {
+                    segmentLayers[index] = alt;
+                    auto geometry = makeBridgeGeometry(segmentLayers);
+                    if (!geometry)
+                        continue;
+                    const auto conflicts =
+                        autoRouteConflictCount(geometry->points, geometry->segmentLayers, geometry->pointVias, width,
+                                               obstacles, connectivity, margin);
+                    if (conflicts < segmentBestConflicts) {
+                        segmentBestConflicts = conflicts;
+                        segmentBest = alt;
+                        segmentBestGeometry = std::move(geometry);
+                    }
+                }
+                segmentLayers[index] = segmentBest;
+                if (segmentBest != original) {
+                    bestBridgeConflicts = segmentBestConflicts;
+                    bestBridge = std::move(segmentBestGeometry);
+                    changed = true;
+                }
+            }
+            if (!changed)
+                break;
+            if (bestBridgeConflicts == 0)
+                break;
+        }
+        if (bestBridge && bestBridgeConflicts == 0)
+            return bestBridge;
+        if (auto geometry = makeBridgeGeometry(segmentLayers)) {
+            if (autoRouteConflictCount(geometry->points, geometry->segmentLayers, geometry->pointVias, width, obstacles,
+                                       connectivity, margin) == 0)
+                return geometry;
+        }
+    }
+
+    return baseline;
+}
+
+struct SchematicPinView {
+    QPointF point;
+    ice::PinDirection direction = ice::PinDirection::left;
+    ice::ObjectId instance = 0;
+};
+
+struct SchematicBranchRoute {
+    ice::ObjectId fromPin = 0;
+    ice::ObjectId toPin = 0;
+    ice::PinDirection fromDirection = ice::PinDirection::left;
+    ice::PinDirection toDirection = ice::PinDirection::left;
+    std::vector<QPointF> points;
+};
+
+struct SchematicNetRoute {
+    std::vector<SchematicBranchRoute> branches;
+};
 
 class DocumentWindow : public QMainWindow {
   public:
@@ -550,6 +1383,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
+        drcLayoutId_ = 0;
         selectingReport_ = false;
         loadedCachedRunPath_.clear();
         if (schematicViewStack_ && schematicCanvasPage_)
@@ -895,10 +1729,8 @@ class DocumentWindow : public QMainWindow {
         const bool hadExternalConflictsAfterReload = !conflictedSchematicFiles_.empty() ||
                                                      !conflictedLayoutFiles_.empty() ||
                                                      !conflictedProceduralFiles_.empty();
-        if (hadExternalConflictsAfterReload) {
-            if (!resolveExternalFileConflicts())
-                return;
-        }
+        if (hadExternalConflictsAfterReload && !resolveExternalFileConflicts())
+            return;
         if (projectDiskChangePending_) {
             const auto response =
                 QMessageBox::warning(this, QStringLiteral("Save Project"),
@@ -1502,6 +2334,7 @@ class DocumentWindow : public QMainWindow {
         activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
+        drcLayoutId_ = 0;
         selectingReport_ = false;
         loadedCachedRunPath_.clear();
         lastSchematicPlacementDevice_.reset();
@@ -1807,9 +2640,23 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    bool resolveLayoutPdk(const std::string &pdk, QString *pdkLabel, std::optional<ice::PackagePdk> *selectedPdk,
+    std::string defaultStackForPdk(const std::string &pdk) const {
+        if (pdk == ice::genericPdkId)
+            return {};
+        const auto packages = installedPackages(configuredPackageInstallDirectory());
+        const auto package = std::find_if(packages.begin(), packages.end(),
+                                          [&](const auto &entry) { return ice::packageMatchesPdk(entry.spec, pdk); });
+        if (package == packages.end() || !package->spec.pdk)
+            return {};
+        return package->spec.pdk->defaultStack;
+    }
+
+    bool resolveLayoutPdk(const std::string &pdk, const std::string &requestedStack, QString *pdkLabel,
+                          QString *stackLabel, std::string *stack, std::optional<ice::PackagePdk> *selectedPdk,
                           bool *addDependency) {
         *pdkLabel = QStringLiteral("Generic PDK");
+        *stackLabel = QStringLiteral("Default");
+        stack->clear();
         selectedPdk->reset();
         *addDependency = false;
         if (pdk == ice::genericPdkId)
@@ -1831,8 +2678,23 @@ class DocumentWindow : public QMainWindow {
             return false;
         }
         *pdkLabel = packagePdkDisplayName(package->spec);
-        if (package->spec.pdk)
+        if (package->spec.pdk) {
             *selectedPdk = *package->spec.pdk;
+            try {
+                const auto stackId = ice::resolvePdkStack(*package->spec.pdk, requestedStack);
+                if (!stackId.empty()) {
+                    const auto selected =
+                        std::find_if(package->spec.pdk->stacks.begin(), package->spec.pdk->stacks.end(),
+                                     [&](const auto &entry) { return entry.id == stackId; });
+                    *stack = stackId;
+                    *stackLabel =
+                        QString::fromStdString(selected->displayName.empty() ? selected->id : selected->displayName);
+                }
+            } catch (const ice::ProjectError &error) {
+                QMessageBox::critical(this, QStringLiteral("Create Layout Cell"), QString::fromStdString(error.what()));
+                return false;
+            }
+        }
         const auto &dependencies = project_->project().packageDependencies;
         if (std::find(dependencies.begin(), dependencies.end(), pdk) == dependencies.end()) {
             const auto displayName = packagePdkDisplayName(package->spec);
@@ -1859,29 +2721,33 @@ class DocumentWindow : public QMainWindow {
         CreateLayoutDialog dialog(installDirectory, nextLayoutDefaultName(), this);
         if (dialog.exec() != QDialog::Accepted)
             return;
-        createLayoutCell(dialog.layoutName(), dialog.pdkId());
+        createLayoutCell(dialog.layoutName(), dialog.pdkId(), dialog.stackId());
     }
 
-    void createLayoutCell(const QString &name, const std::string &pdk) {
+    void createLayoutCell(const QString &name, const std::string &pdk, const std::string &requestedStack = {}) {
         if (!project_ || name.trimmed().isEmpty())
             return;
         QString pdkLabel;
+        QString stackLabel;
+        std::string stack;
         std::optional<ice::PackagePdk> selectedPdk;
         bool addDependency = false;
-        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+        if (!resolveLayoutPdk(pdk, requestedStack, &pdkLabel, &stackLabel, &stack, &selectedPdk, &addDependency))
             return;
         try {
             project_->execute("create layout cell", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk, pdk);
-                activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk);
+                    addPdkLayers(project, *selectedPdk, pdk, stack);
+                activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk, stack);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
             activeProceduralLayoutId_ = 0;
             refreshProject();
-            statusBar()->showMessage(QStringLiteral("Layout cell created with %1").arg(pdkLabel));
+            statusBar()->showMessage(
+                QStringLiteral("Layout cell created with %1%2")
+                    .arg(pdkLabel, stack.empty() ? QString{} : QStringLiteral(" / %1").arg(stackLabel)));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Layout Cell"), QString::fromStdString(error.what()));
         }
@@ -1916,16 +2782,18 @@ class DocumentWindow : public QMainWindow {
         dialog.setWindowTitle(QStringLiteral("Create Procedural Layout"));
         if (dialog.exec() != QDialog::Accepted)
             return;
-        createProceduralLayout(dialog.layoutName(), dialog.pdkId());
+        createProceduralLayout(dialog.layoutName(), dialog.pdkId(), dialog.stackId());
     }
 
-    void createProceduralLayout(const QString &name, const std::string &pdk) {
+    void createProceduralLayout(const QString &name, const std::string &pdk, const std::string &requestedStack = {}) {
         if (!project_ || name.trimmed().isEmpty())
             return;
         QString pdkLabel;
+        QString stackLabel;
+        std::string stack;
         std::optional<ice::PackagePdk> selectedPdk;
         bool addDependency = false;
-        if (!resolveLayoutPdk(pdk, &pdkLabel, &selectedPdk, &addDependency))
+        if (!resolveLayoutPdk(pdk, requestedStack, &pdkLabel, &stackLabel, &stack, &selectedPdk, &addDependency))
             return;
         ice::ObjectId proceduralId = 0;
         QString generationError;
@@ -1935,9 +2803,9 @@ class DocumentWindow : public QMainWindow {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
-                    addPdkLayers(project, *selectedPdk, pdk);
+                    addPdkLayers(project, *selectedPdk, pdk, stack);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
-                                                           ice::defaultProceduralLayoutScript());
+                                                           ice::defaultProceduralLayoutScript(), stack);
                 generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
             });
             project_->setLastHistoryLabel("Created procedural layout " + name.trimmed().toStdString());
@@ -1954,7 +2822,9 @@ class DocumentWindow : public QMainWindow {
                                                     "failed:\n%1")
                                          .arg(generationError));
             }
-            statusBar()->showMessage(QStringLiteral("Procedural layout created with %1").arg(pdkLabel));
+            statusBar()->showMessage(
+                QStringLiteral("Procedural layout created with %1%2")
+                    .arg(pdkLabel, stack.empty() ? QString{} : QStringLiteral(" / %1").arg(stackLabel)));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create Procedural Layout"),
                                   QString::fromStdString(error.what()));
@@ -2029,6 +2899,7 @@ class DocumentWindow : public QMainWindow {
         if (schematicViewStack_ && textSchematicEditorPage_)
             schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
         if (textSchematicEditor_) {
+            textSchematicEditor_->setLanguage(textSourceLanguage(it->second));
             const auto text = QString::fromStdString(it->second.sourceText());
             if (textSchematicEditor_->text() != text)
                 textSchematicEditor_->setText(text);
@@ -2268,9 +3139,11 @@ class DocumentWindow : public QMainWindow {
         if (schematicIt == project_->project().schematicCells.end())
             return;
         const auto schematicName = QString::fromStdString(schematicIt->second.name);
+        const auto schematicPdk = schematicIt->second.pdk;
         try {
             project_->execute("make layout from schematic", [&](ice::Project &project) {
-                activeLayoutId_ = ice::createLayoutFromSchematic(project, schematicId);
+                activeLayoutId_ =
+                    ice::createLayoutFromSchematic(project, schematicId, {}, defaultStackForPdk(schematicPdk));
                 ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
             });
         } catch (const ice::ProjectError &error) {
@@ -2293,14 +3166,27 @@ class DocumentWindow : public QMainWindow {
     }
 
     ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
-                                                 const ice::LayoutDeviceLibrary &library) const {
+                                                 const ice::LayoutDeviceLibrary &library,
+                                                 const std::map<std::string, std::string> *values = nullptr,
+                                                 const ice::LayoutDeviceGeometry *geometry = nullptr) const {
         const auto cellId = ice::createLayoutCell(
             project, uniqueDeviceCellName(project, device.name, layoutDeviceCellPrefix(library)), library.pdk);
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
         cell.device = device.name;
+        if (activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_))
+            cell.stack = project.layoutCells.at(activeLayoutId_).stack;
         syncLayoutDeviceParameters(project, cell, device);
-        applyLayoutDeviceShapes(project, cell, library, device.shapes, device.ports);
+        if (values) {
+            for (auto &parameter : cell.parameters) {
+                if (const auto value = values->find(parameter.name); value != values->end())
+                    parameter.value = value->second;
+            }
+        }
+        if (geometry)
+            applyLayoutDeviceShapes(project, cell, library, geometry->shapes, geometry->ports);
+        else
+            applyLayoutDeviceShapes(project, cell, library, device.shapes, device.ports);
         ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
         return cellId;
     }
@@ -2369,6 +3255,515 @@ class DocumentWindow : public QMainWindow {
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Place Device"), QString::fromStdString(error.what()));
         }
+    }
+
+    void activateLayoutPlannedDevice(ice::ObjectId deviceId) {
+        if (!project_ || !layoutDevicesPanel_ || deviceId == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto planned = cellIt->second.plannedDevices.find(deviceId);
+        if (planned == cellIt->second.plannedDevices.end())
+            return;
+
+        const auto element = plannedDeviceSpiceElement(project_->project(), planned->second);
+        if (element == 'V' || element == 'I' || element == 'G' || element == 'P') {
+            QMenu pinMenu(this);
+            auto *convert = pinMenu.addAction(QStringLiteral("Convert to Pin"));
+            auto *chosenPin = pinMenu.exec(QCursor::pos());
+            if (chosenPin == convert)
+                convertPlannedDeviceToPin(deviceId);
+            return;
+        }
+
+        QMenu menu(this);
+        auto *manual = menu.addAction(QStringLiteral("Draw Layout Manually"));
+        auto *place = menu.addAction(QStringLiteral("Place Layout Device…"));
+        place->setEnabled(!layoutDevicesPanel_->library().cells.empty());
+        auto *chosen = menu.exec(QCursor::pos());
+        if (chosen == manual) {
+            const auto name = planned->second.name;
+            project_->execute("remove planned device", [&](ice::Project &project) {
+                auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                cell->second.plannedDevices.erase(deviceId);
+                std::erase_if(cell->second.plannedConnections, [&](const auto &entry) {
+                    return entry.second.from == deviceId || entry.second.to == deviceId;
+                });
+            });
+            project_->setLastHistoryLabel("Removed layout planned device " + name);
+            refreshProject();
+            statusBar()->showMessage(QStringLiteral("Planned device removed; draw its layout manually."));
+            return;
+        }
+        if (chosen == place)
+            placeLayoutDeviceForPlanned(deviceId);
+    }
+
+    void convertPlannedDeviceToPin(ice::ObjectId deviceId) {
+        if (!project_ || deviceId == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto plannedIt = cellIt->second.plannedDevices.find(deviceId);
+        if (plannedIt == cellIt->second.plannedDevices.end())
+            return;
+        const auto planned = plannedIt->second;
+        const auto element = plannedDeviceSpiceElement(project_->project(), planned);
+        if (element != 'V' && element != 'I' && element != 'G' && element != 'P')
+            return;
+        const auto portDirection =
+            element == 'P' ? plannedDevicePortDirection(project_->project(), planned) : std::nullopt;
+
+        std::set<ice::ObjectId> connectedNets;
+        for (const auto &[_, connection] : cellIt->second.plannedConnections) {
+            if (connection.from != deviceId && connection.to != deviceId)
+                continue;
+            if (connection.net != 0)
+                connectedNets.insert(connection.net);
+        }
+
+        const auto layers = layoutLayers(project_->project(), activeLayoutId_);
+        if (layers.empty()) {
+            QMessageBox::information(
+                this, QStringLiteral("Convert to Pin"),
+                QStringLiteral("Create a layout layer before converting sources or grounds to pins."));
+            return;
+        }
+        const auto isMetalLayer = [](const ice::Layer &layer) {
+            return layerKey(layer.name).find("metal") != std::string::npos;
+        };
+        const auto isPinLayer = [](const ice::Layer &layer) { return layerIsPinLayer(layer); };
+
+        ice::ObjectId existingPin = 0;
+        if (element != 'P' && connectedNets.size() == 1) {
+            const auto net = *connectedNets.begin();
+            for (const auto &[portId, port] : cellIt->second.ports) {
+                if (port.net == net) {
+                    existingPin = portId;
+                    break;
+                }
+            }
+        }
+
+        // Prefer a metal pin layer, then any pin layer, then a metal drawing
+        // layer, then whatever the layout provides.
+        ice::ObjectId defaultLayer = 0;
+        for (const auto &[_, layer] : project_->project().layers) {
+            if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isPinLayer(layer) &&
+                isMetalLayer(layer)) {
+                defaultLayer = layer.id;
+                break;
+            }
+        }
+        if (defaultLayer == 0) {
+            for (const auto &[_, layer] : project_->project().layers) {
+                if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isPinLayer(layer)) {
+                    defaultLayer = layer.id;
+                    break;
+                }
+            }
+        }
+        if (defaultLayer == 0) {
+            for (const auto &[_, layer] : project_->project().layers) {
+                if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isMetalLayer(layer)) {
+                    defaultLayer = layer.id;
+                    break;
+                }
+            }
+        }
+        if (defaultLayer == 0)
+            defaultLayer = layers.front().get().id;
+
+        std::vector<ice::ObjectId> candidateLayers;
+        const auto appendCandidates = [&](const auto &predicate) {
+            for (const auto &layerRef : layers) {
+                const auto &layer = layerRef.get();
+                if (!predicate(layer) ||
+                    std::find(candidateLayers.begin(), candidateLayers.end(), layer.id) != candidateLayers.end())
+                    continue;
+                candidateLayers.push_back(layer.id);
+            }
+        };
+        appendCandidates([&](const ice::Layer &layer) { return isPinLayer(layer) && isMetalLayer(layer); });
+        appendCandidates(isPinLayer);
+        if (candidateLayers.empty())
+            appendCandidates([&](const ice::Layer &layer) { return isMetalLayer(layer); });
+        if (candidateLayers.empty())
+            appendCandidates([](const ice::Layer &) { return true; });
+        if (candidateLayers.empty())
+            return;
+
+        auto pinLayer = candidateLayers.front();
+        if (existingPin == 0 && candidateLayers.size() > 1) {
+            QDialog layerDialog(this);
+            layerDialog.setWindowTitle(QStringLiteral("Convert to Pin"));
+            auto *layerLayout = new QVBoxLayout(&layerDialog);
+            layerLayout->addWidget(new QLabel(QStringLiteral("Pin layer:"), &layerDialog));
+            auto *layerCombo = new QComboBox(&layerDialog);
+            for (const auto layerId : candidateLayers)
+                layerCombo->addItem(QString::fromStdString(project_->project().layers.at(layerId).name));
+            if (const auto it = std::find(candidateLayers.begin(), candidateLayers.end(), defaultLayer);
+                it != candidateLayers.end())
+                layerCombo->setCurrentIndex(static_cast<int>(std::distance(candidateLayers.begin(), it)));
+            layerLayout->addWidget(layerCombo);
+            auto *layerButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &layerDialog);
+            connect(layerButtons, &QDialogButtonBox::accepted, &layerDialog, &QDialog::accept);
+            connect(layerButtons, &QDialogButtonBox::rejected, &layerDialog, &QDialog::reject);
+            layerLayout->addWidget(layerButtons);
+            if (layerDialog.exec() != QDialog::Accepted)
+                return;
+            pinLayer = candidateLayers.at(static_cast<std::size_t>(layerCombo->currentIndex()));
+        }
+
+        const auto pinSize = std::max<ice::Coordinate>(1, project_->project().snap(400));
+        ice::ObjectId usedPort = 0;
+        try {
+            project_->execute("convert planned device to pin", [&](ice::Project &project) {
+                auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                auto &layout = cell->second;
+                const auto normalized = [](std::string value) {
+                    std::transform(value.begin(), value.end(), value.begin(),
+                                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                    return value;
+                };
+                std::set<std::string> names;
+                for (const auto &[_, port] : layout.ports)
+                    names.insert(normalized(port.name));
+
+                const auto pinNet = connectedNets.size() == 1 ? *connectedNets.begin() : ice::ObjectId{0};
+                std::string base;
+                if (element != 'P' && pinNet != 0) {
+                    if (const auto netIt = layout.nets.find(pinNet); netIt != layout.nets.end())
+                        base = netIt->second.name;
+                    if (base == "0")
+                        base = "GND";
+                }
+                if (base.empty()) {
+                    if (element == 'G')
+                        base = "GND";
+                    else if (!planned.name.empty())
+                        base = planned.name;
+                    else
+                        base = "PIN";
+                }
+                std::string name = base;
+                for (int suffix = 2; names.contains(normalized(name)); ++suffix)
+                    name = base + "_" + std::to_string(suffix);
+                names.insert(normalized(name));
+
+                auto portId = existingPin;
+                if (portId == 0) {
+                    auto x = planned.x + planned.width / 2 - pinSize / 2;
+                    auto y = planned.y + planned.height / 2 - pinSize / 2;
+                    x = std::clamp(x, planned.x, planned.x + std::max<ice::Coordinate>(0, planned.width - pinSize));
+                    y = std::clamp(y, planned.y, planned.y + std::max<ice::Coordinate>(0, planned.height - pinSize));
+                    portId = ice::addPort(project, activeLayoutId_, name, pinLayer, ice::Rect{x, y, pinSize, pinSize},
+                                          portDirection.value_or(ice::PortDirection::inout), ice::PortSide::left,
+                                          pinNet, name);
+                    if (planned.schematicInstance != 0) {
+                        auto &port = project.layoutCells.at(activeLayoutId_).ports.at(portId);
+                        port.schematicInstance = planned.schematicInstance;
+                    }
+                }
+                usedPort = portId;
+
+                for (auto connection = layout.plannedConnections.begin();
+                     connection != layout.plannedConnections.end();) {
+                    auto &value = connection->second;
+                    bool touches = false;
+                    if (value.from == deviceId) {
+                        value.from = portId;
+                        value.fromPort = 0;
+                        touches = true;
+                    }
+                    if (value.to == deviceId) {
+                        value.to = portId;
+                        value.toPort = 0;
+                        touches = true;
+                    }
+                    if (touches && value.from == value.to) {
+                        connection = layout.plannedConnections.erase(connection);
+                        continue;
+                    }
+                    ++connection;
+                }
+                layout.plannedDevices.erase(deviceId);
+                updateRoutedConnectionPaths(project);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Convert to Pin"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (usedPort == 0) {
+            statusBar()->showMessage(QStringLiteral("Could not create a layout pin"));
+            return;
+        }
+        project_->setLastHistoryLabel("Converted layout planned device " + planned.name + " to pin");
+        refreshProject();
+        QTimer::singleShot(0, this, [this, portId = usedPort] { selectLayoutShapeItem(portId); });
+        statusBar()->showMessage(
+            QStringLiteral("Converted %1 to a layout pin.").arg(QString::fromStdString(planned.name)));
+    }
+
+    void placeLayoutDeviceForPlanned(ice::ObjectId deviceId) {
+        if (!project_ || !layoutDevicesPanel_ || deviceId == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto plannedIt = cellIt->second.plannedDevices.find(deviceId);
+        if (plannedIt == cellIt->second.plannedDevices.end())
+            return;
+        const auto &planned = plannedIt->second;
+        const auto &library = layoutDevicesPanel_->library();
+
+        std::string symbolName;
+        std::vector<std::string> schematicPins;
+        std::map<std::string, std::string> initialValues;
+        if (planned.schematicInstance != 0) {
+            for (const auto &[_, schematic] : project_->project().schematicCells) {
+                const auto instance = schematic.instances.find(planned.schematicInstance);
+                if (instance == schematic.instances.end())
+                    continue;
+                if (const auto symbol = schematic.symbols.find(instance->second.symbol);
+                    symbol != schematic.symbols.end()) {
+                    symbolName = symbol->second.name;
+                    for (const auto &pin : symbol->second.pins)
+                        schematicPins.push_back(pin.name);
+                }
+                for (const auto &parameter : instance->second.parameters)
+                    initialValues[parameter.name] = parameter.value;
+                break;
+            }
+        }
+        if (symbolName.empty())
+            symbolName = planned.name;
+
+        LayoutDevicePlacementDialog dialog(library, symbolName, schematicPins, initialValues, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto *device = dialog.selectedDevice();
+        if (!device)
+            return;
+        auto values = dialog.parameterValues();
+
+        std::optional<ice::LayoutDeviceGeometry> geometry;
+        if (device->generator) {
+            QString generationError;
+            WaitCursorGuard waitCursor;
+            statusBar()->showMessage(QStringLiteral("Generating %1…").arg(QString::fromStdString(device->name)));
+            geometry = generateLayoutDeviceGeometry(*device, values, &generationError, library.pdk);
+            if (!geometry) {
+                QMessageBox::warning(this, QStringLiteral("Place Layout Device"),
+                                     QStringLiteral("Could not generate %1:\n\n%2")
+                                         .arg(QString::fromStdString(device->name), generationError));
+                return;
+            }
+        }
+
+        const auto bounds = geometry ? geometry->bounds : device->bounds;
+        const auto centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
+        const auto centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
+        const auto targetX = planned.x + planned.width / 2.0;
+        const auto targetY = planned.y + planned.height / 2.0;
+        const auto instanceX = static_cast<ice::Coordinate>(std::lround(targetX - centerX));
+        const auto instanceY = static_cast<ice::Coordinate>(std::lround(targetY - centerY));
+        const auto plannedName = planned.name;
+        const auto schematicInstance = planned.schematicInstance;
+        const auto deviceCopy = *device;
+        const auto cellId = activeLayoutId_;
+
+        ice::ObjectId instanceId = 0;
+        std::string instanceName;
+        try {
+            project_->execute("place planned layout device", [&](ice::Project &project) {
+                auto cell = project.layoutCells.find(cellId);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto childId = createLayoutDeviceInstanceCell(project, deviceCopy, library, &values,
+                                                                    geometry ? &*geometry : nullptr);
+                if (childId == cellId)
+                    return;
+                auto &layout = cell->second;
+                const auto baseName = plannedName.empty() ? deviceCopy.name : plannedName;
+                auto name = baseName;
+                for (int suffix = 2;; ++suffix) {
+                    const bool exists = std::any_of(layout.instances.begin(), layout.instances.end(),
+                                                    [&](const auto &entry) { return entry.second.name == name; });
+                    if (!exists)
+                        break;
+                    name = baseName + "_" + std::to_string(suffix);
+                }
+                instanceId = project.nextId();
+                ice::LayoutInstance instance{instanceId, childId, name, instanceX, instanceY, ice::Orientation::r0};
+                instance.schematicInstance = schematicInstance;
+                layout.instances.emplace(instanceId, instance);
+                const auto &childCell = project.layoutCells.at(childId);
+                for (auto connection = layout.plannedConnections.begin();
+                     connection != layout.plannedConnections.end();) {
+                    auto &value = connection->second;
+                    bool touches = false;
+                    if (value.from == deviceId) {
+                        value.from = instanceId;
+                        value.fromPort = layoutPortForSchematicPin(childCell, value.fromPin);
+                        touches = true;
+                    }
+                    if (value.to == deviceId) {
+                        value.to = instanceId;
+                        value.toPort = layoutPortForSchematicPin(childCell, value.toPin);
+                        touches = true;
+                    }
+                    if (touches && value.from == value.to) {
+                        connection = layout.plannedConnections.erase(connection);
+                        continue;
+                    }
+                    ++connection;
+                }
+                layout.plannedDevices.erase(deviceId);
+                instanceName = name;
+                updateRoutedConnectionPaths(project);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Place Layout Device"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (instanceId == 0) {
+            statusBar()->showMessage(QStringLiteral("Could not place this device inside itself"));
+            return;
+        }
+        project_->setLastHistoryLabel("Placed layout device " + deviceCopy.name + " as " + instanceName);
+        refreshProject();
+        if (layoutCanvas_)
+            layoutCanvas_->selectLayoutInstance(instanceId);
+        statusBar()->showMessage(
+            QStringLiteral("Placed %1 as %2; double-click a connection to route it.")
+                .arg(QString::fromStdString(deviceCopy.name), QString::fromStdString(instanceName)));
+    }
+
+    bool layoutPlannedEndpointIsRoutable(const ice::LayoutCell &cell, ice::ObjectId endpoint,
+                                         ice::ObjectId port) const {
+        if (const auto pin = cell.ports.find(endpoint); pin != cell.ports.end())
+            return pin->second.layer != 0 && pin->second.rectangle.valid();
+        if (port == 0 || !project_)
+            return false;
+        const auto instance = cell.instances.find(endpoint);
+        if (instance == cell.instances.end())
+            return false;
+        const auto child = project_->project().layoutCells.find(instance->second.cell);
+        return child != project_->project().layoutCells.end() && child->second.library &&
+               !child->second.device.empty() && child->second.ports.contains(port);
+    }
+
+    void activateLayoutPlannedConnection(ice::ObjectId connectionId) {
+        if (!project_ || connectionId == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto connection = cellIt->second.plannedConnections.find(connectionId);
+        if (connection == cellIt->second.plannedConnections.end())
+            return;
+
+        const bool fromRoutable =
+            layoutPlannedEndpointIsRoutable(cellIt->second, connection->second.from, connection->second.fromPort);
+        const bool toRoutable =
+            layoutPlannedEndpointIsRoutable(cellIt->second, connection->second.to, connection->second.toPort);
+        QMenu menu(this);
+        auto *manual = menu.addAction(QStringLiteral("Draw Connection Manually"));
+        auto *automatic = menu.addAction(QStringLiteral("Route Automatically"));
+        automatic->setEnabled(fromRoutable && toRoutable);
+        if (!automatic->isEnabled())
+            automatic->setToolTip(
+                QStringLiteral("Automatic routing requires placed device pins or layout pins on both ends."));
+        auto *chosen = menu.exec(QCursor::pos());
+        if (chosen == manual) {
+            project_->execute("break planned connection", [&](ice::Project &project) {
+                auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell != project.layoutCells.end() && !cell->second.library)
+                    cell->second.plannedConnections.erase(connectionId);
+                updateRoutedConnectionPaths(project);
+            });
+            project_->setLastHistoryLabel("Broke layout planned connection");
+            refreshProject();
+            if (layoutCanvas_) {
+                if (layoutPathTool_)
+                    layoutPathTool_->setChecked(true);
+                layoutCanvas_->setTool(LayoutCanvas::Tool::path);
+                updateLayoutPathConfig();
+                layoutCanvas_->setFocus();
+            }
+            statusBar()->showMessage(QStringLiteral("Connection removed; draw it manually with the Path tool."));
+            return;
+        }
+        if (chosen == automatic)
+            routeLayoutPlannedConnection(connectionId);
+    }
+
+    void routeLayoutPlannedConnection(ice::ObjectId connectionId) {
+        if (!project_ || connectionId == 0)
+            return;
+        const auto &project = project_->project();
+        const auto cellIt = project.layoutCells.find(activeLayoutId_);
+        if (cellIt == project.layoutCells.end() || cellIt->second.library)
+            return;
+        const auto connectionIt = cellIt->second.plannedConnections.find(connectionId);
+        if (connectionIt == cellIt->second.plannedConnections.end())
+            return;
+        const auto connection = connectionIt->second;
+
+        std::string routeError;
+        const auto routeWidth = std::max<ice::Coordinate>(1, layoutPathWidth_);
+        const auto geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, routeWidth, &routeError);
+        if (!geometry) {
+            if (routeError == "The two pins already touch; no route is needed.")
+                statusBar()->showMessage(QString::fromStdString(routeError));
+            else
+                QMessageBox::information(this, QStringLiteral("Automatic Routing"), QString::fromStdString(routeError));
+            return;
+        }
+        const auto &points = geometry->points;
+        const auto &pointVias = geometry->pointVias;
+        const auto common = geometry->layer;
+
+        ice::ObjectId pathId = 0;
+        try {
+            project_->execute("route planned connection", [&](ice::Project &project) {
+                auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                auto shape = ice::Shape{};
+                shape.id = project.nextId();
+                shape.layer = common;
+                if (connection.net != 0)
+                    shape.net = connection.net;
+                shape.routedConnection = connectionId;
+                shape.name = ice::nextShapeName(cell->second, "Routed Path");
+                shape.centerline = points;
+                shape.segmentLayers = geometry->segmentLayers;
+                shape.pointVias = pointVias;
+                shape.width = std::max(1, layoutPathWidth_);
+                rebuildLayoutPathGeometry(shape);
+                pathId = shape.id;
+                cell->second.shapes.emplace(shape.id, std::move(shape));
+                if (const auto planned = cell->second.plannedConnections.find(connectionId);
+                    planned != cell->second.plannedConnections.end())
+                    planned->second.routed = true;
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Automatic Routing"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (pathId == 0)
+            return;
+        project_->setLastHistoryLabel("Routed layout planned connection");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Automatically routed the connection."));
     }
 
     void openLayoutInstanceCell(ice::ObjectId instanceId) {
@@ -2513,6 +3908,62 @@ class DocumentWindow : public QMainWindow {
         shape.rectangle = {minX, minY, maxX - minX, maxY - minY};
     }
 
+    static void updateRoutedConnectionPaths(ice::Project &project) {
+        for (auto &[cellId, cell] : project.layoutCells) {
+            if (cell.library)
+                continue;
+            std::map<ice::ObjectId, ice::ObjectId> pathByConnection;
+            for (auto shape = cell.shapes.begin(); shape != cell.shapes.end();) {
+                if (shape->second.routedConnection == 0) {
+                    ++shape;
+                    continue;
+                }
+                const auto connectionId = shape->second.routedConnection;
+                const auto connection = cell.plannedConnections.find(connectionId);
+                if (connection == cell.plannedConnections.end() || !connection->second.routed ||
+                    pathByConnection.contains(connectionId)) {
+                    shape = cell.shapes.erase(shape);
+                    continue;
+                }
+                pathByConnection.emplace(connectionId, shape->first);
+                ++shape;
+            }
+            for (auto &[connectionId, connection] : cell.plannedConnections) {
+                if (!connection.routed)
+                    continue;
+                const auto path = pathByConnection.find(connectionId);
+                if (path == pathByConnection.end()) {
+                    connection.routed = false;
+                    continue;
+                }
+                std::string error;
+                const auto pathShape = cell.shapes.find(path->second);
+                const auto routeWidth = pathShape != cell.shapes.end()
+                                            ? std::max<ice::Coordinate>(1, pathShape->second.width)
+                                            : std::max<ice::Coordinate>(1, project.grid);
+                const auto geometry = computeLayoutAutoRoute(project, cellId, connection, routeWidth, &error);
+                if (!geometry) {
+                    if (const auto shape = cell.shapes.find(path->second); shape != cell.shapes.end())
+                        cell.shapes.erase(shape);
+                    connection.routed = false;
+                    continue;
+                }
+                auto &shape = cell.shapes.at(path->second);
+                shape.layer = geometry->layer;
+                if (connection.net != 0)
+                    shape.net = connection.net;
+                else
+                    shape.net.reset();
+                shape.centerline = geometry->points;
+                shape.segmentLayers = geometry->segmentLayers;
+                shape.pointVias = geometry->pointVias;
+                if (shape.width <= 0)
+                    shape.width = std::max<ice::Coordinate>(1, project.grid);
+                rebuildLayoutPathGeometry(shape);
+            }
+        }
+    }
+
     void finishActiveLayoutPath() {
         activeLayoutPathId_ = 0;
         activeLayoutPathWidth_ = 0;
@@ -2523,6 +3974,44 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto x = static_cast<ice::Coordinate>(std::lround(position.x()));
         const auto y = static_cast<ice::Coordinate>(std::lround(-position.y()));
+        const auto &currentProject = project_->project();
+        if (const auto cellIt = currentProject.layoutCells.find(activeLayoutId_);
+            cellIt != currentProject.layoutCells.end() && !cellIt->second.library) {
+            const auto shapeIt = cellIt->second.shapes.find(shapeId);
+            if (shapeIt != cellIt->second.shapes.end() && shapeIt->second.routedConnection != 0) {
+                const auto connectionId = shapeIt->second.routedConnection;
+                const auto connectionIt = cellIt->second.plannedConnections.find(connectionId);
+                if (connectionIt == cellIt->second.plannedConnections.end())
+                    return;
+                const auto lastIndex = static_cast<int>(shapeIt->second.centerline.size()) - 1;
+                if (index != 0 && index != lastIndex)
+                    return;
+                const bool fromEnd = index == 0;
+                const auto endpoint = fromEnd ? connectionIt->second.from : connectionIt->second.to;
+                const auto port = fromEnd ? connectionIt->second.fromPort : connectionIt->second.toPort;
+                const auto pin = layoutRouteEndpoint(currentProject, cellIt->second, endpoint, port);
+                if (!pin)
+                    return;
+                const auto side = layoutPointSide(pin->rect, ice::LayoutPoint{x, y});
+                try {
+                    project_->execute("change routed pin side", [&](ice::Project &project) {
+                        auto &cell = project.layoutCells.at(activeLayoutId_);
+                        const auto connection = cell.plannedConnections.find(connectionId);
+                        if (connection == cell.plannedConnections.end())
+                            return;
+                        (fromEnd ? connection->second.fromSide : connection->second.toSide) = side;
+                        updateRoutedConnectionPaths(project);
+                    });
+                } catch (const ice::ProjectError &error) {
+                    statusBar()->showMessage(
+                        QStringLiteral("Change routed pin side: %1").arg(QString::fromStdString(error.what())), 5000);
+                    return;
+                }
+                project_->setLastHistoryLabel("Changed layout routed pin side");
+                refreshProject();
+                return;
+            }
+        }
         try {
             project_->execute("move layout path point", [&](ice::Project &project) {
                 const auto cell = project.layoutCells.find(activeLayoutId_);
@@ -3099,15 +4588,17 @@ class DocumentWindow : public QMainWindow {
 
         std::set<ice::ObjectId> touchedConnections;
         for (const auto &[connectionId, connection] : cell.plannedConnections) {
-            const auto from = cell.plannedDevices.find(connection.from);
-            const auto to = cell.plannedDevices.find(connection.to);
-            if (from == cell.plannedDevices.end() || to == cell.plannedDevices.end())
+            if (connection.routed)
                 continue;
-            const auto fromRect = layoutPlannedDeviceSceneRect(from->second);
-            const auto toRect = layoutPlannedDeviceSceneRect(to->second);
+            const auto fromRect =
+                layoutConnectionEndpointSceneRect(project_->project(), cell, connection.from, connection.fromPort);
+            const auto toRect =
+                layoutConnectionEndpointSceneRect(project_->project(), cell, connection.to, connection.toPort);
+            if (!fromRect || !toRect)
+                continue;
             QPainterPath line;
-            line.moveTo(layoutPlannedEdgeScenePoint(fromRect, toRect.center()));
-            line.lineTo(layoutPlannedEdgeScenePoint(toRect, fromRect.center()));
+            line.moveTo(layoutPlannedEdgeScenePoint(*fromRect, toRect->center()));
+            line.lineTo(layoutPlannedEdgeScenePoint(*toRect, fromRect->center()));
             if (touches(line) || touchedDevices.contains(connection.from) || touchedDevices.contains(connection.to)) {
                 touchedConnections.insert(connectionId);
                 touchedDevices.insert(connection.from);
@@ -3988,16 +5479,7 @@ class DocumentWindow : public QMainWindow {
                 project.packageDependencies.push_back(spec.name);
             if (spec.pdk) {
                 const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
-                for (const auto &layer : spec.pdk->layers) {
-                    const auto exists =
-                        std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
-                            const auto &existing = entry.second;
-                            return existing.name == layer.name && existing.layout == 0 &&
-                                   (existing.pdk.empty() || existing.pdk == technology);
-                        });
-                    if (exists == project.layers.end())
-                        ice::addLayer(project, layer.name, layer.number, 0, technology);
-                }
+                addPdkLayers(project, *spec.pdk, technology);
             }
             if (project.schematicCells.empty()) {
                 const auto schematic =
@@ -4177,7 +5659,7 @@ class DocumentWindow : public QMainWindow {
                     pointViaColors.push_back(std::move(colors));
                 }
                 item = createLayoutPathItem(
-                    id, points, shape.width, segmentColors, pointViaColors, readOnly,
+                    id, points, shape.width, segmentColors, pointViaColors, readOnly, true, shape.routedConnection != 0,
                     [this](ice::ObjectId pathId, int index, QPointF position) {
                         QTimer::singleShot(
                             0, this, [this, pathId, index, position] { moveLayoutPathPoint(pathId, index, position); });
@@ -4227,8 +5709,12 @@ class DocumentWindow : public QMainWindow {
                     }
                 }
             }
-            item->setToolTip(readOnly ? QStringLiteral("Library cell shape %1").arg(id)
-                                      : QStringLiteral("Shape %1").arg(id));
+            if (readOnly)
+                item->setToolTip(QStringLiteral("Library cell shape %1").arg(id));
+            else if (shape.isPath() && shape.routedConnection != 0)
+                item->setToolTip(QStringLiteral("Routed path %1").arg(id));
+            else
+                item->setToolTip(QStringLiteral("Shape %1").arg(id));
         }
 
         for (const auto &[id, port] : cellIt->second.ports) {
@@ -4364,24 +5850,20 @@ class DocumentWindow : public QMainWindow {
                 delta.y() != 0.0 ? rect.height() * 0.5 / std::abs(delta.y()) : std::numeric_limits<qreal>::max();
             return center + delta * std::min(scaleX, scaleY);
         };
-        QPen connectionPen(ice::uiColor(ice::UiColor::Accent4));
-        connectionPen.setCosmetic(true);
-        connectionPen.setWidthF(1.5);
         for (const auto &[connectionId, connection] : cellIt->second.plannedConnections) {
-            const auto from = cellIt->second.plannedDevices.find(connection.from);
-            const auto to = cellIt->second.plannedDevices.find(connection.to);
-            if (from == cellIt->second.plannedDevices.end() || to == cellIt->second.plannedDevices.end())
+            if (connection.routed)
                 continue;
-            const auto fromRect = plannedRect(from->second);
-            const auto toRect = plannedRect(to->second);
-            auto *line = layoutCanvas_->scene()->addLine(
-                QLineF(plannedEdge(fromRect, toRect.center()), plannedEdge(toRect, fromRect.center())), connectionPen);
-            line->setZValue(-5.0);
-            line->setData(0, QVariant::fromValue<qulonglong>(connectionId));
-            line->setData(2, QStringLiteral("planned-connection"));
-            line->setAcceptedMouseButtons(Qt::NoButton);
+            const auto fromRect = layoutConnectionEndpointSceneRect(project_->project(), cellIt->second,
+                                                                    connection.from, connection.fromPort);
+            const auto toRect = layoutConnectionEndpointSceneRect(project_->project(), cellIt->second, connection.to,
+                                                                  connection.toPort);
+            if (!fromRect || !toRect)
+                continue;
+            const QLineF segment(plannedEdge(*fromRect, toRect->center()), plannedEdge(*toRect, fromRect->center()));
+            auto *item = createLayoutPlannedConnectionItem(connectionId, segment, ice::uiColor(ice::UiColor::Accent4));
+            layoutCanvas_->scene()->addItem(item);
             if (const auto net = cellIt->second.nets.find(connection.net); net != cellIt->second.nets.end())
-                line->setToolTip(QString::fromStdString(net->second.name));
+                item->setToolTip(QString::fromStdString(net->second.name));
         }
         for (const auto &[deviceId, device] : cellIt->second.plannedDevices) {
             layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
@@ -4422,6 +5904,7 @@ class DocumentWindow : public QMainWindow {
                 return;
             if (auto instance = cellIt->second.instances.find(instanceId); instance != cellIt->second.instances.end())
                 instance->second.orientation = composeOrientation(instance->second.orientation, step);
+            updateRoutedConnectionPaths(project);
         });
         if (const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
             cellIt != project_->project().layoutCells.end()) {
@@ -4448,6 +5931,7 @@ class DocumentWindow : public QMainWindow {
                 instance->second.x = project.snap(instance->second.x);
                 instance->second.y = project.snap(instance->second.y);
             }
+            updateRoutedConnectionPaths(project);
         });
         if (const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
             cellIt != project_->project().layoutCells.end()) {
@@ -4530,6 +6014,7 @@ class DocumentWindow : public QMainWindow {
                     device->second.y = centerY - device->second.height * 0.5;
                 }
             }
+            updateRoutedConnectionPaths(project);
         });
         project_->setLastHistoryLabel("Rotated layout figures");
         refreshProject();
@@ -4637,7 +6122,8 @@ class DocumentWindow : public QMainWindow {
                         else if (shape.isText())
                             typeName = QStringLiteral("Text");
                         else if (shape.isPath())
-                            typeName = QStringLiteral("Path");
+                            typeName =
+                                shape.routedConnection != 0 ? QStringLiteral("Routed Path") : QStringLiteral("Path");
                         else if (!shape.polygon.empty())
                             typeName = QStringLiteral("Polygon");
                         else
@@ -4696,6 +6182,40 @@ class DocumentWindow : public QMainWindow {
                                                             static_cast<ice::Coordinate>(position.x()),
                                                             static_cast<ice::Coordinate>(-position.y())});
         });
+        refreshProject();
+    }
+
+    void renameSchematicNet(ice::ObjectId netId) {
+        if (!project_ || netId == 0)
+            return;
+        auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+        if (cellIt == project_->project().schematicCells.end())
+            cellIt = project_->project().schematicCells.begin();
+        if (cellIt == project_->project().schematicCells.end())
+            return;
+        const auto netIt = cellIt->second.nets.find(netId);
+        if (netIt == cellIt->second.nets.end())
+            return;
+        bool accepted = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Rename Net Label"), QStringLiteral("Net name:"),
+                                  QLineEdit::Normal, QString::fromStdString(netIt->second.name), &accepted)
+                .trimmed();
+        if (!accepted || name.isEmpty() || name.toStdString() == netIt->second.name)
+            return;
+        const auto cellId = cellIt->first;
+        bool changed = false;
+        project_->execute("rename net label", [&](ice::Project &project) {
+            auto &cell = project.schematicCells.at(cellId);
+            auto net = cell.nets.find(netId);
+            if (net == cell.nets.end())
+                return;
+            net->second.name = name.toStdString();
+            changed = true;
+        });
+        if (!changed)
+            return;
+        project_->setLastHistoryLabel("Renamed net label to " + name.toStdString());
         refreshProject();
     }
 
@@ -4982,6 +6502,12 @@ class DocumentWindow : public QMainWindow {
         }
         updateSchematicNetlistState();
         updateSimulationNetlistState();
+        // The parameter callback runs while the properties table is still
+        // handling the edit, so redraw the schematic after that event returns.
+        QTimer::singleShot(0, this, [this] {
+            if (project_)
+                refreshSchematic();
+        });
     }
 
     void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
@@ -5104,6 +6630,7 @@ class DocumentWindow : public QMainWindow {
                 if (cell.library)
                     applyLayoutDeviceShapes(project, cell, layoutDevicesPanel_->library(), geometry->shapes,
                                             geometry->ports);
+                updateRoutedConnectionPaths(project);
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Regenerate Device"), QString::fromStdString(error.what()));
@@ -6179,7 +7706,7 @@ class DocumentWindow : public QMainWindow {
                 break;
             uniqueName = QStringLiteral("%1 %2").arg(name).arg(suffix);
         }
-        name = uniqueName;
+        name = std::move(uniqueName);
 
         const auto root = QFileInfo(projectPath_).absolutePath();
         QDir reportsDir(QDir(root).filePath(QStringLiteral("scripts")));
@@ -6205,12 +7732,9 @@ class DocumentWindow : public QMainWindow {
         const auto relative = QDir(root).relativeFilePath(target);
         ice::ObjectId newId = 0;
         try {
-            const auto reportName = name;
-            const auto reportPath = relative;
             project_->execute("add simulation script", [&](ice::Project &project) {
                 newId = project.nextId();
-                project.reports.emplace(newId,
-                                        ice::ProjectReport{newId, reportName.toStdString(), reportPath.toStdString()});
+                project.reports.emplace(newId, ice::ProjectReport{newId, name.toStdString(), relative.toStdString()});
             });
             project_->setLastHistoryLabel("Added simulation script " + name.toStdString());
             activeReportId_ = newId;
@@ -6900,7 +8424,7 @@ class DocumentWindow : public QMainWindow {
         for (const auto &trace : vcd.traces) {
             traceNames.push_back(trace.name);
             if (!capture.empty())
-                capture += ",";
+                capture += ',';
             capture += trace.name;
         }
         bool graphsUpdated = false;
@@ -7146,6 +8670,7 @@ class DocumentWindow : public QMainWindow {
         }
 
         ensureDrcProcess();
+        drcLayoutId_ = cellId;
         drcTempDir_ = std::move(temporary);
         drcReportPath_ = reportPath;
         drcLog_.clear();
@@ -7211,6 +8736,38 @@ class DocumentWindow : public QMainWindow {
         if (activityPanel_)
             activityPanel_->showDrcTab();
         statusBar()->showMessage(QStringLiteral("DRC failed"));
+    }
+
+    void focusDrcViolation(const ice::DrcViolation &violation) {
+        if (!project_)
+            return;
+        const auto &project = project_->project();
+        auto cellId = drcLayoutId_;
+        if (!project.layoutCells.contains(cellId) && !violation.cell.empty()) {
+            const auto cell = std::find_if(project.layoutCells.begin(), project.layoutCells.end(),
+                                           [&](const auto &entry) { return entry.second.name == violation.cell; });
+            if (cell != project.layoutCells.end())
+                cellId = cell->first;
+        }
+        if (!project.layoutCells.contains(cellId))
+            cellId = activeLayoutId_;
+        if (!project.layoutCells.contains(cellId)) {
+            statusBar()->showMessage(QStringLiteral("DRC violation does not match an open layout cell"));
+            return;
+        }
+
+        openLayoutFile(cellId);
+        if (layoutCanvas_) {
+            layoutCanvas_->focusOnLayoutRect(violation.location);
+            layoutCanvas_->setFocus();
+        }
+        if (activityDock_)
+            activityDock_->show();
+
+        const auto rule = QString::fromStdString(violation.rule);
+        const auto message = QString::fromStdString(violation.message);
+        statusBar()->showMessage(message.isEmpty() ? QStringLiteral("DRC: %1").arg(rule)
+                                                   : QStringLiteral("DRC %1: %2").arg(rule, message));
     }
 
     void runLvs() {
@@ -7380,7 +8937,9 @@ class DocumentWindow : public QMainWindow {
 
     int historyScope(const QString &label) const {
         const auto lower = label.toLower();
-        const bool layout = lower.contains(QStringLiteral("layout")) || lower.contains(QStringLiteral("layer"));
+        const bool layout = lower.contains(QStringLiteral("layout")) || lower.contains(QStringLiteral("layer")) ||
+                            lower.contains(QStringLiteral("planned device")) ||
+                            lower.contains(QStringLiteral("planned connection"));
         const bool schematic =
             !layout && (lower.contains(QStringLiteral("schematic")) || lower.contains(QStringLiteral("symbol")) ||
                         lower.contains(QStringLiteral("net")) || lower.contains(QStringLiteral("pin")) ||
@@ -7392,6 +8951,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     void resetSectionHistories() {
+        schematicRouteCache_.clear();
         schematicHistory_.clear();
         layoutHistory_.clear();
         schematicHistoryPosition_ = 0;
@@ -7443,6 +9003,7 @@ class DocumentWindow : public QMainWindow {
             restored.proceduralLayouts = entries[position].project.proceduralLayouts;
         }
         project_->replaceProject(std::move(restored));
+        schematicRouteCache_.clear();
         if (schematic)
             schematicHistoryPosition_ = position;
         else
@@ -7557,10 +9118,8 @@ class DocumentWindow : public QMainWindow {
         return label;
     }
 
-    static QString schematicFileExtension(const ice::SchematicCell &cell) {
-        if (cell.systemVerilogSchematic)
-            return QStringLiteral("sv");
-        return cell.textSchematic ? QStringLiteral("sp") : QStringLiteral("icesch");
+    static TextDocumentLanguage textSourceLanguage(const ice::SchematicCell &cell) {
+        return cell.systemVerilogSchematic ? TextDocumentLanguage::SystemVerilog : TextDocumentLanguage::Spice;
     }
 
     void syncOpenFileTabs() {
@@ -7652,7 +9211,7 @@ class DocumentWindow : public QMainWindow {
                     const bool conflict = conflictedProceduralFiles_.contains(id);
                     layoutCellTabs_->setTabText(index,
                                                 fileTabLabel(QString::fromStdString(procedural->second.name),
-                                                             QStringLiteral("icelay"), layoutFileDirty(id), conflict));
+                                                             QStringLiteral("py"), layoutFileDirty(id), conflict));
                     continue;
                 }
                 const auto cell = project_->project().layoutCells.find(id);
@@ -7768,9 +9327,9 @@ class DocumentWindow : public QMainWindow {
                     if (!openLayoutTabs_.contains(id))
                         continue;
                     const auto index = layoutCellTabs_->count();
-                    layoutCellTabs_->addTab(new QWidget, fileTabLabel(QString::fromStdString(procedural.name),
-                                                                      QStringLiteral("icelay"), layoutFileDirty(id),
-                                                                      conflictedProceduralFiles_.contains(id)));
+                    layoutCellTabs_->addTab(new QWidget,
+                                            fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
+                                                         layoutFileDirty(id), conflictedProceduralFiles_.contains(id)));
                     layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
                     layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
                 }
@@ -7868,6 +9427,190 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    static std::string lowerText(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    }
+
+    static std::optional<std::string> instanceParameter(const ice::SchematicInstance &instance,
+                                                        std::initializer_list<const char *> names) {
+        for (const auto &parameter : instance.parameters) {
+            const auto key = lowerText(parameter.name);
+            for (const auto *name : names)
+                if (key == name)
+                    return parameter.value;
+        }
+        return std::nullopt;
+    }
+
+    static bool isSchematicSourceSymbol(const ice::Symbol &symbol, const ice::SchematicInstance &instance) {
+        const auto name = lowerText(symbol.name);
+        if (name.find("source") != std::string::npos || name.find("battery") != std::string::npos)
+            return true;
+        return instanceParameter(instance, {"voltage", "current", "amplitude", "pulsed_voltage"}).has_value();
+    }
+
+    static std::optional<double> parseQuantityValue(const std::string &text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return std::nullopt;
+        const auto last = text.find_last_not_of(" \t\r\n");
+        const auto trimmed = text.substr(first, last - first + 1);
+        try {
+            std::size_t consumed = 0;
+            const auto value = std::stod(trimmed, &consumed);
+            while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
+                ++consumed;
+            double scale = 1.0;
+            if (consumed < trimmed.size()) {
+                switch (trimmed[consumed]) {
+                case 'f':
+                    scale = 1.0e-15;
+                    break;
+                case 'p':
+                    scale = 1.0e-12;
+                    break;
+                case 'n':
+                    scale = 1.0e-9;
+                    break;
+                case 'u':
+                    scale = 1.0e-6;
+                    break;
+                case 'm':
+                    scale = 1.0e-3;
+                    break;
+                case 'k':
+                    scale = 1.0e3;
+                    break;
+                case 'M':
+                    scale = 1.0e6;
+                    break;
+                case 'G':
+                    scale = 1.0e9;
+                    break;
+                default:
+                    return std::nullopt;
+                }
+                ++consumed;
+                while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
+                    ++consumed;
+                if (consumed != trimmed.size())
+                    return std::nullopt;
+            }
+            if (!std::isfinite(value))
+                return std::nullopt;
+            return value * scale;
+        } catch (const std::exception &) {
+            return std::nullopt;
+        }
+    }
+
+    static QString formatQuantityValue(double value) {
+        if (!std::isfinite(value))
+            return {};
+        constexpr std::array<std::pair<double, const char *>, 9> units = {
+            std::pair{1.0e9, "G"},  std::pair{1.0e6, "M"},   std::pair{1.0e3, "k"},
+            std::pair{1.0, ""},     std::pair{1.0e-3, "m"},  std::pair{1.0e-6, "u"},
+            std::pair{1.0e-9, "n"}, std::pair{1.0e-12, "p"}, std::pair{1.0e-15, "f"}};
+        const auto magnitude = std::abs(value);
+        for (const auto &[scale, suffix] : units) {
+            if (magnitude >= scale || scale == 1.0e-15)
+                return QString::number(value / scale, 'g', 4) + QString::fromLatin1(suffix);
+        }
+        return QString::number(value, 'g', 4);
+    }
+
+    static QString withUnit(const std::string &value, const QString &unit) {
+        auto text = QString::fromStdString(value).trimmed();
+        if (text.endsWith(unit, Qt::CaseInsensitive))
+            return text;
+        return text + QLatin1Char(' ') + unit;
+    }
+
+    static QRectF svgVisibleBounds(QSvgRenderer &renderer, const QSizeF &size) {
+        if (!renderer.isValid() || !size.isValid() || size.isEmpty())
+            return {};
+        constexpr qreal maxDimension = 512.0;
+        const auto scale = std::min(maxDimension / std::max(size.width(), size.height()), 8.0);
+        const auto width = std::max(1, qRound(size.width() * scale));
+        const auto height = std::max(1, qRound(size.height() * scale));
+        QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        renderer.render(&painter, QRectF(0.0, 0.0, width, height));
+        painter.end();
+        int minX = width;
+        int minY = height;
+        int maxX = -1;
+        int maxY = -1;
+        for (int y = 0; y < height; ++y) {
+            const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+            for (int x = 0; x < width; ++x) {
+                if (qAlpha(line[x]) <= 8)
+                    continue;
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+            }
+        }
+        if (maxX < minX || maxY < minY)
+            return {};
+        return QRectF(minX / scale, minY / scale, (maxX - minX + 1) / scale, (maxY - minY + 1) / scale);
+    }
+
+    const QRectF &schematicArtworkVisibleBounds(QSvgRenderer &renderer, const std::string &artwork,
+                                                const QSizeF &size) {
+        if (const auto cached = schematicArtworkBoundsCache_.find(artwork);
+            cached != schematicArtworkBoundsCache_.end())
+            return cached->second;
+        return schematicArtworkBoundsCache_.emplace(artwork, svgVisibleBounds(renderer, size)).first->second;
+    }
+
+    struct SchematicValueLabel {
+        QString text;
+        bool onRight = false;
+    };
+
+    static SchematicValueLabel schematicValueLabel(const ice::Symbol &symbol, const ice::SchematicInstance &instance) {
+        if (const auto value = instanceParameter(instance, {"resistance"}))
+            return {QString::fromStdString(*value), false};
+        if (const auto value = instanceParameter(instance, {"capacitance"}))
+            return {QString::fromStdString(*value), false};
+        if (const auto value = instanceParameter(instance, {"inductance"}))
+            return {QString::fromStdString(*value), false};
+
+        const auto name = lowerText(symbol.name);
+        if (name.find("sine") != std::string::npos) {
+            QStringList lines;
+            if (const auto amplitude = instanceParameter(instance, {"amplitude"}))
+                lines.append(QStringLiteral("A = %1").arg(withUnit(*amplitude, QStringLiteral("V"))));
+            if (const auto frequency = instanceParameter(instance, {"frequency", "freq"})) {
+                if (const auto parsed = parseQuantityValue(*frequency); parsed && *parsed > 0.0)
+                    lines.append(QStringLiteral("T = %1 s").arg(formatQuantityValue(1.0 / *parsed)));
+            } else if (const auto period = instanceParameter(instance, {"period"})) {
+                lines.append(QStringLiteral("T = %1").arg(withUnit(*period, QStringLiteral("s"))));
+            }
+            if (!lines.isEmpty())
+                return {lines.join('\n'), true};
+        }
+        if (name.find("pulse") != std::string::npos) {
+            QStringList lines;
+            if (const auto voltage = instanceParameter(instance, {"pulsed_voltage", "amplitude", "voltage"}))
+                lines.append(QStringLiteral("V = %1").arg(withUnit(*voltage, QStringLiteral("V"))));
+            if (const auto period = instanceParameter(instance, {"period"}))
+                lines.append(QStringLiteral("T = %1").arg(withUnit(*period, QStringLiteral("s"))));
+            if (!lines.isEmpty())
+                return {lines.join('\n'), true};
+        }
+        if (const auto voltage = instanceParameter(instance, {"voltage"}))
+            return {withUnit(*voltage, QStringLiteral("V")), true};
+        if (const auto current = instanceParameter(instance, {"current"}))
+            return {withUnit(*current, QStringLiteral("A")), true};
+        return {};
+    }
+
     void refreshSchematic() {
         if (!schematicCanvas_)
             return;
@@ -7893,6 +9636,7 @@ class DocumentWindow : public QMainWindow {
             if (schematicViewStack_ && textSchematicEditorPage_)
                 schematicViewStack_->setCurrentWidget(textSchematicEditorPage_);
             if (textSchematicEditor_) {
+                textSchematicEditor_->setLanguage(textSourceLanguage(cell));
                 const auto text = QString::fromStdString(cell.sourceText());
                 if (textSchematicEditor_->text() != text)
                     textSchematicEditor_->setText(text);
@@ -7924,6 +9668,7 @@ class DocumentWindow : public QMainWindow {
         }
         if (schematicNetlistPanel_)
             schematicNetlistPanel_->setCell(project_->project(), &cell);
+        std::map<ice::ObjectId, QGraphicsTextItem *> netLabelItems;
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
                 continue;
@@ -7932,6 +9677,7 @@ class DocumentWindow : public QMainWindow {
             label->setData(0, QStringLiteral("net-label"));
             label->setData(1, QVariant::fromValue<qulonglong>(netId));
             label->setPos(net.x, -net.y);
+            netLabelItems.emplace(netId, label);
         }
         std::map<ice::ObjectId, ice::ObjectId> pinNetIds;
         for (const auto &[netId, net] : cell.nets)
@@ -7986,7 +9732,13 @@ class DocumentWindow : public QMainWindow {
             // Center artwork of any size on the symbol origin; pins are
             // defined relative to the artwork center (see symbols/*.toml).
             const auto artworkSize = renderer->defaultSize();
-            artwork->setPos(-artworkSize.width() / 2.0, -artworkSize.height() / 2.0);
+            const QRectF artworkRect(-artworkSize.width() / 2.0, -artworkSize.height() / 2.0, artworkSize.width(),
+                                     artworkSize.height());
+            const auto &visibleArtwork = schematicArtworkVisibleBounds(*renderer, artworkText, artworkSize);
+            const auto visibleInGroup = visibleArtwork.isValid() && !visibleArtwork.isEmpty()
+                                            ? visibleArtwork.translated(artworkRect.topLeft())
+                                            : artworkRect;
+            artwork->setPos(artworkRect.topLeft());
             artwork->setFlag(QGraphicsItem::ItemIsSelectable, false);
             artwork->setData(0, QStringLiteral("symbol-artwork"));
             auto *tint = new QGraphicsColorizeEffect(artwork);
@@ -7995,17 +9747,47 @@ class DocumentWindow : public QMainWindow {
             tint->setEnabled(true);
             artwork->setGraphicsEffect(tint);
             artwork->setData(3, QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(tint)));
+            constexpr qreal symbolAnnotationGap = 2.0;
+            const bool sourceSymbol = isSchematicSourceSymbol(symbolIt->second, instance);
+            const auto valueLabel = schematicValueLabel(symbolIt->second, instance);
             auto *label = new QGraphicsTextItem(QString::fromStdString(instance.name), group);
             label->setDefaultTextColor(ice::uiColor(ice::UiColor::Axis1));
-            if (symbolIt->second.label) {
+            if (sourceSymbol) {
+                const auto bounds = label->boundingRect();
+                label->setPos(visibleInGroup.left() - bounds.width() - symbolAnnotationGap,
+                              visibleInGroup.center().y() - bounds.height() / 2.0);
+            } else if (symbolIt->second.label) {
                 const auto bounds = label->boundingRect();
                 label->setPos(symbolIt->second.label->x - bounds.width() / 2.0,
                               -symbolIt->second.label->y - bounds.height() / 2.0);
             } else {
-                label->setPos(-artworkSize.width() / 2.0, artworkSize.height() / 2.0 + 6);
+                const auto bounds = label->boundingRect();
+                label->setPos(visibleInGroup.center().x() - bounds.width() / 2.0,
+                              visibleInGroup.bottom() + symbolAnnotationGap);
             }
             label->setData(0, QStringLiteral("symbol-label"));
             label->setFlag(QGraphicsItem::ItemIsSelectable, false);
+            if (!valueLabel.text.isEmpty()) {
+                auto *valueItem = new QGraphicsTextItem(valueLabel.text, group);
+                valueItem->setDefaultTextColor(ice::uiColor(ice::UiColor::Text1));
+                valueItem->setData(0, QStringLiteral("symbol-value"));
+                valueItem->setFlag(QGraphicsItem::ItemIsSelectable, false);
+                valueItem->setAcceptedMouseButtons(Qt::NoButton);
+                const auto bounds = valueItem->boundingRect();
+                if (valueLabel.onRight) {
+                    valueItem->setPos(visibleInGroup.right() + symbolAnnotationGap,
+                                      visibleInGroup.center().y() - bounds.height() / 2.0);
+                } else {
+                    qreal valueGap = symbolAnnotationGap;
+                    if (symbolIt->second.label) {
+                        const auto referenceBounds = label->boundingRect();
+                        const auto referenceBottom = -symbolIt->second.label->y + referenceBounds.height() / 2.0;
+                        valueGap = std::max<qreal>(0.0, visibleInGroup.top() - referenceBottom);
+                    }
+                    valueItem->setPos(visibleInGroup.center().x() - bounds.width() / 2.0,
+                                      visibleInGroup.bottom() + valueGap);
+                }
+            }
             for (const auto &pin : symbolIt->second.pins) {
                 auto *pinItem = new QGraphicsEllipseItem(QRectF(-5, -5, 10, 10), group);
                 pinItem->setPen(QPen(ice::uiColor(ice::UiColor::Axis1)));
@@ -8063,36 +9845,46 @@ class DocumentWindow : public QMainWindow {
             highlight->setData(0, QStringLiteral("symbol-highlight"));
             highlight->setVisible(false);
         }
-        struct PinView {
-            QPointF point;
-            ice::PinDirection direction;
-        };
-        std::map<ice::ObjectId, PinView> pinViews;
+        std::map<ice::ObjectId, SchematicPinView> pinViews;
         for (auto *item : scene->items()) {
             if (item->data(0).toString() != QStringLiteral("pin"))
                 continue;
+            auto *owner = item->parentItem();
             pinViews[item->data(1).toULongLong()] = {item->scenePos(),
-                                                     static_cast<ice::PinDirection>(item->data(2).toInt())};
+                                                     static_cast<ice::PinDirection>(item->data(2).toInt()),
+                                                     owner ? owner->data(1).toULongLong() : ice::ObjectId{0}};
+        }
+        reconcileSchematicRoutes(cellIt->first, cellIt->second, pinViews, scene);
+        if (const auto routeIt = schematicRouteCache_.find(cellIt->first); routeIt != schematicRouteCache_.end()) {
+            for (const auto &[netId, netRoute] : routeIt->second) {
+                for (const auto &branch : netRoute.branches) {
+                    if (branch.points.size() < 2)
+                        continue;
+                    QPainterPath path;
+                    path.moveTo(branch.points.front());
+                    for (std::size_t index = 1; index < branch.points.size(); ++index)
+                        path.lineTo(branch.points[index]);
+                    auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
+                    wire->setZValue(-1);
+                    wire->setData(0, QStringLiteral("wire"));
+                    wire->setData(1, QVariant::fromValue<qulonglong>(netId));
+                    wire->setData(4, QVariant::fromValue<qulonglong>(branch.fromPin));
+                    wire->setData(5, QVariant::fromValue<qulonglong>(branch.toPin));
+                }
+            }
         }
         for (const auto &[netId, net] : cell.nets) {
-            if (net.pins.size() < 2)
+            const auto label = netLabelItems.find(netId);
+            if (label == netLabelItems.end())
                 continue;
-            const auto root = pinViews.find(net.pins.front());
-            if (root == pinViews.end())
-                continue;
-            // A net is a tree rooted at its first pin. Route one branch to
-            // every other member so multi-pin nets remain fully visible.
-            for (std::size_t index = 1; index < net.pins.size(); ++index) {
-                const auto target = pinViews.find(net.pins[index]);
-                if (target == pinViews.end())
-                    continue;
-                auto path = routeWire(root->second.point, root->second.direction, target->second.point,
-                                      target->second.direction, scene, net.pins.front(), net.pins[index]);
-                auto *wire = scene->addPath(path, QPen(ice::uiColor(ice::UiColor::Accent4), 2));
-                wire->setZValue(-1);
-                wire->setData(0, QStringLiteral("wire"));
-                wire->setData(1, QVariant::fromValue<qulonglong>(netId));
-            }
+            std::optional<QPointF> position;
+            if (net.labelAnchor)
+                position = schematicNetLabelPosition(cellIt->first, net, *label->second);
+            if (!position)
+                position =
+                    schematicNetNearestLabelPosition(cellIt->first, netId, *label->second, QPointF(net.x, -net.y));
+            if (position)
+                label->second->setPos(*position);
         }
         // Selection is view state over the domain model, so re-apply it after
         // the scene has been rebuilt from the database.
@@ -8106,6 +9898,308 @@ class DocumentWindow : public QMainWindow {
             if (child->data(0).toString() == QStringLiteral("symbol-artwork"))
                 return child->sceneBoundingRect();
         return symbol->sceneBoundingRect();
+    }
+
+    static bool schematicSegmentIntersectsRect(QPointF first, QPointF second, QRectF rect, qreal margin) {
+        rect = rect.normalized().adjusted(-margin, -margin, margin, margin);
+        if (rect.width() <= 0.0 || rect.height() <= 0.0)
+            return false;
+        constexpr qreal epsilon = 0.001;
+        if (std::abs(first.y() - second.y()) <= epsilon) {
+            if (first.y() <= rect.top() + epsilon || first.y() >= rect.bottom() - epsilon)
+                return false;
+            return std::min(std::max(first.x(), second.x()), rect.right()) -
+                       std::max(std::min(first.x(), second.x()), rect.left()) >
+                   epsilon;
+        }
+        if (std::abs(first.x() - second.x()) <= epsilon) {
+            if (first.x() <= rect.left() + epsilon || first.x() >= rect.right() - epsilon)
+                return false;
+            return std::min(std::max(first.y(), second.y()), rect.bottom()) -
+                       std::max(std::min(first.y(), second.y()), rect.top()) >
+                   epsilon;
+        }
+        return false;
+    }
+
+    bool schematicBranchValid(const SchematicBranchRoute &branch,
+                              const std::map<ice::ObjectId, SchematicPinView> &pinViews, QGraphicsScene *scene) const {
+        const auto from = pinViews.find(branch.fromPin);
+        const auto to = pinViews.find(branch.toPin);
+        if (from == pinViews.end() || to == pinViews.end() || branch.fromPin == branch.toPin)
+            return false;
+        if (branch.fromDirection != from->second.direction || branch.toDirection != to->second.direction)
+            return false;
+        if (branch.points.size() < 2)
+            return false;
+        constexpr qreal tolerance = 0.5;
+        if (QLineF(branch.points.front(), from->second.point).length() > tolerance ||
+            QLineF(branch.points.back(), to->second.point).length() > tolerance)
+            return false;
+        constexpr qreal clearance = 2.0;
+        constexpr qreal minimumExtension = 30.0;
+        for (auto *item : scene->items()) {
+            if (item->data(0).toString() != QStringLiteral("symbol"))
+                continue;
+            const auto instance = item->data(1).toULongLong();
+            if (instance == from->second.instance || instance == to->second.instance)
+                continue;
+            const auto rect = symbolObstacleRect(item);
+            if (!rect.isValid() || rect.isEmpty())
+                continue;
+            for (std::size_t index = 0; index + 1 < branch.points.size(); ++index)
+                if (schematicSegmentIntersectsRect(branch.points[index], branch.points[index + 1], rect, clearance))
+                    return false;
+        }
+        for (const auto &[pinId, view] : pinViews) {
+            if (pinId == branch.fromPin || pinId == branch.toPin)
+                continue;
+            const auto exit = view.point + directionVector(view.direction) * minimumExtension;
+            const QRectF extension = QRectF(view.point, exit).normalized();
+            for (std::size_t index = 0; index + 1 < branch.points.size(); ++index)
+                if (schematicSegmentIntersectsRect(branch.points[index], branch.points[index + 1], extension,
+                                                   clearance + 0.5))
+                    return false;
+        }
+        return true;
+    }
+
+    std::optional<QPointF> schematicNetLabelPosition(ice::ObjectId cellId, const ice::Net &net,
+                                                     const QGraphicsTextItem &label) const {
+        if (!net.labelAnchor)
+            return std::nullopt;
+        const auto cellRoutes = schematicRouteCache_.find(cellId);
+        if (cellRoutes == schematicRouteCache_.end())
+            return std::nullopt;
+        const auto netRoute = cellRoutes->second.find(net.id);
+        if (netRoute == cellRoutes->second.end())
+            return std::nullopt;
+        const SchematicBranchRoute *branch = nullptr;
+        bool reversed = false;
+        for (const auto &candidate : netRoute->second.branches) {
+            if (candidate.fromPin == net.labelAnchor->fromPin && candidate.toPin == net.labelAnchor->toPin) {
+                branch = &candidate;
+                break;
+            }
+            if (candidate.fromPin == net.labelAnchor->toPin && candidate.toPin == net.labelAnchor->fromPin) {
+                branch = &candidate;
+                reversed = true;
+                break;
+            }
+        }
+        if (!branch || branch->points.size() < 2)
+            return std::nullopt;
+        std::vector<qreal> cumulative(branch->points.size(), 0.0);
+        for (std::size_t index = 1; index < branch->points.size(); ++index)
+            cumulative[index] =
+                cumulative[index - 1] + QLineF(branch->points[index - 1], branch->points[index]).length();
+        const auto totalLength = cumulative.back();
+        if (totalLength <= 0.0)
+            return std::nullopt;
+        const auto fraction =
+            std::clamp(reversed ? 1.0 - net.labelAnchor->fraction : net.labelAnchor->fraction, 0.0, 1.0);
+        const auto side = (net.labelAnchor->sideB != reversed) ? 1.0 : -1.0;
+        const auto target = fraction * totalLength;
+        const auto bounds = label.boundingRect();
+        const auto width = bounds.width() > 0.0 ? bounds.width() : 80.0;
+        const auto height = bounds.height() > 0.0 ? bounds.height() : 18.0;
+        for (std::size_t index = 1; index < branch->points.size(); ++index) {
+            const auto start = branch->points[index - 1];
+            const auto end = branch->points[index];
+            const auto delta = end - start;
+            const auto length = QLineF(start, end).length();
+            if (length <= 0.0)
+                continue;
+            if (target > cumulative[index] + 0.001 && index + 1 < branch->points.size())
+                continue;
+            const auto local = std::clamp((target - cumulative[index - 1]) / length, qreal(0.0), qreal(1.0));
+            const auto point = start + delta * local;
+            const QPointF normal(-delta.y() / length, delta.x() / length);
+            const qreal clearance = std::abs(normal.x()) * width / 2.0 + std::abs(normal.y()) * height / 2.0 + 2.0;
+            return point + normal * side * clearance - bounds.center();
+        }
+        return std::nullopt;
+    }
+
+    std::optional<QPointF> schematicNetNearestLabelPosition(ice::ObjectId cellId, ice::ObjectId netId,
+                                                            const QGraphicsTextItem &label, QPointF candidate) const {
+        const auto cellRoutes = schematicRouteCache_.find(cellId);
+        if (cellRoutes == schematicRouteCache_.end())
+            return std::nullopt;
+        const auto netRoute = cellRoutes->second.find(netId);
+        if (netRoute == cellRoutes->second.end())
+            return std::nullopt;
+        const auto bounds = label.boundingRect();
+        const auto width = bounds.width() > 0.0 ? bounds.width() : 80.0;
+        const auto height = bounds.height() > 0.0 ? bounds.height() : 18.0;
+        const QPointF labelCenter = bounds.center();
+        const QPointF candidateCenter = candidate + labelCenter;
+        constexpr qreal margin = 2.0;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        std::optional<QPointF> best;
+        for (const auto &branch : netRoute->second.branches) {
+            for (std::size_t index = 1; index < branch.points.size(); ++index) {
+                const auto start = branch.points[index - 1];
+                const auto end = branch.points[index];
+                const auto delta = end - start;
+                const auto lengthSquared = QPointF::dotProduct(delta, delta);
+                if (lengthSquared <= 0.0)
+                    continue;
+                const auto length = std::sqrt(lengthSquared);
+                const auto fraction = std::clamp(QPointF::dotProduct(candidateCenter - start, delta) / lengthSquared,
+                                                 qreal(0.0), qreal(1.0));
+                const auto point = start + delta * fraction;
+                const QPointF normal(-delta.y() / length, delta.x() / length);
+                const qreal side = QPointF::dotProduct(candidateCenter - point, normal) < 0.0 ? -1.0 : 1.0;
+                const qreal clearance =
+                    std::abs(normal.x()) * width / 2.0 + std::abs(normal.y()) * height / 2.0 + margin;
+                const auto anchored = point + normal * side * clearance - labelCenter;
+                const auto distance = QLineF(candidate, anchored).length();
+                if (distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                best = anchored;
+            }
+        }
+        return best;
+    }
+
+    void reconcileSchematicRoutes(ice::ObjectId cellId, const ice::SchematicCell &cell,
+                                  const std::map<ice::ObjectId, SchematicPinView> &pinViews, QGraphicsScene *scene) {
+        auto &cellCache = schematicRouteCache_[cellId];
+        for (auto entry = cellCache.begin(); entry != cellCache.end();) {
+            if (!cell.nets.contains(entry->first))
+                entry = cellCache.erase(entry);
+            else
+                ++entry;
+        }
+        for (const auto &[netId, net] : cell.nets) {
+            std::vector<ice::ObjectId> pins;
+            std::set<ice::ObjectId> pinSet;
+            for (const auto pin : net.pins) {
+                if (!pinViews.contains(pin) || !pinSet.insert(pin).second)
+                    continue;
+                pins.push_back(pin);
+            }
+            if (pins.size() < 2) {
+                cellCache.erase(netId);
+                continue;
+            }
+            auto &route = cellCache[netId];
+            if (net.labelAnchor && pinSet.contains(net.labelAnchor->fromPin) &&
+                pinSet.contains(net.labelAnchor->toPin) && net.labelAnchor->fromPin != net.labelAnchor->toPin) {
+                const auto present =
+                    std::any_of(route.branches.begin(), route.branches.end(), [&](const SchematicBranchRoute &branch) {
+                        return (branch.fromPin == net.labelAnchor->fromPin && branch.toPin == net.labelAnchor->toPin) ||
+                               (branch.fromPin == net.labelAnchor->toPin && branch.toPin == net.labelAnchor->fromPin);
+                    });
+                if (!present) {
+                    SchematicBranchRoute branch;
+                    branch.fromPin = net.labelAnchor->fromPin;
+                    branch.toPin = net.labelAnchor->toPin;
+                    route.branches.insert(route.branches.begin(), branch);
+                }
+            }
+
+            std::map<ice::ObjectId, ice::ObjectId> parent;
+            for (const auto pin : pins)
+                parent.emplace(pin, pin);
+            std::function<ice::ObjectId(ice::ObjectId)> findRoot = [&](ice::ObjectId pin) {
+                auto root = pin;
+                while (parent.at(root) != root)
+                    root = parent.at(root);
+                while (parent.at(pin) != pin) {
+                    const auto next = parent.at(pin);
+                    parent[pin] = root;
+                    pin = next;
+                }
+                return root;
+            };
+            const auto unite = [&](ice::ObjectId left, ice::ObjectId right) {
+                const auto leftRoot = findRoot(left);
+                const auto rightRoot = findRoot(right);
+                if (leftRoot != rightRoot)
+                    parent[rightRoot] = leftRoot;
+            };
+
+            std::vector<SchematicBranchRoute> branches;
+            std::set<std::pair<ice::ObjectId, ice::ObjectId>> seen;
+            for (auto &branch : route.branches) {
+                if (!pinSet.contains(branch.fromPin) || !pinSet.contains(branch.toPin) ||
+                    branch.fromPin == branch.toPin)
+                    continue;
+                const auto key = branch.fromPin < branch.toPin ? std::make_pair(branch.fromPin, branch.toPin)
+                                                               : std::make_pair(branch.toPin, branch.fromPin);
+                if (!seen.insert(key).second)
+                    continue;
+                if (findRoot(branch.fromPin) == findRoot(branch.toPin))
+                    continue;
+                unite(branch.fromPin, branch.toPin);
+                branches.push_back(std::move(branch));
+            }
+
+            // Keep existing branches and add the shortest links needed to
+            // connect any pins that are not yet covered by the cached tree.
+            while (true) {
+                std::map<ice::ObjectId, std::vector<ice::ObjectId>> components;
+                for (const auto pin : pins)
+                    components[findRoot(pin)].push_back(pin);
+                if (components.size() <= 1)
+                    break;
+                const std::vector<std::pair<ice::ObjectId, std::vector<ice::ObjectId>>> componentList(
+                    components.begin(), components.end());
+                double bestDistance = std::numeric_limits<double>::max();
+                ice::ObjectId bestFrom = 0;
+                ice::ObjectId bestTo = 0;
+                for (std::size_t left = 0; left < componentList.size(); ++left) {
+                    for (std::size_t right = left + 1; right < componentList.size(); ++right) {
+                        for (const auto leftPin : componentList[left].second) {
+                            for (const auto rightPin : componentList[right].second) {
+                                const auto distance =
+                                    QLineF(pinViews.at(leftPin).point, pinViews.at(rightPin).point).length();
+                                const auto better =
+                                    distance < bestDistance - 0.001 ||
+                                    (std::abs(distance - bestDistance) <= 0.001 &&
+                                     std::make_pair(leftPin, rightPin) < std::make_pair(bestFrom, bestTo));
+                                if (!better)
+                                    continue;
+                                bestDistance = distance;
+                                bestFrom = leftPin;
+                                bestTo = rightPin;
+                            }
+                        }
+                    }
+                }
+                if (bestFrom == 0)
+                    break;
+                SchematicBranchRoute branch;
+                branch.fromPin = bestFrom;
+                branch.toPin = bestTo;
+                branches.push_back(branch);
+                unite(bestFrom, bestTo);
+            }
+
+            for (auto &branch : branches) {
+                const auto from = pinViews.find(branch.fromPin);
+                const auto to = pinViews.find(branch.toPin);
+                if (from == pinViews.end() || to == pinViews.end())
+                    continue;
+                if (schematicBranchValid(branch, pinViews, scene))
+                    continue;
+                branch.points.clear();
+                const auto path = routeWire(from->second.point, from->second.direction, to->second.point,
+                                            to->second.direction, scene, branch.fromPin, branch.toPin);
+                for (int index = 0; index < path.elementCount(); ++index) {
+                    const auto element = path.elementAt(index);
+                    const QPointF point(element.x, element.y);
+                    if (branch.points.empty() || QLineF(branch.points.back(), point).length() > 0.001)
+                        branch.points.push_back(point);
+                }
+                branch.fromDirection = from->second.direction;
+                branch.toDirection = to->second.direction;
+            }
+            route.branches = std::move(branches);
+        }
     }
 
     QPainterPath routeWire(QPointF start, ice::PinDirection startDirection, QPointF target,
@@ -8202,6 +10296,12 @@ class DocumentWindow : public QMainWindow {
             startupView_->refreshAppearance();
         if (reportHighlighter_)
             reportHighlighter_->refreshColors();
+        if (proceduralEditor_)
+            proceduralEditor_->refreshSyntaxColors();
+        if (textSchematicEditor_)
+            textSchematicEditor_->refreshSyntaxColors();
+        if (simulationTestbenchEditor_)
+            simulationTestbenchEditor_->refreshSyntaxColors();
         if (graphTabs_) {
             for (int index = 0; index < graphTabs_->count(); ++index)
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
@@ -8471,6 +10571,8 @@ class DocumentWindow : public QMainWindow {
         activityDock_->setTitleBarWidget(titleBar);
         activityPanel_ = new ActivityPanel;
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
+        activityPanel_->setOnDrcViolationActivated(
+            [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
         activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }
@@ -8678,7 +10780,7 @@ class DocumentWindow : public QMainWindow {
                 if (project_) {
                     for (const auto &[id, layout] : project_->project().proceduralLayouts)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(layout.name),
-                                                                 QStringLiteral("icelay"), layoutFileDirty(id),
+                                                                 QStringLiteral("py"), layoutFileDirty(id),
                                                                  conflictedProceduralFiles_.contains(id)));
                     for (const auto &[id, cell] : project_->project().layoutCells)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
@@ -8875,13 +10977,13 @@ class DocumentWindow : public QMainWindow {
         layoutEditorLayout->addWidget(layoutViewStack_, 1);
         layoutEmptyPanel_ = new EmptyLayoutPanel;
         layoutEmptyPanel_->setOnCreate(
-            [this](EmptyLayoutPanel::Kind kind, const QString &name, const std::string &pdk) {
+            [this](EmptyLayoutPanel::Kind kind, const QString &name, const std::string &pdk, const std::string &stack) {
                 switch (kind) {
                 case EmptyLayoutPanel::Kind::StaticLayout:
-                    createLayoutCell(name, pdk);
+                    createLayoutCell(name, pdk, stack);
                     break;
                 case EmptyLayoutPanel::Kind::ProceduralLayout:
-                    createProceduralLayout(name, pdk);
+                    createProceduralLayout(name, pdk, stack);
                     break;
                 }
             });
@@ -9043,6 +11145,10 @@ class DocumentWindow : public QMainWindow {
                 layoutCanvas_->setDevicePlacementCallback([this](QPointF position) { placeLayoutDevice(position); });
                 layoutCanvas_->setInstanceActivatedCallback(
                     [this](ice::ObjectId instanceId) { openLayoutInstanceCell(instanceId); });
+                layoutCanvas_->setPlannedDeviceActivatedCallback(
+                    [this](ice::ObjectId deviceId) { activateLayoutPlannedDevice(deviceId); });
+                layoutCanvas_->setPlannedConnectionActivatedCallback(
+                    [this](ice::ObjectId connectionId) { activateLayoutPlannedConnection(connectionId); });
                 layoutCanvas_->setInstanceSelectionCallback([this](ice::ObjectId instanceId) {
                     if (layoutHierarchy_)
                         layoutHierarchy_->selectInstance(instanceId);
@@ -9260,6 +11366,7 @@ class DocumentWindow : public QMainWindow {
         testbenchToolbar->addWidget(simulationTestbenchRunButton_);
         testbenchLayout->addLayout(testbenchToolbar);
         simulationTestbenchEditor_ = new TextDocumentEditor;
+        simulationTestbenchEditor_->setLanguage(TextDocumentLanguage::SystemVerilog);
         simulationTestbenchEditor_->setOnTextEdited([this](const QString &text) { onSimulationTestbenchEdited(text); });
         testbenchLayout->addWidget(simulationTestbenchEditor_, 1);
         simulationTestbenchTabIndex_ = simulationTabs_->addTab(testbenchPage, QStringLiteral("Testbench"));
@@ -9537,26 +11644,125 @@ class DocumentWindow : public QMainWindow {
                     refreshProject();
                 },
                 [this](ice::ObjectId firstPin, ice::ObjectId secondPin) {
-                    if (!project_)
+                    if (!project_ || firstPin == 0 || secondPin == 0 || firstPin == secondPin)
                         return;
+                    auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                    if (cellIt == project_->project().schematicCells.end())
+                        cellIt = project_->project().schematicCells.begin();
+                    if (cellIt == project_->project().schematicCells.end())
+                        return;
+                    const auto cellId = cellIt->first;
+                    const auto findNet = [&](ice::ObjectId pin) {
+                        for (const auto &[id, net] : cellIt->second.nets)
+                            if (std::find(net.pins.begin(), net.pins.end(), pin) != net.pins.end())
+                                return id;
+                        return ice::ObjectId{0};
+                    };
+                    const auto firstNet = findNet(firstPin);
+                    const auto secondNet = findNet(secondPin);
+                    if (firstNet != 0 && firstNet == secondNet)
+                        return;
+                    std::vector<SchematicBranchRoute> inheritedBranches;
+                    for (const auto netId : {firstNet, secondNet}) {
+                        if (netId == 0)
+                            continue;
+                        if (const auto cached = schematicRouteCache_[cellId].find(netId);
+                            cached != schematicRouteCache_[cellId].end())
+                            inheritedBranches.insert(inheritedBranches.end(), cached->second.branches.begin(),
+                                                     cached->second.branches.end());
+                    }
+                    ice::ObjectId finalNet = 0;
                     project_->execute("connect pins", [&](ice::Project &project) {
-                        auto cellIt = project.schematicCells.find(activeSchematicId_);
-                        if (cellIt == project.schematicCells.end())
-                            cellIt = project.schematicCells.begin();
-                        auto &cell = cellIt->second;
-                        auto netIt = std::find_if(cell.nets.begin(), cell.nets.end(), [&](const auto &entry) {
-                            return std::find(entry.second.pins.begin(), entry.second.pins.end(), firstPin) !=
-                                   entry.second.pins.end();
-                        });
-                        if (netIt == cell.nets.end()) {
-                            auto netId = project.nextId();
-                            cell.nets.emplace(netId,
-                                              ice::Net{netId, "N" + std::to_string(netId), {firstPin, secondPin}});
-                        } else if (std::find(netIt->second.pins.begin(), netIt->second.pins.end(), secondPin) ==
-                                   netIt->second.pins.end())
-                            netIt->second.pins.push_back(secondPin);
+                        auto &cell = project.schematicCells.at(cellId);
+                        const auto netForPin = [&](ice::ObjectId pin) -> ice::ObjectId {
+                            for (const auto &[id, net] : cell.nets)
+                                if (std::find(net.pins.begin(), net.pins.end(), pin) != net.pins.end())
+                                    return id;
+                            return 0;
+                        };
+                        const auto first = netForPin(firstPin);
+                        const auto second = netForPin(secondPin);
+                        if (first != 0 && first == second) {
+                            finalNet = first;
+                            return;
+                        }
+                        if (first == 0 && second == 0) {
+                            finalNet = project.nextId();
+                            cell.nets.emplace(
+                                finalNet, ice::Net{finalNet, "N" + std::to_string(finalNet), {firstPin, secondPin}});
+                        } else if (first != 0 && second == 0) {
+                            finalNet = first;
+                            auto &pins = cell.nets.at(first).pins;
+                            if (std::find(pins.begin(), pins.end(), secondPin) == pins.end())
+                                pins.push_back(secondPin);
+                        } else if (first == 0 && second != 0) {
+                            finalNet = second;
+                            auto &pins = cell.nets.at(second).pins;
+                            if (std::find(pins.begin(), pins.end(), firstPin) == pins.end())
+                                pins.push_back(firstPin);
+                        } else {
+                            finalNet = first;
+                            auto &target = cell.nets.at(first);
+                            auto &source = cell.nets.at(second);
+                            for (const auto pin : source.pins)
+                                if (std::find(target.pins.begin(), target.pins.end(), pin) == target.pins.end())
+                                    target.pins.push_back(pin);
+                            const auto automaticName = [](const ice::Net &net) {
+                                return net.name.empty() || net.name == "N" + std::to_string(net.id);
+                            };
+                            if (automaticName(target) && !source.name.empty() && !automaticName(source))
+                                target.name = source.name;
+                            if (!target.labelAnchor && source.labelAnchor)
+                                target.labelAnchor = source.labelAnchor;
+                            cell.nets.erase(second);
+                        }
+                        // A pin may only belong to one net. Clean up any
+                        // duplicate memberships and make sure both edited pins
+                        // are present in the final net.
+                        std::vector<ice::ObjectId> removeNets;
+                        for (auto &[id, net] : cell.nets) {
+                            if (id != finalNet) {
+                                net.pins.erase(std::remove_if(net.pins.begin(), net.pins.end(),
+                                                              [&](ice::ObjectId pin) {
+                                                                  return pin == firstPin || pin == secondPin;
+                                                              }),
+                                               net.pins.end());
+                                if (net.pins.size() < 2)
+                                    removeNets.push_back(id);
+                            }
+                        }
+                        for (const auto id : removeNets)
+                            cell.nets.erase(id);
+                        auto &final = cell.nets.at(finalNet);
+                        std::set<ice::ObjectId> uniquePins;
+                        final.pins.erase(
+                            std::remove_if(final.pins.begin(), final.pins.end(),
+                                           [&](ice::ObjectId pin) { return !uniquePins.insert(pin).second; }),
+                            final.pins.end());
+                        for (const auto pin : {firstPin, secondPin})
+                            if (std::find(final.pins.begin(), final.pins.end(), pin) == final.pins.end())
+                                final.pins.push_back(pin);
+                        if (!final.labelAnchor)
+                            final.labelAnchor = ice::NetLabelAnchor{firstPin, secondPin, 0.5, false};
                         updateAutomaticNetLabelPositions(project);
                     });
+                    if (finalNet != 0) {
+                        auto &cellCache = schematicRouteCache_[cellId];
+                        cellCache.erase(firstNet);
+                        cellCache.erase(secondNet);
+                        auto &branches = cellCache[finalNet].branches;
+                        branches = std::move(inheritedBranches);
+                        const auto duplicate = std::any_of(branches.begin(), branches.end(), [&](const auto &branch) {
+                            return (branch.fromPin == firstPin && branch.toPin == secondPin) ||
+                                   (branch.fromPin == secondPin && branch.toPin == firstPin);
+                        });
+                        if (!duplicate) {
+                            SchematicBranchRoute branch;
+                            branch.fromPin = firstPin;
+                            branch.toPin = secondPin;
+                            branches.push_back(branch);
+                        }
+                    }
                     refreshProject();
                 },
                 [this](QPointF position) { placeComment(position); },
@@ -9600,34 +11806,41 @@ class DocumentWindow : public QMainWindow {
                 if (changed)
                     refreshProject();
             });
-            schematicCanvas_->setNetLabelMovedCallback([this](ice::ObjectId netId, QPointF position) {
-                if (!project_)
-                    return;
-                auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
-                if (cellIt == project_->project().schematicCells.end())
-                    cellIt = project_->project().schematicCells.begin();
-                if (cellIt == project_->project().schematicCells.end())
-                    return;
-                const auto cellId = cellIt->first;
-                bool changed = false;
-                project_->execute("move net label", [&](ice::Project &project) {
-                    auto &cell = project.schematicCells.at(cellId);
-                    auto netIt = cell.nets.find(netId);
-                    if (netIt == cell.nets.end())
+            schematicCanvas_->setNetLabelMovedCallback(
+                [this](ice::ObjectId netId, const ice::NetLabelAnchor &anchor, QPointF position) {
+                    if (!project_)
                         return;
-                    const auto x = static_cast<ice::Coordinate>(position.x());
-                    const auto y = static_cast<ice::Coordinate>(-position.y());
-                    if (netIt->second.x == x && netIt->second.y == y)
+                    auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+                    if (cellIt == project_->project().schematicCells.end())
+                        cellIt = project_->project().schematicCells.begin();
+                    if (cellIt == project_->project().schematicCells.end())
                         return;
-                    netIt->second.x = x;
-                    netIt->second.y = y;
-                    changed = true;
+                    const auto cellId = cellIt->first;
+                    bool changed = false;
+                    project_->execute("move net label", [&](ice::Project &project) {
+                        auto &cell = project.schematicCells.at(cellId);
+                        auto netIt = cell.nets.find(netId);
+                        if (netIt == cell.nets.end())
+                            return;
+                        const auto x = static_cast<ice::Coordinate>(position.x());
+                        const auto y = static_cast<ice::Coordinate>(-position.y());
+                        if (netIt->second.x == x && netIt->second.y == y && netIt->second.labelAnchor &&
+                            netIt->second.labelAnchor->fromPin == anchor.fromPin &&
+                            netIt->second.labelAnchor->toPin == anchor.toPin &&
+                            netIt->second.labelAnchor->fraction == anchor.fraction &&
+                            netIt->second.labelAnchor->sideB == anchor.sideB)
+                            return;
+                        netIt->second.x = x;
+                        netIt->second.y = y;
+                        netIt->second.labelAnchor = anchor;
+                        changed = true;
+                    });
+                    if (changed)
+                        refreshProject();
+                    else
+                        refreshSchematic();
                 });
-                if (changed)
-                    refreshProject();
-                else
-                    refreshSchematic();
-            });
+            schematicCanvas_->setNetLabelActivatedCallback([this](ice::ObjectId netId) { renameSchematicNet(netId); });
             schematicCanvas_->setFlipCallback([this](ice::ObjectId id) {
                 if (!project_)
                     return;
@@ -9806,23 +12019,28 @@ class DocumentWindow : public QMainWindow {
                             } else {
                                 ice::moveRectangle(project, activeLayoutId_, objectId, dx, dy);
                             }
+                            if (cellIt->second.shapes.at(objectId).routedConnection == 0)
+                                updateRoutedConnectionPaths(project);
                             return;
                         }
                         if (cellIt->second.ports.contains(objectId)) {
                             ice::movePort(project, activeLayoutId_, objectId, static_cast<ice::Coordinate>(delta.x()),
                                           static_cast<ice::Coordinate>(-delta.y()));
+                            updateRoutedConnectionPaths(project);
                             return;
                         }
                         if (auto planned = cellIt->second.plannedDevices.find(objectId);
                             planned != cellIt->second.plannedDevices.end()) {
                             planned->second.x += static_cast<ice::Coordinate>(delta.x());
                             planned->second.y -= static_cast<ice::Coordinate>(delta.y());
+                            updateRoutedConnectionPaths(project);
                             return;
                         }
                         if (auto instance = cellIt->second.instances.find(objectId);
                             instance != cellIt->second.instances.end()) {
                             instance->second.x += static_cast<ice::Coordinate>(delta.x());
                             instance->second.y -= static_cast<ice::Coordinate>(delta.y());
+                            updateRoutedConnectionPaths(project);
                         }
                     });
                     refreshProject();
@@ -9840,6 +12058,7 @@ class DocumentWindow : public QMainWindow {
                             ice::resizePort(project, activeLayoutId_, objectId, rect);
                         else
                             ice::resizeRectangle(project, activeLayoutId_, objectId, rect);
+                        updateRoutedConnectionPaths(project);
                     });
                     refreshProject();
                     QTimer::singleShot(0, this, [this, objectId] { selectLayoutShapeItem(objectId); });
@@ -9867,14 +12086,35 @@ class DocumentWindow : public QMainWindow {
                                 });
                                 continue;
                             }
-                            if (const auto port = cellIt->second.ports.find(id); port != cellIt->second.ports.end()) {
-                                if (!port->second.locked)
-                                    cellIt->second.ports.erase(port);
+                            if (cellIt->second.instances.erase(id) != 0) {
+                                std::erase_if(cellIt->second.plannedConnections, [&](const auto &entry) {
+                                    return entry.second.from == id || entry.second.to == id;
+                                });
                                 continue;
                             }
-                            if (cellIt->second.shapes.erase(id) == 0)
-                                cellIt->second.instances.erase(id);
+                            if (const auto port = cellIt->second.ports.find(id); port != cellIt->second.ports.end()) {
+                                if (!port->second.locked) {
+                                    std::erase_if(cellIt->second.plannedConnections, [&](const auto &entry) {
+                                        return entry.second.from == id || entry.second.to == id;
+                                    });
+                                    cellIt->second.ports.erase(port);
+                                }
+                                continue;
+                            }
+                            const auto shape = cellIt->second.shapes.find(id);
+                            if (shape != cellIt->second.shapes.end()) {
+                                if (shape->second.routedConnection != 0) {
+                                    if (const auto connection =
+                                            cellIt->second.plannedConnections.find(shape->second.routedConnection);
+                                        connection != cellIt->second.plannedConnections.end())
+                                        connection->second.routed = false;
+                                }
+                                cellIt->second.shapes.erase(shape);
+                                continue;
+                            }
+                            cellIt->second.instances.erase(id);
                         }
+                        updateRoutedConnectionPaths(project);
                     });
                     refreshProject();
                 },
@@ -9968,7 +12208,7 @@ class DocumentWindow : public QMainWindow {
                     QStringLiteral("Polygon: click vertices · double-click/Escape/Space = finish"));
             });
 
-            auto *pathTool = addTool(QStringLiteral("route"), QStringLiteral("Draw Path"));
+            auto *pathTool = addTool(QStringLiteral("waypoints"), QStringLiteral("Draw Path"));
             pathTool->setCheckable(true);
             pathTool->setToolTip(QStringLiteral("Draw path (W)"));
             pathTool->setStatusTip(QStringLiteral("Draw path (W)"));
@@ -10103,8 +12343,8 @@ class DocumentWindow : public QMainWindow {
                     layoutCanvas_->setFocus();
                 }
                 refreshLayoutProperties(false);
-                statusBar()->showMessage(QStringLiteral(
-                    "Rectangle: click to start, move to size, click to finish · or type width,height in the size field"));
+                statusBar()->showMessage(QStringLiteral("Rectangle: click to start, move to size, click to finish · or "
+                                                        "type width,height in the size field"));
             });
             connect(pathTool, &QAction::triggered, this, [this, pathTool] {
                 if (!pathTool->isChecked() || !layoutCanvas_ || layoutCanvas_->isReadOnly())
@@ -10488,6 +12728,12 @@ class DocumentWindow : public QMainWindow {
     QWidget *layoutToolbarColumn_ = nullptr;
     QWidget *layoutOptionsColumn_ = nullptr;
     ice::ObjectId activeSchematicId_ = 0;
+    // Per-cell, per-net branch routes. Unchanged branches are reused so editing
+    // one net does not perturb unrelated schematic wiring.
+    std::map<ice::ObjectId, std::map<ice::ObjectId, SchematicNetRoute>> schematicRouteCache_;
+    // Visible SVG ink bounds keyed by artwork source. Measuring an SVG requires
+    // an offscreen render and alpha scan, so cache it for the session.
+    std::map<std::string, QRectF> schematicArtworkBoundsCache_;
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
@@ -10527,6 +12773,7 @@ class DocumentWindow : public QMainWindow {
     std::unique_ptr<QTemporaryDir> drcTempDir_;
     QString drcReportPath_;
     QString drcLog_;
+    ice::ObjectId drcLayoutId_ = 0;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
     QWidget *layoutPage_ = nullptr;
@@ -10640,6 +12887,8 @@ class DocumentWindow : public QMainWindow {
 
 } // namespace
 
+namespace {
+
 class AppWindowAdapter final : public AppWindow {
   public:
     explicit AppWindowAdapter(std::unique_ptr<DocumentWindow> window) : window_(std::move(window)) {}
@@ -10653,6 +12902,8 @@ class AppWindowAdapter final : public AppWindow {
   private:
     std::unique_ptr<DocumentWindow> window_;
 };
+
+} // namespace
 
 std::unique_ptr<AppWindow> createAppWindow(ice::AppearanceMode appearance) {
     return std::make_unique<AppWindowAdapter>(std::make_unique<DocumentWindow>(appearance));

@@ -371,23 +371,28 @@ std::size_t seedDefaultParameters(Project &project, SchematicInstance &instance,
     }
     return added;
 }
-ObjectId createLayoutCell(Project &project, std::string name, std::string pdk) {
+ObjectId createLayoutCell(Project &project, std::string name, std::string pdk, std::string stack) {
     if (name.empty())
         throw ProjectError("layout.cell", "Layout cell name must not be empty");
     if (layoutNameTaken(project, name))
         throw ProjectError("layout.name", "A layout named '" + name + "' already exists");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layout stack must be a valid stack identifier");
     ObjectId id = project.nextId();
-    project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk)});
+    project.layoutCells.emplace(id, LayoutCell{id, std::move(name), std::move(pdk), std::move(stack)});
     return id;
 }
 
-ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script) {
+ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script,
+                                std::string stack) {
     if (name.empty())
         throw ProjectError("layout.procedural.name", "Procedural layout name must not be empty");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.pdk", "Layout PDK must be a valid PDK identifier");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layout stack must be a valid stack identifier");
 
     const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
     if (nameTaken(name))
@@ -401,19 +406,19 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
             generatedName = stem + " " + std::to_string(index);
     }
 
-    const auto generatedCell = createLayoutCell(project, generatedName, pdk);
+    const auto generatedCell = createLayoutCell(project, generatedName, pdk, stack);
     const auto id = project.nextId();
     project.layoutCells.at(generatedCell).generatedBy = id;
     project.proceduralLayouts.emplace(
-        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(script), generatedCell});
+        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(stack), std::move(script), generatedCell});
     return id;
 }
 
-ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name) {
+ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name, std::string stack) {
     const auto &schematic =
         require(project.schematicCells, schematicId, "schematic.cell", "Schematic cell does not exist");
 
-    std::string layoutName = name.empty() ? schematic.name : std::move(name);
+    std::string layoutName = name.empty() ? schematic.name : name;
     if (layoutName.empty())
         layoutName = "Layout";
     const auto nameTaken = [&](const std::string &candidate) { return layoutNameTaken(project, candidate); };
@@ -425,7 +430,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     }
 
     const auto pdk = schematic.pdk.empty() ? std::string{genericPdkId} : schematic.pdk;
-    const auto layoutId = createLayoutCell(project, layoutName, pdk);
+    const auto layoutId = createLayoutCell(project, layoutName, pdk, std::move(stack));
     auto &layout = project.layoutCells.at(layoutId);
 
     std::vector<const SchematicInstance *> orderedInstances;
@@ -446,16 +451,40 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     const auto gridStep = [&](Coordinate value) { return std::max(project.grid, project.snap(value)); };
     const auto boxWidth = gridStep(1200);
     const auto boxHeight = gridStep(700);
-    const auto horizontalGap = gridStep(900);
-    const auto verticalGap = gridStep(700);
-    const auto columnStep = boxWidth + horizontalGap;
-    const auto rowStep = boxHeight + verticalGap;
+
+    // Schematic instances are positioned in symbol-canvas units. Map those
+    // coordinates into layout nanometers so the planned boxes keep the
+    // relative arrangement they had in the schematic.
+    constexpr Coordinate schematicToLayoutScale = 10;
+    struct PlannedPlacement {
+        Coordinate x = 0;
+        Coordinate y = 0;
+    };
+    std::vector<PlannedPlacement> placements(orderedInstances.size());
+    Coordinate minimumX = 0;
+    Coordinate minimumY = 0;
+    bool havePlacement = false;
+    for (std::size_t index = 0; index < orderedInstances.size(); ++index) {
+        const auto *instance = orderedInstances[index];
+        const auto x = project.snap(instance->x * schematicToLayoutScale - boxWidth / 2);
+        const auto y = project.snap(instance->y * schematicToLayoutScale - boxHeight / 2);
+        placements[index] = {x, y};
+        if (!havePlacement) {
+            minimumX = x;
+            minimumY = y;
+            havePlacement = true;
+        } else {
+            minimumX = std::min(minimumX, x);
+            minimumY = std::min(minimumY, y);
+        }
+    }
+    const auto offsetX = havePlacement ? -minimumX : 0;
+    const auto offsetY = havePlacement ? -minimumY : 0;
 
     const auto count = static_cast<int>(orderedInstances.size());
-    const auto columns = std::max(1, std::min(4, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))))));
-    const auto rows = (count + columns - 1) / columns;
 
     std::map<ObjectId, std::vector<ObjectId>> pinDevices;
+    std::map<ObjectId, std::string> pinNames;
     for (int index = 0; index < count; ++index) {
         const auto *instance = orderedInstances[static_cast<std::size_t>(index)];
         std::string deviceName = instance->name;
@@ -466,32 +495,40 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
             deviceName = "Device " + std::to_string(index + 1);
 
         const auto deviceId = project.nextId();
-        const auto row = index / columns;
-        const auto column = index % columns;
-        const auto x = static_cast<Coordinate>(column) * columnStep;
-        const auto y = static_cast<Coordinate>(rows - 1 - row) * rowStep;
-        layout.plannedDevices.emplace(
-            deviceId, PlannedDevice{deviceId, std::move(deviceName), instance->id, x, y, boxWidth, boxHeight});
+        const auto &placement = placements[static_cast<std::size_t>(index)];
+        layout.plannedDevices.emplace(deviceId,
+                                      PlannedDevice{deviceId, std::move(deviceName), instance->id,
+                                                    placement.x + offsetX, placement.y + offsetY, boxWidth, boxHeight});
         if (symbol == schematic.symbols.end())
             continue;
-        for (const auto &pin : symbol->second.pins)
+        for (const auto &pin : symbol->second.pins) {
             pinDevices[pin.id].push_back(deviceId);
+            pinNames[pin.id] = pin.name;
+        }
     }
+
+    struct NetEndpoint {
+        ObjectId device = 0;
+        std::string pin;
+    };
 
     std::set<std::string> layoutNetNames;
     for (const auto &[_, net] : schematic.nets) {
         std::set<std::pair<ObjectId, ObjectId>> connectedPairs;
-        std::vector<ObjectId> devices;
+        std::vector<NetEndpoint> endpoints;
         for (const auto pinId : net.pins) {
             const auto entry = pinDevices.find(pinId);
             if (entry == pinDevices.end())
                 continue;
+            const auto pinName = pinNames.find(pinId);
             for (const auto deviceId : entry->second) {
-                if (std::find(devices.begin(), devices.end(), deviceId) == devices.end())
-                    devices.push_back(deviceId);
+                const bool exists = std::any_of(endpoints.begin(), endpoints.end(),
+                                                [&](const auto &endpoint) { return endpoint.device == deviceId; });
+                if (!exists)
+                    endpoints.push_back({deviceId, pinName == pinNames.end() ? std::string{} : pinName->second});
             }
         }
-        if (devices.size() < 2)
+        if (endpoints.size() < 2)
             continue;
         auto netName = net.name.empty() ? "N" + std::to_string(net.id) : net.name;
         if (!layoutNetNames.insert(lower(netName)).second)
@@ -499,16 +536,20 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         layoutNetNames.insert(lower(netName));
         const auto layoutNetId = project.nextId();
         layout.nets.emplace(layoutNetId, LayoutNet{layoutNetId, netName});
-        const auto from = devices.front();
-        for (std::size_t index = 1; index < devices.size(); ++index) {
-            const auto to = devices[index];
-            if (from == to)
+        const auto &from = endpoints.front();
+        for (std::size_t index = 1; index < endpoints.size(); ++index) {
+            const auto &to = endpoints[index];
+            if (from.device == to.device)
                 continue;
-            const auto pair = from < to ? std::make_pair(from, to) : std::make_pair(to, from);
+            const auto pair = from.device < to.device ? std::make_pair(from.device, to.device)
+                                                      : std::make_pair(to.device, from.device);
             if (!connectedPairs.insert(pair).second)
                 continue;
             const auto connectionId = project.nextId();
-            layout.plannedConnections.emplace(connectionId, PlannedConnection{connectionId, from, to, layoutNetId});
+            PlannedConnection connection{connectionId, from.device, to.device, layoutNetId};
+            connection.fromPin = from.pin;
+            connection.toPin = to.pin;
+            layout.plannedConnections.emplace(connectionId, std::move(connection));
         }
     }
     return layoutId;
@@ -525,15 +566,20 @@ std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
     }
 }
 
-ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype) {
+ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype,
+                  std::string stack) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
     if (number < 0)
         throw ProjectError("layout.layer", "Layer number must not be negative");
     if (datatype < 0 || datatype > 65535)
         throw ProjectError("layout.layer", "Layer datatype out of GDSII range");
+    if (stack.find_first_of("/\\") != std::string::npos)
+        throw ProjectError("layout.stack", "Layer stack must be a valid stack identifier");
     ObjectId id = project.nextId();
-    project.layers.emplace(id, Layer{id, std::move(name), number, true, layout, std::move(pdk), datatype});
+    Layer layer{id, std::move(name), number, true, layout, std::move(pdk), datatype};
+    layer.stack = std::move(stack);
+    project.layers.emplace(id, std::move(layer));
     return id;
 }
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
@@ -683,6 +729,8 @@ void removePort(Project &project, ObjectId cellId, ObjectId portId) {
                 throw ProjectError("layout.port.referenced", "Port is promoted by another layout cell");
         }
     }
+    std::erase_if(cell.plannedConnections,
+                  [&](const auto &entry) { return entry.second.from == portId || entry.second.to == portId; });
     cell.ports.erase(portId);
 }
 
@@ -714,7 +762,11 @@ ObjectId addLayoutInstance(Project &project, ObjectId parentCellId, ObjectId chi
     if (parentCellId == childCellId)
         throw ProjectError("layout.instance", "A layout cell cannot instance itself");
     auto &parent = require(project.layoutCells, parentCellId, "layout.cell", "Parent layout cell does not exist");
-    require(project.layoutCells, childCellId, "layout.cell", "Child layout cell does not exist");
+    const auto &child = require(project.layoutCells, childCellId, "layout.cell", "Child layout cell does not exist");
+    if (!parent.pdk.empty() && !child.pdk.empty() && parent.pdk != child.pdk)
+        throw ProjectError("layout.instance.technology", "Parent and child layouts must use the same PDK");
+    if (parent.stack != child.stack)
+        throw ProjectError("layout.instance.stack", "Parent and child layouts must use the same PDK stack");
     ObjectId id = project.nextId();
     parent.instances.emplace(id, LayoutInstance{id, childCellId, std::move(name), x, y, orientation});
     return id;
@@ -772,7 +824,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
         throw ProjectError("layout.boolean", "Select at least two shapes for a boolean operation");
 
     std::vector<Shape *> operands;
-    std::optional<ObjectId> layer;
+    ObjectId layer = 0;
     std::optional<ObjectId> net;
     bool firstNet = true;
     std::set<ObjectId> seen;
@@ -787,7 +839,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
             throw ProjectError("layout.boolean", "Boolean operations support rectangles and polygons only");
         if (shape.polygon.empty() && !shape.rectangle.valid())
             throw ProjectError("layout.shape", "Shape does not contain a valid filled outline");
-        if (layer && *layer != shape.layer)
+        if (layer != 0 && layer != shape.layer)
             throw ProjectError("layout.boolean", "Select shapes on the same layer");
         layer = shape.layer;
         if (firstNet) {
@@ -882,7 +934,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
         points.reserve(polygon.size());
         for (const auto &point : polygon)
             points.push_back({point.x, point.y});
-        Shape shape{id, *layer, net, GeometryKernel::bounds(polygon), std::move(points)};
+        Shape shape{id, layer, net, GeometryKernel::bounds(polygon), std::move(points)};
         shape.name = nextShapeName(cell, type);
         cell.shapes.emplace(id, std::move(shape));
         resultIds.push_back(id);

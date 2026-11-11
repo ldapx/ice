@@ -185,8 +185,8 @@ cell = icepy.pcells.generate_cell(
 print(len(cell.shapes), cell.bounds)
 ```
 
-`icepy.pcells.generate_geometry(...)` returns the legacy device-library JSON
-shape (`bounds` plus layer/datatype/polygon records), while
+`icepy.pcells.generate_geometry(...)` returns the device-library JSON shape
+(`bounds` plus layer/datatype/polygon records), while
 `parameter_specs_for(...)` returns the PCell parameter definitions.
 
 The IHP package uses this runtime through:

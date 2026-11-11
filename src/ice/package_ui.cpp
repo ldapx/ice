@@ -31,7 +31,6 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <cmath>
 #include <exception>
 #include <map>
 #include <system_error>
@@ -251,22 +250,7 @@ std::filesystem::path defaultPackageInstallDirectory() {
 std::string defaultPackageIndexUrl() { return "https://github.com/ldapx/ice-packages.git"; }
 
 std::filesystem::path configuredPackageIndexDirectory() {
-    QSettings settings;
-    const auto stored = settings.value(QStringLiteral("packages/indexDirectory")).toString();
-    const auto home = std::filesystem::path(QDir::homePath().toStdString());
-    const auto legacyCheckout = (home / "repositories" / "ice-packages").lexically_normal();
-    const bool migrated = settings.value(QStringLiteral("packages/indexDirectoryMigrated"), false).toBool();
-    if (!migrated) {
-        settings.setValue(QStringLiteral("packages/indexDirectoryMigrated"), true);
-        if (stored.isEmpty())
-            return defaultPackageIndexDirectory();
-        const auto storedPath = std::filesystem::path(stored.toStdString()).lexically_normal();
-        if (storedPath == legacyCheckout) {
-            settings.remove(QStringLiteral("packages/indexDirectory"));
-            return defaultPackageIndexDirectory();
-        }
-        return storedPath;
-    }
+    const auto stored = QSettings().value(QStringLiteral("packages/indexDirectory")).toString();
     if (stored.isEmpty())
         return defaultPackageIndexDirectory();
     return std::filesystem::path(stored.toStdString()).lexically_normal();
@@ -335,8 +319,8 @@ bool installMissingPackages(QWidget *parent, const std::vector<std::string> &pac
     return dialog.exec() == QDialog::Accepted;
 }
 
-CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &installDirectory,
-                                             const QString &defaultName, QWidget *parent)
+CreateSchematicDialog::CreateSchematicDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
+                                             QWidget *parent)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("Create Schematic"));
     setModal(true);

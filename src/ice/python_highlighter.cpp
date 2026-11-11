@@ -1,24 +1,12 @@
 #include "python_highlighter.hpp"
 
-#include <QApplication>
+#include "syntax_highlighter_utils.hpp"
+
 #include <QColor>
-#include <QFont>
-#include <QPalette>
 #include <QRegularExpression>
 #include <QTextDocument>
 
-#include <utility>
-
 namespace {
-
-QTextCharFormat makeFormat(const QColor &color, bool italic = false, bool bold = false) {
-    QTextCharFormat format;
-    format.setForeground(color);
-    format.setFontItalic(italic);
-    if (bold)
-        format.setFontWeight(QFont::DemiBold);
-    return format;
-}
 
 const QRegularExpression &keywordPattern() {
     static const QRegularExpression pattern(QStringLiteral(
@@ -60,16 +48,17 @@ PythonSyntaxHighlighter::PythonSyntaxHighlighter(QTextDocument *document) : QSyn
 }
 
 void PythonSyntaxHighlighter::refreshColors() {
-    const auto palette = QApplication::palette();
-    const bool dark = palette.color(QPalette::Window).lightness() < 128;
+    const bool dark = darkSyntaxPalette();
 
-    keywordFormat_ = makeFormat(QColor(dark ? QStringLiteral("#c678dd") : QStringLiteral("#a626a4")), false, true);
-    builtinFormat_ = makeFormat(QColor(dark ? QStringLiteral("#61afef") : QStringLiteral("#005cc5")));
-    numberFormat_ = makeFormat(QColor(dark ? QStringLiteral("#d19a66") : QStringLiteral("#b76b01")));
-    stringFormat_ = makeFormat(QColor(dark ? QStringLiteral("#98c379") : QStringLiteral("#22863a")));
-    commentFormat_ = makeFormat(QColor(dark ? QStringLiteral("#7f848e") : QStringLiteral("#6a737d")), true);
-    decoratorFormat_ = makeFormat(QColor(dark ? QStringLiteral("#e5c07b") : QStringLiteral("#795e26")));
-    definitionFormat_ = makeFormat(QColor(dark ? QStringLiteral("#61afef") : QStringLiteral("#6f42c1")), false, true);
+    keywordFormat_ =
+        makeSyntaxFormat(QColor(dark ? QStringLiteral("#c678dd") : QStringLiteral("#a626a4")), false, true);
+    builtinFormat_ = makeSyntaxFormat(QColor(dark ? QStringLiteral("#61afef") : QStringLiteral("#005cc5")));
+    numberFormat_ = makeSyntaxFormat(QColor(dark ? QStringLiteral("#d19a66") : QStringLiteral("#b76b01")));
+    stringFormat_ = makeSyntaxFormat(QColor(dark ? QStringLiteral("#98c379") : QStringLiteral("#22863a")));
+    commentFormat_ = makeSyntaxFormat(QColor(dark ? QStringLiteral("#7f848e") : QStringLiteral("#6a737d")), true);
+    decoratorFormat_ = makeSyntaxFormat(QColor(dark ? QStringLiteral("#e5c07b") : QStringLiteral("#795e26")));
+    definitionFormat_ =
+        makeSyntaxFormat(QColor(dark ? QStringLiteral("#61afef") : QStringLiteral("#6f42c1")), false, true);
     rehighlight();
 }
 

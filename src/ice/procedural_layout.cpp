@@ -4,6 +4,7 @@
 #include "icons.hpp"
 #include "layout_devices.hpp"
 #include "package_ui.hpp"
+#include "python_highlighter.hpp"
 #include "ui_helpers.hpp"
 
 #include <QCoreApplication>
@@ -25,7 +26,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
@@ -363,26 +363,36 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
 
     auto backup = project;
     try {
+        const auto genericPdk = procedural.pdk.empty() || procedural.pdk == genericPdkId;
+        const auto findLayer = [&](const std::string &name) {
+            return std::find_if(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+                const auto &layer = entry.second;
+                const auto pdkMatches =
+                    genericPdk ? (layer.pdk.empty() || layer.pdk == genericPdkId) : layer.pdk == procedural.pdk;
+                return layer.name == name && pdkMatches && layer.stack == procedural.stack;
+            });
+        };
+        const auto addProceduralLayer = [&](const std::string &name, int number) {
+            return addLayer(project, name, number, 0, genericPdk ? std::string{} : procedural.pdk, 0, procedural.stack);
+        };
         std::map<std::string, ObjectId> layerIds;
         for (const auto &[name, number] : generated.layers) {
-            const auto existing = std::find_if(project.layers.begin(), project.layers.end(),
-                                               [&](const auto &entry) { return entry.second.name == name; });
+            const auto existing = findLayer(name);
             if (existing != project.layers.end()) {
                 layerIds[name] = existing->first;
                 continue;
             }
             const auto layerNumber = number ? *number : inferredLayerNumber(name, project);
-            layerIds[name] = addLayer(project, name, layerNumber);
+            layerIds[name] = addProceduralLayer(name, layerNumber);
         }
         const auto layerIdFor = [&](const std::string &name) {
-            const auto existing = std::find_if(project.layers.begin(), project.layers.end(),
-                                               [&](const auto &entry) { return entry.second.name == name; });
+            const auto existing = findLayer(name);
             if (existing != project.layers.end())
                 return existing->first;
             const auto generatedLayer = layerIds.find(name);
             if (generatedLayer != layerIds.end())
                 return generatedLayer->second;
-            return addLayer(project, name, inferredLayerNumber(name, project));
+            return addProceduralLayer(name, inferredLayerNumber(name, project));
         };
 
         auto &cell = project.layoutCells.at(procedural.generatedCell);
@@ -610,6 +620,7 @@ ProceduralLayoutEditor::ProceduralLayoutEditor(QWidget *parent) : QWidget(parent
     editor_->setTabStopDistance(editor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
     editor_->setAccessibleName(QStringLiteral("Procedural layout Python script"));
     editor_->setPlaceholderText(QStringLiteral("Write Python that builds the layout through the `layout` object."));
+    pythonHighlighter_ = new PythonSyntaxHighlighter(editor_->document());
     layout->addWidget(editor_, 1);
 
     connect(editor_, &QPlainTextEdit::textChanged, this, [this] {
@@ -628,6 +639,11 @@ void ProceduralLayoutEditor::setScript(const QString &script) {
 }
 
 QString ProceduralLayoutEditor::script() const { return editor_->toPlainText(); }
+
+void ProceduralLayoutEditor::refreshSyntaxColors() {
+    if (pythonHighlighter_)
+        pythonHighlighter_->refreshColors();
+}
 
 void ProceduralLayoutEditor::setOnScriptEdited(std::function<void(const QString &)> callback) {
     onScriptEdited_ = std::move(callback);
