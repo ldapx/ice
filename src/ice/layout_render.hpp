@@ -14,6 +14,7 @@
 #include <QString>
 
 #include <map>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -54,12 +55,25 @@ struct LayoutPreviewConnection {
     QString net;
 };
 
+enum class LayoutHeatMapKind { none, placement_density, routing_congestion };
+
+struct LayoutPreviewHeatMap {
+    QRectF bounds;
+    int columns = 0;
+    int rows = 0;
+    std::vector<double> values;
+    double minimum = 0.0;
+    double maximum = 0.0;
+};
+
 struct LayoutPreviewModel {
     QRectF bounds;
     std::vector<LayoutPreviewShape> shapes;
     std::vector<LayoutPreviewPort> ports;
     std::vector<LayoutPreviewPlannedDevice> plannedDevices;
     std::vector<LayoutPreviewConnection> plannedConnections;
+    std::optional<LayoutPreviewHeatMap> placementDensity;
+    std::optional<LayoutPreviewHeatMap> routingCongestion;
 
     bool empty() const;
 };
@@ -91,7 +105,6 @@ class LayoutRenderer {
     using DeviceStyleMap = std::map<std::pair<int, int>, LayerStyle>;
 
     using PaintOptions = LayoutPaintOptions;
-
 
     // Resolves device-library layers to the same styles their placed project
     // layers use, falling back to the stable palette for unplaced layers.

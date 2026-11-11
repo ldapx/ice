@@ -117,6 +117,13 @@ and ask the user to rebuild/restart ICE.
 | `layout_export_gds` | Export a layout cell to GDSII, including pins and labels. |
 | `layout_export_lef` | Export pins as a minimal LEF macro. |
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
+| `implementation_create` | Create an RTL-to-GDS run for a PDK/stack with sources, source cells, SDC, floorplan, and execution policy. |
+| `implementation_list` | List implementation runs with stage status and result layout ids. |
+| `implementation_status` | Return stage states, artifacts, tool versions, and metrics. |
+| `implementation_run` | Execute Yosys/OpenROAD stages synchronously; supports `from`/`to` and a per-stage timeout. |
+| `implementation_log` | Return the bounded log for a stage, optionally as the last N lines. |
+| `implementation_cancel` | Signal the OpenROAD/Yosys process recorded for a run. |
+| `implementation_import_layout` | Import the newest DEF checkpoint as a package-mapped layout with pins, nets, instances, and routes. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports `template="tran"`, `"mixed"`, `"pwm_dac"`, or `"digital"`. |

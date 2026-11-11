@@ -130,6 +130,60 @@ Device libraries use purpose-qualified names such as `GatPoly.pin` and
 start hidden, while drawing purposes remain visible. The Layers panel groups
 purposes under their base layer number.
 
+### Implementation platform data
+
+A PDK package can also describe the physical data required by the RTL-to-GDS
+runner. Declare `implementation = true` under `[provides]`, then declare the
+engine and optional ORFS compatibility mapping once per PDK:
+
+```toml
+[pdk.implementation]
+engine = "openroad"
+synthesis = "yosys"
+min_openroad = "2.0"
+min_yosys = "0.40"
+
+[pdk.implementation.orfs]
+platform = "gf180"
+track_option = "9t"
+power_option = "5v0"
+corner = "BC"
+liberty_pattern = "mcu9t5v0__tt_025C_5v00"
+```
+
+Explicit file lists belong to the PDK stack. These paths are relative to the
+package root and are covered by the package content hash:
+
+```toml
+[pdk.stack.implementation]
+site = "GF018hv5v_green_sc9"
+tech_lef = "implementation/tech.lef"
+cell_lef = "implementation/cells.lef"
+gds = "implementation/cells.gds"
+io_horizontal_layers = ["Metal3"]
+io_vertical_layers = ["Metal4"]
+routing_min_layer = "Metal1"
+routing_max_layer = "Metal5"
+tapcell_script = "implementation/tapcell.tcl"
+pdn_script = "implementation/pdn.tcl"
+rc_script = "implementation/setRC.tcl"
+rcx_rules = "implementation/extraction.rules"
+fill_cells = ["FILL1", "FILL2"]
+
+[pdk.stack.implementation.liberty]
+tt = ["implementation/tt.lib.gz"]
+ff = ["implementation/ff.lib.gz"]
+ss = ["implementation/ss.lib.gz"]
+```
+
+When `[pdk.implementation.orfs]` is present, ICE may resolve missing LEF,
+Liberty, site, IO-layer, routing, and OpenRCX rule defaults from an
+OpenROAD-flow-scripts platform under `OPENROAD_FLOW_SCRIPTS` or
+`ICE_OPENROAD_FLOW_SCRIPTS`. The Liberty pattern should include the standard-cell
+variant (for GF180MCU, `mcu9t5v0` for 9-track data) so Liberty masters match the
+cell LEF. Explicit per-stack paths take precedence. `implementation-toolchain`
+reports whether `openroad`, `yosys`, and `klayout` are available.
+
 ### Layer styles
 
 A PDK package can ship default colors, patterns, and visibility for its layers

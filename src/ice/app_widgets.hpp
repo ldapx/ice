@@ -13,6 +13,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <atomic>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -65,6 +67,13 @@ class ActivityPanel : public QWidget {
     void showAgentTab();
     void appendMessage(const QString &message);
     void showMessagesTab();
+    QString startJob(const QString &title, const QString &stage, const QString &detail = {});
+    void updateJobStatus(const QString &id, const QString &status, const QString &detail = {});
+    void updateJobStage(const QString &id, const QString &stage);
+    void updateJobDetail(const QString &id, const QString &detail);
+    void finishJob(const QString &id, bool success, const QString &detail = {});
+    void showJobsTab();
+    void setOnCancelJob(std::function<void(const QString &)> callback) { onCancelJob_ = std::move(callback); }
 
   private:
     struct AgentBackend;
@@ -126,6 +135,13 @@ class ActivityPanel : public QWidget {
     void setSessionPromptRunning(const std::string &acpSessionId, bool running);
     QString agentModeLabel(const AgentSession &session) const;
     QString agentModelLabel(const AgentSession &session) const;
+    void installMessageSinks();
+    void appendLogEntry(const QString &time, int level, const QString &category, const QString &message);
+    void rebuildMessageView();
+    bool messagePassesFilters(const QString &category, int level) const;
+    void refreshJobsTable();
+    void updateJobsFooter();
+    QString selectedJobId() const;
     void newAgentSession();
     void closeActiveAgentSession();
     void refreshPastAgentSessions();
@@ -134,7 +150,10 @@ class ActivityPanel : public QWidget {
     QLabel *drcSummary_ = nullptr;
     QTableWidget *drcTable_ = nullptr;
     QTabWidget *tabs_ = nullptr;
-    QPlainTextEdit *messages_ = nullptr;
+    QTableWidget *messagesTable_ = nullptr;
+    QComboBox *messageCategoryFilter_ = nullptr;
+    QComboBox *messageSeverityFilter_ = nullptr;
+    QLabel *messagesCount_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
     QPlainTextEdit *lvsReport_ = nullptr;
     std::vector<ice::DrcViolation> drcViolations_;
@@ -143,6 +162,36 @@ class ActivityPanel : public QWidget {
     int lvsTabIndex_ = -1;
     int agentTabIndex_ = -1;
     int messagesTabIndex_ = -1;
+    struct MessageEntry {
+        QString time;
+        int level = 0;
+        QString category;
+        QString message;
+    };
+    std::deque<MessageEntry> messageEntries_;
+    std::shared_ptr<std::atomic<bool>> messageSinkAlive_;
+
+    struct JobEntry {
+        QString id;
+        QString title;
+        QString stage;
+        QString status;
+        QString detail;
+        qint64 startedMs = 0;
+        qint64 finishedMs = 0;
+        bool running = false;
+    };
+    std::vector<JobEntry> jobs_;
+    QString nextJobId_;
+    QTableWidget *jobsTable_ = nullptr;
+    QLabel *jobsSummary_ = nullptr;
+    QProgressBar *jobsProgress_ = nullptr;
+    QPushButton *cancelJobButton_ = nullptr;
+    QPushButton *clearJobsButton_ = nullptr;
+    QTimer *jobsTimer_ = nullptr;
+    int nextJobNumber_ = 1;
+    int jobsTabIndex_ = -1;
+    std::function<void(const QString &)> onCancelJob_;
 
     QComboBox *agentSelector_ = nullptr;
     QComboBox *sessionSelector_ = nullptr;

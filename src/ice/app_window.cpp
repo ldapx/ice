@@ -2,8 +2,11 @@
 #include "app_widgets.hpp"
 #include "icelib/core.hpp"
 #include "icelib/drc.hpp"
+#include "icelib/hdl.hpp"
+#include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/layout_library.hpp"
+#include "icelib/logging.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
@@ -26,6 +29,7 @@
 #include "appearance.hpp"
 #include "file_labels.hpp"
 #include "icons.hpp"
+#include "implementation_ui.hpp"
 #include "package_ui.hpp"
 #include "procedural_layout.hpp"
 #include "simulation_plot.hpp"
@@ -113,6 +117,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -126,7 +131,31 @@
 #include <string>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 namespace {
+
+QString implementationStageLabel(ice::ImplementationStage stage) {
+    switch (stage) {
+    case ice::ImplementationStage::created:
+        return QStringLiteral("HDL");
+    case ice::ImplementationStage::elaboration:
+        return QStringLiteral("Elaboration");
+    case ice::ImplementationStage::synthesis:
+        return QStringLiteral("Synthesis");
+    case ice::ImplementationStage::floorplan:
+        return QStringLiteral("Floorplan");
+    case ice::ImplementationStage::placement:
+        return QStringLiteral("Placement");
+    case ice::ImplementationStage::cts:
+        return QStringLiteral("CTS");
+    case ice::ImplementationStage::routing:
+        return QStringLiteral("Routing");
+    case ice::ImplementationStage::final:
+        return QStringLiteral("Final");
+    }
+    return QStringLiteral("Implementation");
+}
 
 bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId, const ice::Layer &layer) {
     if (layoutId == 0 || (layer.layout == 0 && layer.pdk.empty()))
@@ -1229,6 +1258,15 @@ class DocumentWindow : public QMainWindow {
         });
     }
 
+    ~DocumentWindow() override {
+        if (implementationController_) {
+            if (implementationController_->busy())
+                implementationController_->cancel();
+            delete implementationController_;
+            implementationController_ = nullptr;
+        }
+    }
+
     static bool directoryHasSymbols(const std::filesystem::path &directory) {
         std::error_code status;
         if (!std::filesystem::is_directory(directory, status) || status)
@@ -1399,8 +1437,9 @@ class DocumentWindow : public QMainWindow {
         // known sets so the first refresh does not treat every existing file
         // as newly-created and open it automatically.
         if (project_) {
-            for (const auto &[id, _] : project_->project().schematicCells)
-                knownSchematicCells_.insert(id);
+            for (const auto &[id, cell] : project_->project().schematicCells)
+                if (!cell.systemVerilogSchematic)
+                    knownSchematicCells_.insert(id);
             for (const auto &[id, _] : project_->project().layoutCells)
                 knownLayoutCells_.insert(id);
             for (const auto &[id, _] : project_->project().proceduralLayouts)
@@ -1411,7 +1450,6 @@ class DocumentWindow : public QMainWindow {
             layoutSelectTool_->setChecked(true);
         if (layoutCanvas_)
             layoutCanvas_->setTool(LayoutCanvas::Tool::select);
-        projectPath_.clear();
         schematicSymbolsLoaded_ = false;
         schematicSymbolsPdk_.clear();
         if (schematicNetlistPanel_)
@@ -1427,6 +1465,8 @@ class DocumentWindow : public QMainWindow {
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
         statusBar_->setProjectName(QString::fromStdString(project_->project().name));
         statusBar()->showMessage(QStringLiteral("Project loaded"));
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
         showWorkspace();
         return true;
     }
@@ -1435,6 +1475,8 @@ class DocumentWindow : public QMainWindow {
         if (path.isEmpty()) {
             projectPath_.clear();
             clearProjectWatcher();
+            if (implementationController_)
+                implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
             return;
         }
         const QFileInfo info(path);
@@ -1442,6 +1484,8 @@ class DocumentWindow : public QMainWindow {
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
         configureProjectWatcher();
+        if (implementationController_)
+            implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
     }
 
   private:
@@ -1556,6 +1600,8 @@ class DocumentWindow : public QMainWindow {
         if (!setProject(std::move(project)))
             return;
         projectPath_ = QString::fromStdString(projectFile.string());
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
         if (activityPanel_)
             activityPanel_->setProjectPath(QString::fromStdString(root.string()));
         configureProjectWatcher();
@@ -1581,6 +1627,8 @@ class DocumentWindow : public QMainWindow {
             if (!setProject(std::move(project)))
                 return;
             projectPath_ = projectPath;
+            if (implementationController_)
+                implementationController_->setProject(&project_->project(), projectPath_);
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
             configureProjectWatcher();
@@ -2339,6 +2387,8 @@ class DocumentWindow : public QMainWindow {
         loadedCachedRunPath_.clear();
         lastSchematicPlacementDevice_.reset();
         project_.reset();
+        if (implementationController_)
+            implementationController_->setProject(nullptr, QString());
         savedSchematicSignatures_.clear();
         savedLayoutSignatures_.clear();
         savedProceduralSignatures_.clear();
@@ -2380,7 +2430,6 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->scene()->clear();
         if (layoutPropertiesPanel_)
             layoutPropertiesPanel_->clearSelection();
-        simulationOutput_->setPlainText(QStringLiteral("No project open."));
         schematicSelector_->clear();
         simulationPlot_->clear();
         if (simulationPanel_)
@@ -2482,15 +2531,11 @@ class DocumentWindow : public QMainWindow {
         setLucideIcon(schematicAction, QStringLiteral("microchip"));
         auto *textAction = menu.addAction(QStringLiteral("Text SPICE Schematic"));
         setLucideIcon(textAction, QStringLiteral("notebook-text"));
-        auto *svBlockAction = menu.addAction(QStringLiteral("SystemVerilog Block"));
-        setLucideIcon(svBlockAction, QStringLiteral("notebook-text"));
         const auto *chosen = menu.exec(QCursor::pos());
         if (chosen == schematicAction)
             createSchematic();
         else if (chosen == textAction)
             createTextSchematic();
-        else if (chosen == svBlockAction)
-            createSystemVerilogBlock();
     }
 
     static QString systemVerilogIdentifier(QString text) {
@@ -2545,30 +2590,257 @@ class DocumentWindow : public QMainWindow {
             .arg(name, module);
     }
 
-    void createSystemVerilogBlock() {
+    std::string uniqueHdlRunName(const std::string &base) const {
+        if (!project_)
+            return base;
+        const auto taken = [&](const std::string &candidate) {
+            for (const auto &[_, run] : project_->project().implementationRuns) {
+                if (run.name == candidate)
+                    return true;
+            }
+            return false;
+        };
+        if (!taken(base))
+            return base;
+        for (int index = 2;; ++index) {
+            const auto candidate = base + " " + std::to_string(index);
+            if (!taken(candidate))
+                return candidate;
+        }
+    }
+
+    std::string hdlTopName(const ice::SchematicCell &cell) const {
+        const auto parsed = ice::parseSystemVerilogModule(cell);
+        return parsed.ok ? parsed.module.name : cell.name;
+    }
+
+    void elaborateHdlDesign(ice::ObjectId sourceCell, const std::string &pdk) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto cell = project_->project().schematicCells.find(sourceCell);
+        if (cell == project_->project().schematicCells.end() || !cell->second.systemVerilogSchematic) {
+            QMessageBox::information(this, QStringLiteral("Elaborate Design"),
+                                     QStringLiteral("Select a SystemVerilog source file first."));
+            return;
+        }
+        if (implementationController_->busy()) {
+            logMessage(ice::logging::implementation, spdlog::level::warn,
+                       QStringLiteral("Elaborate design ignored because another implementation job is running."));
+            return;
+        }
+        const auto sourceName = cell->second.name;
+        beginImplementationJob(QStringLiteral("Elaborate %1").arg(QString::fromStdString(sourceName)),
+                               ice::ImplementationStage::elaboration);
+        QTimer::singleShot(0, this, [this, sourceCell, pdk, sourceName] {
+            if (!project_ || projectPath_.isEmpty()) {
+                finishImplementationJob(false, QStringLiteral("Project is no longer available."));
+                return;
+            }
+            const auto current = project_->project().schematicCells.find(sourceCell);
+            if (current == project_->project().schematicCells.end() || !current->second.systemVerilogSchematic) {
+                finishImplementationJob(false, QStringLiteral("The SystemVerilog source no longer exists."));
+                QMessageBox::information(this, QStringLiteral("Elaborate Design"),
+                                         QStringLiteral("Select a SystemVerilog source file first."));
+                return;
+            }
+            ice::ImplementationConfig config;
+            config.name = uniqueHdlRunName(sourceName + " run");
+            config.top = hdlTopName(current->second);
+            config.pdk = pdk;
+            config.sourceCells = {sourceCell};
+            config.threads = 2;
+            ice::ObjectId runId = 0;
+            try {
+                project_->execute("create HDL run", [&](ice::Project &project) {
+                    runId = ice::createImplementationRun(project, config);
+                    auto &run = project.implementationRuns.at(runId);
+                    run.currentStage = ice::ImplementationStage::elaboration;
+                    run.status = ice::ImplementationStatus::running;
+                    run.stages[ice::ImplementationStage::elaboration].status = ice::ImplementationStageStatus::running;
+                });
+            } catch (const ice::ProjectError &error) {
+                finishImplementationJob(false, QString::fromStdString(error.what()));
+                QMessageBox::critical(this, QStringLiteral("Elaborate Design"), QString::fromStdString(error.what()));
+                return;
+            }
+            project_->setLastHistoryLabel("Created HDL run " + config.name);
+            implementationController_->setActiveRunId(runId);
+            updateImplementationJobStage(ice::ImplementationStage::elaboration);
+            implementationController_->run(ice::ImplementationStage::elaboration,
+                                           ice::ImplementationStage::elaboration);
+            if (!implementationController_->busy()) {
+                finishImplementationJob(false, QStringLiteral("Unable to start the elaboration job."));
+                return;
+            }
+            statusBar()->showMessage(QStringLiteral("Elaborating %1 with %2")
+                                         .arg(QString::fromStdString(sourceName), QString::fromStdString(pdk)));
+        });
+    }
+
+    void synthesizeHdlRun(ice::ObjectId runId, const std::string &pdk) {
+        if (!project_)
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        if (implementationController_->busy()) {
+            logMessage(ice::logging::implementation, spdlog::level::warn,
+                       QStringLiteral("Synthesize design ignored because another implementation job is running."));
+            return;
+        }
+        const auto runName = found->second.name;
+        beginImplementationJob(QStringLiteral("Synthesize %1").arg(QString::fromStdString(runName)),
+                               ice::ImplementationStage::synthesis);
+        QTimer::singleShot(0, this, [this, runId, pdk, runName] {
+            if (!project_) {
+                finishImplementationJob(false, QStringLiteral("Project is no longer available."));
+                return;
+            }
+            const auto current = project_->project().implementationRuns.find(runId);
+            if (current == project_->project().implementationRuns.end()) {
+                finishImplementationJob(false, QStringLiteral("The selected run no longer exists."));
+                return;
+            }
+            const bool pdkChanged = current->second.config.pdk != pdk;
+            try {
+                project_->execute("configure HDL synthesis", [&](ice::Project &project) {
+                    auto &run = project.implementationRuns.at(runId);
+                    run.config.pdk = pdk;
+                    if (pdkChanged)
+                        run.config.stack.clear();
+                    run.currentStage = ice::ImplementationStage::synthesis;
+                    run.status = ice::ImplementationStatus::running;
+                    run.stages[ice::ImplementationStage::synthesis].status = ice::ImplementationStageStatus::running;
+                });
+            } catch (const ice::ProjectError &error) {
+                finishImplementationJob(false, QString::fromStdString(error.what()));
+                QMessageBox::critical(this, QStringLiteral("Synthesize Design"), QString::fromStdString(error.what()));
+                return;
+            }
+            implementationController_->setActiveRunId(runId);
+            updateImplementationJobStage(pdkChanged ? ice::ImplementationStage::elaboration
+                                                    : ice::ImplementationStage::synthesis);
+            implementationController_->run(pdkChanged ? ice::ImplementationStage::elaboration
+                                                      : ice::ImplementationStage::synthesis,
+                                           ice::ImplementationStage::synthesis);
+            if (!implementationController_->busy()) {
+                finishImplementationJob(false, QStringLiteral("Unable to start the synthesis job."));
+                return;
+            }
+            statusBar()->showMessage(QStringLiteral("Synthesizing %1 with %2")
+                                         .arg(QString::fromStdString(runName), QString::fromStdString(pdk)));
+        });
+    }
+
+    void exportTechMappedVerilog(ice::ObjectId runId) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        const auto synthesis = found->second.stages.find(ice::ImplementationStage::synthesis);
+        if (synthesis == found->second.stages.end() ||
+            synthesis->second.status != ice::ImplementationStageStatus::succeeded) {
+            QMessageBox::information(this, QStringLiteral("Export Verilog"),
+                                     QStringLiteral("Run Synthesize before exporting a technology-mapped netlist."));
+            return;
+        }
+        if (implementationController_ && implementationController_->busy())
+            return;
+        implementationController_->setActiveRunId(runId);
+        implementationController_->exportMapped(runId, QString());
+        statusBar()->showMessage(
+            QStringLiteral("Technology mapping %1…").arg(QString::fromStdString(found->second.name)));
+    }
+
+    void applyStageConfig(ice::ObjectId runId, const ice::ImplementationConfig &config,
+                          ice::ImplementationStage stage) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        const auto diagnostics = ice::validateImplementationConfig(project_->project(), config);
+        const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+            return diagnostic.severity == ice::Diagnostic::Severity::error;
+        });
+        if (fatal != diagnostics.end()) {
+            QMessageBox::warning(this, QStringLiteral("Stage Settings"), QString::fromStdString(fatal->message));
+            return;
+        }
+        try {
+            project_->execute("update stage settings", [&](ice::Project &project) {
+                auto &run = project.implementationRuns.at(runId);
+                ice::updateImplementationConfig(run, config, stage);
+            });
+            project_->save(projectPath_.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Stage Settings"), QString::fromStdString(error.what()));
+            return;
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Stage settings updated; downstream checkpoints were invalidated."),
+                                 10000);
+    }
+
+    void removeHdlRun(ice::ObjectId runId) {
+        if (!project_ || projectPath_.isEmpty())
+            return;
+        if (implementationController_ && implementationController_->busy())
+            return;
+        const auto found = project_->project().implementationRuns.find(runId);
+        if (found == project_->project().implementationRuns.end())
+            return;
+        const auto name = found->second.name;
+        const auto directory = found->second.directory;
+        if (QMessageBox::question(this, QStringLiteral("Remove Run"),
+                                  QStringLiteral("Remove the run \"%1\" and delete its build directory?")
+                                      .arg(QString::fromStdString(name)),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        try {
+            project_->execute("remove implementation run",
+                              [&](ice::Project &project) { ice::removeImplementationRun(project, runId); });
+            project_->save(projectPath_.toStdString());
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Remove Run"), QString::fromStdString(error.what()));
+            return;
+        }
+        if (!directory.empty()) {
+            std::error_code status;
+            const auto root = std::filesystem::path(projectPath_.toStdString()).parent_path();
+            const auto target = (root / directory).lexically_normal();
+            const auto buildImpl = (root / "build" / "impl").lexically_normal();
+            if (target.generic_string().starts_with(buildImpl.generic_string() + "/"))
+                std::filesystem::remove_all(target, status);
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Removed run %1").arg(QString::fromStdString(name)));
+    }
+
+    ice::ObjectId createSystemVerilogBlock(bool openInSchematicTab = true) {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Create SystemVerilog Block"),
                                      QStringLiteral("Create or open a project first."));
-            return;
+            return 0;
         }
-        const auto installDirectory = configuredPackageInstallDirectory();
-        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName() + QStringLiteral(" Block"), this);
-        dialog.setWindowTitle(QStringLiteral("Create SystemVerilog Block"));
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        createSystemVerilogCell(dialog.schematicName(), dialog.pdkId(), false);
+        bool accepted = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Create SystemVerilog Block"), QStringLiteral("Block name:"),
+                                  QLineEdit::Normal, nextSchematicDefaultName() + QStringLiteral(" Block"), &accepted);
+        if (!accepted || name.trimmed().isEmpty())
+            return 0;
+        return createSystemVerilogCell(name, ice::genericPdkId, false, openInSchematicTab);
     }
 
-    void createSystemVerilogCell(const QString &name, const std::string &pdk, bool testbench) {
+    ice::ObjectId createSystemVerilogCell(const QString &name, const std::string &pdk, bool testbench,
+                                          bool openInSchematicTab = true) {
         if (!project_)
-            return;
+            return 0;
         const auto trimmedName = name.trimmed();
         if (trimmedName.isEmpty())
-            return;
+            return 0;
         QString pdkLabel;
         bool addDependency = false;
         if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
-            return;
+            return 0;
         ice::ObjectId createdId = 0;
         try {
             project_->execute("create SystemVerilog cell", [&](ice::Project &project) {
@@ -2578,18 +2850,21 @@ class DocumentWindow : public QMainWindow {
                                                          systemVerilogTemplate(trimmedName, testbench).toStdString());
             });
             project_->setLastHistoryLabel("Created SystemVerilog cell " + trimmedName.toStdString());
-            activeSchematicId_ = createdId;
-            refreshProject();
-            selectSchematicTab(createdId);
-            if (documents_ && schematicPage_)
-                documents_->setCurrentWidget(schematicPage_);
+            if (openInSchematicTab) {
+                refreshProject();
+                openHdlSchematic(createdId);
+            } else {
+                refreshProject();
+            }
             statusBar()->showMessage(
                 QStringLiteral("SystemVerilog %1 created with %2")
                     .arg(testbench ? QStringLiteral("testbench") : QStringLiteral("block"), pdkLabel));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Create SystemVerilog Cell"),
                                   QString::fromStdString(error.what()));
+            return 0;
         }
+        return createdId;
     }
 
     void createTextSchematic() {
@@ -2925,9 +3200,33 @@ class DocumentWindow : public QMainWindow {
         updateEmptyWorkspaceState();
     }
 
+    ImplementationPage *hdlSchematicPage() const {
+        for (auto *page : implementationPages_) {
+            if (page->stage() == ice::ImplementationStage::created)
+                return page;
+        }
+        return nullptr;
+    }
+
+    void openHdlSchematic(ice::ObjectId id) {
+        auto *page = hdlSchematicPage();
+        if (!page)
+            return;
+        page->selectHdlCell(id);
+        if (documents_)
+            documents_->setCurrentWidget(page);
+    }
+
     void selectSchematicTab(ice::ObjectId id) {
         if (!schematicCellTabs_)
             return;
+        if (project_) {
+            const auto cell = project_->project().schematicCells.find(id);
+            if (cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic) {
+                openHdlSchematic(id);
+                return;
+            }
+        }
         if (project_ && project_->project().schematicCells.contains(id) && !openSchematicTabs_.contains(id)) {
             openSchematicTabs_.insert(id);
             knownSchematicCells_.insert(id);
@@ -6971,13 +7270,14 @@ class DocumentWindow : public QMainWindow {
         loadedCachedRunPath_ = path;
         auto result = std::make_shared<ice::SimulationResult>(std::move(stored->result));
         applySimulationResultToGraphTabs(result);
-        if (simulationOutput_ && result->state != ice::JobState::succeeded) {
-            simulationOutput_->setPlainText(
-                QStringLiteral("Loaded last stored run %1: %2%3")
-                    .arg(QString::fromStdString(stored->runId),
-                         QString::fromStdString(ice::jobStateName(result->state)),
-                         result->error.empty() ? QString()
-                                               : QStringLiteral("\n%1").arg(QString::fromStdString(result->error))));
+        if (result->state != ice::JobState::succeeded) {
+            logMessage(ice::logging::simulation, spdlog::level::err,
+                       QStringLiteral("Loaded last stored run %1: %2%3")
+                           .arg(QString::fromStdString(stored->runId),
+                                QString::fromStdString(ice::jobStateName(result->state)),
+                                result->error.empty()
+                                    ? QString()
+                                    : QStringLiteral("\n%1").arg(QString::fromStdString(result->error))));
         }
     }
 
@@ -7335,10 +7635,57 @@ class DocumentWindow : public QMainWindow {
                   : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     }
 
-    void appendReportMessage(const QString &message) {
-        if (activityPanel_)
-            activityPanel_->appendMessage(message);
+    void beginImplementationJob(const QString &title, ice::ImplementationStage stage) {
+        if (!activityPanel_)
+            return;
+        if (implementationJobId_.isEmpty()) {
+            implementationJobId_ = activityPanel_->startJob(title, implementationStageLabel(stage));
+            if (activityDock_)
+                activityDock_->show();
+        } else {
+            activityPanel_->updateJobStage(implementationJobId_, implementationStageLabel(stage));
+            activityPanel_->updateJobStatus(implementationJobId_, QStringLiteral("Running"), title);
+        }
+        activityPanel_->showJobsTab();
     }
+
+    void updateImplementationJobStage(ice::ImplementationStage stage) {
+        if (activityPanel_ && !implementationJobId_.isEmpty())
+            activityPanel_->updateJobStage(implementationJobId_, implementationStageLabel(stage));
+    }
+
+    void finishImplementationJob(bool success, const QString &detail) {
+        if (activityPanel_ && !implementationJobId_.isEmpty())
+            activityPanel_->finishJob(implementationJobId_, success, detail);
+        implementationJobId_.clear();
+    }
+
+    void logMessage(const char *category, spdlog::level::level_enum level, const QString &message) {
+        if (message.isEmpty())
+            return;
+        if (auto logger = spdlog::get(category))
+            logger->log(level, "{}", message.toStdString());
+        else
+            spdlog::log(level, "{}", message.toStdString());
+    }
+
+    void logMessageText(const char *category, const QString &message) {
+        const auto lower = message.toLower();
+        auto level = spdlog::level::info;
+        if (lower.contains(QStringLiteral("critical")))
+            level = spdlog::level::critical;
+        else if (lower.contains(QStringLiteral("error")) || lower.contains(QStringLiteral("failed")) ||
+                 lower.contains(QStringLiteral("cannot")) || lower.contains(QStringLiteral("unable")) ||
+                 lower.contains(QStringLiteral("timed out")))
+            level = spdlog::level::err;
+        else if (lower.contains(QStringLiteral("warning")) || lower.contains(QStringLiteral("warn")))
+            level = spdlog::level::warn;
+        else if (lower.contains(QStringLiteral("debug")))
+            level = spdlog::level::debug;
+        logMessage(category, level, message);
+    }
+
+    void appendReportMessage(const QString &message) { logMessageText(ice::logging::simulation, message); }
 
     void showReportMessages() {
         if (activityDock_)
@@ -8377,28 +8724,42 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Simulation netlist built"));
     }
 
-    static QString formatSimulationReport(const ice::SimulationRequest &request, const ice::SimulationResult &result,
-                                          const QStringList &netlistNotes) {
-        std::ostringstream output;
-        output << "State: " << ice::jobStateName(result.state) << "\n"
-               << "Analysis: " << result.analysis << "\n"
-               << "Simulator: " << result.simulator << " " << result.simulator_version << "\n";
-        if (!request.netlist.empty()) {
-            output << "Netlist:\n";
-            for (const auto &line : request.netlist)
-                output << "  " << line << "\n";
+    void logSimulationResult(const std::string &simulationName, const ice::SimulationRequest &request,
+                             const ice::SimulationResult &result, const QStringList &netlistNotes,
+                             const QString &storedPath) {
+        const auto name = QString::fromStdString(simulationName);
+        logMessage(ice::logging::simulation, spdlog::level::info,
+                   QStringLiteral("Analysis: %1 · Simulator: %2 %3")
+                       .arg(QString::fromStdString(result.analysis), QString::fromStdString(result.simulator),
+                            QString::fromStdString(result.simulator_version)));
+        if (result.state == ice::JobState::succeeded) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s)")
+                           .arg(name)
+                           .arg(result.time.size())
+                           .arg(result.traces.size()));
+        } else {
+            logMessage(ice::logging::simulation,
+                       result.state == ice::JobState::cancelled ? spdlog::level::warn : spdlog::level::err,
+                       QStringLiteral("Simulation '%1' %2%3")
+                           .arg(name, QString::fromStdString(ice::jobStateName(result.state)),
+                                result.error.empty()
+                                    ? QString()
+                                    : QStringLiteral(": %1").arg(QString::fromStdString(result.error))));
         }
-        for (const auto &note : netlistNotes)
-            output << "Note: " << note.toStdString() << "\n";
-        if (!result.error.empty())
-            output << "Error: " << result.error << "\n";
-        if (!result.time.empty() && !result.traces.empty()) {
-            output << "Samples: " << result.time.size() << "\n"
-                   << "Trace: " << result.traces.front().name << "\n"
-                   << "First sample: " << result.traces.front().values.front() << "\n"
-                   << "Last sample: " << result.traces.front().values.back() << "\n";
+        for (const auto &warning : result.warnings) {
+            logMessage(ice::logging::simulation, spdlog::level::warn,
+                       QStringLiteral("Simulation '%1': %2").arg(name, QString::fromStdString(warning)));
         }
-        return QString::fromStdString(output.str());
+        for (const auto &note : netlistNotes) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1': %2").arg(name, note));
+        }
+        if (!storedPath.isEmpty()) {
+            logMessage(ice::logging::simulation, spdlog::level::info,
+                       QStringLiteral("Simulation '%1' stored result: %2").arg(name, storedPath));
+        }
+        (void)request;
     }
 
     void loadVcdGraphs() {
@@ -8506,7 +8867,10 @@ class DocumentWindow : public QMainWindow {
         sim.use_initial_conditions = formSim.use_initial_conditions;
         sim.directives = formSim.directives;
         sim.captureSignals = formSim.captureSignals;
-        simulationOutput_->setPlainText(QStringLiteral("Running simulation..."));
+        logMessage(ice::logging::simulation, spdlog::level::info,
+                   QStringLiteral("Running simulation '%1' (%2, %3)...")
+                       .arg(QString::fromStdString(sim.name), QString::fromStdString(sim.simulator),
+                            QString::fromStdString(sim.analysis)));
         documents_->setCurrentWidget(simulationPage_);
         if (simulationTabs_ && simulationGraphsPage_)
             simulationTabs_->setCurrentWidget(simulationGraphsPage_);
@@ -8517,11 +8881,18 @@ class DocumentWindow : public QMainWindow {
         try {
             request = buildSimulationRequest(sim, netlistNotes);
         } catch (const ice::ProjectError &error) {
+            logMessage(ice::logging::simulation, spdlog::level::err,
+                       QStringLiteral("Simulation '%1' could not start: %2")
+                           .arg(QString::fromStdString(sim.name), QString::fromStdString(error.what())));
+            showReportMessages();
             QMessageBox::critical(this, QStringLiteral("Run Simulation"), QString::fromStdString(error.what()));
             return;
         }
         const auto timeout = request.simulator == "mixed" ? std::chrono::seconds(120) : std::chrono::seconds(10);
-        auto result = ice::SimulationRunner().run(request, timeout);
+        auto result = ice::SimulationRunner().run(request, timeout, [this](const ice::SimulationProgress &progress) {
+            if (!progress.message.empty())
+                logMessage(ice::logging::simulation, spdlog::level::info, QString::fromStdString(progress.message));
+        });
 
         // Populate empty capture and graph fields from the generated traces so
         // the first run produces a usable plot, including for digital VCDs.
@@ -8540,7 +8911,6 @@ class DocumentWindow : public QMainWindow {
                     sim = updated->second;
             }
         }
-        auto report = formatSimulationReport(request, result, netlistNotes);
         QString storedPath;
 
         const auto projectRoot = projectPath_.isEmpty()
@@ -8566,14 +8936,19 @@ class DocumentWindow : public QMainWindow {
             try {
                 const auto artifact = ice::writeSimulationRun(context, result);
                 storedPath = QString::fromStdString(artifact.path.string());
-                report += QStringLiteral("\nStored result: %1\n").arg(storedPath);
             } catch (const ice::ProjectError &error) {
-                report += QStringLiteral("\nUnable to store result: %1\n").arg(QString::fromStdString(error.what()));
+                logMessage(ice::logging::simulation, spdlog::level::warn,
+                           QStringLiteral("Simulation '%1': unable to store result: %2")
+                               .arg(QString::fromStdString(sim.name), QString::fromStdString(error.what())));
             }
         } else {
-            report += QStringLiteral("\nResult not stored: save the project first.\n");
+            logMessage(ice::logging::simulation, spdlog::level::warn,
+                       QStringLiteral("Simulation '%1': result not stored; save the project first.")
+                           .arg(QString::fromStdString(sim.name)));
         }
-        simulationOutput_->setPlainText(report);
+        logSimulationResult(sim.name, request, result, netlistNotes, storedPath);
+        if (result.state != ice::JobState::succeeded)
+            showReportMessages();
 
         if (graphsUpdated) {
             QSignalBlocker blocker(signalsCapture_);
@@ -8928,6 +9303,8 @@ class DocumentWindow : public QMainWindow {
         refreshLayout();
         updateHistoryPanels();
         updateSimulationNetlistState();
+        if (implementationController_)
+            implementationController_->setProject(&project_->project(), projectPath_);
     }
 
     struct SectionHistoryEntry {
@@ -9133,7 +9510,9 @@ class DocumentWindow : public QMainWindow {
         }
         std::set<ice::ObjectId> schematicIds;
         ice::ObjectId newlyDiscoveredSchematic = 0;
-        for (const auto &[id, _] : project_->project().schematicCells) {
+        for (const auto &[id, cell] : project_->project().schematicCells) {
+            if (cell.systemVerilogSchematic)
+                continue;
             schematicIds.insert(id);
             if (knownSchematicCells_.insert(id).second) {
                 openSchematicTabs_.insert(id);
@@ -9228,6 +9607,10 @@ class DocumentWindow : public QMainWindow {
     void openSchematicFile(ice::ObjectId id) {
         if (!project_ || !project_->project().schematicCells.contains(id))
             return;
+        if (project_->project().schematicCells.at(id).systemVerilogSchematic) {
+            openHdlSchematic(id);
+            return;
+        }
         openSchematicTabs_.insert(id);
         knownSchematicCells_.insert(id);
         refreshEmbeddedPanels();
@@ -9270,7 +9653,7 @@ class DocumentWindow : public QMainWindow {
             const auto selected = activeSchematicId_;
             schematicCellTabs_->clear();
             for (const auto &[id, cell] : project.schematicCells) {
-                if (!openSchematicTabs_.contains(id))
+                if (!openSchematicTabs_.contains(id) || cell.systemVerilogSchematic)
                     continue;
                 const int tab = schematicCellTabs_->count();
                 schematicCellTabs_->addTab(
@@ -9457,53 +9840,52 @@ class DocumentWindow : public QMainWindow {
             return std::nullopt;
         const auto last = text.find_last_not_of(" \t\r\n");
         const auto trimmed = text.substr(first, last - first + 1);
-        try {
-            std::size_t consumed = 0;
-            const auto value = std::stod(trimmed, &consumed);
-            while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
-                ++consumed;
-            double scale = 1.0;
-            if (consumed < trimmed.size()) {
-                switch (trimmed[consumed]) {
-                case 'f':
-                    scale = 1.0e-15;
-                    break;
-                case 'p':
-                    scale = 1.0e-12;
-                    break;
-                case 'n':
-                    scale = 1.0e-9;
-                    break;
-                case 'u':
-                    scale = 1.0e-6;
-                    break;
-                case 'm':
-                    scale = 1.0e-3;
-                    break;
-                case 'k':
-                    scale = 1.0e3;
-                    break;
-                case 'M':
-                    scale = 1.0e6;
-                    break;
-                case 'G':
-                    scale = 1.0e9;
-                    break;
-                default:
-                    return std::nullopt;
-                }
-                ++consumed;
-                while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
-                    ++consumed;
-                if (consumed != trimmed.size())
-                    return std::nullopt;
-            }
-            if (!std::isfinite(value))
-                return std::nullopt;
-            return value * scale;
-        } catch (const std::exception &) {
+        double value = 0.0;
+        const auto parsed = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr == trimmed.data())
             return std::nullopt;
+        std::size_t consumed = static_cast<std::size_t>(parsed.ptr - trimmed.data());
+        while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
+            ++consumed;
+        double scale = 1.0;
+        if (consumed < trimmed.size()) {
+            switch (trimmed[consumed]) {
+            case 'f':
+                scale = 1.0e-15;
+                break;
+            case 'p':
+                scale = 1.0e-12;
+                break;
+            case 'n':
+                scale = 1.0e-9;
+                break;
+            case 'u':
+                scale = 1.0e-6;
+                break;
+            case 'm':
+                scale = 1.0e-3;
+                break;
+            case 'k':
+                scale = 1.0e3;
+                break;
+            case 'M':
+                scale = 1.0e6;
+                break;
+            case 'G':
+                scale = 1.0e9;
+                break;
+            default:
+                return std::nullopt;
+            }
+            ++consumed;
+            while (consumed < trimmed.size() && std::isalpha(static_cast<unsigned char>(trimmed[consumed])))
+                ++consumed;
+            if (consumed != trimmed.size())
+                return std::nullopt;
         }
+        if (!std::isfinite(value))
+            return std::nullopt;
+        return value * scale;
     }
 
     static QString formatQuantityValue(double value) {
@@ -9626,11 +10008,22 @@ class DocumentWindow : public QMainWindow {
             schematicSymbolsPdk_.clear();
             return;
         }
+        const auto firstDrawable = [&]() {
+            return std::find_if(project_->project().schematicCells.begin(), project_->project().schematicCells.end(),
+                                [](const auto &entry) { return !entry.second.systemVerilogSchematic; });
+        };
         auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
-        if (cellIt == project_->project().schematicCells.end())
-            cellIt = project_->project().schematicCells.begin();
-        if (cellIt == project_->project().schematicCells.end())
+        if (cellIt == project_->project().schematicCells.end() || cellIt->second.systemVerilogSchematic)
+            cellIt = firstDrawable();
+        if (cellIt == project_->project().schematicCells.end()) {
+            if (schematicSymbolsPanel_)
+                schematicSymbolsPanel_->clear();
+            if (schematicNetlistPanel_)
+                schematicNetlistPanel_->clear();
+            schematicSymbolsLoaded_ = false;
+            schematicSymbolsPdk_.clear();
             return;
+        }
         const auto &cell = cellIt->second;
         if (cell.isTextSource()) {
             if (schematicViewStack_ && textSchematicEditorPage_)
@@ -10573,6 +10966,12 @@ class DocumentWindow : public QMainWindow {
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
         activityPanel_->setOnDrcViolationActivated(
             [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
+        activityPanel_->setOnCancelJob([this](const QString &id) {
+            if (id == implementationJobId_ && implementationController_) {
+                implementationController_->cancel();
+                activityPanel_->updateJobStatus(id, QStringLiteral("Cancelling"));
+            }
+        });
         activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }
@@ -10759,10 +11158,13 @@ class DocumentWindow : public QMainWindow {
             } else {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
                 if (project_) {
-                    for (const auto &[id, cell] : project_->project().schematicCells)
+                    for (const auto &[id, cell] : project_->project().schematicCells) {
+                        if (cell.systemVerilogSchematic)
+                            continue;
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
                                                                  schematicFileExtension(cell), schematicFileDirty(id),
                                                                  conflictedSchematicFiles_.contains(id)));
+                    }
                 }
                 schematicEmptyPanel_->setOpenCandidates(candidates);
                 schematicEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
@@ -10800,6 +11202,7 @@ class DocumentWindow : public QMainWindow {
         documents_ = new QTabWidget;
         auto *documents = documents_;
         documents->setTabsClosable(false);
+        documents->setIconSize(QSize(16, 16));
         auto *schematicPage = new QWidget;
         schematicPage_ = schematicPage;
         auto *schematicLayout = new QVBoxLayout(schematicPage);
@@ -10811,6 +11214,7 @@ class DocumentWindow : public QMainWindow {
         auto *schematicContent = new QWidget;
         auto *schematicContentLayout = new QHBoxLayout(schematicContent);
         schematicHierarchy_ = new ProjectPanel(false, false, false, true);
+        schematicHierarchy_->setHideSystemVerilog(true);
         schematicHierarchy_->setOnAddClicked([this] { showAddSchematicMenu(); });
         schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
         schematicHierarchy_->setOnMakeLayoutFromSchematic([this](ice::ObjectId id) { makeLayoutFromSchematic(id); });
@@ -10896,7 +11300,8 @@ class DocumentWindow : public QMainWindow {
         schematicProperties->addTab(schematicHistoryPanel_, QStringLiteral("History"));
         schematicContentLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
-        documents->addTab(schematicPage, QStringLiteral("Schematic"));
+        const auto schematicTab = documents->addTab(schematicPage, QStringLiteral("A/MS Schematic"));
+        documents->setTabIcon(schematicTab, ice::tabIcon(QStringLiteral("ams-schematic"), 16));
 
         auto *layoutPage = new QWidget;
         layoutPage_ = layoutPage;
@@ -11113,7 +11518,8 @@ class DocumentWindow : public QMainWindow {
         layoutRightTabs->addTab(layoutHistoryPanel_, QStringLiteral("History"));
         layoutContentLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);
-        documents->addTab(layoutPage, QStringLiteral("Layout"));
+        const auto layoutTab = documents->addTab(layoutPage, QStringLiteral("Layout"));
+        documents->setTabIcon(layoutTab, ice::tabIcon(QStringLiteral("layout"), 16));
 
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setOnDeviceSelected([this](const ice::LayoutDeviceCell *cell) {
@@ -11274,17 +11680,8 @@ class DocumentWindow : public QMainWindow {
         simulationNetlist_->setReadOnly(true);
         simulationNetlist_->setLineWrapMode(QPlainTextEdit::NoWrap);
         simulationNetlist_->setPlaceholderText(QStringLiteral("Build the netlist to see it here."));
-        simulationOutput_ = new QPlainTextEdit;
-        simulationOutput_->setReadOnly(true);
-        simulationOutput_->setPlaceholderText(QStringLiteral("Simulation status and result summary"));
-        auto *rightSplitter = new QSplitter(Qt::Vertical);
-        rightSplitter->setChildrenCollapsible(false);
-        rightSplitter->addWidget(simulationNetlist_);
-        rightSplitter->addWidget(simulationOutput_);
-        rightSplitter->setStretchFactor(0, 1);
-        rightSplitter->setStretchFactor(1, 1);
         propertiesColumns->addLayout(propertiesColumn, 1);
-        propertiesColumns->addWidget(rightSplitter, 1);
+        propertiesColumns->addWidget(simulationNetlist_, 1);
         propertiesLayout->addLayout(propertiesColumns, 1);
         simulationTabs_->addTab(propertiesPage, QStringLiteral("Properties"));
 
@@ -11486,7 +11883,141 @@ class DocumentWindow : public QMainWindow {
         });
 
         connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
-        documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+        const auto simulationTab = documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+        documents->setTabIcon(simulationTab, ice::tabIcon(QStringLiteral("simulation"), 16));
+
+        implementationController_ = new ImplementationUiController(this);
+        implementationController_->addLogListener([this](ice::ImplementationStage, const QString &text) {
+            const auto line = text.trimmed();
+            if (line.isEmpty())
+                return;
+            logMessageText(ice::logging::implementation, line);
+            if (activityPanel_ && !implementationJobId_.isEmpty())
+                activityPanel_->updateJobDetail(implementationJobId_, line);
+        });
+        implementationController_->setOnChanged([this] {
+            if (implementationController_ && implementationController_->busy()) {
+                suppressProjectWatcher_ = true;
+                const auto stage = implementationController_->runningStage();
+                const auto *run = implementationController_->activeRun();
+                if (implementationJobId_.isEmpty()) {
+                    const auto title = run && !run->name.empty() ? QString::fromStdString(run->name)
+                                                                 : QStringLiteral("Implementation");
+                    beginImplementationJob(title, stage);
+                } else {
+                    updateImplementationJobStage(stage);
+                }
+            }
+            for (auto *page : implementationPages_)
+                page->refresh();
+        });
+        implementationController_->setOnHdlTextEdited([this](ice::ObjectId id, const std::string &text) {
+            if (!project_)
+                return;
+            auto &cells = project_->project().schematicCells;
+            const auto cell = cells.find(id);
+            if (cell == cells.end() || !cell->second.systemVerilogSchematic)
+                return;
+            if (cell->second.systemVerilogText == text)
+                return;
+            cell->second.systemVerilogText = text;
+            project_->markDirty();
+            updateFileTabDirtyIndicators();
+        });
+        implementationController_->setOnProjectChanged([this] {
+            suppressProjectWatcher_ = false;
+            if (project_ && !projectPath_.isEmpty())
+                reloadProjectFromDisk(false);
+            else if (implementationController_)
+                implementationController_->refresh();
+        });
+        implementationController_->setOnRunFinished([this](int exitCode) {
+            finishImplementationJob(exitCode == 0, exitCode == 0 ? QStringLiteral("Completed")
+                                                                 : QStringLiteral("Exited with code %1").arg(exitCode));
+            if (exitCode != 0)
+                statusBar()->showMessage(
+                    QStringLiteral("Implementation command failed (exit code %1). See the Activity log.").arg(exitCode),
+                    10000);
+            if (exitCode == 0 || !project_ || projectPath_.isEmpty())
+                return;
+            const auto runId = implementationController_->activeRunId();
+            auto found = project_->project().implementationRuns.find(runId);
+            if (found == project_->project().implementationRuns.end() ||
+                found->second.status != ice::ImplementationStatus::running)
+                return;
+            project_->execute("mark implementation run failed", [&](ice::Project &project) {
+                auto &run = project.implementationRuns.at(runId);
+                run.status = ice::ImplementationStatus::failed;
+                run.lastError = "ice-cli exited with code " + std::to_string(exitCode);
+                auto &stage = run.stages[run.currentStage];
+                if (stage.status == ice::ImplementationStageStatus::running) {
+                    stage.status = ice::ImplementationStageStatus::failed;
+                    stage.error = run.lastError;
+                    stage.finishedAt = run.updatedAt;
+                }
+            });
+            try {
+                project_->save(projectPath_.toStdString());
+            } catch (const ice::ProjectError &) {
+            }
+            refreshProject();
+        });
+        implementationController_->setBeforeRun([this] {
+            if (!project_ || projectPath_.isEmpty())
+                return false;
+            try {
+                project_->save(projectPath_.toStdString());
+                captureSavedFileBaselines();
+                projectDiskChangePending_ = false;
+                suppressProjectWatcher_ = true;
+                return true;
+            } catch (const ice::ProjectError &error) {
+                QMessageBox::warning(this, QStringLiteral("Implementation"),
+                                     QStringLiteral("Unable to save the project before running: %1")
+                                         .arg(QString::fromStdString(error.what())));
+                return false;
+            }
+        });
+        const std::pair<ice::ImplementationStage, const char *> implementationTabs[] = {
+            {ice::ImplementationStage::created, "HDL Schematic"},
+            {ice::ImplementationStage::synthesis, "Synthesis"},
+        };
+        int implementationIndex = 1;
+        for (const auto &[stage, label] : implementationTabs) {
+            auto *page = new ImplementationPage(stage, implementationController_);
+            if (stage == ice::ImplementationStage::created) {
+                page->setCreateHdlBlockCallback([this, page] {
+                    const auto id = createSystemVerilogBlock(false);
+                    if (id != 0)
+                        page->selectHdlCell(id);
+                });
+                page->setDeleteHdlBlockCallback([this](ice::ObjectId id) { removeSchematic(id); });
+            }
+            if (stage == ice::ImplementationStage::synthesis) {
+                page->setElaborateDesignCallback(
+                    [this](ice::ObjectId id, const std::string &pdk) { elaborateHdlDesign(id, pdk); });
+                page->setSynthesizeRunCallback(
+                    [this](ice::ObjectId id, const std::string &pdk) { synthesizeHdlRun(id, pdk); });
+                page->setExportVerilogCallback([this](ice::ObjectId id) { exportTechMappedVerilog(id); });
+                page->setRemoveRunCallback([this](ice::ObjectId id) { removeHdlRun(id); });
+            }
+            implementationPages_.push_back(page);
+            const auto tab = documents->insertTab(implementationIndex++, page, QString::fromLatin1(label));
+            const auto iconName = stage == ice::ImplementationStage::created ? "hdl-schematic" : "synthesis";
+            documents->setTabIcon(tab, ice::tabIcon(QString::fromLatin1(iconName), 16));
+        }
+
+        physicalDesignPage_ = new PhysicalDesignPage(implementationController_);
+        for (auto *page : physicalDesignPage_->pages()) {
+            const auto pageStage = page->stage();
+            page->setApplyConfigCallback([this, pageStage](ice::ObjectId id, const ice::ImplementationConfig &config) {
+                applyStageConfig(id, config, pageStage);
+            });
+            implementationPages_.push_back(page);
+        }
+        const auto physicalTab =
+            documents->insertTab(implementationIndex++, physicalDesignPage_, QStringLiteral("Physical Design"));
+        documents->setTabIcon(physicalTab, ice::tabIcon(QStringLiteral("floorplan"), 16));
 
         auto *reportsView = new QWidget;
         reportsView_ = reportsView;
@@ -12776,11 +13307,14 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId drcLayoutId_ = 0;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
+    ImplementationUiController *implementationController_ = nullptr;
+    QString implementationJobId_;
+    std::vector<ImplementationPage *> implementationPages_;
+    PhysicalDesignPage *physicalDesignPage_ = nullptr;
     QWidget *layoutPage_ = nullptr;
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
-    QPlainTextEdit *simulationOutput_ = nullptr;
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationTestbenchPage_ = nullptr;

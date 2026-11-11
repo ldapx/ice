@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 namespace ice {
 namespace {
@@ -27,11 +29,15 @@ std::vector<std::string> splitTokens(const std::string &line) {
 }
 
 double parseTimeValue(const std::string &text) {
-    try {
-        return std::stod(text);
-    } catch (const std::exception &) {
+    // Locale-independent: Qt may install a comma-based numeric locale.
+    std::string_view view(text);
+    if (!view.empty() && view.front() == '+')
+        view.remove_prefix(1);
+    double value = 0.0;
+    const auto result = std::from_chars(view.data(), view.data() + view.size(), value);
+    if (result.ec != std::errc{} || result.ptr != view.data() + view.size())
         return 0.0;
-    }
+    return value;
 }
 
 double timescaleMultiplier(std::string unit) {
@@ -86,12 +92,16 @@ double valueForChange(const VcdSignal &signal, const std::string &value, bool &o
     }
     if (signal.type == "real" || value.front() == 'r' || value.front() == 'R') {
         const auto text = value.front() == 'r' || value.front() == 'R' ? value.substr(1) : value;
-        try {
-            return std::stod(text);
-        } catch (const std::exception &) {
+        std::string_view view(text);
+        if (!view.empty() && view.front() == '+')
+            view.remove_prefix(1);
+        double result = 0.0;
+        const auto parsed = std::from_chars(view.data(), view.data() + view.size(), result);
+        if (parsed.ec != std::errc{} || parsed.ptr != view.data() + view.size()) {
             ok = false;
             return 0.0;
         }
+        return result;
     }
     if (value.front() == 'b' || value.front() == 'B') {
         double result = 0.0;
