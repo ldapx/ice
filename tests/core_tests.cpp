@@ -373,14 +373,36 @@ if [ "$1" = "-V" ]; then
   echo "Fake Yosys 0.99"
   exit 0
 fi
-mkdir -p synth
+mkdir -p synth reports
 printf 'module counter(input clk); endmodule\n' > synth/1_synth.v
 printf 'module counter(input clk); endmodule\n' > synth/2_tech_map.v
+if [ "$1" = "-s" ]; then
+  case "$2" in
+    *00-synth.ys)
+      printf 'digraph G { a -> b }\n' > reports/synthesis-overview.dot
+      printf 'digraph G { a -> b }\n' > reports/synthesis.dot
+      ;;
+    *00-elaborate.ys)
+      printf 'digraph G { a -> b }\n' > reports/elaboration.dot
+      ;;
+  esac
+fi
 cat <<'STAT'
  Number of cells:                 12
  Number of wires:                 34
  Chip area for module '\counter':  56.75
 STAT
+exit 0
+)");
+    writeExecutable(binRoot / "dot", R"(#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n' > "$out"
 exit 0
 )");
     writeExecutable(binRoot / "openroad", R"(#!/bin/sh
@@ -419,6 +441,7 @@ exit 0
 )");
     ScopedEnvironment yosys("ICE_YOSYS", (binRoot / "yosys").string());
     ScopedEnvironment openroad("ICE_OPENROAD", (binRoot / "openroad").string());
+    ScopedEnvironment graphviz("ICE_DOT", (binRoot / "dot").string());
 
     ice::PackageSpec package;
     package.name = "example.pdk";
@@ -484,6 +507,9 @@ exit 0
     CHECK(std::filesystem::is_regular_file(root / run.directory / "db" / "6_final.odb"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "final" / "6_final.v"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "logs" / "05-final.log"));
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.svg"));
+    CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.dot"));
+    CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis-overview.dot"));
     CHECK(ice::readImplementationLog(run, root, ice::ImplementationStage::final).find("fake openroad") !=
           std::string::npos);
 

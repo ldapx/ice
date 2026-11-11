@@ -88,6 +88,36 @@ void addArtifact(std::vector<std::string> &artifacts, const std::string &artifac
         artifacts.push_back(artifact);
 }
 
+// Mirror the Graphviz lookup used when the Yosys script is generated so the
+// DOT conversion honours ICE_DOT and the same PATH.
+std::optional<std::filesystem::path> findGraphviz() {
+    const auto check = [](const std::filesystem::path &path) -> std::optional<std::filesystem::path> {
+        std::error_code status;
+        if (std::filesystem::is_regular_file(path, status) && !status)
+            return path;
+        return std::nullopt;
+    };
+    if (const auto *overridePath = std::getenv("ICE_DOT"); overridePath && *overridePath)
+        if (const auto found = check(overridePath))
+            return found;
+    if (const auto *path = std::getenv("PATH"); path && *path) {
+#ifdef _WIN32
+        constexpr char separator = ';';
+#else
+        constexpr char separator = ':';
+#endif
+        std::stringstream entries(path);
+        std::string entry;
+        while (std::getline(entries, entry, separator)) {
+            if (entry.empty())
+                entry = ".";
+            if (const auto found = check(std::filesystem::path(entry) / "dot"))
+                return found;
+        }
+    }
+    return std::nullopt;
+}
+
 const char *stageLabel(ImplementationStage stage) {
     switch (stage) {
     case ImplementationStage::created:
@@ -127,6 +157,111 @@ std::string stageMetricPath(ImplementationStage stage) {
     }
 }
 
+void finalizeYosysGraph(const ImplementationExecutionOptions &options, const std::filesystem::path &runDirectory,
+                        ImplementationStage stage) {
+    const auto stem = stage == ImplementationStage::elaboration ? std::string("elaboration") : std::string("synthesis");
+    const auto reports = runDirectory / "reports";
+    const auto dot = reports / (stem + ".dot");
+    const auto overviewDot = reports / (stem + "-overview.dot");
+    const auto svg = reports / (stem + ".svg");
+    const auto svgNew = reports / (stem + ".svg.new");
+    std::error_code status;
+    std::filesystem::remove(svgNew, status);
+
+    const auto dotSize = [](const std::filesystem::path &path) -> std::optional<std::uintmax_t> {
+        std::error_code sizeStatus;
+        if (!std::filesystem::is_regular_file(path, sizeStatus) || sizeStatus)
+            return std::nullopt;
+        const auto size = std::filesystem::file_size(path, sizeStatus);
+        if (sizeStatus)
+            return std::nullopt;
+        return size;
+    };
+    // Hierarchical `dot` layout does not scale to gate-level designs with
+    // thousands of cells. Prefer the compact pre-mapping graph when it is
+    // available and only fall back to the faster `sfdp` engine if needed.
+    constexpr std::uintmax_t largeDotBytes = 1ULL * 1024ULL * 1024ULL;
+    struct Candidate {
+        std::filesystem::path dot;
+        bool large = false;
+    };
+    std::vector<Candidate> candidates;
+    const auto detailedSize = dotSize(dot);
+    const auto overviewSize = dotSize(overviewDot);
+    if (detailedSize && *detailedSize <= largeDotBytes) {
+        candidates.push_back({dot, false});
+        if (overviewSize)
+            candidates.push_back({overviewDot, *overviewSize > largeDotBytes});
+    } else if (overviewSize) {
+        candidates.push_back({overviewDot, *overviewSize > largeDotBytes});
+        if (detailedSize)
+            candidates.push_back({dot, true});
+    } else if (detailedSize) {
+        candidates.push_back({dot, true});
+    }
+    if (candidates.empty())
+        return;
+
+    const auto dotExecutable = findGraphviz();
+    if (!dotExecutable) {
+        if (options.log) {
+            std::ostringstream message;
+            message << "Graphviz: " << stem << " graph not rendered because 'dot' is not available. DOT kept at "
+                    << candidates.front().dot.string() << "\n";
+            options.log(message.str());
+        }
+        return;
+    }
+
+    ProcessResult result;
+    int timeoutSeconds = 0;
+    for (const auto &candidate : candidates) {
+        timeoutSeconds = candidate.large ? 300 : 60;
+        if (options.log) {
+            std::ostringstream message;
+            message << "Graphviz: rendering " << stem << " graph";
+            if (candidate.dot == overviewDot)
+                message << " overview";
+            if (candidate.large)
+                message << " with sfdp";
+            message << "...\n";
+            options.log(message.str());
+        }
+        ProcessOptions graph;
+        graph.arguments = {dotExecutable->string()};
+        if (candidate.large)
+            graph.arguments.push_back("-Ksfdp");
+        graph.arguments.insert(graph.arguments.end(), {"-Tsvg", candidate.dot.string(), "-o", svg.string()});
+        graph.workingDirectory = runDirectory;
+        graph.timeoutSeconds = timeoutSeconds;
+        result = runProcess(graph, options.cancellation);
+        std::error_code renderedStatus;
+        const bool rendered = result.succeeded() && std::filesystem::is_regular_file(svg, renderedStatus) &&
+                              !renderedStatus && std::filesystem::file_size(svg, renderedStatus) > 0 && !renderedStatus;
+        if (rendered) {
+            std::filesystem::remove(dot, status);
+            std::filesystem::remove(overviewDot, status);
+            if (options.log) {
+                std::ostringstream message;
+                message << "Graphviz: wrote " << svg.string() << "\n";
+                options.log(message.str());
+            }
+            return;
+        }
+        std::filesystem::remove(svg, status);
+    }
+    if (options.log) {
+        std::ostringstream message;
+        message << "Graphviz: " << stem << " graph skipped";
+        if (result.timedOut)
+            message << " after " << timeoutSeconds << " s";
+        else if (!result.error.empty())
+            message << ": " << result.error;
+        message << ". DOT kept at " << candidates.front().dot.string() << "\n";
+        options.log(message.str());
+    }
+}
+
 // Outputs that must exist after a stage succeeds. Optional outputs are only
 // recorded when present.
 struct StageOutputs {
@@ -138,10 +273,13 @@ StageOutputs stageOutputs(ImplementationStage stage, bool ctsEnabled) {
     switch (stage) {
     case ImplementationStage::elaboration:
         // The graph is optional so elaboration still succeeds when Graphviz
-        // is not installed.
-        return {{}, {"reports/elaboration.svg", "logs/00-elaboration.log", "scripts/00-elaborate.ys"}};
+        // is not installed or the SVG conversion fails.
+        return {{},
+                {"reports/elaboration.svg", "reports/elaboration.dot", "logs/00-elaboration.log",
+                 "scripts/00-elaborate.ys"}};
     case ImplementationStage::synthesis:
-        return {{"synth/1_synth.v"}, {"logs/00-synthesis.log", "scripts/00-synth.ys", "reports/synthesis.svg"}};
+        return {{"synth/1_synth.v"},
+                {"logs/00-synthesis.log", "scripts/00-synth.ys", "reports/synthesis.svg", "reports/synthesis.dot"}};
     case ImplementationStage::floorplan:
         return {{"db/2_floorplan.odb", "def/2_floorplan.def"},
                 {"final/2_floorplan.sdc", "logs/01-floorplan.log", "logs/01-floorplan.metrics.json"}};
@@ -663,7 +801,22 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
     }
     if (options.resetDownstream) {
         resetStageState(run, options.from);
-        if (static_cast<int>(options.from) <= static_cast<int>(ImplementationStage::synthesis)) {
+        const auto fromIndex = static_cast<int>(options.from);
+        const auto staleGraph = [&](const std::string &artifact) {
+            if (fromIndex <= static_cast<int>(ImplementationStage::elaboration) &&
+                (artifact.ends_with("/reports/elaboration.svg") || artifact == "reports/elaboration.svg" ||
+                 artifact.ends_with("/reports/elaboration.dot") || artifact == "reports/elaboration.dot"))
+                return true;
+            if (fromIndex <= static_cast<int>(ImplementationStage::synthesis) &&
+                (artifact.ends_with("/reports/synthesis.svg") || artifact == "reports/synthesis.svg" ||
+                 artifact.ends_with("/reports/synthesis.dot") || artifact == "reports/synthesis.dot" ||
+                 artifact.ends_with("/reports/synthesis-overview.dot") || artifact == "reports/synthesis-overview.dot"))
+                return true;
+            return false;
+        };
+        run.artifacts.erase(std::remove_if(run.artifacts.begin(), run.artifacts.end(), staleGraph),
+                            run.artifacts.end());
+        if (fromIndex <= static_cast<int>(ImplementationStage::synthesis)) {
             // A new synthesis invalidates the previously exported mapping.
             std::error_code status;
             std::filesystem::remove(runDirectory / implementationMappedNetlistRelativePath(), status);
@@ -934,6 +1087,15 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             process.arguments.push_back(scriptPath.generic_string());
         }
 
+        if (stage == ImplementationStage::elaboration || stage == ImplementationStage::synthesis) {
+            const auto stem =
+                stage == ImplementationStage::elaboration ? std::string("elaboration") : std::string("synthesis");
+            std::error_code graphStatus;
+            std::filesystem::remove(runDirectory / "reports" / (stem + ".dot"), graphStatus);
+            std::filesystem::remove(runDirectory / "reports" / (stem + "-overview.dot"), graphStatus);
+            std::filesystem::remove(runDirectory / "reports" / (stem + ".svg"), graphStatus);
+            std::filesystem::remove(runDirectory / "reports" / (stem + ".svg.new"), graphStatus);
+        }
         const auto pidPath = runDirectory / "run.pid";
         ProcessOutputCallback outputCallback;
         if (options.log) {
@@ -965,12 +1127,7 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
 
         if (stage == ImplementationStage::elaboration || stage == ImplementationStage::synthesis) {
             parseYosysMetrics(processResult.logTail, run.metrics);
-            // `show -format svg` writes a DOT file as an intermediate and then
-            // converts it. Keep only the SVG product.
-            const auto graphStem =
-                stage == ImplementationStage::elaboration ? std::string("elaboration") : std::string("synthesis");
-            std::error_code removeStatus;
-            std::filesystem::remove(runDirectory / "reports" / (graphStem + ".dot"), removeStatus);
+            finalizeYosysGraph(options, runDirectory, stage);
         } else {
             const auto metrics = stageMetricPath(stage);
             if (!metrics.empty())

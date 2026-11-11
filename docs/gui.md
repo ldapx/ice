@@ -171,10 +171,17 @@ The Synthesis page uses the same padded Explorer and artifact containers. Its
 left column lists HDL source files. The middle panel has no permanent graph
 tabs: double-clicking an artifact opens one closable tab per file, just like a
 document. Graph artifacts open a zoomable SVG canvas and the technology-mapped
-netlist opens a read-only Verilog editor. The right column lists only the
-`elaboration.svg` graph, the `synthesis.svg` graph, and the technology-mapped
+netlist opens a read-only Verilog editor. The right column lists the
+`elaboration` and `synthesis` graph artifacts and the technology-mapped
 `2_tech_map.v` netlist. Logs, scripts, and the generic `1_synth.v` stay in the
 run directory but are not shown in this list.
+
+Graph generation is split from the synthesis itself so a large design cannot
+block the stage. Yosys writes DOT files, then ICE renders them to SVG with a
+bounded Graphviz run. When the detailed post-synthesis graph is too large to
+lay out, ICE uses a compact graph captured before memory and technology
+mapping, so the result stays viewable. If no graph can be rendered, the DOT is
+kept as a text artifact and a warning is written to the Jobs/Messages views.
 
 The Floorplan stage pane adds a `Netlists` tab to its left column. It lists
 every `synth/2_tech_map.v` and exported technology-mapped `.v` present across
