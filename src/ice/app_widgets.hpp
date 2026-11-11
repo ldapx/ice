@@ -67,6 +67,13 @@ class ActivityPanel : public QWidget {
     void showAgentTab();
     void appendMessage(const QString &message);
     void showMessagesTab();
+    QString startJob(const QString &title, const QString &stage, const QString &detail = {});
+    void updateJobStatus(const QString &id, const QString &status, const QString &detail = {});
+    void updateJobStage(const QString &id, const QString &stage);
+    void updateJobDetail(const QString &id, const QString &detail);
+    void finishJob(const QString &id, bool success, const QString &detail = {});
+    void showJobsTab();
+    void setOnCancelJob(std::function<void(const QString &)> callback) { onCancelJob_ = std::move(callback); }
 
   private:
     struct AgentBackend;
@@ -132,6 +139,9 @@ class ActivityPanel : public QWidget {
     void appendLogEntry(const QString &time, int level, const QString &category, const QString &message);
     void rebuildMessageView();
     bool messagePassesFilters(const QString &category, int level) const;
+    void refreshJobsTable();
+    void updateJobsFooter();
+    QString selectedJobId() const;
     void newAgentSession();
     void closeActiveAgentSession();
     void refreshPastAgentSessions();
@@ -160,6 +170,28 @@ class ActivityPanel : public QWidget {
     };
     std::deque<MessageEntry> messageEntries_;
     std::shared_ptr<std::atomic<bool>> messageSinkAlive_;
+
+    struct JobEntry {
+        QString id;
+        QString title;
+        QString stage;
+        QString status;
+        QString detail;
+        qint64 startedMs = 0;
+        qint64 finishedMs = 0;
+        bool running = false;
+    };
+    std::vector<JobEntry> jobs_;
+    QString nextJobId_;
+    QTableWidget *jobsTable_ = nullptr;
+    QLabel *jobsSummary_ = nullptr;
+    QProgressBar *jobsProgress_ = nullptr;
+    QPushButton *cancelJobButton_ = nullptr;
+    QPushButton *clearJobsButton_ = nullptr;
+    QTimer *jobsTimer_ = nullptr;
+    int nextJobNumber_ = 1;
+    int jobsTabIndex_ = -1;
+    std::function<void(const QString &)> onCancelJob_;
 
     QComboBox *agentSelector_ = nullptr;
     QComboBox *sessionSelector_ = nullptr;

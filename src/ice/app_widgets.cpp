@@ -106,6 +106,31 @@ QString messageLevelName(int level) {
     return QStringLiteral("Info");
 }
 
+QString formatJobElapsed(qint64 milliseconds) {
+    const auto totalSeconds = std::max<qint64>(0, milliseconds) / 1000;
+    if (totalSeconds < 3600) {
+        return QStringLiteral("%1:%2")
+            .arg(totalSeconds / 60, 2, 10, QLatin1Char('0'))
+            .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2:%3")
+        .arg(totalSeconds / 3600)
+        .arg((totalSeconds % 3600) / 60, 2, 10, QLatin1Char('0'))
+        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+QColor jobStatusColor(const QString &status) {
+    if (status == QStringLiteral("Running") || status == QStringLiteral("Starting"))
+        return QColor(QStringLiteral("#2563eb"));
+    if (status == QStringLiteral("Succeeded"))
+        return QColor(QStringLiteral("#15803d"));
+    if (status == QStringLiteral("Failed"))
+        return QColor(QStringLiteral("#b91c1c"));
+    if (status == QStringLiteral("Cancelling") || status == QStringLiteral("Cancelled"))
+        return QColor(QStringLiteral("#a16207"));
+    return ice::uiColor(ice::UiColor::Text2);
+}
+
 QColor messageLevelColor(int level) {
     switch (static_cast<spdlog::level::level_enum>(level)) {
     case spdlog::level::warn:
@@ -566,29 +591,75 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
 
     auto *jobsPage = new QWidget;
     auto *jobsLayout = new QVBoxLayout(jobsPage);
-    auto *jobsHint = new QLabel(QStringLiteral("Long-running application and simulation tasks appear here."));
-    jobsHint->setWordWrap(true);
-    jobsHint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    jobsLayout->addWidget(jobsHint);
-    auto *jobsList = new QListWidget;
-    jobsList->setAccessibleName(QStringLiteral("Jobs"));
-    jobsList->setAlternatingRowColors(true);
-    auto *noJobs = new QListWidgetItem(QStringLiteral("No active jobs"), jobsList);
-    noJobs->setFlags(Qt::NoItemFlags);
-    jobsLayout->addWidget(jobsList, 1);
+    jobsLayout->setContentsMargins(6, 6, 6, 6);
+    jobsLayout->setSpacing(4);
+    auto *jobsHeader = new QHBoxLayout;
+    jobsHeader->setSpacing(6);
+    jobsSummary_ = new QLabel(QStringLiteral("No jobs yet"));
+    jobsSummary_->setStyleSheet(QStringLiteral("font-weight: 600;"));
+    jobsHeader->addWidget(jobsSummary_, 1);
+    clearJobsButton_ = new QPushButton(QStringLiteral("Clear finished"));
+    clearJobsButton_->setToolTip(QStringLiteral("Remove completed jobs from the list"));
+    clearJobsButton_->setEnabled(false);
+    jobsHeader->addWidget(clearJobsButton_);
+    jobsLayout->addLayout(jobsHeader);
+
+    jobsTable_ = new QTableWidget(0, 5);
+    jobsTable_->setAccessibleName(QStringLiteral("Jobs"));
+    jobsTable_->setHorizontalHeaderLabels({QStringLiteral("Job"), QStringLiteral("Stage"), QStringLiteral("Status"),
+                                           QStringLiteral("Elapsed"), QStringLiteral("Detail")});
+    jobsTable_->verticalHeader()->setVisible(false);
+    jobsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    jobsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    jobsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    jobsTable_->setWordWrap(false);
+    jobsTable_->setShowGrid(false);
+    jobsTable_->setAlternatingRowColors(true);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    jobsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    jobsTable_->setTextElideMode(Qt::ElideRight);
+    jobsLayout->addWidget(jobsTable_, 1);
+
     auto *jobsFooter = new QHBoxLayout;
     jobsFooter->setSpacing(6);
-    auto *progress = new QProgressBar;
-    progress->setRange(0, 100);
-    progress->setValue(0);
-    progress->setFormat(QStringLiteral("Ready"));
-    progress->setMaximumHeight(16);
-    jobsFooter->addWidget(progress, 1);
-    auto *cancelJobButton = new QPushButton(QStringLiteral("Cancel selected job"));
-    cancelJobButton->setEnabled(false);
-    jobsFooter->addWidget(cancelJobButton);
+    jobsProgress_ = new QProgressBar;
+    jobsProgress_->setRange(0, 100);
+    jobsProgress_->setValue(0);
+    jobsProgress_->setFormat(QStringLiteral("Idle"));
+    jobsProgress_->setMaximumHeight(16);
+    jobsFooter->addWidget(jobsProgress_, 1);
+    cancelJobButton_ = new QPushButton(QStringLiteral("Cancel selected job"));
+    cancelJobButton_->setEnabled(false);
+    jobsFooter->addWidget(cancelJobButton_);
     jobsLayout->addLayout(jobsFooter);
-    tabs->addTab(jobsPage, QStringLiteral("Jobs"));
+    jobsTabIndex_ = tabs->addTab(jobsPage, QStringLiteral("Jobs"));
+
+    jobsTimer_ = new QTimer(this);
+    jobsTimer_->setInterval(1000);
+    connect(jobsTimer_, &QTimer::timeout, this, [this] { refreshJobsTable(); });
+    connect(jobsTable_, &QTableWidget::itemSelectionChanged, this, [this] { updateJobsFooter(); });
+    connect(cancelJobButton_, &QPushButton::clicked, this, [this] {
+        const auto id = selectedJobId();
+        if (id.isEmpty() || !onCancelJob_)
+            return;
+        for (auto &job : jobs_) {
+            if (job.id == id && job.running) {
+                job.status = QStringLiteral("Cancelling");
+                break;
+            }
+        }
+        onCancelJob_(id);
+        refreshJobsTable();
+    });
+    connect(clearJobsButton_, &QPushButton::clicked, this, [this] {
+        jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](const auto &job) { return !job.running; }),
+                    jobs_.end());
+        refreshJobsTable();
+    });
+    updateJobsFooter();
 
     layout->addWidget(tabs);
     tabs_ = tabs;
@@ -2447,6 +2518,175 @@ void ActivityPanel::appendMessage(const QString &message) {
 void ActivityPanel::showMessagesTab() {
     if (tabs_ && messagesTabIndex_ >= 0)
         tabs_->setCurrentIndex(messagesTabIndex_);
+}
+QString ActivityPanel::startJob(const QString &title, const QString &stage, const QString &detail) {
+    JobEntry job;
+    job.id = QStringLiteral("job-%1").arg(nextJobNumber_++);
+    job.title = title;
+    job.stage = stage;
+    job.status = QStringLiteral("Running");
+    job.detail = detail;
+    job.startedMs = QDateTime::currentMSecsSinceEpoch();
+    job.running = true;
+    jobs_.push_back(job);
+    if (jobsTimer_ && !jobsTimer_->isActive())
+        jobsTimer_->start();
+    refreshJobsTable();
+    showJobsTab();
+    return job.id;
+}
+
+void ActivityPanel::updateJobStatus(const QString &id, const QString &status, const QString &detail) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        job.status = status;
+        if (!detail.isEmpty())
+            job.detail = detail;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::updateJobStage(const QString &id, const QString &stage) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        job.stage = stage;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::updateJobDetail(const QString &id, const QString &detail) {
+    if (id.isEmpty() || !jobsTable_)
+        return;
+    for (auto &job : jobs_) {
+        if (job.id == id) {
+            job.detail = detail;
+            break;
+        }
+    }
+    for (int row = 0; row < jobsTable_->rowCount(); ++row) {
+        const auto *item = jobsTable_->item(row, 0);
+        if (!item || item->data(Qt::UserRole).toString() != id)
+            continue;
+        if (auto *detailItem = jobsTable_->item(row, 4)) {
+            detailItem->setText(detail);
+            detailItem->setToolTip(detail);
+        }
+        break;
+    }
+}
+
+void ActivityPanel::finishJob(const QString &id, bool success, const QString &detail) {
+    for (auto &job : jobs_) {
+        if (job.id != id)
+            continue;
+        const bool wasCancelling = job.status == QStringLiteral("Cancelling");
+        job.running = false;
+        job.finishedMs = QDateTime::currentMSecsSinceEpoch();
+        job.status = wasCancelling ? QStringLiteral("Cancelled")
+                                   : (success ? QStringLiteral("Succeeded") : QStringLiteral("Failed"));
+        if (!detail.isEmpty() && !wasCancelling)
+            job.detail = detail;
+        break;
+    }
+    refreshJobsTable();
+}
+
+void ActivityPanel::showJobsTab() {
+    if (tabs_ && jobsTabIndex_ >= 0)
+        tabs_->setCurrentIndex(jobsTabIndex_);
+}
+
+QString ActivityPanel::selectedJobId() const {
+    if (!jobsTable_)
+        return {};
+    const auto row = jobsTable_->currentRow();
+    if (row < 0)
+        return {};
+    const auto *item = jobsTable_->item(row, 0);
+    return item ? item->data(Qt::UserRole).toString() : QString{};
+}
+
+void ActivityPanel::refreshJobsTable() {
+    if (!jobsTable_)
+        return;
+    const auto selected = selectedJobId();
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    jobsTable_->setRowCount(0);
+    int selectedRow = -1;
+    for (auto iterator = jobs_.rbegin(); iterator != jobs_.rend(); ++iterator) {
+        const auto &job = *iterator;
+        const int row = jobsTable_->rowCount();
+        jobsTable_->insertRow(row);
+        auto *titleItem = new QTableWidgetItem(job.title);
+        titleItem->setData(Qt::UserRole, job.id);
+        auto *stageItem = new QTableWidgetItem(job.stage);
+        auto *statusItem = new QTableWidgetItem(job.status);
+        statusItem->setForeground(QBrush(jobStatusColor(job.status)));
+        if (job.running) {
+            auto font = statusItem->font();
+            font.setBold(true);
+            statusItem->setFont(font);
+        }
+        auto *elapsedItem =
+            new QTableWidgetItem(formatJobElapsed((job.finishedMs > 0 ? job.finishedMs : now) - job.startedMs));
+        auto *detailItem = new QTableWidgetItem(job.detail);
+        detailItem->setToolTip(job.detail);
+        jobsTable_->setItem(row, 0, titleItem);
+        jobsTable_->setItem(row, 1, stageItem);
+        jobsTable_->setItem(row, 2, statusItem);
+        jobsTable_->setItem(row, 3, elapsedItem);
+        jobsTable_->setItem(row, 4, detailItem);
+        if (job.id == selected)
+            selectedRow = row;
+    }
+    if (selectedRow >= 0)
+        jobsTable_->setCurrentCell(selectedRow, 0);
+    updateJobsFooter();
+    const bool hasRunning = std::any_of(jobs_.begin(), jobs_.end(), [](const auto &job) { return job.running; });
+    if (jobsTimer_) {
+        if (hasRunning && !jobsTimer_->isActive())
+            jobsTimer_->start();
+        else if (!hasRunning)
+            jobsTimer_->stop();
+    }
+}
+
+void ActivityPanel::updateJobsFooter() {
+    if (!jobsSummary_ || !jobsProgress_)
+        return;
+    const auto running = std::count_if(jobs_.begin(), jobs_.end(), [](const auto &job) { return job.running; });
+    const auto finished = static_cast<int>(jobs_.size()) - static_cast<int>(running);
+    if (jobs_.empty()) {
+        jobsSummary_->setText(QStringLiteral("No jobs yet"));
+    } else if (running > 0) {
+        jobsSummary_->setText(QStringLiteral("%1 running · %2 finished").arg(running).arg(finished));
+    } else {
+        jobsSummary_->setText(QStringLiteral("%1 finished").arg(finished));
+    }
+    if (running > 0) {
+        jobsProgress_->setRange(0, 0);
+        jobsProgress_->setFormat(QStringLiteral("Running"));
+    } else {
+        jobsProgress_->setRange(0, 100);
+        jobsProgress_->setValue(0);
+        jobsProgress_->setFormat(QStringLiteral("Idle"));
+    }
+    const auto id = selectedJobId();
+    bool selectedRunning = false;
+    for (const auto &job : jobs_) {
+        if (job.id == id && job.running) {
+            selectedRunning = true;
+            break;
+        }
+    }
+    if (cancelJobButton_)
+        cancelJobButton_->setEnabled(selectedRunning);
+    if (clearJobsButton_)
+        clearJobsButton_->setEnabled(finished > 0);
 }
 
 CommandPalette::CommandPalette(const QList<QAction *> &actions, QWidget *parent) : QDialog(parent) {

@@ -135,6 +135,28 @@
 
 namespace {
 
+QString implementationStageLabel(ice::ImplementationStage stage) {
+    switch (stage) {
+    case ice::ImplementationStage::created:
+        return QStringLiteral("HDL");
+    case ice::ImplementationStage::elaboration:
+        return QStringLiteral("Elaboration");
+    case ice::ImplementationStage::synthesis:
+        return QStringLiteral("Synthesis");
+    case ice::ImplementationStage::floorplan:
+        return QStringLiteral("Floorplan");
+    case ice::ImplementationStage::placement:
+        return QStringLiteral("Placement");
+    case ice::ImplementationStage::cts:
+        return QStringLiteral("CTS");
+    case ice::ImplementationStage::routing:
+        return QStringLiteral("Routing");
+    case ice::ImplementationStage::final:
+        return QStringLiteral("Final");
+    }
+    return QStringLiteral("Implementation");
+}
+
 bool layerAvailableForLayout(const ice::Project &project, ice::ObjectId layoutId, const ice::Layer &layer) {
     if (layoutId == 0 || (layer.layout == 0 && layer.pdk.empty()))
         return true;
@@ -2601,31 +2623,58 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Select a SystemVerilog source file first."));
             return;
         }
-        ice::ImplementationConfig config;
-        config.name = uniqueHdlRunName(cell->second.name + " run");
-        config.top = hdlTopName(cell->second);
-        config.pdk = pdk;
-        config.sourceCells = {sourceCell};
-        config.threads = 2;
-        ice::ObjectId runId = 0;
-        try {
-            project_->execute("create HDL run", [&](ice::Project &project) {
-                runId = ice::createImplementationRun(project, config);
-                auto &run = project.implementationRuns.at(runId);
-                run.currentStage = ice::ImplementationStage::elaboration;
-                run.status = ice::ImplementationStatus::running;
-                run.stages[ice::ImplementationStage::elaboration].status = ice::ImplementationStageStatus::running;
-            });
-        } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Elaborate Design"), QString::fromStdString(error.what()));
+        if (implementationController_->busy()) {
+            logMessage(ice::logging::implementation, spdlog::level::warn,
+                       QStringLiteral("Elaborate design ignored because another implementation job is running."));
             return;
         }
-        project_->setLastHistoryLabel("Created HDL run " + config.name);
-        refreshProject();
-        implementationController_->setActiveRunId(runId);
-        implementationController_->run(ice::ImplementationStage::elaboration, ice::ImplementationStage::elaboration);
-        statusBar()->showMessage(QStringLiteral("Elaborating %1 with %2")
-                                     .arg(QString::fromStdString(cell->second.name), QString::fromStdString(pdk)));
+        const auto sourceName = cell->second.name;
+        beginImplementationJob(QStringLiteral("Elaborate %1").arg(QString::fromStdString(sourceName)),
+                               ice::ImplementationStage::elaboration);
+        QTimer::singleShot(0, this, [this, sourceCell, pdk, sourceName] {
+            if (!project_ || projectPath_.isEmpty()) {
+                finishImplementationJob(false, QStringLiteral("Project is no longer available."));
+                return;
+            }
+            const auto current = project_->project().schematicCells.find(sourceCell);
+            if (current == project_->project().schematicCells.end() || !current->second.systemVerilogSchematic) {
+                finishImplementationJob(false, QStringLiteral("The SystemVerilog source no longer exists."));
+                QMessageBox::information(this, QStringLiteral("Elaborate Design"),
+                                         QStringLiteral("Select a SystemVerilog source file first."));
+                return;
+            }
+            ice::ImplementationConfig config;
+            config.name = uniqueHdlRunName(sourceName + " run");
+            config.top = hdlTopName(current->second);
+            config.pdk = pdk;
+            config.sourceCells = {sourceCell};
+            config.threads = 2;
+            ice::ObjectId runId = 0;
+            try {
+                project_->execute("create HDL run", [&](ice::Project &project) {
+                    runId = ice::createImplementationRun(project, config);
+                    auto &run = project.implementationRuns.at(runId);
+                    run.currentStage = ice::ImplementationStage::elaboration;
+                    run.status = ice::ImplementationStatus::running;
+                    run.stages[ice::ImplementationStage::elaboration].status = ice::ImplementationStageStatus::running;
+                });
+            } catch (const ice::ProjectError &error) {
+                finishImplementationJob(false, QString::fromStdString(error.what()));
+                QMessageBox::critical(this, QStringLiteral("Elaborate Design"), QString::fromStdString(error.what()));
+                return;
+            }
+            project_->setLastHistoryLabel("Created HDL run " + config.name);
+            implementationController_->setActiveRunId(runId);
+            updateImplementationJobStage(ice::ImplementationStage::elaboration);
+            implementationController_->run(ice::ImplementationStage::elaboration,
+                                           ice::ImplementationStage::elaboration);
+            if (!implementationController_->busy()) {
+                finishImplementationJob(false, QStringLiteral("Unable to start the elaboration job."));
+                return;
+            }
+            statusBar()->showMessage(QStringLiteral("Elaborating %1 with %2")
+                                         .arg(QString::fromStdString(sourceName), QString::fromStdString(pdk)));
+        });
     }
 
     void synthesizeHdlRun(ice::ObjectId runId, const std::string &pdk) {
@@ -2634,29 +2683,53 @@ class DocumentWindow : public QMainWindow {
         const auto found = project_->project().implementationRuns.find(runId);
         if (found == project_->project().implementationRuns.end())
             return;
-        const bool pdkChanged = found->second.config.pdk != pdk;
-        try {
-            project_->execute("configure HDL synthesis", [&](ice::Project &project) {
-                auto &run = project.implementationRuns.at(runId);
-                run.config.pdk = pdk;
-                if (pdkChanged)
-                    run.config.stack.clear();
-                run.currentStage = ice::ImplementationStage::synthesis;
-                run.status = ice::ImplementationStatus::running;
-                run.stages[ice::ImplementationStage::synthesis].status = ice::ImplementationStageStatus::running;
-            });
-        } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Synthesize Design"), QString::fromStdString(error.what()));
+        if (implementationController_->busy()) {
+            logMessage(ice::logging::implementation, spdlog::level::warn,
+                       QStringLiteral("Synthesize design ignored because another implementation job is running."));
             return;
         }
-        refreshProject();
-        implementationController_->setActiveRunId(runId);
-        implementationController_->run(pdkChanged ? ice::ImplementationStage::elaboration
-                                                  : ice::ImplementationStage::synthesis,
-                                       ice::ImplementationStage::synthesis);
-        const auto name = project_->project().implementationRuns.at(runId).name;
-        statusBar()->showMessage(
-            QStringLiteral("Synthesizing %1 with %2").arg(QString::fromStdString(name), QString::fromStdString(pdk)));
+        const auto runName = found->second.name;
+        beginImplementationJob(QStringLiteral("Synthesize %1").arg(QString::fromStdString(runName)),
+                               ice::ImplementationStage::synthesis);
+        QTimer::singleShot(0, this, [this, runId, pdk, runName] {
+            if (!project_) {
+                finishImplementationJob(false, QStringLiteral("Project is no longer available."));
+                return;
+            }
+            const auto current = project_->project().implementationRuns.find(runId);
+            if (current == project_->project().implementationRuns.end()) {
+                finishImplementationJob(false, QStringLiteral("The selected run no longer exists."));
+                return;
+            }
+            const bool pdkChanged = current->second.config.pdk != pdk;
+            try {
+                project_->execute("configure HDL synthesis", [&](ice::Project &project) {
+                    auto &run = project.implementationRuns.at(runId);
+                    run.config.pdk = pdk;
+                    if (pdkChanged)
+                        run.config.stack.clear();
+                    run.currentStage = ice::ImplementationStage::synthesis;
+                    run.status = ice::ImplementationStatus::running;
+                    run.stages[ice::ImplementationStage::synthesis].status = ice::ImplementationStageStatus::running;
+                });
+            } catch (const ice::ProjectError &error) {
+                finishImplementationJob(false, QString::fromStdString(error.what()));
+                QMessageBox::critical(this, QStringLiteral("Synthesize Design"), QString::fromStdString(error.what()));
+                return;
+            }
+            implementationController_->setActiveRunId(runId);
+            updateImplementationJobStage(pdkChanged ? ice::ImplementationStage::elaboration
+                                                    : ice::ImplementationStage::synthesis);
+            implementationController_->run(pdkChanged ? ice::ImplementationStage::elaboration
+                                                      : ice::ImplementationStage::synthesis,
+                                           ice::ImplementationStage::synthesis);
+            if (!implementationController_->busy()) {
+                finishImplementationJob(false, QStringLiteral("Unable to start the synthesis job."));
+                return;
+            }
+            statusBar()->showMessage(QStringLiteral("Synthesizing %1 with %2")
+                                         .arg(QString::fromStdString(runName), QString::fromStdString(pdk)));
+        });
     }
 
     void exportTechMappedVerilog(ice::ObjectId runId) {
@@ -7562,6 +7635,31 @@ class DocumentWindow : public QMainWindow {
                   : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     }
 
+    void beginImplementationJob(const QString &title, ice::ImplementationStage stage) {
+        if (!activityPanel_)
+            return;
+        if (implementationJobId_.isEmpty()) {
+            implementationJobId_ = activityPanel_->startJob(title, implementationStageLabel(stage));
+            if (activityDock_)
+                activityDock_->show();
+        } else {
+            activityPanel_->updateJobStage(implementationJobId_, implementationStageLabel(stage));
+            activityPanel_->updateJobStatus(implementationJobId_, QStringLiteral("Running"), title);
+        }
+        activityPanel_->showJobsTab();
+    }
+
+    void updateImplementationJobStage(ice::ImplementationStage stage) {
+        if (activityPanel_ && !implementationJobId_.isEmpty())
+            activityPanel_->updateJobStage(implementationJobId_, implementationStageLabel(stage));
+    }
+
+    void finishImplementationJob(bool success, const QString &detail) {
+        if (activityPanel_ && !implementationJobId_.isEmpty())
+            activityPanel_->finishJob(implementationJobId_, success, detail);
+        implementationJobId_.clear();
+    }
+
     void logMessage(const char *category, spdlog::level::level_enum level, const QString &message) {
         if (message.isEmpty())
             return;
@@ -10868,6 +10966,12 @@ class DocumentWindow : public QMainWindow {
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
         activityPanel_->setOnDrcViolationActivated(
             [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
+        activityPanel_->setOnCancelJob([this](const QString &id) {
+            if (id == implementationJobId_ && implementationController_) {
+                implementationController_->cancel();
+                activityPanel_->updateJobStatus(id, QStringLiteral("Cancelling"));
+            }
+        });
         activityDock_->setWidget(activityPanel_);
         addDockWidget(Qt::BottomDockWidgetArea, activityDock_);
     }
@@ -11785,12 +11889,25 @@ class DocumentWindow : public QMainWindow {
         implementationController_ = new ImplementationUiController(this);
         implementationController_->addLogListener([this](ice::ImplementationStage, const QString &text) {
             const auto line = text.trimmed();
-            if (!line.isEmpty())
-                logMessageText(ice::logging::implementation, line);
+            if (line.isEmpty())
+                return;
+            logMessageText(ice::logging::implementation, line);
+            if (activityPanel_ && !implementationJobId_.isEmpty())
+                activityPanel_->updateJobDetail(implementationJobId_, line);
         });
         implementationController_->setOnChanged([this] {
-            if (implementationController_ && implementationController_->busy())
+            if (implementationController_ && implementationController_->busy()) {
                 suppressProjectWatcher_ = true;
+                const auto stage = implementationController_->runningStage();
+                const auto *run = implementationController_->activeRun();
+                if (implementationJobId_.isEmpty()) {
+                    const auto title = run && !run->name.empty() ? QString::fromStdString(run->name)
+                                                                 : QStringLiteral("Implementation");
+                    beginImplementationJob(title, stage);
+                } else {
+                    updateImplementationJobStage(stage);
+                }
+            }
             for (auto *page : implementationPages_)
                 page->refresh();
         });
@@ -11815,6 +11932,8 @@ class DocumentWindow : public QMainWindow {
                 implementationController_->refresh();
         });
         implementationController_->setOnRunFinished([this](int exitCode) {
+            finishImplementationJob(exitCode == 0, exitCode == 0 ? QStringLiteral("Completed")
+                                                                 : QStringLiteral("Exited with code %1").arg(exitCode));
             if (exitCode != 0)
                 statusBar()->showMessage(
                     QStringLiteral("Implementation command failed (exit code %1). See the Activity log.").arg(exitCode),
@@ -13189,6 +13308,7 @@ class DocumentWindow : public QMainWindow {
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
     ImplementationUiController *implementationController_ = nullptr;
+    QString implementationJobId_;
     std::vector<ImplementationPage *> implementationPages_;
     PhysicalDesignPage *physicalDesignPage_ = nullptr;
     QWidget *layoutPage_ = nullptr;

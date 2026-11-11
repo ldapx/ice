@@ -673,6 +673,21 @@ canvas so the same key can be reused. Conflicts within a scope, or against a
 global shortcut, are rejected. Bindings are stored in the user's Qt settings and
 applied immediately.
 
+## Jobs dock
+
+The **Jobs** tab lists long-running implementation work: elaboration,
+synthesis, technology mapping, and physical stages. Each row shows the job,
+stage, status, elapsed time, and the latest log line. The footer has an
+indeterminate progress indicator while work is running, **Cancel selected job**
+for the active implementation process, and **Clear finished** to remove
+completed entries.
+
+Elaborate and Synthesize now return immediately: the project setup is deferred
+to the next event-loop turn, the CLI process runs asynchronously, and the new
+job appears in the Jobs tab before the run starts. Selecting a job enables
+cancellation, and stage transitions update the job in place. Detailed output is
+also available in the category-filtered **Messages** tab.
+
 ## Messages dock
 
 The bottom **Messages** tab is the unified log view. Each log category has its
