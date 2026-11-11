@@ -330,18 +330,30 @@ std::string lowercase(std::string value) {
 }
 
 std::filesystem::path implementationOrfsRoot() {
-    for (const auto *name : {"ICE_OPENROAD_FLOW_SCRIPTS", "OPENROAD_FLOW_SCRIPTS"}) {
+    for (const auto *name : {"ICE_OPENROAD_FLOW_SCRIPTS", "OPENROAD_FLOW_SCRIPTS", "ORFS_ROOT"}) {
         if (const auto *value = std::getenv(name); value && *value) {
             std::error_code status;
             if (std::filesystem::is_directory(value, status) && !status)
                 return value;
         }
     }
+    std::vector<std::filesystem::path> candidates = {
+        "/opt/OpenROAD-flow-scripts",
+        "/opt/openroad-flow-scripts",
+        "/usr/local/OpenROAD-flow-scripts",
+        "/usr/share/openroad-flow-scripts",
+    };
     if (const auto *home = std::getenv("HOME"); home && *home) {
-        const auto fallback = std::filesystem::path(home) / "repositories" / "OpenROAD-flow-scripts";
+        const auto root = std::filesystem::path(home);
+        candidates.push_back(root / "OpenROAD-flow-scripts");
+        candidates.push_back(root / "repositories" / "OpenROAD-flow-scripts");
+        candidates.push_back(root / "src" / "OpenROAD-flow-scripts");
+        candidates.push_back(root / ".local" / "share" / "OpenROAD-flow-scripts");
+    }
+    for (const auto &candidate : candidates) {
         std::error_code status;
-        if (std::filesystem::is_directory(fallback, status) && !status)
-            return fallback;
+        if (std::filesystem::is_directory(candidate, status) && !status)
+            return candidate;
     }
     return {};
 }
@@ -1123,10 +1135,23 @@ ImplementationPreparation prepareImplementationRun(Project &project, Implementat
     yosys << "hierarchy -check -top " << run.config.top << "\n";
     yosys << "proc\n";
     yosys << "opt\n";
-    yosys << "synth -top " << run.config.top << " -flatten\n";
+    if (graphviz) {
+        // Generate a compact pre-mapping graph first. It stays small enough for
+        // Graphviz to lay out even when the final gate-level design has
+        // thousands of cells; the stage runner falls back to it for large
+        // designs. Continue with the remaining synthesis passes afterwards.
+        yosys << "synth -top " << run.config.top << " -flatten -run begin:fine\n";
+        yosys << "show -format dot -prefix reports/synthesis-overview -notitle\n";
+        yosys << "synth -top " << run.config.top << " -flatten -run fine:check\n";
+    } else {
+        yosys << "synth -top " << run.config.top << " -flatten\n";
+    }
     yosys << "opt_clean\n";
     if (graphviz) {
-        yosys << "show -format svg -prefix reports/synthesis -notitle\n";
+        // Generate the detailed DOT here, but leave SVG rendering to the stage
+        // runner so large graphs can be skipped or timed out without blocking
+        // synthesis itself.
+        yosys << "show -format dot -prefix reports/synthesis -notitle\n";
     }
     yosys << "write_verilog -noattr -noexpr -nohex -nodec " << tclQuote(synthNetlist.generic_string()) << "\n";
     yosys << "stat\n";
@@ -1165,7 +1190,7 @@ ImplementationPreparation prepareImplementationRun(Project &project, Implementat
     elaborate << "proc\n";
     elaborate << "opt\n";
     if (graphviz)
-        elaborate << "show -format svg -prefix reports/elaboration -notitle\n";
+        elaborate << "show -format dot -prefix reports/elaboration -notitle\n";
     elaborate << "stat\n";
     const auto elaborateScript = runDirectory / "scripts" / "00-elaborate.ys";
     writeText(elaborateScript, elaborate.str());
