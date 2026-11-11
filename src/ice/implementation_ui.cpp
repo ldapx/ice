@@ -591,13 +591,20 @@ std::optional<std::filesystem::path> runGraph(const ice::ImplementationRun &run,
     const auto executable = QStandardPaths::findExecutable(QStringLiteral("dot"));
     if (executable.isEmpty())
         return std::nullopt;
+    std::error_code sizeStatus;
+    const auto dotBytes = std::filesystem::file_size(*dot, sizeStatus);
+    const bool large = !sizeStatus && dotBytes > 1ULL * 1024ULL * 1024ULL;
+    QStringList arguments;
+    if (large)
+        arguments << QStringLiteral("-Ksfdp");
+    arguments << QStringLiteral("-Tsvg") << QString::fromStdString(dot->string()) << QStringLiteral("-o")
+              << QString::fromStdString(svgPath.string());
     QProcess process;
     process.setProgram(executable);
-    process.setArguments({QStringLiteral("-Tsvg"), QString::fromStdString(dot->string()), QStringLiteral("-o"),
-                          QString::fromStdString(svgPath.string())});
+    process.setArguments(arguments);
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
-    if (!process.waitForStarted(5000) || !process.waitForFinished(30000))
+    if (!process.waitForStarted(5000) || !process.waitForFinished(large ? 300000 : 60000))
         return std::nullopt;
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
         return std::nullopt;
@@ -2362,8 +2369,18 @@ std::optional<std::string> ImplementationPage::promptPdk(const QString &title, c
         QString label = QString::fromStdString(pdk.id);
         if (!pdk.packageName.empty())
             label += QStringLiteral(" (%1)").arg(QString::fromStdString(pdk.packageName));
-        if (!pdk.implementationReady)
-            label += QStringLiteral(" — no implementation data");
+        if (!pdk.implementationReady) {
+            QString reason = QStringLiteral("no implementation data");
+            for (const auto &missing : pdk.implementationMissing) {
+                if (missing.find("OPENROAD_FLOW_SCRIPTS") != std::string::npos) {
+                    reason = QStringLiteral("needs OpenROAD-flow-scripts");
+                    break;
+                }
+            }
+            if (reason == QStringLiteral("no implementation data") && !pdk.implementationMissing.empty())
+                reason = QString::fromStdString(pdk.implementationMissing.front());
+            label += QStringLiteral(" — ") + reason;
+        }
         labels.push_back(label);
         ids.push_back(pdk.id);
         if (pdk.id == current)
@@ -3081,7 +3098,9 @@ void ImplementationPage::refreshArtifacts() {
     };
     const auto isSynthesisArtifact = [](const std::string &artifact) {
         return artifact.ends_with("/reports/elaboration.svg") || artifact == "reports/elaboration.svg" ||
+               artifact.ends_with("/reports/elaboration.dot") || artifact == "reports/elaboration.dot" ||
                artifact.ends_with("/reports/synthesis.svg") || artifact == "reports/synthesis.svg" ||
+               artifact.ends_with("/reports/synthesis.dot") || artifact == "reports/synthesis.dot" ||
                artifact.ends_with("/synth/2_tech_map.v") || artifact == "synth/2_tech_map.v";
     };
     if (synthesisMode()) {
@@ -3109,8 +3128,12 @@ void ImplementationPage::refreshArtifacts() {
         if (synthesisMode()) {
             if (artifact.ends_with("/reports/elaboration.svg") || artifact == "reports/elaboration.svg")
                 return QStringLiteral("Elaboration graph (elaboration.svg)");
+            if (artifact.ends_with("/reports/elaboration.dot") || artifact == "reports/elaboration.dot")
+                return QStringLiteral("Elaboration graph source (elaboration.dot)");
             if (artifact.ends_with("/reports/synthesis.svg") || artifact == "reports/synthesis.svg")
                 return QStringLiteral("Synthesis graph (synthesis.svg)");
+            if (artifact.ends_with("/reports/synthesis.dot") || artifact == "reports/synthesis.dot")
+                return QStringLiteral("Synthesis graph source (synthesis.dot)");
             if (artifact.ends_with("/synth/2_tech_map.v") || artifact == "synth/2_tech_map.v")
                 return QStringLiteral("Technology-mapped netlist (2_tech_map.v)");
         }
