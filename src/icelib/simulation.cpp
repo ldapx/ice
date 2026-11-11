@@ -5,7 +5,6 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -38,7 +37,7 @@ struct NgspiceLog {
         text.append(message);
         if (!text.empty() && text.back() != '\n')
             text.push_back('\n');
-        constexpr std::size_t limit = 32 * 1024;
+        constexpr std::size_t limit = std::size_t{32} * 1024;
         if (text.size() > limit)
             text.erase(0, text.size() - limit);
     }
@@ -165,7 +164,7 @@ std::string shellQuote(const std::string &value) {
     return result + "'";
 }
 
-std::string readTextFile(const std::filesystem::path &path, std::size_t limit = 2 * 1024 * 1024) {
+std::string readTextFile(const std::filesystem::path &path, std::size_t limit = std::size_t{2} * 1024 * 1024) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
         return {};
@@ -382,7 +381,7 @@ bool populateSimulationSignalsFromTraces(SimulationItem &simulation, const std::
         std::string capture;
         for (std::size_t index = 0; index < traceNames.size(); ++index) {
             if (index)
-                capture += ",";
+                capture += ',';
             capture += traceNames[index];
         }
         simulation.captureSignals = std::move(capture);
@@ -495,7 +494,7 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         std::string name = signal;
         for (auto &character : name)
             character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-        if ((name.rfind("v(", 0) == 0 || name.rfind("i(", 0) == 0 || name.rfind("@", 0) == 0) && name.size() >= 3)
+        if ((name.starts_with("v(") || name.starts_with("i(") || name.starts_with('@')) && name.size() >= 3)
             return name;
         return "v(" + name + ")";
     };

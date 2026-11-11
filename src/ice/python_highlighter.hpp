@@ -5,7 +5,7 @@
 
 class QTextDocument;
 
-// Lightweight Python highlighter for project report source files.
+// Lightweight Python highlighter for project scripts and procedural layouts.
 class PythonSyntaxHighlighter : public QSyntaxHighlighter {
   public:
     explicit PythonSyntaxHighlighter(QTextDocument *document);

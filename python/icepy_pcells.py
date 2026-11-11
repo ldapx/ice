@@ -731,6 +731,14 @@ def _um_value(value, default: float = 0.0) -> int:
     return int(round(_length_um(value, default) * PACKAGE_DBU_PER_UM))
 
 
+def _layer_stream(spec) -> tuple[str, int, int]:
+    if len(spec) == 2:
+        label, number = spec
+        return str(label), int(number), 0
+    label, number, datatype = spec
+    return str(label), int(number), int(datatype)
+
+
 class PackagePcell:
     """Base class for package PCells built with the ICE layout builder.
 
@@ -753,6 +761,7 @@ class PackagePcell:
     cap_bottom = "met1"
     cap_top = "met2"
     cap_marker = ""
+    res_layer = "res"
     turns = 2
     guard_ring = False
 
@@ -796,8 +805,8 @@ class PackagePcell:
     def rect(self, builder, layer: str, x, y, width, height):
         if width <= 0 or height <= 0 or layer not in self.layers:
             return
-        label, number = self.layers[layer]
-        builder.layer(label, number)
+        label, number, datatype = _layer_stream(self.layers[layer])
+        builder.layer(label, number, datatype)
         builder.rectangle(
             label, int(round(x)), int(round(y)), int(round(width)), int(round(height))
         )
@@ -807,8 +816,8 @@ class PackagePcell:
             return
         import icepy
 
-        label, number = self.layers[layer]
-        builder.layer(label, number)
+        label, number, datatype = _layer_stream(self.layers[layer])
+        builder.layer(label, number, datatype)
         builder.polygon(
             label, [icepy.LayoutPoint(int(round(x)), int(round(y))) for x, y in points]
         )
@@ -828,7 +837,8 @@ class PackagePcell:
     ):
         if layer not in self.layers or width <= 0 or height <= 0:
             return
-        label_name = self.layers[layer][0]
+        label_name, number, datatype = _layer_stream(self.layers[layer])
+        builder.layer(label_name, number, datatype)
         builder.port(
             name,
             label_name,
@@ -1024,8 +1034,8 @@ class PackagePcell:
             contact,
             contact,
         )
-        if "res" in self.layers:
-            self.rect(builder, "res", -200, -200, length + 400, width + 400)
+        if self.res_layer in self.layers:
+            self.rect(builder, self.res_layer, -200, -200, length + 400, width + 400)
         if self.doping == "n" and "nwell" in self.layers:
             self.rect(builder, "nwell", -head, -300, length + 2 * head, width + 600)
         elif self.doping == "p" and "pwell" in self.layers:

@@ -666,8 +666,8 @@ SpiceImportResult createSchematicFromSpice(Project &project, std::string name, s
         ComponentRequest request;
         request.type = component.type;
         request.name = component.name;
-        request.x = static_cast<Coordinate>((layoutIndex % 4) * 180);
-        request.y = static_cast<Coordinate>((layoutIndex / 4) * 150);
+        request.x = static_cast<Coordinate>(layoutIndex % 4) * 180;
+        request.y = static_cast<Coordinate>(layoutIndex / 4) * 150;
         request.parameters.push_back({0, component.parameterName, component.parameterValue});
         addSchematicComponent(project, cell, request);
         ++layoutIndex;

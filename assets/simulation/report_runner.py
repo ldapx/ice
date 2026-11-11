@@ -193,12 +193,6 @@ class SimulationScriptContext:
         self._graphs.append(graph)
         return graph
 
-    add_graph = graph
-
-
-# Backwards-compatible name for older scripts that import the context type.
-ReportContext = SimulationScriptContext
-
 
 def _load_script(path: Path):
     spec = importlib.util.spec_from_file_location("ice_simulation_script", path)
@@ -232,8 +226,6 @@ def main() -> int:
         with redirect_stdout(captured):
             module = _load_script(script_path)
             builder = getattr(module, "build_script", None)
-            if not callable(builder):
-                builder = getattr(module, "build_report", None)
             result = builder(context) if callable(builder) else None
         if not callable(builder) or result is None:
             result = captured.getvalue()

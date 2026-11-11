@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string_view>
@@ -319,7 +320,6 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
     std::string itemSeverity;
     std::string itemMultiplicity;
     std::string itemValue;
-    std::string itemText;
     std::string itemDescription;
     Bounds itemBounds;
     std::vector<std::string> itemMessages;
@@ -347,14 +347,20 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
             if (entry.empty())
                 continue;
             if (!message.empty())
-                message += "\n";
+                message += '\n';
             message += entry;
         }
         if (!description.empty())
             message = message.empty() ? description : description + ": " + message;
         if (message.empty())
             message = violation.rule;
-        const auto multiplicity = itemMultiplicity.empty() ? 1 : std::max(1, std::atoi(itemMultiplicity.c_str()));
+        int multiplicity = 1;
+        if (!itemMultiplicity.empty()) {
+            char *end = nullptr;
+            const auto parsed = std::strtol(itemMultiplicity.c_str(), &end, 10);
+            if (end != itemMultiplicity.c_str() && parsed > 0)
+                multiplicity = static_cast<int>(std::min<long>(parsed, std::numeric_limits<int>::max()));
+        }
         if (multiplicity > 1)
             message += " (x" + std::to_string(multiplicity) + ")";
         violation.message = std::move(message);
@@ -402,7 +408,7 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
                     std::string path;
                     for (const auto &frame : categoryFrames) {
                         if (!path.empty())
-                            path += ".";
+                            path += '.';
                         path += trim(frame.name);
                     }
                     if (!path.empty())

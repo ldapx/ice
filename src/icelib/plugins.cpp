@@ -23,11 +23,6 @@ PluginManifest PluginManager::readManifest(const std::filesystem::path &root) {
                 if (auto text = item.value<std::string>())
                     manifest.capabilities.push_back(*text);
             }
-        } else if (const auto *legacy = (*plugin)["capabilities"].as_array()) {
-            for (const auto &item : *legacy) {
-                if (auto text = item.value<std::string>())
-                    manifest.capabilities.push_back(*text);
-            }
         }
         if (const auto *permissions = table["permissions"].as_table()) {
             manifest.permissions.readProject = (*permissions)["read_project"].value_or(true);
@@ -92,25 +87,5 @@ const PluginRecord &PluginManager::get(const std::string &name) const {
     if (it == records_.end())
         throw ProjectError("plugin.lifecycle", "Plugin was not discovered: " + name);
     return it->second;
-}
-const std::map<std::string, PluginRecord> &PluginManager::records() const noexcept { return records_; }
-std::string pluginStateName(PluginState state) {
-    switch (state) {
-    case PluginState::discovered:
-        return "discovered";
-    case PluginState::loaded:
-        return "loaded";
-    case PluginState::initialized:
-        return "initialized";
-    case PluginState::enabled:
-        return "enabled";
-    case PluginState::disabled:
-        return "disabled";
-    case PluginState::unloaded:
-        return "unloaded";
-    case PluginState::failed:
-        return "failed";
-    }
-    return "unknown";
 }
 } // namespace ice

@@ -4,7 +4,6 @@
 #include <cctype>
 #include <map>
 #include <numeric>
-#include <set>
 #include <vector>
 
 namespace ice {
@@ -75,7 +74,7 @@ std::string layoutLayerConnectivityKey(const Layer &layer) {
 
     std::string key = base + "#" + std::to_string(layer.number);
     if (!purpose.empty() && purpose != "drawing" && purpose != "pin") {
-        key += ":";
+        key += ':';
         key += purpose;
         key += ":" + std::to_string(layer.datatype);
     }

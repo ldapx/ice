@@ -1,3 +1,4 @@
+#include "icelib/operations.hpp"
 #include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
@@ -181,9 +182,15 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
         if (symbol != cell.symbols.end())
             symbolType = normalizedIdentifier(symbol->second.name);
         const bool isPort = symbolType == "input" || symbolType == "output";
+        bool sourceOrGround = false;
         if (symbol != cell.symbols.end()) {
             device.type = symbol->second.name;
             device.sourceCell = symbol->second.sourceCell;
+            auto element = symbol->second.sourceCell != 0 ? 'X' : spiceElementForSymbol(symbol->second.name);
+            const auto normalized = normalizedIdentifier(symbol->second.name);
+            if (element == 'X' && (normalized == "gnd" || normalized == "0"))
+                element = 'G';
+            sourceOrGround = element == 'V' || element == 'I' || element == 'G';
             if (isPort) {
                 PortInstance port;
                 port.id = id;
@@ -192,7 +199,7 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
                 for (const auto &pin : symbol->second.pins)
                     port.pins.push_back(pin.id);
                 portInstances.push_back(std::move(port));
-            } else {
+            } else if (!sourceOrGround) {
                 for (const auto &pin : symbol->second.pins)
                     pinOwners[pin.id].push_back(id);
             }
@@ -202,7 +209,7 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
                                   "Schematic instance '" + instance.name + "' references a missing symbol", id,
                                   std::nullopt, VerificationSeverity::error});
         }
-        if (isPort)
+        if (isPort || sourceOrGround)
             continue;
         device.name = instance.name.empty() ? device.type + " " + std::to_string(id) : instance.name;
         device.parameters = parameterMap(instance.parameters);
@@ -252,6 +259,7 @@ LogicalDevice actualLayoutDevice(const LayoutInstance &instance, const LayoutCel
     device.childCell = child.id;
     device.parameters = parameterMap(child.parameters);
     device.hasParameters = true;
+    device.schematicInstance = instance.schematicInstance;
     return device;
 }
 
@@ -263,6 +271,25 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     const auto &cell = cellIt->second;
     if (cell.library)
         throw ProjectError("lvs.layout", "LVS compares user layout cells, not read-only library cells");
+
+    const auto elementForName = [](const std::string &name) {
+        const auto normalized = normalizedIdentifier(name);
+        if (normalized == "gnd" || normalized == "0")
+            return 'G';
+        return spiceElementForSymbol(name);
+    };
+    const auto elementForSchematicInstance = [&](ObjectId instanceId) {
+        const auto instance = schematic.instances.find(instanceId);
+        if (instance == schematic.instances.end())
+            return '?';
+        const auto symbol = schematic.symbols.find(instance->second.symbol);
+        if (symbol == schematic.symbols.end())
+            return '?';
+        if (symbol->second.sourceCell != 0)
+            return 'X';
+        return elementForName(symbol->second.name);
+    };
+    const auto isSupply = [](char element) { return element == 'V' || element == 'I' || element == 'G'; };
 
     LayoutLogicalSide result;
     struct ActualDevice {
@@ -279,7 +306,16 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
                                   VerificationSeverity::error});
             continue;
         }
+        char element = 'X';
+        if (instance.schematicInstance != 0)
+            element = elementForSchematicInstance(instance.schematicInstance);
+        else if (child->second.library && !child->second.device.empty())
+            element = elementForName(child->second.device);
+        if (isSupply(element))
+            continue;
         auto device = actualLayoutDevice(instance, child->second);
+        if (instance.schematicInstance != 0 && schematic.instances.contains(instance.schematicInstance))
+            device.type = instanceType(schematic, instance.schematicInstance);
         actualByName[normalizedIdentifier(instance.name)].push_back(id);
         actualDevices.push_back({id, std::move(device)});
     }
@@ -288,6 +324,10 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
 
     std::set<ObjectId> usedActual;
     for (const auto &[plannedId, planned] : cell.plannedDevices) {
+        const auto element =
+            planned.schematicInstance != 0 ? elementForSchematicInstance(planned.schematicInstance) : 'X';
+        if (isSupply(element))
+            continue;
         ObjectId actualId = 0;
         const auto matches = actualByName.find(normalizedIdentifier(planned.name));
         if (matches != actualByName.end()) {
@@ -339,6 +379,10 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     std::map<ObjectId, ObjectId> parent;
     for (const auto &[plannedId, _] : cell.plannedDevices)
         parent[plannedId] = plannedId;
+    for (const auto &[instanceId, _] : cell.instances)
+        parent[instanceId] = instanceId;
+    for (const auto &[portId, _] : cell.ports)
+        parent[portId] = portId;
     const auto findRoot = [&parent](ObjectId id) {
         auto root = id;
         while (parent.at(root) != root)
@@ -358,6 +402,10 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     };
 
     bool validConnection = false;
+    const auto logicalId = [&](ObjectId id) {
+        const auto logical = result.plannedToLogical.find(id);
+        return logical != result.plannedToLogical.end() ? logical->second : id;
+    };
     std::map<std::string, std::set<ObjectId>> namedGroups;
     std::map<std::string, ObjectId> namedObjects;
     std::set<ObjectId> unnamedMembers;
@@ -366,8 +414,9 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         const bool haveFrom = parent.contains(connection.from);
         const bool haveTo = parent.contains(connection.to);
         if (!haveFrom || !haveTo) {
-            mismatches.push_back({1, "layout-connection", "Planned connection references a missing planned device",
-                                  std::nullopt, connection.id, VerificationSeverity::error});
+            mismatches.push_back({1, "layout-connection",
+                                  "Planned connection references a missing device or layout instance", std::nullopt,
+                                  connection.id, VerificationSeverity::error});
             continue;
         }
         validConnection = true;
@@ -376,8 +425,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             layoutNet != cell.nets.end() && !layoutNet->second.name.empty() ? layoutNet->second.name : std::string{};
         if (!netName.empty()) {
             auto &members = namedGroups[netName];
-            members.insert(connection.from);
-            members.insert(connection.to);
+            members.insert(logicalId(connection.from));
+            members.insert(logicalId(connection.to));
             const auto [entry, inserted] = namedObjects.emplace(netName, connection.id);
             if (!inserted && connection.id < entry->second)
                 entry->second = connection.id;
@@ -397,10 +446,9 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         LogicalNet net;
         net.name = name;
         net.object = namedObjects.at(name);
-        for (const auto plannedId : members) {
-            const auto logical = result.plannedToLogical.find(plannedId);
-            if (logical != result.plannedToLogical.end())
-                net.devices.insert(logical->second);
+        for (const auto id : members) {
+            if (result.side.devices.contains(id))
+                net.devices.insert(id);
         }
         if (net.devices.size() >= 2)
             result.side.nets.push_back(std::move(net));
@@ -410,22 +458,35 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     for (const auto plannedId : unnamedMembers)
         unnamedComponents[findRoot(plannedId)].push_back(plannedId);
     for (const auto &[root, members] : unnamedComponents) {
-        if (members.size() < 2)
+        std::set<ObjectId> logicalMembers;
+        for (const auto member : members) {
+            const auto logical = logicalId(member);
+            if (result.side.devices.contains(logical))
+                logicalMembers.insert(logical);
+        }
+        if (logicalMembers.size() < 2)
             continue;
         LogicalNet net;
-        net.name = "net " + std::to_string(*std::min_element(members.begin(), members.end()));
+        net.name = "net " + std::to_string(*std::min_element(logicalMembers.begin(), logicalMembers.end()));
         net.object = unnamedObjects.contains(root) ? unnamedObjects.at(root) : 0;
-        for (const auto plannedId : members) {
-            const auto logical = result.plannedToLogical.find(plannedId);
-            if (logical != result.plannedToLogical.end())
-                net.devices.insert(logical->second);
-        }
-        if (net.devices.size() >= 2)
-            result.side.nets.push_back(std::move(net));
+        net.devices = std::move(logicalMembers);
+        result.side.nets.push_back(std::move(net));
     }
 
+    const auto isConvertedSupplyPin = [&](const Port &port) {
+        if (port.schematicInstance == 0)
+            return false;
+        const auto instance = schematic.instances.find(port.schematicInstance);
+        if (instance == schematic.instances.end())
+            return true;
+        const auto symbol = schematic.symbols.find(instance->second.symbol);
+        if (symbol == schematic.symbols.end())
+            return true;
+        const auto type = normalizedIdentifier(symbol->second.name);
+        return type != "input" && type != "output";
+    };
     for (const auto &[_, port] : cell.ports) {
-        if (!port.visible)
+        if (!port.visible || isConvertedSupplyPin(port))
             continue;
         std::string netName;
         if (port.net != 0) {
@@ -675,7 +736,7 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
 }
 
 std::string schematicBaseName(std::string name) {
-    const auto normalized = normalizedIdentifier(name);
+    auto normalized = normalizedIdentifier(name);
     if (normalized.ends_with("_layout"))
         return normalized.substr(0, normalized.size() - 7);
     return normalized;
@@ -698,6 +759,14 @@ ObjectId schematicForLayout(const Project &project, ObjectId layoutCellId) {
     for (const auto &[_, device] : layout->second.plannedDevices) {
         if (device.schematicInstance != 0)
             linkedInstances.insert(device.schematicInstance);
+    }
+    for (const auto &[_, instance] : layout->second.instances) {
+        if (instance.schematicInstance != 0)
+            linkedInstances.insert(instance.schematicInstance);
+    }
+    for (const auto &[_, port] : layout->second.ports) {
+        if (port.schematicInstance != 0)
+            linkedInstances.insert(port.schematicInstance);
     }
 
     std::set<ObjectId> candidates;
