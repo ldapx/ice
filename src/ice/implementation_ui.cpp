@@ -8,6 +8,7 @@
 #include "layout_canvas.hpp"
 #include "layout_render.hpp"
 #include "text_document_editor.hpp"
+#include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
 #include <QApplication>
@@ -15,10 +16,15 @@
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QFormLayout>
@@ -30,6 +36,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -37,12 +44,15 @@
 #include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLineF>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -63,6 +73,7 @@
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -72,7 +83,9 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 
@@ -192,7 +205,7 @@ QString stageSummaryText(const ice::ImplementationRun *run, ice::ImplementationS
             else
                 parts << QStringLiteral("setup WNS %1 ns").arg(*wns * 1.0e9, 0, 'f', 3);
         }
-    } else if (stage == ice::ImplementationStage::routing) {
+    } else if (stage == ice::ImplementationStage::routing || stage == ice::ImplementationStage::final) {
         if (const auto drc = metric("route__drc_errors"))
             parts << QStringLiteral("%1 DRC").arg(static_cast<qulonglong>(std::max(0.0, *drc)));
         if (const auto wirelength = metric("route__wirelength"))
@@ -201,6 +214,12 @@ QString stageSummaryText(const ice::ImplementationRun *run, ice::ImplementationS
             parts << QStringLiteral("%1 vias").arg(static_cast<qulonglong>(std::max(0.0, *vias)));
         if (const auto antenna = metric("antenna__violating__nets"))
             parts << QStringLiteral("%1 antenna nets").arg(static_cast<qulonglong>(std::max(0.0, *antenna)));
+        if (stage == ice::ImplementationStage::final) {
+            if (const auto wns = metric("timing__setup__ws"); wns && std::abs(*wns) <= 1.0e20)
+                parts << QStringLiteral("setup WNS %1 ns").arg(*wns * 1.0e9, 0, 'f', 3);
+            if (const auto power = metric("power__total"); power && *power >= 0.0)
+                parts << QStringLiteral("power %1 mW").arg(*power * 1.0e3, 0, 'f', 2);
+        }
     }
     if (parts.isEmpty())
         return {};
@@ -219,6 +238,8 @@ std::string stageDefPath(ice::ImplementationStage stage) {
         return "def/4_cts.def";
     case ice::ImplementationStage::routing:
         return "def/5_route.def";
+    case ice::ImplementationStage::final:
+        return "def/6_final.def";
     default:
         return {};
     }
@@ -251,6 +272,8 @@ std::string stageOdbPath(ice::ImplementationStage stage) {
         return "db/4_cts.odb";
     case ice::ImplementationStage::routing:
         return "db/5_route.odb";
+    case ice::ImplementationStage::final:
+        return "db/6_final.odb";
     default:
         return {};
     }
@@ -278,6 +301,7 @@ ice::LayoutPreviewLayer parsePreviewLayer(const QJsonObject &object, const ice::
     const auto number = object.value(QStringLiteral("layer_number")).toInt();
     layer.number = number;
     layer.datatype = object.value(QStringLiteral("layer_datatype")).toInt();
+    layer.name = name;
     layer.id = previewLayerId(project, name, number);
     return layer;
 }
@@ -313,6 +337,128 @@ std::optional<ice::LayoutPreviewHeatMap> parsePreviewHeatMap(const QJsonValue &v
     return heatmap;
 }
 
+std::optional<ice::LayoutPreviewHeatMap> parseHeatMapCsv(const std::filesystem::path &path) {
+    std::ifstream input(path);
+    if (!input.is_open())
+        return std::nullopt;
+    struct Bin {
+        double x0 = 0.0;
+        double y0 = 0.0;
+        double x1 = 0.0;
+        double y1 = 0.0;
+        double value = 0.0;
+    };
+    std::vector<Bin> bins;
+    std::set<double> xs;
+    std::set<double> ys;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line.front() == 'x')
+            continue;
+        std::stringstream stream(line);
+        std::string field;
+        std::vector<double> values;
+        while (std::getline(stream, field, ',')) {
+            try {
+                values.push_back(std::stod(field));
+            } catch (const std::exception &) {
+                values.clear();
+                break;
+            }
+        }
+        if (values.size() < 5)
+            continue;
+        bins.push_back({values[0], values[1], values[2], values[3], values[4]});
+        xs.insert(values[0]);
+        ys.insert(values[1]);
+    }
+    if (bins.empty() || xs.empty() || ys.empty())
+        return std::nullopt;
+    ice::LayoutPreviewHeatMap heatmap;
+    heatmap.columns = static_cast<int>(xs.size());
+    heatmap.rows = static_cast<int>(ys.size());
+    const auto x0 = *xs.begin();
+    const auto y0 = *ys.begin();
+    double x1 = x0;
+    double y1 = y0;
+    for (const auto &bin : bins) {
+        x1 = std::max(x1, bin.x1);
+        y1 = std::max(y1, bin.y1);
+    }
+    heatmap.bounds = QRectF(x0 * kMicronToProjectUnit, y0 * kMicronToProjectUnit, (x1 - x0) * kMicronToProjectUnit,
+                            (y1 - y0) * kMicronToProjectUnit);
+    heatmap.values.assign(static_cast<std::size_t>(heatmap.columns) * heatmap.rows, 0.0);
+    heatmap.minimum = std::numeric_limits<double>::max();
+    heatmap.maximum = std::numeric_limits<double>::lowest();
+    const std::vector<double> xValues(xs.begin(), xs.end());
+    const std::vector<double> yValues(ys.begin(), ys.end());
+    for (const auto &bin : bins) {
+        const auto column =
+            static_cast<int>(std::lower_bound(xValues.begin(), xValues.end(), bin.x0) - xValues.begin());
+        const auto row = static_cast<int>(std::lower_bound(yValues.begin(), yValues.end(), bin.y0) - yValues.begin());
+        if (column < 0 || column >= heatmap.columns || row < 0 || row >= heatmap.rows)
+            continue;
+        const auto index = static_cast<std::size_t>(row) * heatmap.columns + column;
+        heatmap.values[index] = bin.value;
+        heatmap.minimum = std::min(heatmap.minimum, bin.value);
+        heatmap.maximum = std::max(heatmap.maximum, bin.value);
+    }
+    if (heatmap.maximum <= heatmap.minimum)
+        return std::nullopt;
+    return heatmap;
+}
+
+std::vector<ice::LayoutPreviewMarker> parseDrcMarkers(const std::filesystem::path &path) {
+    std::vector<ice::LayoutPreviewMarker> markers;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return markers;
+    const std::regex violationType(R"(^\s*violation type:\s*(.+)$)");
+    const std::regex sources(R"(^\s*srcs:\s*(.+)$)");
+    const std::regex comment(R"(^\s*comment:\s*(.+)$)");
+    const std::regex bboxLayer(
+        R"(^\s*bbox =\s*\(\s*([^,]+),\s*([^\)]+)\)\s*-\s*\(\s*([^,]+),\s*([^\)]+)\)\s*on Layer\s*(.+)$)");
+    std::string line;
+    std::string currentType;
+    std::string currentSources;
+    std::string currentComment;
+    while (std::getline(input, line)) {
+        std::smatch match;
+        if (std::regex_match(line, match, violationType)) {
+            currentType = match[1].str();
+            currentSources.clear();
+            currentComment.clear();
+            continue;
+        }
+        if (std::regex_match(line, match, sources)) {
+            currentSources = match[1].str();
+            continue;
+        }
+        if (std::regex_match(line, match, comment)) {
+            currentComment = match[1].str();
+            continue;
+        }
+        if (!std::regex_match(line, match, bboxLayer))
+            continue;
+        try {
+            const auto scale = kMicronToProjectUnit;
+            const auto x0 = std::stod(match[1].str()) * scale;
+            const auto y0 = std::stod(match[2].str()) * scale;
+            const auto x1 = std::stod(match[3].str()) * scale;
+            const auto y1 = std::stod(match[4].str()) * scale;
+            ice::LayoutPreviewMarker marker;
+            marker.type = QString::fromStdString(currentType);
+            marker.layer = QString::fromStdString(match[5].str());
+            marker.rectangle = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized();
+            marker.sources = QString::fromStdString(currentSources);
+            marker.comment = QString::fromStdString(currentComment);
+            markers.push_back(std::move(marker));
+        } catch (const std::exception &) {
+        }
+    }
+    return markers;
+}
+
 std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json, const ice::Project *project,
                                                          QString &error) {
     QJsonParseError parseError;
@@ -323,6 +469,7 @@ std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json,
     }
     const auto root = document.object();
     auto model = std::make_shared<ice::LayoutPreviewModel>();
+    model->truncated = root.value(QStringLiteral("truncated")).toBool();
     const auto bounds = parsePreviewRect(root.value(QStringLiteral("bounds")).toObject());
     model->bounds = QRectF(bounds.x, bounds.y, bounds.width, bounds.height);
     bool validBounds = model->bounds.isValid() && model->bounds.width() > 0.0 && model->bounds.height() > 0.0;
@@ -340,6 +487,9 @@ std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json,
             shape.kind = ice::LayoutPreviewShape::Kind::polygon;
         shape.width = object.value(QStringLiteral("width")).toDouble();
         shape.text = object.value(QStringLiteral("text")).toString();
+        shape.net = object.value(QStringLiteral("net")).toString();
+        shape.netId = object.value(QStringLiteral("net_id")).toInt();
+        shape.special = object.value(QStringLiteral("special")).toBool();
         for (const auto &pointValue : object.value(QStringLiteral("points")).toArray()) {
             const auto point = pointValue.toArray();
             if (point.size() < 2)
@@ -367,6 +517,8 @@ std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json,
         const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
         port.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
         port.label = object.value(QStringLiteral("name")).toString();
+        port.net = object.value(QStringLiteral("net")).toString();
+        port.netId = object.value(QStringLiteral("net_id")).toInt();
         if (port.rectangle.isValid()) {
             model->ports.push_back(std::move(port));
             if (!validBounds)
@@ -380,11 +532,69 @@ std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json,
         const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
         device.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
         device.name = object.value(QStringLiteral("name")).toString();
+        device.id = object.value(QStringLiteral("id")).toInt();
+        device.master = object.value(QStringLiteral("master")).toString();
+        device.category = object.value(QStringLiteral("category")).toString();
+        device.module = object.value(QStringLiteral("module")).toString();
+        device.orientation = object.value(QStringLiteral("orientation")).toString();
         if (device.rectangle.isValid()) {
             model->plannedDevices.push_back(std::move(device));
             if (!validBounds)
                 model->bounds = model->bounds.united(model->plannedDevices.back().rectangle);
         }
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("nets")).toArray()) {
+        const auto object = entry.toObject();
+        ice::LayoutPreviewNet net;
+        net.id = object.value(QStringLiteral("id")).toInt();
+        net.name = object.value(QStringLiteral("name")).toString();
+        net.type = object.value(QStringLiteral("type")).toString();
+        net.special = object.value(QStringLiteral("special")).toBool();
+        net.termCount = static_cast<quint64>(object.value(QStringLiteral("term_count")).toDouble());
+        for (const auto &term : object.value(QStringLiteral("terms")).toArray())
+            net.terms.push_back(term.toString());
+        model->nets.push_back(std::move(net));
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("modules")).toArray()) {
+        const auto object = entry.toObject();
+        ice::LayoutPreviewModule module;
+        module.id = object.value(QStringLiteral("id")).toInt();
+        module.name = object.value(QStringLiteral("name")).toString();
+        module.parentId = object.value(QStringLiteral("parent_id")).toInt();
+        module.instanceCount = static_cast<quint64>(object.value(QStringLiteral("instance_count")).toDouble());
+        model->modules.push_back(std::move(module));
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("guides")).toArray()) {
+        const auto object = entry.toObject();
+        ice::LayoutPreviewGuide guide;
+        guide.net = object.value(QStringLiteral("net")).toString();
+        guide.layer = object.value(QStringLiteral("layer")).toString();
+        guide.congested = object.value(QStringLiteral("congested")).toBool();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        guide.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (guide.rectangle.isValid())
+            model->guides.push_back(std::move(guide));
+    }
+    for (const auto &entry : root.value(QStringLiteral("rows")).toArray()) {
+        const auto object = entry.toObject();
+        ice::LayoutPreviewRow row;
+        row.site = object.value(QStringLiteral("site")).toString();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        row.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (row.rectangle.isValid())
+            model->rows.push_back(std::move(row));
+    }
+    for (const auto &entry : root.value(QStringLiteral("blockages")).toArray()) {
+        const auto object = entry.toObject();
+        ice::LayoutPreviewBlockage blockage;
+        blockage.type = object.value(QStringLiteral("type")).toString();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        blockage.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (blockage.rectangle.isValid())
+            model->blockages.push_back(std::move(blockage));
     }
 
     model->placementDensity = parsePreviewHeatMap(root.value(QStringLiteral("placement_density")));
@@ -402,6 +612,48 @@ std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json,
 // either an ODB-backed preview model or the legacy DEF import fallback.
 class ImplementationPreviewCanvas : public QGraphicsView {
   public:
+    struct LayerEntry {
+        QString key;
+        QString label;
+        int number = 0;
+        QColor color;
+        bool visible = true;
+    };
+
+    enum class Tool { none, ruler, label };
+    enum class SelectionKind { none, instance, port, shape, marker };
+
+    struct Selection {
+        SelectionKind kind = SelectionKind::none;
+        int index = -1;
+        QString name;
+        QString master;
+        QString category;
+        QString module;
+        QString net;
+        QString layer;
+        QString type;
+        QString sources;
+        QString comment;
+        int netId = 0;
+        bool special = false;
+        QRectF rectangle;
+        QPolygonF polygon;
+        std::vector<QPointF> centerline;
+        qreal width = 0.0;
+
+        bool valid() const { return kind != SelectionKind::none; }
+    };
+
+    struct HeatMapOptions {
+        bool logScale = false;
+        bool reverse = false;
+        bool showLegend = true;
+        int alpha = 140;
+        std::optional<double> minimum;
+        std::optional<double> maximum;
+    };
+
     explicit ImplementationPreviewCanvas(QWidget *parent = nullptr) : QGraphicsView(parent) {
         setScene(new QGraphicsScene(this));
         setRenderHint(QPainter::Antialiasing, true);
@@ -423,10 +675,289 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     }
 
     void setHeatMap(ice::LayoutHeatMapKind kind) {
+        customHeatMap_.reset();
         if (heatMapKind_ == kind)
             return;
         heatMapKind_ = kind;
-        rebuild();
+        // Overlay changes should not discard the user's zoom and pan.
+        rebuild(false);
+    }
+
+    void setCustomHeatMap(std::optional<ice::LayoutPreviewHeatMap> heatmap) {
+        customHeatMap_ = std::move(heatmap);
+        heatMapKind_ = ice::LayoutHeatMapKind::none;
+        rebuild(false);
+    }
+    bool hasCustomHeatMap() const { return customHeatMap_.has_value(); }
+
+    std::vector<LayerEntry> layers() const { return layers_; }
+
+    void setLayerVisible(const QString &key, bool visible) {
+        if (key.isEmpty())
+            return;
+        if (visible)
+            hiddenLayers_.erase(key);
+        else
+            hiddenLayers_.insert(key);
+        rebuild(false);
+    }
+
+    void setInstanceCategoryVisible(const QString &category, bool visible) {
+        if (category.isEmpty())
+            return;
+        if (visible)
+            hiddenInstanceCategories_.erase(category);
+        else
+            hiddenInstanceCategories_.insert(category);
+        rebuild(false);
+    }
+
+    void setNetTypeVisible(const QString &type, bool visible) {
+        if (type.isEmpty())
+            return;
+        if (visible)
+            hiddenNetTypes_.erase(type);
+        else
+            hiddenNetTypes_.insert(type);
+        rebuild(false);
+    }
+
+    void setShowSpecialNets(bool visible) {
+        if (showSpecialNets_ == visible)
+            return;
+        showSpecialNets_ = visible;
+        rebuild(false);
+    }
+
+    void setShowPorts(bool visible) {
+        if (showPorts_ == visible)
+            return;
+        showPorts_ = visible;
+        rebuild(false);
+    }
+
+    void setShowGuides(bool visible) {
+        if (showGuides_ == visible)
+            return;
+        showGuides_ = visible;
+        rebuild(false);
+    }
+    void setShowRows(bool visible) {
+        if (showRows_ == visible)
+            return;
+        showRows_ = visible;
+        rebuild(false);
+    }
+    void setShowBlockages(bool visible) {
+        if (showBlockages_ == visible)
+            return;
+        showBlockages_ = visible;
+        rebuild(false);
+    }
+
+    void setHeatMapOptions(const HeatMapOptions &options) {
+        heatMapOptions_ = options;
+        rebuild(false);
+    }
+    HeatMapOptions heatMapOptions() const { return heatMapOptions_; }
+
+    void setSelectionCallback(std::function<void(const Selection &)> callback) {
+        selectionCallback_ = std::move(callback);
+    }
+    Selection selection() const { return selection_; }
+
+    void clearSelection() {
+        if (!selection_.valid())
+            return;
+        selection_ = {};
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+    }
+
+    void setFocusNet(const QString &net) {
+        if (focusNet_ == net)
+            return;
+        focusNet_ = net;
+        rebuild(false);
+    }
+    QString focusNet() const { return focusNet_; }
+    void clearFocusNet() { setFocusNet({}); }
+
+    void selectMarker(int index) {
+        if (!activeModel_ || index < 0 || index >= static_cast<int>(activeModel_->markers.size()))
+            return;
+        selection_ = selectionForMarker(*activeModel_, index);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        zoomToSelection();
+    }
+
+    bool selectByName(const QString &name) {
+        if (!activeModel_ || name.isEmpty())
+            return false;
+        for (int index = 0; index < static_cast<int>(activeModel_->plannedDevices.size()); ++index) {
+            const auto &device = activeModel_->plannedDevices[static_cast<std::size_t>(index)];
+            if (device.name != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::instance;
+            selection_.index = index;
+            selection_.name = device.name;
+            selection_.master = device.master;
+            selection_.category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            selection_.module = device.module;
+            selection_.rectangle = device.rectangle;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        for (int index = 0; index < static_cast<int>(activeModel_->ports.size()); ++index) {
+            const auto &port = activeModel_->ports[static_cast<std::size_t>(index)];
+            if (port.label != name && port.net != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::port;
+            selection_.index = index;
+            selection_.name = port.label;
+            selection_.net = port.net;
+            selection_.netId = port.netId;
+            selection_.layer = port.layer.name;
+            selection_.rectangle = port.rectangle;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        for (int index = 0; index < static_cast<int>(activeModel_->shapes.size()); ++index) {
+            const auto &shape = activeModel_->shapes[static_cast<std::size_t>(index)];
+            if (shape.net != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::shape;
+            selection_.index = index;
+            selection_.name = shape.net;
+            selection_.net = shape.net;
+            selection_.netId = shape.netId;
+            selection_.special = shape.special;
+            selection_.layer = shape.layer.name;
+            selection_.polygon = shape.polygon;
+            selection_.centerline = shape.centerline;
+            selection_.width = shape.width;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<Selection> markers() const { return markerSelections_; }
+
+    void setTool(Tool tool) { tool_ = tool; }
+    Tool tool() const { return tool_; }
+
+    void clearAnnotations() {
+        rulers_.clear();
+        labels_.clear();
+        rebuild(false);
+    }
+
+    void setStatusCallback(std::function<void(const QPointF &, const QString &)> callback) {
+        statusCallback_ = std::move(callback);
+    }
+
+    void fitView() {
+        fitOnResize_ = true;
+        fitToScene();
+    }
+
+    void zoomIn() {
+        fitOnResize_ = false;
+        scale(1.25, 1.25);
+    }
+
+    void zoomOut() {
+        fitOnResize_ = false;
+        scale(1.0 / 1.25, 1.0 / 1.25);
+    }
+
+    void zoomToSelection() {
+        const auto rect = selectionSceneRect();
+        if (!rect.isValid())
+            return;
+        fitOnResize_ = false;
+        fitInView(rect.adjusted(-20.0, -20.0, 20.0, 20.0), Qt::KeepAspectRatio);
+    }
+
+    void saveImage(const QString &path) {
+        if (path.isEmpty())
+            return;
+        grab().save(path);
+    }
+
+    std::map<QString, int> instanceCategories() const {
+        std::map<QString, int> counts;
+        if (!activeModel_)
+            return counts;
+        for (const auto &device : activeModel_->plannedDevices) {
+            const auto category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            ++counts[category];
+        }
+        return counts;
+    }
+
+    std::map<QString, int> netTypes() const {
+        std::map<QString, int> counts;
+        if (!activeModel_)
+            return counts;
+        for (const auto &net : activeModel_->nets) {
+            const auto type = net.type.isEmpty() ? QStringLiteral("signal") : net.type.toLower();
+            ++counts[type];
+        }
+        return counts;
+    }
+
+    std::vector<ice::LayoutPreviewNet> nets() const {
+        return activeModel_ ? activeModel_->nets : std::vector<ice::LayoutPreviewNet>{};
+    }
+
+    std::vector<ice::LayoutPreviewModule> modules() const {
+        return activeModel_ ? activeModel_->modules : std::vector<ice::LayoutPreviewModule>{};
+    }
+
+    std::vector<ice::LayoutPreviewMarker> drcMarkers() const {
+        return activeModel_ ? activeModel_->markers : std::vector<ice::LayoutPreviewMarker>{};
+    }
+
+    bool instanceCategoryVisible(const QString &category) const {
+        return hiddenInstanceCategories_.find(category) == hiddenInstanceCategories_.end();
+    }
+    bool netTypeVisible(const QString &type) const { return hiddenNetTypes_.find(type) == hiddenNetTypes_.end(); }
+    bool showSpecialNets() const { return showSpecialNets_; }
+    bool showPorts() const { return showPorts_; }
+    bool showGuides() const { return showGuides_; }
+    bool showRows() const { return showRows_; }
+    bool showBlockages() const { return showBlockages_; }
+    bool hasGuides() const { return activeModel_ && !activeModel_->guides.empty(); }
+    bool hasRows() const { return activeModel_ && !activeModel_->rows.empty(); }
+    bool hasBlockages() const { return activeModel_ && !activeModel_->blockages.empty(); }
+
+    std::optional<ice::LayoutPreviewHeatMap> currentHeatMap() const {
+        if (customHeatMap_)
+            return customHeatMap_;
+        if (!activeModel_)
+            return std::nullopt;
+        if (heatMapKind_ == ice::LayoutHeatMapKind::placement_density && activeModel_->placementDensity)
+            return *activeModel_->placementDensity;
+        if (heatMapKind_ == ice::LayoutHeatMapKind::routing_congestion && activeModel_->routingCongestion)
+            return *activeModel_->routingCongestion;
+        return std::nullopt;
     }
 
   protected:
@@ -449,16 +980,303 @@ class ImplementationPreviewCanvas : public QGraphicsView {
         QGraphicsView::mouseDoubleClickEvent(event);
     }
 
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() != Qt::LeftButton) {
+            QGraphicsView::mousePressEvent(event);
+            return;
+        }
+        const auto point = viewToModel(event->pos());
+        if (tool_ == Tool::ruler) {
+            rulerBuilding_ = true;
+            rulerStart_ = point;
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::label) {
+            bool accepted = false;
+            const auto text = QInputDialog::getText(this, QStringLiteral("Add label"), QStringLiteral("Label:"),
+                                                    QLineEdit::Normal, {}, &accepted);
+            if (accepted && !text.isEmpty()) {
+                labels_.emplace_back(point, text);
+                rebuild(false);
+            }
+            event->accept();
+            return;
+        }
+        selection_ = hitTest(point);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override {
+        const auto point = viewToModel(event->pos());
+        if (statusCallback_)
+            statusCallback_(point, tool_ == Tool::ruler ? QStringLiteral("Ruler: click and drag") : QString());
+        QGraphicsView::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (tool_ == Tool::ruler && rulerBuilding_ && event->button() == Qt::LeftButton) {
+            const auto end = viewToModel(event->pos());
+            if (QLineF(rulerStart_, end).length() > 0.5)
+                rulers_.emplace_back(rulerStart_, end);
+            rulerBuilding_ = false;
+            rebuild(false);
+            event->accept();
+            return;
+        }
+        QGraphicsView::mouseReleaseEvent(event);
+    }
+
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        const auto point = viewToModel(event->pos());
+        selection_ = hitTest(point);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        QMenu menu(this);
+        auto *inspect = menu.addAction(QStringLiteral("Inspect"));
+        inspect->setEnabled(selection_.valid());
+        auto *focus = menu.addAction(QStringLiteral("Focus net"));
+        focus->setEnabled(!selection_.net.isEmpty());
+        auto *clearFocus = menu.addAction(QStringLiteral("Clear focused net"));
+        clearFocus->setEnabled(!focusNet_.isEmpty());
+        auto *zoom = menu.addAction(QStringLiteral("Zoom to selection"));
+        zoom->setEnabled(selection_.valid());
+        menu.addSeparator();
+        auto *clear = menu.addAction(QStringLiteral("Clear selection"));
+        clear->setEnabled(selection_.valid());
+        const auto *chosen = menu.exec(event->globalPos());
+        if (chosen == focus)
+            setFocusNet(selection_.net);
+        else if (chosen == clearFocus)
+            clearFocusNet();
+        else if (chosen == zoom)
+            zoomToSelection();
+        else if (chosen == clear) {
+            selection_ = {};
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+        }
+        event->accept();
+    }
+
+    void leaveEvent(QEvent *event) override {
+        if (statusCallback_)
+            statusCallback_({}, {});
+        QGraphicsView::leaveEvent(event);
+    }
+
+    void paintEvent(QPaintEvent *event) override {
+        QGraphicsView::paintEvent(event);
+        if (!heatMapOptions_.showLegend)
+            return;
+        const auto heatmap = currentHeatMap();
+        if (!heatmap)
+            return;
+        const auto minimum = heatMapOptions_.minimum.value_or(heatmap->minimum);
+        const auto maximum = heatMapOptions_.maximum.value_or(heatmap->maximum);
+        if (maximum <= minimum)
+            return;
+        QPainter painter(viewport());
+        constexpr int width = 180;
+        constexpr int height = 12;
+        const int left = viewport()->width() - width - 18;
+        const int top = 18;
+        for (int x = 0; x < width; ++x) {
+            const auto value = minimum + (maximum - minimum) * static_cast<double>(x) / (width - 1);
+            painter.fillRect(left + x, top, 1, height, heatMapColor(value, minimum, maximum));
+        }
+        painter.setPen(QPen(QColor(120, 120, 120), 1));
+        painter.drawRect(left, top, width, height);
+        painter.setPen(palette().color(QPalette::Text));
+        painter.drawText(left, top + height + 14, QString::number(minimum, 'g', 4));
+        painter.drawText(left + width - 55, top + height + 14, QString::number(maximum, 'g', 4));
+    }
+
   private:
-    static QColor heatMapColor(double value, double minimum, double maximum) {
+    static QPointF scenePoint(QPointF point) { return QPointF(point.x(), -point.y()); }
+    static QRectF sceneRect(QRectF rectangle) {
+        return QRectF(rectangle.left(), -(rectangle.top() + rectangle.height()), rectangle.width(), rectangle.height());
+    }
+    static QPolygonF scenePolygon(const QPolygonF &polygon) {
+        QPolygonF result;
+        result.reserve(polygon.size());
+        for (const auto &point : polygon)
+            result << scenePoint(point);
+        return result;
+    }
+
+    QPointF viewToModel(QPoint position) const {
+        const auto scene = mapToScene(position);
+        return QPointF(scene.x(), -scene.y());
+    }
+
+    static qreal distanceToSegment(const QPointF &point, const QPointF &start, const QPointF &end) {
+        const QPointF segment(end.x() - start.x(), end.y() - start.y());
+        const qreal lengthSquared = segment.x() * segment.x() + segment.y() * segment.y();
+        if (lengthSquared <= 0.0)
+            return QLineF(point, start).length();
+        const QPointF delta(point.x() - start.x(), point.y() - start.y());
+        const qreal t = std::clamp((delta.x() * segment.x() + delta.y() * segment.y()) / lengthSquared, 0.0, 1.0);
+        return QLineF(point, start + t * segment).length();
+    }
+
+    Selection selectionForMarker(const ice::LayoutPreviewModel &model, int index) const {
+        Selection selection;
+        if (index < 0 || index >= static_cast<int>(model.markers.size()))
+            return selection;
+        const auto &marker = model.markers[static_cast<std::size_t>(index)];
+        selection.kind = SelectionKind::marker;
+        selection.index = index;
+        selection.name = marker.type;
+        selection.type = marker.type;
+        selection.layer = marker.layer;
+        selection.sources = marker.sources;
+        selection.comment = marker.comment;
+        selection.rectangle = marker.rectangle;
+        return selection;
+    }
+
+    Selection hitTest(const QPointF &point) const {
+        Selection result;
+        if (!activeModel_)
+            return result;
+        const auto layerVisible = [&](const ice::LayoutPreviewLayer &layer) {
+            return hiddenLayers_.find(ice::layoutPreviewLayerKey(layer)) == hiddenLayers_.end();
+        };
+        const auto netVisible = [&](int net_id, bool special) {
+            if (special && !showSpecialNets_)
+                return false;
+            for (const auto &net : activeModel_->nets) {
+                if (net.id != net_id)
+                    continue;
+                return hiddenNetTypes_.find(net.type.toLower()) == hiddenNetTypes_.end();
+            }
+            return true;
+        };
+
+        for (int index = static_cast<int>(activeModel_->markers.size()) - 1; index >= 0; --index) {
+            if (activeModel_->markers[static_cast<std::size_t>(index)].rectangle.contains(point))
+                return selectionForMarker(*activeModel_, index);
+        }
+
+        qreal bestArea = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->ports.size()); ++index) {
+            const auto &port = activeModel_->ports[static_cast<std::size_t>(index)];
+            if (!layerVisible(port.layer) || !netVisible(port.netId, false) || !port.rectangle.contains(point))
+                continue;
+            const auto area = port.rectangle.width() * port.rectangle.height();
+            if (area > bestArea)
+                continue;
+            bestArea = area;
+            result.kind = SelectionKind::port;
+            result.index = index;
+            result.name = port.label;
+            result.net = port.net;
+            result.netId = port.netId;
+            result.layer = port.layer.name;
+            result.rectangle = port.rectangle;
+        }
+
+        bestArea = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->plannedDevices.size()); ++index) {
+            const auto &device = activeModel_->plannedDevices[static_cast<std::size_t>(index)];
+            const auto category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            if (hiddenInstanceCategories_.find(category) != hiddenInstanceCategories_.end() ||
+                !device.rectangle.contains(point))
+                continue;
+            const auto area = device.rectangle.width() * device.rectangle.height();
+            if (area > bestArea)
+                continue;
+            bestArea = area;
+            result.kind = SelectionKind::instance;
+            result.index = index;
+            result.name = device.name;
+            result.master = device.master;
+            result.category = category;
+            result.module = device.module;
+            result.rectangle = device.rectangle;
+        }
+
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->shapes.size()); ++index) {
+            const auto &shape = activeModel_->shapes[static_cast<std::size_t>(index)];
+            if (!layerVisible(shape.layer) || !netVisible(shape.netId, shape.special))
+                continue;
+            if (shape.kind == ice::LayoutPreviewShape::Kind::polygon) {
+                if (shape.polygon.size() < 3 || !shape.polygon.boundingRect().contains(point) ||
+                    !shape.polygon.containsPoint(point, Qt::OddEvenFill))
+                    continue;
+                result.kind = SelectionKind::shape;
+                result.index = index;
+                result.name = shape.net;
+                result.net = shape.net;
+                result.netId = shape.netId;
+                result.special = shape.special;
+                result.layer = shape.layer.name;
+                result.polygon = shape.polygon;
+                bestDistance = 0.0;
+                break;
+            }
+            if (shape.kind == ice::LayoutPreviewShape::Kind::path) {
+                qreal distance = std::numeric_limits<qreal>::max();
+                for (std::size_t segment = 0; segment + 1 < shape.centerline.size(); ++segment)
+                    distance = std::min(
+                        distance, distanceToSegment(point, shape.centerline[segment], shape.centerline[segment + 1]));
+                const auto threshold = std::max<qreal>(shape.width * 0.5, 1.0);
+                if (distance > threshold || distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                result.kind = SelectionKind::shape;
+                result.index = index;
+                result.name = shape.net;
+                result.net = shape.net;
+                result.netId = shape.netId;
+                result.special = shape.special;
+                result.layer = shape.layer.name;
+                result.centerline = shape.centerline;
+                result.width = shape.width;
+            }
+        }
+        return result;
+    }
+
+    QRectF selectionSceneRect() const {
+        QRectF rectangle = selection_.rectangle;
+        if (selection_.polygon.size() >= 3)
+            rectangle = selection_.polygon.boundingRect();
+        else if (!selection_.centerline.empty()) {
+            rectangle = QRectF(selection_.centerline.front(), QSizeF(0.0, 0.0));
+            for (const auto &point : selection_.centerline)
+                rectangle = rectangle.united(QRectF(point, QSizeF(0.0, 0.0)));
+            rectangle.adjust(-selection_.width, -selection_.width, selection_.width, selection_.width);
+        }
+        return sceneRect(rectangle);
+    }
+
+    QColor heatMapColor(double value, double minimum, double maximum) const {
         const auto span = maximum - minimum;
-        const auto normalized = span > 0.0 ? std::clamp((value - minimum) / span, 0.0, 1.0) : 0.0;
-        return QColor::fromHsvF(0.66 * (1.0 - normalized), 0.78, 0.92, 0.42);
+        auto normalized = span > 0.0 ? std::clamp((value - minimum) / span, 0.0, 1.0) : 0.0;
+        if (heatMapOptions_.logScale)
+            normalized =
+                span > 0.0 ? std::clamp(std::log10(1.0 + value - minimum) / std::log10(1.0 + span), 0.0, 1.0) : 0.0;
+        if (heatMapOptions_.reverse)
+            normalized = 1.0 - normalized;
+        return QColor::fromHsvF(0.66 * (1.0 - normalized), 0.78, 0.92,
+                                std::clamp(heatMapOptions_.alpha, 0, 255) / 255.0);
     }
 
     void addHeatMap(const ice::LayoutPreviewHeatMap &heatmap) {
         if (heatmap.columns <= 0 || heatmap.rows <= 0 || heatmap.bounds.width() <= 0.0 ||
             heatmap.bounds.height() <= 0.0 || heatmap.maximum <= heatmap.minimum)
+            return;
+        const auto minimum = heatMapOptions_.minimum.value_or(heatmap.minimum);
+        const auto maximum = heatMapOptions_.maximum.value_or(heatmap.maximum);
+        if (maximum <= minimum)
             return;
         const auto bin_width = heatmap.bounds.width() / heatmap.columns;
         const auto bin_height = heatmap.bounds.height() / heatmap.rows;
@@ -468,39 +1286,174 @@ class ImplementationPreviewCanvas : public QGraphicsView {
                 if (index >= heatmap.values.size())
                     continue;
                 const auto value = heatmap.values[index];
-                if (value <= heatmap.minimum && heatmap.maximum > heatmap.minimum)
+                if (value < minimum)
                     continue;
                 const auto x = heatmap.bounds.x() + column * bin_width;
                 const auto y = heatmap.bounds.y() + row * bin_height;
                 auto *item = scene()->addRect(QRectF(x, -(y + bin_height), bin_width, bin_height), Qt::NoPen,
-                                              heatMapColor(value, heatmap.minimum, heatmap.maximum));
+                                              heatMapColor(value, minimum, maximum));
                 item->setZValue(-1.0);
             }
         }
     }
 
-    void rebuild() {
+    void addMarkers(const ice::LayoutPreviewModel &model) {
+        for (int index = 0; index < static_cast<int>(model.markers.size()); ++index) {
+            const auto &marker = model.markers[static_cast<std::size_t>(index)];
+            QPen pen(QColor(220, 38, 38), 1.0);
+            pen.setCosmetic(true);
+            auto *item = scene()->addRect(sceneRect(marker.rectangle), pen, QColor(220, 38, 38, 40));
+            item->setZValue(4.0);
+        }
+    }
+
+    void addFocusNet(const ice::LayoutPreviewModel &model) {
+        if (focusNet_.isEmpty())
+            return;
+        QPen pen(QColor(250, 204, 21), 1.8);
+        pen.setCosmetic(true);
+        for (const auto &shape : model.shapes) {
+            if (shape.net != focusNet_)
+                continue;
+            if (shape.kind == ice::LayoutPreviewShape::Kind::polygon) {
+                auto *item = scene()->addPolygon(scenePolygon(shape.polygon), pen, QColor(250, 204, 21, 35));
+                item->setZValue(6.0);
+            } else if (shape.kind == ice::LayoutPreviewShape::Kind::path && shape.centerline.size() >= 2) {
+                QPolygonF polygon;
+                for (const auto &point : shape.centerline)
+                    polygon << scenePoint(point);
+                auto *item = scene()->addPolygon(polygon, pen, QBrush(Qt::NoBrush));
+                item->setZValue(6.0);
+            }
+        }
+        for (const auto &port : model.ports) {
+            if (port.net != focusNet_)
+                continue;
+            auto *item = scene()->addRect(sceneRect(port.rectangle), pen, QColor(250, 204, 21, 45));
+            item->setZValue(6.0);
+        }
+    }
+
+    void addSelectionOverlay() {
+        if (!selection_.valid())
+            return;
+        QPen pen(QColor(37, 99, 235), 2.0);
+        pen.setCosmetic(true);
+        const auto fill = QColor(37, 99, 235, 40);
+        if (selection_.kind == SelectionKind::shape && selection_.polygon.size() >= 3) {
+            auto *item = scene()->addPolygon(scenePolygon(selection_.polygon), pen, fill);
+            item->setZValue(8.0);
+        } else if (selection_.kind == SelectionKind::shape && selection_.centerline.size() >= 2) {
+            QPolygonF polygon;
+            for (const auto &point : selection_.centerline)
+                polygon << scenePoint(point);
+            auto *item = scene()->addPolygon(polygon, pen, QBrush(Qt::NoBrush));
+            item->setZValue(8.0);
+        } else if (selection_.rectangle.isValid()) {
+            auto *item = scene()->addRect(sceneRect(selection_.rectangle), pen, fill);
+            item->setZValue(8.0);
+        }
+    }
+
+    void addAnnotations() {
+        QPen rulerPen(QColor(250, 204, 21), 1.2);
+        rulerPen.setCosmetic(true);
+        for (const auto &[start, end] : rulers_) {
+            const auto sceneStart = scenePoint(start);
+            const auto sceneEnd = scenePoint(end);
+            scene()->addLine(QLineF(sceneStart, sceneEnd), rulerPen)->setZValue(9.0);
+            auto *label =
+                scene()->addText(QStringLiteral("%1 µm").arg(QLineF(start, end).length() / 1000.0, 0, 'f', 3));
+            label->setDefaultTextColor(QColor(250, 204, 21));
+            label->setPos((sceneStart + sceneEnd) * 0.5);
+            label->setZValue(9.0);
+        }
+        for (const auto &[position, text] : labels_) {
+            auto *item = scene()->addText(text);
+            item->setDefaultTextColor(palette().color(QPalette::Text));
+            item->setPos(scenePoint(position));
+            item->setZValue(9.0);
+        }
+    }
+
+    void rebuild(bool refit = true) {
         scene()->clear();
-        fitOnResize_ = true;
-        std::optional<ice::LayoutPreviewModel> fallback;
+        layers_.clear();
+        markerSelections_.clear();
+        activeModel_ = nullptr;
+        fallbackModel_.reset();
+        if (refit)
+            fitOnResize_ = true;
         const ice::LayoutPreviewModel *model = model_.get();
         if (!model && project_ && cell_ != 0) {
             const auto found = project_->layoutCells.find(cell_);
             if (found != project_->layoutCells.end())
-                fallback = ice::buildLayoutCellPreviewModel(*project_, found->second, true, true, true);
-            if (fallback && !fallback->empty())
-                model = &*fallback;
+                fallbackModel_ = ice::buildLayoutCellPreviewModel(*project_, found->second, true, true, true);
+            if (fallbackModel_ && !fallbackModel_->empty())
+                model = &*fallbackModel_;
         }
+        activeModel_ = model;
         if (model && !model->empty()) {
             const auto styles = styleProject_ ? layerStylesFor(*styleProject_) : ice::LayoutRenderer::LayerStyleMap{};
-            if (heatMapKind_ == ice::LayoutHeatMapKind::placement_density && model->placementDensity)
+            std::map<QString, LayerEntry> uniqueLayers;
+            const auto collectLayer = [&](const ice::LayoutPreviewLayer &layer) {
+                const auto key = ice::layoutPreviewLayerKey(layer);
+                if (uniqueLayers.contains(key))
+                    return;
+                LayerEntry entry;
+                entry.key = key;
+                entry.number = layer.number;
+                entry.label = !layer.name.isEmpty() ? layer.name
+                                                    : (layer.number > 0 ? QStringLiteral("Layer %1").arg(layer.number)
+                                                                        : QStringLiteral("Unnamed layer"));
+                if (layer.id != 0) {
+                    if (const auto style = styles.find(layer.id); style != styles.end())
+                        entry.color = style->second.color;
+                }
+                if (!entry.color.isValid())
+                    entry.color = layerStyleForNumber(layer.number).color;
+                entry.visible = !hiddenLayers_.contains(key);
+                uniqueLayers.emplace(key, std::move(entry));
+            };
+            for (const auto &shape : model->shapes)
+                collectLayer(shape.layer);
+            for (const auto &port : model->ports)
+                collectLayer(port.layer);
+            for (auto &[key, entry] : uniqueLayers)
+                layers_.push_back(std::move(entry));
+            std::sort(layers_.begin(), layers_.end(), [](const auto &left, const auto &right) {
+                if (left.number != right.number)
+                    return left.number < right.number;
+                return left.label < right.label;
+            });
+
+            for (int index = 0; index < static_cast<int>(model->markers.size()); ++index)
+                markerSelections_.push_back(selectionForMarker(*model, index));
+
+            if (customHeatMap_)
+                addHeatMap(*customHeatMap_);
+            else if (heatMapKind_ == ice::LayoutHeatMapKind::placement_density && model->placementDensity)
                 addHeatMap(*model->placementDensity);
             else if (heatMapKind_ == ice::LayoutHeatMapKind::routing_congestion && model->routingCongestion)
                 addHeatMap(*model->routingCongestion);
-            auto *item = createLayoutPreviewItem(*model, styles, {});
+            ice::LayoutRenderer::PaintOptions options;
+            options.hiddenLayers = hiddenLayers_;
+            options.hiddenInstanceCategories = hiddenInstanceCategories_;
+            options.hiddenNetTypes = hiddenNetTypes_;
+            options.showSpecialNets = showSpecialNets_;
+            options.showPorts = showPorts_;
+            options.showGuides = showGuides_;
+            options.showRows = showRows_;
+            options.showBlockages = showBlockages_;
+            auto *item = createLayoutPreviewItem(model, styles, {}, options);
             scene()->addItem(item);
+            addMarkers(*model);
+            addFocusNet(*model);
+            addSelectionOverlay();
+            addAnnotations();
             scene()->setSceneRect(scene()->itemsBoundingRect());
-            fitToScene();
+            if (refit)
+                fitToScene();
             return;
         }
         auto *text = scene()->addText(message_.isEmpty() ? QStringLiteral("No preview available.") : message_);
@@ -509,7 +1462,8 @@ class ImplementationPreviewCanvas : public QGraphicsView {
         text->setFont(font);
         text->setDefaultTextColor(palette().color(QPalette::Text));
         scene()->setSceneRect(scene()->itemsBoundingRect().adjusted(-40, -40, 40, 40));
-        fitToScene();
+        if (refit)
+            fitToScene();
     }
 
     void fitToScene() {
@@ -524,6 +1478,31 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     std::shared_ptr<ice::LayoutPreviewModel> model_;
     const ice::Project *styleProject_ = nullptr;
     ice::LayoutHeatMapKind heatMapKind_ = ice::LayoutHeatMapKind::none;
+    std::set<QString> hiddenLayers_;
+    std::set<QString> hiddenInstanceCategories_ = {QStringLiteral("fill"), QStringLiteral("endcap"),
+                                                   QStringLiteral("tap"), QStringLiteral("antenna"),
+                                                   QStringLiteral("cover")};
+    std::set<QString> hiddenNetTypes_;
+    bool showSpecialNets_ = true;
+    bool showPorts_ = true;
+    bool showGuides_ = false;
+    bool showRows_ = false;
+    bool showBlockages_ = false;
+    HeatMapOptions heatMapOptions_;
+    std::optional<ice::LayoutPreviewHeatMap> customHeatMap_;
+    std::optional<ice::LayoutPreviewModel> fallbackModel_;
+    const ice::LayoutPreviewModel *activeModel_ = nullptr;
+    Selection selection_;
+    QString focusNet_;
+    std::vector<Selection> markerSelections_;
+    std::vector<std::pair<QPointF, QPointF>> rulers_;
+    std::vector<std::pair<QPointF, QString>> labels_;
+    Tool tool_ = Tool::none;
+    bool rulerBuilding_ = false;
+    QPointF rulerStart_;
+    std::function<void(const Selection &)> selectionCallback_;
+    std::function<void(const QPointF &, const QString &)> statusCallback_;
+    std::vector<LayerEntry> layers_;
     bool fitOnResize_ = true;
 };
 
@@ -765,12 +1744,16 @@ class SvgPreviewCanvas : public QGraphicsView {
 ImplementationUiController::ImplementationUiController(QObject *parent) : parent_(parent) {}
 
 ImplementationUiController::~ImplementationUiController() {
-    if (process_) {
-        process_->disconnect();
-        process_->kill();
-        process_->waitForFinished(1000);
-        process_ = nullptr;
+    for (auto *process : {process_, previewProcess_, heatMapProcess_}) {
+        if (!process)
+            continue;
+        process->disconnect();
+        process->kill();
+        process->waitForFinished(1000);
     }
+    process_ = nullptr;
+    previewProcess_ = nullptr;
+    heatMapProcess_ = nullptr;
 }
 
 void ImplementationUiController::setProject(const ice::Project *project, const QString &projectPath) {
@@ -855,13 +1838,18 @@ ImplementationUiController::StagePreview ImplementationUiController::stagePrevie
     const auto stamp =
         (odbExists || defExists) ? std::filesystem::last_write_time(previewPath, status).time_since_epoch().count() : 0;
     const auto size = (odbExists || defExists) ? std::filesystem::file_size(previewPath, status) : 0;
-    const auto key = QStringLiteral("%1:%2:%3:%4:%5:%6")
+    const auto drcPath = runRoot / "reports" / "route_drc.rpt";
+    const auto drcStamp = std::filesystem::is_regular_file(drcPath, status) && !status
+                              ? std::filesystem::last_write_time(drcPath, status).time_since_epoch().count()
+                              : 0;
+    const auto key = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
                          .arg(static_cast<qulonglong>(run->id))
                          .arg(static_cast<int>(stage))
                          .arg(odbExists ? 1 : 0)
                          .arg(defExists ? 1 : 0)
                          .arg(static_cast<qlonglong>(stamp))
-                         .arg(static_cast<qulonglong>(size));
+                         .arg(static_cast<qulonglong>(size))
+                         .arg(static_cast<qlonglong>(drcStamp));
     if (const auto cached = previewCache_.find(static_cast<int>(stage));
         cached != previewCache_.end() && cached->second.key == key) {
         return {cached->second.project, cached->second.cell, cached->second.model, cached->second.message};
@@ -887,6 +1875,8 @@ ImplementationUiController::StagePreview ImplementationUiController::stagePrevie
                 process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
                 result.model = parseOdbPreview(process.readAllStandardOutput(), project_, odbError);
                 if (result.model) {
+                    if (stage == ice::ImplementationStage::routing || stage == ice::ImplementationStage::final)
+                        result.model->markers = parseDrcMarkers(runRoot / "reports" / "route_drc.rpt");
                     result.message.clear();
                     return cache(std::move(result));
                 }
@@ -955,6 +1945,108 @@ ImplementationUiController::StagePreview ImplementationUiController::stagePrevie
         result.message = QString::fromStdString(error.what());
         return cache(std::move(result));
     }
+}
+
+void ImplementationUiController::requestStagePreview(ice::ImplementationStage stage, StagePreviewCallback callback) {
+    if (!callback)
+        return;
+    const auto *run = activeRun();
+    if (!run) {
+        StagePreview result;
+        result.message = QStringLiteral("Select an implementation run in the Runs panel.");
+        callback(result);
+        return;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto defRelative = stageDefPath(stage);
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = odbRelative.empty() ? std::filesystem::path{} : runRoot / odbRelative;
+    const auto defPath = defRelative.empty() ? std::filesystem::path{} : runRoot / defRelative;
+    std::error_code status;
+    const bool odbExists = !odbPath.empty() && std::filesystem::is_regular_file(odbPath, status) && !status;
+    const bool defExists = !defPath.empty() && std::filesystem::is_regular_file(defPath, status) && !status;
+    const auto previewPath = odbExists ? odbPath : defPath;
+    const auto stamp =
+        (odbExists || defExists) ? std::filesystem::last_write_time(previewPath, status).time_since_epoch().count() : 0;
+    const auto size = (odbExists || defExists) ? std::filesystem::file_size(previewPath, status) : 0;
+    const auto drcPath = runRoot / "reports" / "route_drc.rpt";
+    const auto drcStamp = std::filesystem::is_regular_file(drcPath, status) && !status
+                              ? std::filesystem::last_write_time(drcPath, status).time_since_epoch().count()
+                              : 0;
+    const auto key = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
+                         .arg(static_cast<qulonglong>(run->id))
+                         .arg(static_cast<int>(stage))
+                         .arg(odbExists ? 1 : 0)
+                         .arg(defExists ? 1 : 0)
+                         .arg(static_cast<qlonglong>(stamp))
+                         .arg(static_cast<qulonglong>(size))
+                         .arg(static_cast<qlonglong>(drcStamp));
+    if (const auto cached = previewCache_.find(static_cast<int>(stage));
+        cached != previewCache_.end() && cached->second.key == key) {
+        callback({cached->second.project, cached->second.cell, cached->second.model, cached->second.message});
+        return;
+    }
+    const auto helper = helperExecutable();
+    if (!odbExists || helper.isEmpty()) {
+        callback(stagePreview(stage));
+        return;
+    }
+
+    if (previewProcess_) {
+        previewProcess_->disconnect();
+        previewProcess_->kill();
+        previewProcess_->deleteLater();
+        previewProcess_ = nullptr;
+    }
+    auto *process = new QProcess(parent_);
+    previewProcess_ = process;
+    process->setProperty("iceHandled", false);
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    QObject::connect(process, &QProcess::errorOccurred, parent_,
+                     [this, process, callback](QProcess::ProcessError error) {
+                         if (error != QProcess::FailedToStart || process->property("iceHandled").toBool())
+                             return;
+                         process->setProperty("iceHandled", true);
+                         StagePreview result;
+                         result.message = QStringLiteral("Unable to start the ODB preview process.");
+                         previewProcess_ = nullptr;
+                         process->deleteLater();
+                         callback(result);
+                     });
+    QObject::connect(
+        process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), parent_,
+        [this, process, stage, key, runRoot, odbPath, drcPath, callback, defExists](int exitCode,
+                                                                                    QProcess::ExitStatus) {
+            if (process->property("iceHandled").toBool())
+                return;
+            process->setProperty("iceHandled", true);
+            auto result = StagePreview{};
+            QString parseError;
+            if (process->exitStatus() == QProcess::NormalExit && exitCode == 0) {
+                result.model = parseOdbPreview(process->readAllStandardOutput(), project_, parseError);
+                if (result.model) {
+                    if (stage == ice::ImplementationStage::routing || stage == ice::ImplementationStage::final)
+                        result.model->markers = parseDrcMarkers(drcPath);
+                    previewCache_[static_cast<int>(stage)] = {key, result.project, result.cell, result.model,
+                                                              result.message};
+                    previewProcess_ = nullptr;
+                    process->deleteLater();
+                    callback(result);
+                    return;
+                }
+            }
+            parseError = QString::fromStdString(process->readAllStandardError().toStdString()).trimmed();
+            if (parseError.isEmpty())
+                parseError = QStringLiteral("Unable to load the ODB preview.");
+            result.message = parseError;
+            previewCache_[static_cast<int>(stage)] = {key, result.project, result.cell, result.model, result.message};
+            previewProcess_ = nullptr;
+            process->deleteLater();
+            callback(result);
+            (void)defExists;
+        });
+    process->start(helper, {QStringLiteral("odb-preview"), QString::fromStdString(odbPath.string()),
+                            QStringLiteral("--heatmap-bins"), QStringLiteral("32")});
 }
 
 QString ImplementationUiController::exportHeatMap(ice::ImplementationStage stage, const QString &kind, QString &error) {
@@ -1043,6 +2135,319 @@ QString ImplementationUiController::exportHeatMap(ice::ImplementationStage stage
         return {};
     }
     return QString::fromStdString(output.string());
+}
+
+void ImplementationUiController::requestExportHeatMap(ice::ImplementationStage stage, const QString &kind,
+                                                      HeatMapCallback callback) {
+    if (!callback)
+        return;
+    const auto *run = activeRun();
+    if (!run) {
+        callback({}, QStringLiteral("Select an implementation run in the Runs panel."));
+        return;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto sdcRelative = stageSdcPath(stage);
+    if (odbRelative.empty()) {
+        callback({}, QStringLiteral("This stage has no physical checkpoint."));
+        return;
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    const auto sdcPath = runRoot / sdcRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        callback({}, QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage)));
+        return;
+    }
+    const auto helper = helperExecutable();
+    if (helper.isEmpty()) {
+        callback({}, QStringLiteral("The ice-openroad helper is not available."));
+        return;
+    }
+    QStringList arguments = {QStringLiteral("heatmap"), QStringLiteral("--input-db"),
+                             QString::fromStdString(odbPath.string()), QStringLiteral("--kind"), kind};
+    if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+        arguments << QStringLiteral("--sdc") << QString::fromStdString(sdcPath.string());
+    const auto pdks = ice::findPdks(run->config.pdk);
+    if (pdks.empty()) {
+        callback({}, QStringLiteral("PDK package '%1' is not installed.").arg(QString::fromStdString(run->config.pdk)));
+        return;
+    }
+    try {
+        const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+        if (!package.pdk) {
+            callback({},
+                     QStringLiteral("Package '%1' does not declare a PDK.").arg(QString::fromStdString(package.name)));
+            return;
+        }
+        std::vector<ice::Diagnostic> diagnostics;
+        const auto platform = ice::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+        std::vector<std::filesystem::path> liberty;
+        if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+            liberty = found->second;
+        else if (!platform.liberty.empty())
+            liberty = platform.liberty.begin()->second;
+        for (const auto &path : liberty)
+            arguments << QStringLiteral("--liberty") << QString::fromStdString(path.string());
+    } catch (const std::exception &exception) {
+        callback({}, QString::fromStdString(exception.what()));
+        return;
+    }
+    const auto output = runRoot / "reports" / (kind.toStdString() + "-heatmap.csv");
+    arguments << QStringLiteral("--output") << QString::fromStdString(output.string()) << QStringLiteral("--log")
+              << QString::fromStdString((runRoot / "logs" / "heatmap.log").string()) << QStringLiteral("--threads")
+              << QString::number(std::max(1, run->config.threads));
+
+    if (heatMapProcess_) {
+        heatMapProcess_->disconnect();
+        heatMapProcess_->kill();
+        heatMapProcess_->deleteLater();
+        heatMapProcess_ = nullptr;
+    }
+    auto *process = new QProcess(parent_);
+    heatMapProcess_ = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), parent_,
+                     [this, process, output, callback](int exitCode, QProcess::ExitStatus) {
+                         const auto standardError =
+                             QString::fromStdString(process->readAllStandardError().toStdString()).trimmed();
+                         const auto standardOutput =
+                             QString::fromStdString(process->readAllStandardOutput().toStdString()).trimmed();
+                         heatMapProcess_ = nullptr;
+                         process->deleteLater();
+                         std::error_code status;
+                         if (process->exitStatus() != QProcess::NormalExit || exitCode != 0 ||
+                             !std::filesystem::is_regular_file(output, status) || status) {
+                             auto error = standardError;
+                             if (error.isEmpty())
+                                 error = standardOutput.isEmpty() ? QStringLiteral("OpenROAD heat-map export failed.")
+                                                                  : standardOutput;
+                             callback({}, error);
+                             return;
+                         }
+                         callback(QString::fromStdString(output.string()), {});
+                     });
+    process->start(helper, arguments);
+}
+
+bool ImplementationUiController::openInOpenRoadGui(ice::ImplementationStage stage, QString &error) {
+    const auto *run = activeRun();
+    if (!run || projectPath_.isEmpty()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return false;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    if (odbRelative.empty()) {
+        error = QStringLiteral("This stage has no ODB checkpoint.");
+        return false;
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        error = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return false;
+    }
+    auto toolchain = ice::discoverImplementationToolchain();
+    auto openroad = toolchain.openroad.path;
+    if (openroad.empty())
+        openroad = QStandardPaths::findExecutable(QStringLiteral("openroad")).toStdString();
+    if (openroad.empty()) {
+        error = QStringLiteral("OpenROAD was not found on PATH.");
+        return false;
+    }
+
+    const auto tclQuote = [](const std::filesystem::path &path) {
+        std::string value = path.generic_string();
+        std::string result = "\"";
+        for (const char character : value) {
+            if (character == '\\' || character == '"' || character == '$' || character == '[' || character == ']')
+                result.push_back('\\');
+            result.push_back(character);
+        }
+        result.push_back('"');
+        return result;
+    };
+
+    QString script;
+    std::vector<std::filesystem::path> liberty;
+    const auto pdks = ice::findPdks(run->config.pdk);
+    if (!pdks.empty()) {
+        try {
+            const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+            if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+                liberty = found->second;
+            else if (!platform.liberty.empty())
+                liberty = platform.liberty.begin()->second;
+        } catch (const std::exception &) {
+        }
+    }
+    for (const auto &path : liberty)
+        script += QStringLiteral("read_liberty %1\n").arg(QString::fromStdString(tclQuote(path)));
+    script += QStringLiteral("read_db %1\n").arg(QString::fromStdString(tclQuote(odbPath)));
+    const auto sdcRelative = stageSdcPath(stage);
+    if (!sdcRelative.empty()) {
+        const auto sdcPath = runRoot / sdcRelative;
+        if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+            script += QStringLiteral("read_sdc %1\n").arg(QString::fromStdString(tclQuote(sdcPath)));
+    }
+
+    const auto scriptPath = runRoot / "logs" / "openroad-gui.tcl";
+    std::filesystem::create_directories(scriptPath.parent_path(), status);
+    std::ofstream output(scriptPath, std::ios::trunc);
+    if (!output) {
+        error = QStringLiteral("Unable to write %1.").arg(QString::fromStdString(scriptPath.string()));
+        return false;
+    }
+    output << script.toStdString();
+    output.close();
+
+    QStringList arguments = {QStringLiteral("-gui"), QStringLiteral("-no_init"), QStringLiteral("-no_splash"),
+                             QString::fromStdString(scriptPath.string())};
+    if (!QProcess::startDetached(QString::fromStdString(openroad.string()), arguments,
+                                 QString::fromStdString(runRoot.string()))) {
+        error = QStringLiteral("Unable to launch OpenROAD GUI.");
+        return false;
+    }
+    return true;
+}
+
+QString ImplementationUiController::timingReport(ice::ImplementationStage stage, QString &error) {
+    const auto *run = activeRun();
+    if (!run || projectPath_.isEmpty()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return {};
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    if (odbRelative.empty()) {
+        error = QStringLiteral("This stage has no ODB checkpoint.");
+        return {};
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        error = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return {};
+    }
+    auto openroad = ice::discoverImplementationToolchain().openroad.path;
+    if (openroad.empty())
+        openroad = QStandardPaths::findExecutable(QStringLiteral("openroad")).toStdString();
+    if (openroad.empty()) {
+        error = QStringLiteral("OpenROAD was not found on PATH.");
+        return {};
+    }
+    const auto tclQuote = [](const std::filesystem::path &path) {
+        std::string value = path.generic_string();
+        std::string result = "\"";
+        for (const char character : value) {
+            if (character == '\\' || character == '"' || character == '$' || character == '[' || character == ']')
+                result.push_back('\\');
+            result.push_back(character);
+        }
+        result.push_back('"');
+        return result;
+    };
+    QString script;
+    std::vector<std::filesystem::path> liberty;
+    const auto pdks = ice::findPdks(run->config.pdk);
+    if (!pdks.empty()) {
+        try {
+            const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+            if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+                liberty = found->second;
+            else if (!platform.liberty.empty())
+                liberty = platform.liberty.begin()->second;
+        } catch (const std::exception &) {
+        }
+    }
+    for (const auto &path : liberty)
+        script += QStringLiteral("read_liberty %1\n").arg(QString::fromStdString(tclQuote(path)));
+    script += QStringLiteral("read_db %1\n").arg(QString::fromStdString(tclQuote(odbPath)));
+    const auto sdcRelative = stageSdcPath(stage);
+    if (!sdcRelative.empty()) {
+        const auto sdcPath = runRoot / sdcRelative;
+        if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+            script += QStringLiteral("read_sdc %1\n").arg(QString::fromStdString(tclQuote(sdcPath)));
+    }
+    script += QStringLiteral("report_checks -path_delay max -format full_clock_expanded -group_count 5\n");
+    script += QStringLiteral("report_checks -path_delay min -format full_clock_expanded -group_count 5\n");
+    script += QStringLiteral("report_power\n");
+
+    const auto scriptPath = runRoot / "logs" / "timing-report.tcl";
+    std::filesystem::create_directories(scriptPath.parent_path(), status);
+    std::ofstream outputFile(scriptPath, std::ios::trunc);
+    if (!outputFile) {
+        error = QStringLiteral("Unable to write %1.").arg(QString::fromStdString(scriptPath.string()));
+        return {};
+    }
+    outputFile << script.toStdString();
+    outputFile.close();
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QProcess process;
+    process.setWorkingDirectory(QString::fromStdString(runRoot.string()));
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(QString::fromStdString(openroad.string()),
+                  {QStringLiteral("-no_init"), QStringLiteral("-no_splash"), QStringLiteral("-exit"),
+                   QString::fromStdString(scriptPath.string())});
+    const bool started = process.waitForStarted(5000);
+    const bool finished = started && process.waitForFinished(180000);
+    QApplication::restoreOverrideCursor();
+    if (!finished || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (!finished)
+            process.kill();
+        error = QString::fromStdString(process.readAllStandardOutput().toStdString()).trimmed();
+        if (error.isEmpty())
+            error = QStringLiteral("OpenROAD timing report failed.");
+        return {};
+    }
+    const auto output = QString::fromStdString(process.readAllStandardOutput().toStdString());
+    std::filesystem::remove(scriptPath, status);
+    return output;
+}
+
+bool ImplementationUiController::importLayout(ice::ObjectId runId, QString &error) {
+    if (!project_ || projectPath_.isEmpty()) {
+        error = QStringLiteral("No project is open.");
+        return false;
+    }
+    const auto found = project_->implementationRuns.find(runId);
+    if (found == project_->implementationRuns.end()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return false;
+    }
+    const auto cli = cliExecutable();
+    if (cli.isEmpty()) {
+        error = QStringLiteral("ice-cli was not found.");
+        return false;
+    }
+    if (beforeRun_ && !beforeRun_()) {
+        error = QStringLiteral("The project could not be saved before importing.");
+        return false;
+    }
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(cli,
+                  {QStringLiteral("implementation-import"), projectPath_, QString::fromStdString(found->second.name)});
+    if (!process.waitForStarted(5000) || !process.waitForFinished(120000)) {
+        process.kill();
+        error = QStringLiteral("Implementation import did not finish.");
+        return false;
+    }
+    const auto output = QString::fromStdString(process.readAllStandardOutput().toStdString()).trimmed();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        error = output.isEmpty() ? QStringLiteral("Implementation import failed.") : output;
+        return false;
+    }
+    if (onProjectChanged_)
+        onProjectChanged_();
+    return true;
 }
 
 QString ImplementationUiController::cliExecutable() const {
@@ -1355,9 +2760,9 @@ void ImplementationPage::buildUi() {
                 };
                 runStageButton_ = addIconButton(QStringLiteral("play"), QStringLiteral("Run selected stage"));
                 runFromHereButton_ =
-                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run from this stage through routing"));
+                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run from this stage through final"));
                 runAllButton_ =
-                    addIconButton(QStringLiteral("grid-3x3"), QStringLiteral("Run floorplan through routing"));
+                    addIconButton(QStringLiteral("grid-3x3"), QStringLiteral("Run floorplan through final"));
                 cancelStageButton_ = addIconButton(QStringLiteral("x"), QStringLiteral("Cancel the active process"));
                 cancelStageButton_->setEnabled(false);
                 runsLayout->addLayout(runRow);
@@ -1370,6 +2775,30 @@ void ImplementationPage::buildUi() {
                 hintFont.setPointSizeF(std::max(7.0, hintFont.pointSizeF() - 1.0));
                 stageHintLabel_->setFont(hintFont);
                 runsLayout->addWidget(stageHintLabel_);
+                auto *openGuiButton = new QPushButton(QStringLiteral("Open in OpenROAD GUI"));
+                openGuiButton->setToolTip(QStringLiteral("Open the active stage ODB in the standalone OpenROAD GUI"));
+                runsLayout->addWidget(openGuiButton);
+                QObject::connect(openGuiButton, &QPushButton::clicked, this, [this] {
+                    QString error;
+                    if (!controller_->openInOpenRoadGui(stage_, error))
+                        QMessageBox::warning(this, QStringLiteral("OpenROAD GUI"), error);
+                });
+                if (stage_ == ice::ImplementationStage::final) {
+                    auto *importButton = new QPushButton(QStringLiteral("Import final layout"));
+                    importButton->setToolTip(QStringLiteral("Import the final DEF as a layout cell"));
+                    runsLayout->addWidget(importButton);
+                    QObject::connect(importButton, &QPushButton::clicked, this, [this] {
+                        const auto id = controller_->activeRunId();
+                        if (id == 0)
+                            return;
+                        QString error;
+                        if (!controller_->importLayout(id, error))
+                            QMessageBox::warning(this, QStringLiteral("Import layout"), error);
+                        else
+                            QMessageBox::information(this, QStringLiteral("Import layout"),
+                                                     QStringLiteral("The final layout was imported."));
+                    });
+                }
             }
             runsLayout->addWidget(runTree_, 1);
             if (!embedded_) {
@@ -1385,6 +2814,20 @@ void ImplementationPage::buildUi() {
                 runsLayout->addLayout(runActions);
             }
             leftTabs_->addTab(runsPage, QStringLiteral("Runs"));
+
+            auto *displayPage = new QWidget;
+            auto *displayLayout = new QVBoxLayout(displayPage);
+            displayLayout->setContentsMargins(4, 4, 4, 4);
+            displayLayout->setSpacing(4);
+            auto *displayHint = new QLabel(QStringLiteral("Toggle layer visibility"));
+            displayHint->setContentsMargins(1, 0, 1, 0);
+            displayLayout->addWidget(displayHint);
+            displayTree_ = new QTreeWidget;
+            displayTree_->setHeaderHidden(true);
+            displayTree_->setAlternatingRowColors(true);
+            displayTree_->setToolTip(QStringLiteral("Visibility filters for the active stage preview"));
+            displayLayout->addWidget(displayTree_, 1);
+            leftTabs_->addTab(displayPage, QStringLiteral("Display"));
         } else {
             leftTabs_->addTab(runTree_, QStringLiteral("Runs"));
         }
@@ -1433,27 +2876,68 @@ void ImplementationPage::buildUi() {
                 closeArtifactTab(widget);
         });
     } else {
+        middleTabs_->setTabsClosable(true);
+        QObject::connect(middleTabs_, &QTabWidget::tabCloseRequested, this, [this](int index) {
+            if (!middleTabs_ || index < 0 || index >= middleTabs_->count())
+                return;
+            auto *widget = middleTabs_->widget(index);
+            if (widget)
+                closeArtifactTab(widget);
+        });
         auto *previewPage = new QWidget;
         auto *previewLayout = new QVBoxLayout(previewPage);
         previewLayout->setContentsMargins(0, 0, 0, 0);
         previewLayout->setSpacing(2);
         auto *overlayRow = new QHBoxLayout;
         overlayRow->setContentsMargins(6, 4, 6, 0);
-        overlayRow->addWidget(new QLabel(QStringLiteral("Overlay")));
+        overlayRow->addWidget(new QLabel(QStringLiteral("Heat map")));
         heatMapCombo_ = new QComboBox;
         heatMapCombo_->addItem(QStringLiteral("None"), static_cast<int>(ice::LayoutHeatMapKind::none));
         heatMapCombo_->addItem(QStringLiteral("Placement density"),
                                static_cast<int>(ice::LayoutHeatMapKind::placement_density));
         heatMapCombo_->addItem(QStringLiteral("Routing congestion"),
                                static_cast<int>(ice::LayoutHeatMapKind::routing_congestion));
-        heatMapCombo_->addItem(QStringLiteral("Power density (CSV)"), 100);
+        heatMapCombo_->addItem(QStringLiteral("Power density (export only)"), 100);
+        heatMapCombo_->addItem(QStringLiteral("Pin density (export only)"), 101);
+        heatMapCombo_->addItem(QStringLiteral("RUDY congestion (export only)"), 102);
+        heatMapCombo_->addItem(QStringLiteral("IR drop (export only)"), 103);
+        heatMapCombo_->addItem(QStringLiteral("Loaded CSV"), 200);
         overlayRow->addWidget(heatMapCombo_);
+        auto *loadHeatMapButton = new QPushButton(QStringLiteral("Load CSV"));
+        loadHeatMapButton->setToolTip(QStringLiteral("Load an OpenROAD heat-map CSV and display it"));
+        overlayRow->addWidget(loadHeatMapButton);
         auto *exportHeatMapButton = new QPushButton(QStringLiteral("Export CSV"));
         exportHeatMapButton->setToolTip(
             QStringLiteral("Write the selected OpenROAD heat map under the run reports directory."));
         overlayRow->addWidget(exportHeatMapButton);
+        auto *heatMapSettingsButton = new QPushButton(QStringLiteral("Settings"));
+        heatMapSettingsButton->setToolTip(QStringLiteral("Configure heat-map scale, range, and legend"));
+        overlayRow->addWidget(heatMapSettingsButton);
         overlayRow->addStretch(1);
         previewLayout->addLayout(overlayRow);
+        previewStatusLabel_ = new QLabel;
+        previewStatusLabel_->setWordWrap(true);
+        previewStatusLabel_->setContentsMargins(6, 0, 6, 2);
+        previewStatusLabel_->setStyleSheet(QStringLiteral("color: #a16207;"));
+        previewStatusLabel_->setVisible(false);
+        previewLayout->addWidget(previewStatusLabel_);
+        QObject::connect(loadHeatMapButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_ || !heatMapCombo_)
+                return;
+            const auto path =
+                QFileDialog::getOpenFileName(this, QStringLiteral("Load heat map"), controller_->projectRoot(),
+                                             QStringLiteral("CSV files (*.csv);;All files (*)"));
+            if (path.isEmpty())
+                return;
+            auto heatmap = parseHeatMapCsv(path.toStdString());
+            if (!heatmap) {
+                QMessageBox::warning(this, QStringLiteral("Load heat map"),
+                                     QStringLiteral("Unable to parse a heat-map CSV with x0,y0,x1,y1,value columns."));
+                return;
+            }
+            previewCanvas_->setCustomHeatMap(std::move(heatmap));
+            heatMapCombo_->setCurrentIndex(heatMapCombo_->findData(200));
+        });
         QObject::connect(exportHeatMapButton, &QPushButton::clicked, this, [this] {
             if (!heatMapCombo_)
                 return;
@@ -1465,28 +2949,212 @@ void ImplementationPage::buildUi() {
                 kind = QStringLiteral("routing");
             else if (data == 100)
                 kind = QStringLiteral("power");
+            else if (data == 101)
+                kind = QStringLiteral("pin");
+            else if (data == 102)
+                kind = QStringLiteral("rudy");
+            else if (data == 103)
+                kind = QStringLiteral("irdrop");
             if (kind.isEmpty()) {
                 QMessageBox::information(this, QStringLiteral("Export heat map"),
                                          QStringLiteral("Select a heat map to export."));
                 return;
             }
-            QString error;
-            const auto path = controller_->exportHeatMap(stage_, kind, error);
-            if (path.isEmpty()) {
-                QMessageBox::warning(this, QStringLiteral("Export heat map"), error);
-                return;
+            if (previewStatusLabel_) {
+                previewStatusLabel_->setText(QStringLiteral("Exporting heat map…"));
+                previewStatusLabel_->setStyleSheet(
+                    QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+                previewStatusLabel_->setVisible(true);
             }
-            refreshArtifacts();
-            QMessageBox::information(this, QStringLiteral("Export heat map"), QStringLiteral("Wrote %1.").arg(path));
+            QPointer<ImplementationPage> self(this);
+            controller_->requestExportHeatMap(stage_, kind, [self](const QString &path, const QString &error) {
+                if (!self)
+                    return;
+                if (self->previewStatusLabel_)
+                    self->previewStatusLabel_->setVisible(false);
+                if (path.isEmpty()) {
+                    QMessageBox::warning(self, QStringLiteral("Export heat map"), error);
+                    return;
+                }
+                self->refreshArtifacts();
+                QMessageBox::information(self, QStringLiteral("Export heat map"),
+                                         QStringLiteral("Wrote %1.").arg(path));
+            });
+        });
+        QObject::connect(heatMapSettingsButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_)
+                return;
+            QDialog dialog(this);
+            dialog.setWindowTitle(QStringLiteral("Heat-map settings"));
+            auto *layout = new QVBoxLayout(&dialog);
+            auto *form = new QFormLayout;
+            auto *logScale = new QCheckBox(QStringLiteral("Log scale"));
+            auto *reverse = new QCheckBox(QStringLiteral("Reverse scale"));
+            auto *legend = new QCheckBox(QStringLiteral("Show legend"));
+            auto *automaticRange = new QCheckBox(QStringLiteral("Automatic range"));
+            auto *minimum = new QDoubleSpinBox;
+            auto *maximum = new QDoubleSpinBox;
+            auto *alpha = new QSpinBox;
+            minimum->setRange(-1.0e9, 1.0e9);
+            maximum->setRange(-1.0e9, 1.0e9);
+            minimum->setDecimals(4);
+            maximum->setDecimals(4);
+            alpha->setRange(0, 255);
+            const auto options = previewCanvas_->heatMapOptions();
+            logScale->setChecked(options.logScale);
+            reverse->setChecked(options.reverse);
+            legend->setChecked(options.showLegend);
+            automaticRange->setChecked(!options.minimum.has_value() && !options.maximum.has_value());
+            if (const auto heatmap = previewCanvas_->currentHeatMap()) {
+                minimum->setValue(options.minimum.value_or(heatmap->minimum));
+                maximum->setValue(options.maximum.value_or(heatmap->maximum));
+            }
+            alpha->setValue(options.alpha);
+            minimum->setEnabled(!automaticRange->isChecked());
+            maximum->setEnabled(!automaticRange->isChecked());
+            QObject::connect(automaticRange, &QCheckBox::toggled, minimum, &QWidget::setDisabled);
+            QObject::connect(automaticRange, &QCheckBox::toggled, maximum, &QWidget::setDisabled);
+            form->addRow(logScale);
+            form->addRow(reverse);
+            form->addRow(legend);
+            form->addRow(automaticRange);
+            form->addRow(QStringLiteral("Minimum"), minimum);
+            form->addRow(QStringLiteral("Maximum"), maximum);
+            form->addRow(QStringLiteral("Alpha"), alpha);
+            layout->addLayout(form);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            layout->addWidget(buttons);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            ImplementationPreviewCanvas::HeatMapOptions updated;
+            updated.logScale = logScale->isChecked();
+            updated.reverse = reverse->isChecked();
+            updated.showLegend = legend->isChecked();
+            updated.alpha = alpha->value();
+            if (!automaticRange->isChecked()) {
+                updated.minimum = minimum->value();
+                updated.maximum = maximum->value();
+            }
+            previewCanvas_->setHeatMapOptions(updated);
         });
         previewCanvas_ = new ImplementationPreviewCanvas;
         previewLayout->addWidget(previewCanvas_, 1);
+        auto *toolRow = new QHBoxLayout;
+        toolRow->setContentsMargins(6, 4, 6, 0);
+        const auto addToolButton = [&](const QString &text, const QString &tooltip) {
+            auto *button = new QPushButton(text);
+            button->setFlat(true);
+            button->setToolTip(tooltip);
+            toolRow->addWidget(button);
+            return button;
+        };
+        auto *fitButton = addToolButton(QStringLiteral("Fit"), QStringLiteral("Fit the layout"));
+        auto *zoomInButton = addToolButton(QStringLiteral("+"), QStringLiteral("Zoom in"));
+        auto *zoomOutButton = addToolButton(QStringLiteral("−"), QStringLiteral("Zoom out"));
+        auto *rulerButton = addToolButton(QStringLiteral("Ruler"), QStringLiteral("Draw a ruler"));
+        rulerButton->setCheckable(true);
+        auto *labelButton = addToolButton(QStringLiteral("Label"), QStringLiteral("Place a text label"));
+        labelButton->setCheckable(true);
+        auto *clearAnnotationsButton =
+            addToolButton(QStringLiteral("Clear"), QStringLiteral("Clear rulers and labels"));
+        auto *saveImageButton = addToolButton(QStringLiteral("Save image"), QStringLiteral("Save the visible preview"));
+        auto *findButton = addToolButton(QStringLiteral("Find"), QStringLiteral("Find an instance, port, or net"));
+        toolRow->addStretch(1);
+        previewLayout->insertLayout(0, toolRow);
+        previewCoordinateLabel_ = new QLabel;
+        previewCoordinateLabel_->setContentsMargins(6, 0, 6, 2);
+        previewCoordinateLabel_->setStyleSheet(
+            QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+        previewLayout->addWidget(previewCoordinateLabel_);
+        QObject::connect(fitButton, &QPushButton::clicked, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->fitView();
+        });
+        QObject::connect(zoomInButton, &QPushButton::clicked, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->zoomIn();
+        });
+        QObject::connect(zoomOutButton, &QPushButton::clicked, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->zoomOut();
+        });
+        QObject::connect(rulerButton, &QPushButton::toggled, this, [this, labelButton](bool checked) {
+            if (!previewCanvas_)
+                return;
+            if (checked)
+                labelButton->setChecked(false);
+            previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::ruler
+                                            : ImplementationPreviewCanvas::Tool::none);
+        });
+        QObject::connect(labelButton, &QPushButton::toggled, this, [this, rulerButton](bool checked) {
+            if (!previewCanvas_)
+                return;
+            if (checked)
+                rulerButton->setChecked(false);
+            previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::label
+                                            : ImplementationPreviewCanvas::Tool::none);
+        });
+        QObject::connect(clearAnnotationsButton, &QPushButton::clicked, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->clearAnnotations();
+        });
+        QObject::connect(saveImageButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_)
+                return;
+            const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Save preview"),
+                                                           QStringLiteral("physical-preview.png"),
+                                                           QStringLiteral("PNG image (*.png);;All files (*)"));
+            if (!path.isEmpty())
+                previewCanvas_->saveImage(path);
+        });
+        QObject::connect(findButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_)
+                return;
+            bool accepted = false;
+            const auto name =
+                QInputDialog::getText(this, QStringLiteral("Find object"),
+                                      QStringLiteral("Instance, port, or net name:"), QLineEdit::Normal, {}, &accepted);
+            if (!accepted || name.isEmpty())
+                return;
+            if (!previewCanvas_->selectByName(name))
+                QMessageBox::information(this, QStringLiteral("Find object"),
+                                         QStringLiteral("No object named %1 was found.").arg(name));
+        });
+        previewCanvas_->setStatusCallback([this](const QPointF &point, const QString &hint) {
+            if (!previewCoordinateLabel_)
+                return;
+            if (point.isNull()) {
+                previewCoordinateLabel_->clear();
+                return;
+            }
+            QString text = QStringLiteral("x %1 µm   y %2 µm")
+                               .arg(point.x() / 1000.0, 0, 'f', 3)
+                               .arg(point.y() / 1000.0, 0, 'f', 3);
+            if (!hint.isEmpty())
+                text += QStringLiteral("   ·   ") + hint;
+            previewCoordinateLabel_->setText(text);
+        });
+        previewCanvas_->setSelectionCallback(
+            [this](const ImplementationPreviewCanvas::Selection &) { refreshInspector(); });
         QObject::connect(heatMapCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
             if (!previewCanvas_ || !heatMapCombo_)
                 return;
-            previewCanvas_->setHeatMap(static_cast<ice::LayoutHeatMapKind>(heatMapCombo_->currentData().toInt()));
+            const auto data = heatMapCombo_->currentData().toInt();
+            if (data == 200) {
+                if (!previewCanvas_->hasCustomHeatMap())
+                    previewCanvas_->setHeatMap(ice::LayoutHeatMapKind::none);
+                return;
+            }
+            if (data >= 100) {
+                previewCanvas_->setHeatMap(ice::LayoutHeatMapKind::none);
+                return;
+            }
+            previewCanvas_->setHeatMap(static_cast<ice::LayoutHeatMapKind>(data));
         });
-        middleTabs_->addTab(previewPage, QStringLiteral("Preview"));
+        const auto previewIndex = middleTabs_->addTab(previewPage, QStringLiteral("Preview"));
+        middleTabs_->tabBar()->setTabButton(previewIndex, QTabBar::RightSide, nullptr);
     }
     contentLayout->addWidget(middleTabs_, 1);
 
@@ -1570,6 +3238,57 @@ void ImplementationPage::buildUi() {
         metricsTable_->setWordWrap(false);
         metricsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
         rightTabs_->addTab(metricsTable_, QStringLiteral("Metrics"));
+        inspectorTree_ = new QTreeWidget;
+        inspectorTree_->setHeaderLabels({QStringLiteral("Property"), QStringLiteral("Value")});
+        inspectorTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        inspectorTree_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+        rightTabs_->addTab(inspectorTree_, QStringLiteral("Inspector"));
+        drcTable_ = new QTableWidget(0, 3);
+        drcTable_->setHorizontalHeaderLabels(
+            {QStringLiteral("Type"), QStringLiteral("Layer"), QStringLiteral("Sources")});
+        drcTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        drcTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        drcTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        drcTable_->verticalHeader()->setVisible(false);
+        drcTable_->setAlternatingRowColors(true);
+        drcTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        rightTabs_->addTab(drcTable_, QStringLiteral("DRC"));
+        timingTable_ = new QTableWidget(0, 2);
+        timingTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
+        timingTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        timingTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        timingTable_->verticalHeader()->setVisible(false);
+        timingTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        auto *timingPage = new QWidget;
+        auto *timingLayout = new QVBoxLayout(timingPage);
+        timingLayout->setContentsMargins(4, 4, 4, 4);
+        auto *timingButton = new QPushButton(QStringLiteral("Generate timing report"));
+        timingButton->setToolTip(QStringLiteral("Run OpenROAD STA and show the worst setup/hold paths"));
+        timingLayout->addWidget(timingButton);
+        timingLayout->addWidget(timingTable_, 1);
+        timingReportView_ = new QPlainTextEdit;
+        timingReportView_->setReadOnly(true);
+        timingReportView_->setPlaceholderText(QStringLiteral("Generate a report to inspect worst paths."));
+        timingLayout->addWidget(timingReportView_, 1);
+        rightTabs_->addTab(timingPage, QStringLiteral("Timing"));
+        QObject::connect(timingButton, &QPushButton::clicked, this, [this] {
+            QString error;
+            const auto report = controller_->timingReport(stage_, error);
+            if (timingReportView_)
+                timingReportView_->setPlainText(report.isEmpty() ? error : report);
+            if (!error.isEmpty())
+                QMessageBox::warning(this, QStringLiteral("Timing report"), error);
+        });
+        clockTree_ = new QTreeWidget;
+        clockTree_->setHeaderLabels({QStringLiteral("Clock net"), QStringLiteral("Pins")});
+        clockTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        clockTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        rightTabs_->addTab(clockTree_, QStringLiteral("Clock"));
+        hierarchyTree_ = new QTreeWidget;
+        hierarchyTree_->setHeaderLabels({QStringLiteral("Module"), QStringLiteral("Instances")});
+        hierarchyTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        hierarchyTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        rightTabs_->addTab(hierarchyTree_, QStringLiteral("Hierarchy"));
         if (physicalStageMode()) {
             auto *formPage = new QWidget;
             auto *outer = new QVBoxLayout(formPage);
@@ -1603,11 +3322,53 @@ void ImplementationPage::buildUi() {
                 dieHeightSpin_->setSuffix(QStringLiteral(" µm"));
                 dieHeightSpin_->setEnabled(false);
                 form->addRow(QStringLiteral("Die height"), dieHeightSpin_);
+                dieXSpin_ = new QDoubleSpinBox;
+                dieXSpin_->setRange(-100000.0, 100000.0);
+                dieXSpin_->setDecimals(3);
+                dieXSpin_->setSuffix(QStringLiteral(" µm"));
+                dieXSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die X"), dieXSpin_);
+                dieYSpin_ = new QDoubleSpinBox;
+                dieYSpin_->setRange(-100000.0, 100000.0);
+                dieYSpin_->setDecimals(3);
+                dieYSpin_->setSuffix(QStringLiteral(" µm"));
+                dieYSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die Y"), dieYSpin_);
                 QObject::connect(dieAreaCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-                    if (dieWidthSpin_)
-                        dieWidthSpin_->setEnabled(checked);
-                    if (dieHeightSpin_)
-                        dieHeightSpin_->setEnabled(checked);
+                    for (auto *spin : {dieWidthSpin_, dieHeightSpin_, dieXSpin_, dieYSpin_})
+                        if (spin)
+                            spin->setEnabled(checked);
+                });
+                coreAreaCheck_ = new QCheckBox(QStringLiteral("Explicit core area"));
+                form->addRow(QString(), coreAreaCheck_);
+                coreWidthSpin_ = new QDoubleSpinBox;
+                coreWidthSpin_->setRange(0.001, 100000.0);
+                coreWidthSpin_->setDecimals(3);
+                coreWidthSpin_->setSuffix(QStringLiteral(" µm"));
+                coreWidthSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core width"), coreWidthSpin_);
+                coreHeightSpin_ = new QDoubleSpinBox;
+                coreHeightSpin_->setRange(0.001, 100000.0);
+                coreHeightSpin_->setDecimals(3);
+                coreHeightSpin_->setSuffix(QStringLiteral(" µm"));
+                coreHeightSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core height"), coreHeightSpin_);
+                coreXSpin_ = new QDoubleSpinBox;
+                coreXSpin_->setRange(-100000.0, 100000.0);
+                coreXSpin_->setDecimals(3);
+                coreXSpin_->setSuffix(QStringLiteral(" µm"));
+                coreXSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core X"), coreXSpin_);
+                coreYSpin_ = new QDoubleSpinBox;
+                coreYSpin_->setRange(-100000.0, 100000.0);
+                coreYSpin_->setDecimals(3);
+                coreYSpin_->setSuffix(QStringLiteral(" µm"));
+                coreYSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core Y"), coreYSpin_);
+                QObject::connect(coreAreaCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+                    for (auto *spin : {coreWidthSpin_, coreHeightSpin_, coreXSpin_, coreYSpin_})
+                        if (spin)
+                            spin->setEnabled(checked);
                 });
                 siteEdit_ = new QLineEdit;
                 siteEdit_->setPlaceholderText(QStringLiteral("Platform default"));
@@ -1814,6 +3575,44 @@ void ImplementationPage::buildUi() {
                     controller_->setActiveRunId(id);
             });
         }
+        QObject::connect(artifactsList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (!item)
+                return;
+            const auto path = item->data(Qt::UserRole).toString();
+            if (!path.isEmpty())
+                openArtifact(path);
+        });
+        if (displayTree_) {
+            QObject::connect(displayTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int) {
+                if (!previewCanvas_ || !item)
+                    return;
+                const auto group = item->data(0, Qt::UserRole).toString();
+                const auto key = item->data(0, Qt::UserRole + 1).toString();
+                const auto visible = item->checkState(0) == Qt::Checked;
+                if (group == QStringLiteral("layer"))
+                    previewCanvas_->setLayerVisible(key, visible);
+                else if (group == QStringLiteral("instance"))
+                    previewCanvas_->setInstanceCategoryVisible(key, visible);
+                else if (group == QStringLiteral("net"))
+                    previewCanvas_->setNetTypeVisible(key, visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("special"))
+                    previewCanvas_->setShowSpecialNets(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("ports"))
+                    previewCanvas_->setShowPorts(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("guides"))
+                    previewCanvas_->setShowGuides(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("rows"))
+                    previewCanvas_->setShowRows(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("blockages"))
+                    previewCanvas_->setShowBlockages(visible);
+            });
+        }
+        if (drcTable_) {
+            QObject::connect(drcTable_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+                if (previewCanvas_ && row >= 0)
+                    previewCanvas_->selectMarker(row);
+            });
+        }
         if (runStageButton_) {
             QObject::connect(runStageButton_, &QPushButton::clicked, this, [this] {
                 if (!controller_->activeRun() || controller_->busy())
@@ -1825,14 +3624,14 @@ void ImplementationPage::buildUi() {
             QObject::connect(runFromHereButton_, &QPushButton::clicked, this, [this] {
                 if (!controller_->activeRun() || controller_->busy())
                     return;
-                controller_->run(stage_, ice::ImplementationStage::routing);
+                controller_->run(stage_, ice::ImplementationStage::final);
             });
         }
         if (runAllButton_) {
             QObject::connect(runAllButton_, &QPushButton::clicked, this, [this] {
                 if (!controller_->activeRun() || controller_->busy())
                     return;
-                controller_->run(ice::ImplementationStage::floorplan, ice::ImplementationStage::routing);
+                controller_->run(ice::ImplementationStage::floorplan, ice::ImplementationStage::final);
             });
         }
         if (runCombo_) {
@@ -1862,7 +3661,8 @@ void ImplementationPage::refreshRunTree() {
         return;
     const auto isPhysicalStage = [](ice::ImplementationStage stage) {
         return stage == ice::ImplementationStage::floorplan || stage == ice::ImplementationStage::placement ||
-               stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing;
+               stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing ||
+               stage == ice::ImplementationStage::final;
     };
     QTreeWidgetItem *activeItem = nullptr;
     for (const auto &[id, run] : project->implementationRuns) {
@@ -2015,6 +3815,15 @@ void ImplementationPage::refreshStageForm() {
         if (run->config.dieArea) {
             dieWidthSpin_->setValue(toMicrons(run->config.dieArea->width));
             dieHeightSpin_->setValue(toMicrons(run->config.dieArea->height));
+            dieXSpin_->setValue(toMicrons(run->config.dieArea->x));
+            dieYSpin_->setValue(toMicrons(run->config.dieArea->y));
+        }
+        coreAreaCheck_->setChecked(run->config.coreArea.has_value());
+        if (run->config.coreArea) {
+            coreWidthSpin_->setValue(toMicrons(run->config.coreArea->width));
+            coreHeightSpin_->setValue(toMicrons(run->config.coreArea->height));
+            coreXSpin_->setValue(toMicrons(run->config.coreArea->x));
+            coreYSpin_->setValue(toMicrons(run->config.coreArea->y));
         }
         siteEdit_->setText(QString::fromStdString(run->config.site));
         ioHorizontalEdit_->setText(joinList(run->config.ioHorizontalLayers));
@@ -2088,6 +3897,10 @@ void ImplementationPage::updateStageActions() {
             hint = ready ? QStringLiteral("Run the routing stage for the active run.")
                          : (run->config.ctsEnabled ? QStringLiteral("Run CTS first.")
                                                    : QStringLiteral("Run placement first."));
+        } else if (stage_ == ice::ImplementationStage::final) {
+            ready = status(ice::ImplementationStage::routing) == ice::ImplementationStageStatus::succeeded;
+            hint = ready ? QStringLiteral("Run the final extraction and sign-off stage for the active run.")
+                         : QStringLiteral("Run routing first.");
         }
     }
     stageReady_ = run && ready;
@@ -2101,11 +3914,11 @@ void ImplementationPage::updateStageActions() {
     }
     if (runFromHereButton_) {
         runFromHereButton_->setEnabled(run && !busy && ready);
-        runFromHereButton_->setToolTip(QStringLiteral("Run %1 through routing.").arg(stageTitle(stage_)));
+        runFromHereButton_->setToolTip(QStringLiteral("Run %1 through final.").arg(stageTitle(stage_)));
     }
     if (runAllButton_) {
         runAllButton_->setEnabled(!busy && flowReady);
-        runAllButton_->setToolTip(QStringLiteral("Run floorplan through routing."));
+        runAllButton_->setToolTip(QStringLiteral("Run floorplan through final."));
     }
     if (cancelStageButton_)
         cancelStageButton_->setEnabled(busy);
@@ -2173,11 +3986,31 @@ void ImplementationPage::applyStageForm() {
                 return static_cast<ice::Coordinate>(std::llround(nanometers * scale));
             };
             ice::Rect die;
+            die.x = toUnits(dieXSpin_->value());
+            die.y = toUnits(dieYSpin_->value());
             die.width = toUnits(dieWidthSpin_->value());
             die.height = toUnits(dieHeightSpin_->value());
             config.dieArea = die;
         } else {
             config.dieArea.reset();
+        }
+        if (coreAreaCheck_->isChecked()) {
+            const auto toUnits = [&](double microns) -> ice::Coordinate {
+                const auto nanometers = microns * 1000.0;
+                const auto &units = project->units;
+                const auto scale = units.nanometers_per_unit > 0
+                                       ? static_cast<double>(units.denominator) / units.nanometers_per_unit
+                                       : 1.0;
+                return static_cast<ice::Coordinate>(std::llround(nanometers * scale));
+            };
+            ice::Rect core;
+            core.x = toUnits(coreXSpin_->value());
+            core.y = toUnits(coreYSpin_->value());
+            core.width = toUnits(coreWidthSpin_->value());
+            core.height = toUnits(coreHeightSpin_->value());
+            config.coreArea = core;
+        } else {
+            config.coreArea.reset();
         }
         config.site = siteEdit_->text().trimmed().toStdString();
         config.ioHorizontalLayers = splitList(ioHorizontalEdit_->text());
@@ -2237,7 +4070,7 @@ void ImplementationPage::refreshSynthesisExplorer() {
 }
 
 void ImplementationPage::openArtifact(const QString &artifactPath) {
-    if (!synthesisMode() || !middleTabs_)
+    if ((!synthesisMode() && !physicalStageMode()) || !middleTabs_)
         return;
     std::filesystem::path path(artifactPath.toStdString());
     if (path.is_relative())
@@ -2247,6 +4080,15 @@ void ImplementationPage::openArtifact(const QString &artifactPath) {
         QMessageBox::information(
             this, QStringLiteral("Open Artifact"),
             QStringLiteral("The file does not exist:\n%1").arg(QString::fromStdString(path.string())));
+        return;
+    }
+    const auto size = std::filesystem::file_size(path, status);
+    const auto extension = QString::fromStdString(path.extension().string()).toLower();
+    if (!status && (size > 16ULL * 1024ULL * 1024ULL || extension == QStringLiteral(".odb"))) {
+        QMessageBox::information(this, QStringLiteral("Open Artifact"),
+                                 QStringLiteral("%1 is too large for the built-in viewer and will open externally.")
+                                     .arg(QString::fromStdString(path.filename().string())));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(path.string())));
         return;
     }
     const auto key = path.lexically_normal().generic_string();
@@ -2290,7 +4132,12 @@ void ImplementationPage::openArtifact(const QString &artifactPath) {
         std::ostringstream contents;
         contents << input.rdbuf();
         editor->setText(QString::fromStdString(contents.str()));
-        editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+        if (extension == QStringLiteral(".v") || extension == QStringLiteral(".sv") ||
+            extension == QStringLiteral(".vh"))
+            editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+        else if (extension == QStringLiteral(".sp") || extension == QStringLiteral(".cir") ||
+                 extension == QStringLiteral(".spice"))
+            editor->setLanguage(TextDocumentLanguage::Spice);
         editor->setReadOnly(true);
         page = editor;
     }
@@ -3068,14 +4915,49 @@ void ImplementationPage::refreshMetrics() {
     const auto *run = controller_->activeRun();
     if (!run)
         return;
-    int row = 0;
+    std::map<QString, std::vector<std::pair<QString, double>>> groups;
     for (const auto &[name, value] : run->metrics) {
+        const auto full = QString::fromStdString(name);
+        auto group = full.section(QStringLiteral("__"), 0, 0);
+        if (group.isEmpty())
+            group = QStringLiteral("Other");
+        groups[group].push_back({full, value});
+    }
+    int row = 0;
+    const auto addSection = [&](const QString &name) {
         metricsTable_->insertRow(row);
-        metricsTable_->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(name)));
-        auto *valueItem = new QTableWidgetItem(QString::number(value, 'g', 12));
-        valueItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        metricsTable_->setItem(row, 1, valueItem);
+        auto *item = new QTableWidgetItem(name);
+        auto font = item->font();
+        font.setBold(true);
+        item->setFont(font);
+        item->setFlags(Qt::NoItemFlags);
+        metricsTable_->setItem(row, 0, item);
+        metricsTable_->setSpan(row, 0, 1, 2);
         ++row;
+    };
+    const auto formatValue = [](const QString &name, double value) -> QString {
+        if (name.startsWith(QStringLiteral("timing__")) && std::abs(value) <= 1.0e20)
+            return QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4);
+        if (name.startsWith(QStringLiteral("power__")))
+            return QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4);
+        if (name.endsWith(QStringLiteral("__area")) || name.endsWith(QStringLiteral("__area__stdcell")))
+            return QStringLiteral("%1 µm²").arg(value, 0, 'f', 2);
+        if (name.endsWith(QStringLiteral("__wirelength")))
+            return QStringLiteral("%1 µm").arg(value, 0, 'f', 2);
+        return QString::number(value, 'g', 12);
+    };
+    for (auto &[group, metrics] : groups) {
+        std::sort(metrics.begin(), metrics.end(),
+                  [](const auto &left, const auto &right) { return left.first < right.first; });
+        addSection(group);
+        for (const auto &[name, value] : metrics) {
+            metricsTable_->insertRow(row);
+            metricsTable_->setItem(row, 0, new QTableWidgetItem(name));
+            auto *valueItem = new QTableWidgetItem(formatValue(name, value));
+            valueItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            metricsTable_->setItem(row, 1, valueItem);
+            ++row;
+        }
     }
 }
 
@@ -3117,7 +4999,8 @@ void ImplementationPage::refreshArtifacts() {
         appendStage(stage_);
         const auto runRoot = std::filesystem::path(controller_->projectRoot().toStdString()) / run->directory;
         for (const auto *heatmap :
-             {"reports/placement-heatmap.csv", "reports/routing-heatmap.csv", "reports/power-heatmap.csv"}) {
+             {"reports/placement-heatmap.csv", "reports/routing-heatmap.csv", "reports/power-heatmap.csv",
+              "reports/pin-heatmap.csv", "reports/rudy-heatmap.csv", "reports/irdrop-heatmap.csv"}) {
             std::error_code status;
             if (std::filesystem::is_regular_file(runRoot / heatmap, status) && !status)
                 append(heatmap);
@@ -3147,9 +5030,264 @@ void ImplementationPage::refreshArtifacts() {
     }
 }
 
+void ImplementationPage::refreshDisplayControls() {
+    if (!displayTree_)
+        return;
+    QSignalBlocker blocker(displayTree_);
+    displayTree_->clear();
+    if (!previewCanvas_)
+        return;
+    const auto addGroup = [&](const QString &name) {
+        auto *group = new QTreeWidgetItem(displayTree_);
+        group->setText(0, name);
+        auto font = group->font(0);
+        font.setBold(true);
+        group->setFont(0, font);
+        group->setFirstColumnSpanned(true);
+        group->setExpanded(true);
+        return group;
+    };
+    const auto addLeaf = [&](QTreeWidgetItem *parent, const QString &label, bool visible, const QString &group,
+                             const QString &key, const QIcon &icon = {}) {
+        auto *item = new QTreeWidgetItem(parent);
+        item->setText(0, label);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
+        item->setData(0, Qt::UserRole, group);
+        item->setData(0, Qt::UserRole + 1, key);
+        if (!icon.isNull())
+            item->setIcon(0, icon);
+        return item;
+    };
+
+    const auto layers = previewCanvas_->layers();
+    if (!layers.empty()) {
+        auto *group = addGroup(QStringLiteral("Layers"));
+        for (const auto &layer : layers)
+            addLeaf(group, layer.label, layer.visible, QStringLiteral("layer"), layer.key,
+                    QIcon(layerPreviewIcon({layer.color, Qt::SolidPattern})));
+    }
+
+    const auto categories = previewCanvas_->instanceCategories();
+    if (!categories.empty()) {
+        auto *group = addGroup(QStringLiteral("Instances"));
+        for (const auto &[category, count] : categories) {
+            const auto label = category.isEmpty() ? QStringLiteral("other") : category;
+            addLeaf(group, QStringLiteral("%1 (%2)").arg(label).arg(count),
+                    previewCanvas_->instanceCategoryVisible(label), QStringLiteral("instance"), label);
+        }
+    }
+
+    const auto netTypes = previewCanvas_->netTypes();
+    if (!netTypes.empty()) {
+        auto *group = addGroup(QStringLiteral("Nets"));
+        for (const auto &[type, count] : netTypes) {
+            const auto label = type.isEmpty() ? QStringLiteral("signal") : type;
+            addLeaf(group, QStringLiteral("%1 (%2)").arg(label).arg(count), previewCanvas_->netTypeVisible(label),
+                    QStringLiteral("net"), label);
+        }
+    }
+
+    auto *options = addGroup(QStringLiteral("Options"));
+    addLeaf(options, QStringLiteral("Special nets"), previewCanvas_->showSpecialNets(), QStringLiteral("option"),
+            QStringLiteral("special"));
+    addLeaf(options, QStringLiteral("Ports"), previewCanvas_->showPorts(), QStringLiteral("option"),
+            QStringLiteral("ports"));
+    if (previewCanvas_->hasGuides())
+        addLeaf(options, QStringLiteral("Route guides"), previewCanvas_->showGuides(), QStringLiteral("option"),
+                QStringLiteral("guides"));
+    if (previewCanvas_->hasRows())
+        addLeaf(options, QStringLiteral("Rows"), previewCanvas_->showRows(), QStringLiteral("option"),
+                QStringLiteral("rows"));
+    if (previewCanvas_->hasBlockages())
+        addLeaf(options, QStringLiteral("Blockages"), previewCanvas_->showBlockages(), QStringLiteral("option"),
+                QStringLiteral("blockages"));
+    displayTree_->expandAll();
+    if (displayTree_->topLevelItemCount() == 0) {
+        auto *item = new QTreeWidgetItem(displayTree_);
+        item->setText(0, QStringLiteral("No display data in this preview."));
+        item->setFlags(Qt::NoItemFlags);
+    }
+}
+
+void ImplementationPage::refreshInspector() {
+    if (!inspectorTree_)
+        return;
+    QSignalBlocker blocker(inspectorTree_);
+    inspectorTree_->clear();
+    if (!previewCanvas_) {
+        return;
+    }
+    const auto selection = previewCanvas_->selection();
+    if (!selection.valid()) {
+        auto *item = new QTreeWidgetItem(inspectorTree_);
+        item->setText(0, QStringLiteral("Select an object in the canvas."));
+        item->setFirstColumnSpanned(true);
+        item->setFlags(Qt::NoItemFlags);
+        return;
+    }
+    const auto add = [&](const QString &name, const QString &value) {
+        auto *item = new QTreeWidgetItem(inspectorTree_);
+        item->setText(0, name);
+        item->setText(1, value);
+        item->setToolTip(1, value);
+    };
+    const auto kind =
+        selection.kind == ImplementationPreviewCanvas::SelectionKind::instance ? QStringLiteral("Instance")
+        : selection.kind == ImplementationPreviewCanvas::SelectionKind::port   ? QStringLiteral("Port")
+        : selection.kind == ImplementationPreviewCanvas::SelectionKind::shape  ? QStringLiteral("Shape")
+                                                                               : QStringLiteral("DRC marker");
+    add(QStringLiteral("Kind"), kind);
+    if (!selection.name.isEmpty())
+        add(QStringLiteral("Name"), selection.name);
+    if (!selection.master.isEmpty())
+        add(QStringLiteral("Master"), selection.master);
+    if (!selection.category.isEmpty())
+        add(QStringLiteral("Category"), selection.category);
+    if (!selection.module.isEmpty())
+        add(QStringLiteral("Module"), selection.module);
+    if (!selection.net.isEmpty())
+        add(QStringLiteral("Net"), selection.net);
+    if (!selection.layer.isEmpty())
+        add(QStringLiteral("Layer"), selection.layer);
+    if (!selection.type.isEmpty())
+        add(QStringLiteral("Type"), selection.type);
+    if (!selection.sources.isEmpty())
+        add(QStringLiteral("Sources"), selection.sources);
+    if (!selection.comment.isEmpty())
+        add(QStringLiteral("Comment"), selection.comment);
+    if (selection.special)
+        add(QStringLiteral("Special net"), QStringLiteral("yes"));
+    if (selection.rectangle.isValid())
+        add(QStringLiteral("Bounds"), QStringLiteral("%1 × %2 µm")
+                                          .arg(selection.rectangle.width() / 1000.0, 0, 'f', 3)
+                                          .arg(selection.rectangle.height() / 1000.0, 0, 'f', 3));
+    inspectorTree_->expandAll();
+}
+
+void ImplementationPage::refreshDrc() {
+    if (!drcTable_)
+        return;
+    drcTable_->setRowCount(0);
+    if (!previewCanvas_)
+        return;
+    const auto markers = previewCanvas_->drcMarkers();
+    for (int row = 0; row < static_cast<int>(markers.size()); ++row) {
+        const auto &marker = markers[static_cast<std::size_t>(row)];
+        drcTable_->insertRow(row);
+        drcTable_->setItem(row, 0, new QTableWidgetItem(marker.type));
+        drcTable_->setItem(row, 1, new QTableWidgetItem(marker.layer));
+        auto *sources = new QTableWidgetItem(marker.sources);
+        sources->setToolTip(marker.comment.isEmpty() ? marker.sources : marker.comment);
+        drcTable_->setItem(row, 2, sources);
+    }
+    if (markers.empty()) {
+        drcTable_->insertRow(0);
+        auto *item = new QTableWidgetItem(QStringLiteral("No DRC markers."));
+        item->setFlags(Qt::NoItemFlags);
+        drcTable_->setItem(0, 0, item);
+        drcTable_->setSpan(0, 0, 1, 3);
+    }
+}
+
+void ImplementationPage::refreshTiming() {
+    if (!timingTable_)
+        return;
+    timingTable_->setRowCount(0);
+    const auto *run = controller_->activeRun();
+    if (!run)
+        return;
+    int row = 0;
+    const auto add = [&](const QString &name, const QString &value) {
+        timingTable_->insertRow(row);
+        timingTable_->setItem(row, 0, new QTableWidgetItem(name));
+        auto *item = new QTableWidgetItem(value);
+        item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        timingTable_->setItem(row, 1, item);
+        ++row;
+    };
+    for (const auto &[name, value] : run->metrics) {
+        if (name.starts_with("timing__")) {
+            if (std::abs(value) > 1.0e20)
+                add(QString::fromStdString(name), QStringLiteral("unconstrained"));
+            else
+                add(QString::fromStdString(name), QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4));
+        } else if (name.starts_with("power__")) {
+            add(QString::fromStdString(name), QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4));
+        } else if (name == "route__drc_errors") {
+            add(QString::fromStdString(name), QString::number(value, 'g', 8));
+        } else if (name.starts_with("antenna__")) {
+            add(QString::fromStdString(name), QString::number(value, 'g', 8));
+        }
+    }
+    if (row == 0) {
+        timingTable_->insertRow(0);
+        auto *item = new QTableWidgetItem(QStringLiteral("No timing metrics for this run yet."));
+        item->setFlags(Qt::NoItemFlags);
+        timingTable_->setItem(0, 0, item);
+        timingTable_->setSpan(0, 0, 1, 2);
+    }
+}
+
+void ImplementationPage::refreshClock() {
+    if (!clockTree_)
+        return;
+    QSignalBlocker blocker(clockTree_);
+    clockTree_->clear();
+    if (!previewCanvas_)
+        return;
+    int clocks = 0;
+    for (const auto &net : previewCanvas_->nets()) {
+        if (net.type.toLower() != QStringLiteral("clock"))
+            continue;
+        auto *item = new QTreeWidgetItem(clockTree_);
+        item->setText(0, net.name);
+        item->setText(1, QString::number(net.termCount));
+        item->setToolTip(0, net.special ? QStringLiteral("Special clock net") : QStringLiteral("Clock net"));
+        for (const auto &term : net.terms) {
+            auto *child = new QTreeWidgetItem(item);
+            child->setText(0, term);
+        }
+        item->setExpanded(item->childCount() <= 32);
+        ++clocks;
+    }
+    if (clocks == 0) {
+        auto *item = new QTreeWidgetItem(clockTree_);
+        item->setText(0, QStringLiteral("No clock nets in the current preview."));
+        item->setFlags(Qt::NoItemFlags);
+    }
+}
+
+void ImplementationPage::refreshHierarchy() {
+    if (!hierarchyTree_)
+        return;
+    QSignalBlocker blocker(hierarchyTree_);
+    hierarchyTree_->clear();
+    if (!previewCanvas_)
+        return;
+    const auto modules = previewCanvas_->modules();
+    if (modules.empty()) {
+        auto *item = new QTreeWidgetItem(hierarchyTree_);
+        item->setText(0, QStringLiteral("No module hierarchy in this preview."));
+        item->setFlags(Qt::NoItemFlags);
+        return;
+    }
+    std::map<int, QTreeWidgetItem *> items;
+    for (const auto &module : modules) {
+        auto *parent = items.find(module.parentId) == items.end() ? nullptr : items.at(module.parentId);
+        auto *item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(hierarchyTree_);
+        item->setText(0, module.name);
+        item->setText(1, QString::number(module.instanceCount));
+        items[module.id] = item;
+    }
+    hierarchyTree_->expandAll();
+}
+
 void ImplementationPage::refreshPreview() {
     if (!previewCanvas_)
         return;
+    if (previewStatusLabel_)
+        previewStatusLabel_->setVisible(false);
     if (physicalStageMode()) {
         const auto *run = controller_->activeRun();
         if (run) {
@@ -3168,21 +5306,63 @@ void ImplementationPage::refreshPreview() {
                                              "Run the stage to generate the DEF preview.")
                                   .arg(title);
                 previewCanvas_->setPreview({}, 0, message, {}, controller_->project());
+                refreshDisplayControls();
+                refreshInspector();
+                refreshDrc();
+                refreshTiming();
+                refreshClock();
+                refreshHierarchy();
                 return;
             }
         }
     }
-    auto preview = controller_->stagePreview(stage_);
-    previewCanvas_->setPreview(preview.project, preview.cell, preview.message, preview.model,
-                               preview.project ? preview.project.get() : controller_->project());
+    if (previewStatusLabel_) {
+        previewStatusLabel_->setText(QStringLiteral("Loading preview…"));
+        previewStatusLabel_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+        previewStatusLabel_->setVisible(true);
+    }
+    QPointer<ImplementationPage> self(this);
+    const auto runId = controller_->activeRunId();
+    controller_->requestStagePreview(
+        stage_, [self, runId, stage = stage_](const ImplementationUiController::StagePreview &preview) {
+            if (!self || self->controller_->activeRunId() != runId)
+                return;
+            self->previewCanvas_->setPreview(preview.project, preview.cell, preview.message, preview.model,
+                                             preview.project ? preview.project.get() : self->controller_->project());
+            if (self->previewStatusLabel_) {
+                if (preview.model && preview.model->truncated) {
+                    self->previewStatusLabel_->setText(
+                        QStringLiteral("Preview truncated by the OpenDB reader; some routed geometry is not shown."));
+                    self->previewStatusLabel_->setStyleSheet(QStringLiteral("color: #a16207;"));
+                    self->previewStatusLabel_->setVisible(true);
+                } else {
+                    self->previewStatusLabel_->setVisible(false);
+                }
+            }
+            self->refreshDisplayControls();
+            self->refreshInspector();
+            self->refreshDrc();
+            self->refreshTiming();
+            self->refreshClock();
+            self->refreshHierarchy();
+            (void)stage;
+        });
 }
 
-PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent) : QWidget(parent) {
+PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent)
+    : QWidget(parent), controller_(controller) {
     stages_ = {ice::ImplementationStage::floorplan, ice::ImplementationStage::placement, ice::ImplementationStage::cts,
-               ice::ImplementationStage::routing};
+               ice::ImplementationStage::routing, ice::ImplementationStage::final};
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+    stageBar_ = new QTabBar;
+    stageBar_->setDocumentMode(true);
+    stageBar_->setExpanding(false);
+    stageBar_->setDrawBase(false);
+    for (const auto stage : stages_)
+        stageBar_->addTab(stageTitle(stage));
+    layout->addWidget(stageBar_);
     stageStack_ = new QStackedWidget;
     for (const auto stage : stages_) {
         auto *page = new ImplementationPage(stage, controller, stageStack_, true);
@@ -3191,7 +5371,58 @@ PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, Q
         stageStack_->addWidget(page);
     }
     layout->addWidget(stageStack_, 1);
+    QObject::connect(stageBar_, &QTabBar::currentChanged, this, [this](int index) {
+        if (index >= 0 && stageStack_)
+            stageStack_->setCurrentIndex(index);
+    });
     stageStack_->setCurrentIndex(0);
+    stageTimer_ = new QTimer(this);
+    stageTimer_->setInterval(750);
+    QObject::connect(stageTimer_, &QTimer::timeout, this, [this] { refreshStageBar(); });
+    stageTimer_->start();
+    refreshStageBar();
+}
+
+void PhysicalDesignPage::refreshStageBar() {
+    if (!stageBar_ || !controller_)
+        return;
+    const auto *run = controller_->activeRun();
+    for (int index = 0; index < stageBar_->count(); ++index) {
+        const auto stage = stageAt(index);
+        auto label = stageTitle(stage);
+        QColor color = palette().color(QPalette::Text);
+        if (run) {
+            const auto found = run->stages.find(stage);
+            if (found != run->stages.end()) {
+                switch (found->second.status) {
+                case ice::ImplementationStageStatus::running:
+                    label = QStringLiteral("▶ %1").arg(label);
+                    color = QColor(37, 99, 235);
+                    break;
+                case ice::ImplementationStageStatus::succeeded:
+                    label = QStringLiteral("✓ %1").arg(label);
+                    color = QColor(21, 128, 61);
+                    break;
+                case ice::ImplementationStageStatus::failed:
+                    label = QStringLiteral("✗ %1").arg(label);
+                    color = QColor(185, 28, 28);
+                    break;
+                case ice::ImplementationStageStatus::cancelled:
+                    label = QStringLiteral("■ %1").arg(label);
+                    color = QColor(161, 98, 7);
+                    break;
+                case ice::ImplementationStageStatus::skipped:
+                    label = QStringLiteral("– %1").arg(label);
+                    color = QColor(107, 114, 128);
+                    break;
+                case ice::ImplementationStageStatus::pending:
+                    break;
+                }
+            }
+        }
+        stageBar_->setTabText(index, label);
+        stageBar_->setTabTextColor(index, color);
+    }
 }
 
 void PhysicalDesignPage::setCurrentStage(ice::ImplementationStage stage) {
@@ -3199,6 +5430,10 @@ void PhysicalDesignPage::setCurrentStage(ice::ImplementationStage stage) {
     if (index < 0 || !stageStack_)
         return;
     stageStack_->setCurrentIndex(index);
+    if (stageBar_) {
+        QSignalBlocker blocker(stageBar_);
+        stageBar_->setCurrentIndex(index);
+    }
 }
 
 ice::ImplementationStage PhysicalDesignPage::currentStage() const {

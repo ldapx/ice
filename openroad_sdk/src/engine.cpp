@@ -596,8 +596,11 @@ struct Engine::Impl {
                                  die.yMax() - core_space);
             floorplan.initFloorplan(die, core, site);
         } else {
-            floorplan.initFloorplan(job.options.utilization, job.options.aspect_ratio, core_space, core_space,
-                                    core_space, core_space, site);
+            // ICE stores utilization as a fraction, while OpenROAD's
+            // initFloorplan expects a percentage (0.5 becomes 50%).
+            const double utilization_percent = job.options.utilization * 100.0;
+            floorplan.initFloorplan(utilization_percent, job.options.aspect_ratio, core_space, core_space, core_space,
+                                    core_space, site);
         }
         floorplan.makeTracks();
 
