@@ -2758,8 +2758,19 @@ constexpr auto kSourceUrl = "https://github.com/ldapx/ice";
 constexpr auto kWebsiteUrl = "https://github.com/ldapx/ice";
 
 QString defaultProjectFolder() {
+    static const auto settingsKey = QStringLiteral("ice/projectFolder");
+    QSettings settings;
+    const auto stored = settings.value(settingsKey).toString();
+    if (!stored.isEmpty() && QDir(stored).exists())
+        return stored;
     const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     return documents.isEmpty() ? QDir::homePath() : documents;
+}
+
+void storeProjectFolder(const QString &folder) {
+    static const auto settingsKey = QStringLiteral("ice/projectFolder");
+    QSettings settings;
+    settings.setValue(settingsKey, folder);
 }
 } // namespace
 
@@ -2865,8 +2876,10 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     connect(browseButton, &QPushButton::clicked, this, [this] {
         const auto directory =
             QFileDialog::getExistingDirectory(this, QStringLiteral("Choose Project Location"), location_->text());
-        if (!directory.isEmpty())
+        if (!directory.isEmpty()) {
             location_->setText(directory);
+            storeProjectFolder(directory);
+        }
     });
     connect(openButton, &QPushButton::clicked, this, [this] {
         if (onOpenProject_)
@@ -2875,6 +2888,7 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     connect(createButton_, &QPushButton::clicked, this, [this] {
         if (onCreateProject_)
             onCreateProject_(name_->text().trimmed(), location_->text().trimmed(), createFolder_->isChecked());
+        storeProjectFolder(location_->text());
     });
     auto submit = [this] {
         if (createButton_->isEnabled())
@@ -2884,6 +2898,7 @@ StartupView::StartupView(QWidget *parent) : QWidget(parent) {
     connect(location_, &QLineEdit::returnPressed, this, submit);
     auto updateCreateButton = [this] {
         createButton_->setEnabled(!name_->text().trimmed().isEmpty() && !location_->text().trimmed().isEmpty());
+        storeProjectFolder(location_->text());
     };
     connect(name_, &QLineEdit::textChanged, this, updateCreateButton);
     connect(location_, &QLineEdit::textChanged, this, updateCreateButton);

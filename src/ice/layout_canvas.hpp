@@ -53,6 +53,8 @@ using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int
 class LayoutCanvas : public QGraphicsView {
   public:
     enum class Tool { select, move, path, rectangle, polygon, pin, placeDevice, ruler, text, textPolygon };
+    // Entries of the right-click menu shown on a selected layout figure.
+    enum class FigureContextAction { traceNet, rotate, flip, copy, cut, paste, deleteShape };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
@@ -74,6 +76,12 @@ class LayoutCanvas : public QGraphicsView {
     virtual ice::ObjectId selectedLayoutInstance() const = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
     virtual void deleteSelectedShapes() = 0;
+    // Drops any in-progress interaction (rectangle/pin preview, polygon, ruler,
+    // path drag) and then clears the scene. Use this instead of
+    // scene()->clear(): the canvas keeps raw pointers to scene items used by
+    // the current interaction, and clearing the scene behind its back left
+    // those pointers dangling (crash after e.g. creating a layer mid-draw).
+    virtual void clearScene() = 0;
     virtual void setCallbacks(std::function<void(QPointF, QPointF)> rectangleCreated,
                               std::function<void(ice::ObjectId, QPointF)> shapeMoved,
                               std::function<void(ice::ObjectId, QRectF)> shapeResized,
@@ -103,6 +111,16 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;
     virtual void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) = 0;
     virtual void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
+    // Invoked when the user picks an entry of the figure context menu. The id
+    // is the selected figure the menu was opened on.
+    virtual void setFigureContextActionCallback(
+        std::function<void(ice::ObjectId, FigureContextAction)> callback) = 0;
+    // Invoked when the user right-clicks empty canvas space. The host owns the
+    // menu contents (editor tools plus clipboard entries).
+    virtual void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) = 0;
+    // Cursor position in scene coordinates (positive Y downwards), updated on
+    // the latest mouse move or press. Used to anchor pasted figures.
+    virtual QPointF cursorScenePosition() const = 0;
     // Highlights the layout shapes and planned connections that belong to one
     // logical net. Overlays are presentation-only and are cleared on the next
     // canvas interaction.
