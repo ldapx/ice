@@ -192,6 +192,7 @@ ice-cli implementation-delete <project> <run>
 `implementation-create` resolves the package default stack when `--stack` is
 omitted. `--source-cell` refers to an existing SystemVerilog source cell in the
 project; `--source` refers to an external Verilog/SystemVerilog file.
+`--utilization` is a fraction of the core area (`0.5` means 50%).
 `implementation-prepare` resolves the package's implementation platform, copies
 the RTL and SDC inputs into the run directory, and generates:
 
@@ -211,8 +212,8 @@ force the legacy backend or `ICE_OPENROAD_BACKEND=cpp` to require the C++
 backend. The same helper provides read-only ODB tooling (`ice-openroad
 odb-info`, `ice-openroad odb-preview`) and native heat-map CSV export
 (`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). Build
-and install it with `xmake openroad-sdk` or
-`scripts/build-ice-openroad.sh --sdk-install <prefix>`; see
+it from the pinned OpenROAD/OpenSTA revisions with `xmake openroad-sdk`; use
+`scripts/build-ice-openroad.sh --sdk-install <prefix>` for an SDK install. See
 `openroad_sdk/README.md`. Yosys synthesis is technology-independent and writes
 the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform
 standard cells with `dfflibmap`/`abc`, writes `synth/2_tech_map.v`, records

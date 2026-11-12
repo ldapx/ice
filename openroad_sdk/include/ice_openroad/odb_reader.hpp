@@ -47,6 +47,9 @@ struct PreviewShape {
     std::vector<PreviewPoint> points;
     double width = 0.0;
     std::string text;
+    std::string net;
+    int net_id = 0;
+    bool special = false;
 };
 
 struct PreviewPort {
@@ -55,13 +58,51 @@ struct PreviewPort {
     int layer_number = 0;
     int layer_datatype = 0;
     Rect rectangle;
+    std::string net;
+    int net_id = 0;
 };
 
 struct PreviewInstance {
+    int id = 0;
     std::string name;
     std::string master;
+    std::string category;
+    std::string module;
     std::string orientation;
     Rect rectangle;
+};
+
+struct PreviewNet {
+    int id = 0;
+    std::string name;
+    std::string type;
+    bool special = false;
+    std::uint64_t term_count = 0;
+    std::vector<std::string> terms;
+};
+
+struct PreviewModule {
+    int id = 0;
+    std::string name;
+    int parent_id = 0;
+    std::uint64_t instance_count = 0;
+};
+
+struct PreviewGuide {
+    std::string net;
+    std::string layer;
+    Rect rectangle;
+    bool congested = false;
+};
+
+struct PreviewRowInfo {
+    Rect rectangle;
+    std::string site;
+};
+
+struct PreviewBlockage {
+    Rect rectangle;
+    std::string type;
 };
 
 struct HeatMapData {
@@ -80,6 +121,11 @@ struct OdbPreview {
     std::vector<PreviewShape> shapes;
     std::vector<PreviewPort> ports;
     std::vector<PreviewInstance> instances;
+    std::vector<PreviewNet> nets;
+    std::vector<PreviewModule> modules;
+    std::vector<PreviewGuide> guides;
+    std::vector<PreviewRowInfo> rows;
+    std::vector<PreviewBlockage> blockages;
     std::optional<HeatMapData> placement_density;
     std::optional<HeatMapData> routing_congestion;
     bool truncated = false;

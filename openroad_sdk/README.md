@@ -21,18 +21,39 @@ provides hard cancellation and process isolation for stage execution.
 
 ## Building
 
-The helper must be built against an OpenROAD source checkout. See
-`scripts/build-ice-openroad.sh`.
+The helper must be built against OpenROAD and its Bazel targets. ICE pins a
+tested OpenROAD/OpenSTA pair in `scripts/openroad-sdk-pins.env`.
+
+`ice-openroad` is built from the pinned source pair (or from
+`ICE_OPENROAD_SRC`).
+
+### Automatic source build
 
 ```sh
-ICE_OPENROAD_SRC=/path/to/OpenROAD scripts/build-ice-openroad.sh
+xmake openroad-sdk
 ```
 
-or:
+When `ICE_OPENROAD_SRC` is not set, the build script fetches the pinned
+revisions into:
+
+```text
+$HOME/.cache/ice/openroad-sdk
+```
+
+No AUR tree or sibling OpenROAD checkout is required. Use `--refresh` to
+discard the cached source, or `--fetch-only` to prepare it without building:
+
+```sh
+scripts/build-ice-openroad.sh --fetch-only
+```
+
+To use an existing OpenROAD source checkout instead:
 
 ```sh
 ICE_OPENROAD_SRC=/path/to/OpenROAD xmake openroad-sdk
 ```
+
+The checkout must contain `BUILD.bazel` and `src/sta/BUILD.bazel`.
 
 The script copies the helper next to `ice-cli` in the ICE build directory.
 Override discovery with `ICE_OPENROAD_HELPER=/path/to/ice-openroad`.
@@ -43,8 +64,7 @@ Use `--sdk-install <prefix>` to install the shared library, public headers,
 harness, and a `pkg-config` file:
 
 ```sh
-ICE_OPENROAD_SRC=/path/to/OpenROAD \
-  scripts/build-ice-openroad.sh --sdk-install "$HOME/.local/ice-openroad"
+scripts/build-ice-openroad.sh --sdk-install "$HOME/.local/ice-openroad"
 ```
 
 ```sh
@@ -145,4 +165,4 @@ Remaining work:
 
 - richer metrics/report exports;
 - in-process execution for short stages;
-- packaging the shared SDK alongside the OpenROAD AUR split package.
+- publishing prebuilt helper/SDK archives from CI for each ICE release.

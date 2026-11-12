@@ -72,8 +72,24 @@ class ImplementationUiController {
     // legacy DEF import. Results are cached by run/stage/file timestamp.
     StagePreview stagePreview(ice::ImplementationStage stage);
 
+    // Asynchronous variant used by the physical panes.
+    using StagePreviewCallback = std::function<void(const StagePreview &)>;
+    void requestStagePreview(ice::ImplementationStage stage, StagePreviewCallback callback);
+
     // Writes a native OpenROAD heat-map CSV for the active run/stage.
     QString exportHeatMap(ice::ImplementationStage stage, const QString &kind, QString &error);
+
+    using HeatMapCallback = std::function<void(const QString &path, const QString &error)>;
+    void requestExportHeatMap(ice::ImplementationStage stage, const QString &kind, HeatMapCallback callback);
+
+    // Opens the active stage ODB in the standalone OpenROAD GUI.
+    bool openInOpenRoadGui(ice::ImplementationStage stage, QString &error);
+
+    // Runs OpenROAD STA on the active stage ODB and returns its path report.
+    QString timingReport(ice::ImplementationStage stage, QString &error);
+
+    // Imports the newest available DEF checkpoint as a layout cell.
+    bool importLayout(ice::ObjectId runId, QString &error);
 
     void refresh();
     void addLogListener(std::function<void(ice::ImplementationStage, const QString &)> listener);
@@ -113,6 +129,8 @@ class ImplementationUiController {
     QProcess *process_ = nullptr;
     QString processBuffer_;
     ice::ImplementationStage runningStage_ = ice::ImplementationStage::created;
+    QProcess *previewProcess_ = nullptr;
+    QProcess *heatMapProcess_ = nullptr;
     std::function<void()> onChanged_;
     std::function<void()> onProjectChanged_;
     std::function<void(int)> onRunFinished_;
@@ -188,12 +206,19 @@ class ImplementationPage : public QWidget {
     void refreshOutline();
     void refreshIpLibraries();
     void refreshPreview();
+    void refreshDisplayControls();
+    void refreshInspector();
+    void refreshDrc();
+    void refreshTiming();
+    void refreshClock();
+    void refreshHierarchy();
     bool hdlMode() const { return stage_ == ice::ImplementationStage::created; }
     bool synthesisMode() const { return stage_ == ice::ImplementationStage::synthesis; }
     bool floorplanMode() const { return stage_ == ice::ImplementationStage::floorplan; }
     bool physicalStageMode() const {
         return stage_ == ice::ImplementationStage::floorplan || stage_ == ice::ImplementationStage::placement ||
-               stage_ == ice::ImplementationStage::cts || stage_ == ice::ImplementationStage::routing;
+               stage_ == ice::ImplementationStage::cts || stage_ == ice::ImplementationStage::routing ||
+               stage_ == ice::ImplementationStage::final;
     }
 
     ice::ImplementationStage stage_;
@@ -204,6 +229,15 @@ class ImplementationPage : public QWidget {
     QTabWidget *leftTabs_ = nullptr;
     QTreeWidget *runTree_ = nullptr;
     QListWidget *netlistList_ = nullptr;
+    QTreeWidget *displayTree_ = nullptr;
+    QLabel *previewStatusLabel_ = nullptr;
+    QLabel *previewCoordinateLabel_ = nullptr;
+    QTreeWidget *inspectorTree_ = nullptr;
+    QTableWidget *drcTable_ = nullptr;
+    QTableWidget *timingTable_ = nullptr;
+    QPlainTextEdit *timingReportView_ = nullptr;
+    QTreeWidget *clockTree_ = nullptr;
+    QTreeWidget *hierarchyTree_ = nullptr;
     QListWidget *hdlFileList_ = nullptr;
     QLineEdit *hdlSearch_ = nullptr;
     QPushButton *newHdlButton_ = nullptr;
@@ -236,6 +270,13 @@ class ImplementationPage : public QWidget {
     QCheckBox *dieAreaCheck_ = nullptr;
     QDoubleSpinBox *dieWidthSpin_ = nullptr;
     QDoubleSpinBox *dieHeightSpin_ = nullptr;
+    QDoubleSpinBox *dieXSpin_ = nullptr;
+    QDoubleSpinBox *dieYSpin_ = nullptr;
+    QCheckBox *coreAreaCheck_ = nullptr;
+    QDoubleSpinBox *coreWidthSpin_ = nullptr;
+    QDoubleSpinBox *coreHeightSpin_ = nullptr;
+    QDoubleSpinBox *coreXSpin_ = nullptr;
+    QDoubleSpinBox *coreYSpin_ = nullptr;
     QLineEdit *siteEdit_ = nullptr;
     QLineEdit *ioHorizontalEdit_ = nullptr;
     QLineEdit *ioVerticalEdit_ = nullptr;
@@ -288,8 +329,12 @@ class PhysicalDesignPage : public QWidget {
   private:
     int stageIndex(ice::ImplementationStage stage) const;
     ice::ImplementationStage stageAt(int index) const;
+    void refreshStageBar();
 
     QStackedWidget *stageStack_ = nullptr;
+    QTabBar *stageBar_ = nullptr;
+    QTimer *stageTimer_ = nullptr;
+    ImplementationUiController *controller_ = nullptr;
     std::vector<ImplementationPage *> pages_;
     std::vector<ice::ImplementationStage> stages_;
 };

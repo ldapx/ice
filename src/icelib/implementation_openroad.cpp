@@ -290,8 +290,8 @@ StageOutputs stageOutputs(ImplementationStage stage, bool ctsEnabled) {
         return {{"db/4_cts.odb", "def/4_cts.def"}, {"final/4_cts.sdc", "logs/03-cts.log", "logs/03-cts.metrics.json"}};
     case ImplementationStage::routing:
         return {{"db/5_route.odb", "def/5_route.def"},
-                {"final/5_route.sdc", "reports/route.guide", "reports/antenna.rpt", "logs/04-route.log",
-                 "logs/04-route.metrics.json"}};
+                {"final/5_route.sdc", "reports/route.guide", "reports/route_drc.rpt", "reports/antenna.rpt",
+                 "logs/04-route.log", "logs/04-route.metrics.json"}};
     case ImplementationStage::final:
         return {{"db/6_final.odb", "def/6_final.def", "final/6_final.v"},
                 {"final/6_final.spef", "final/6_final.sdc", "logs/05-final.log", "logs/05-final.metrics.json"}};

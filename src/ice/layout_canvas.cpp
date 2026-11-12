@@ -35,43 +35,69 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <set>
 
 namespace {
 class LayoutPreviewGraphicsItem : public QGraphicsItem {
   public:
-    LayoutPreviewGraphicsItem(ice::LayoutPreviewModel model, ice::LayoutRenderer::LayerStyleMap styles,
-                              ice::LayoutRenderer::DeviceStyleMap deviceStyles)
-        : model_(std::move(model)), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)) {
-        if (model_.bounds.isValid()) {
-            bounds_ = QRectF(model_.bounds.x(), -(model_.bounds.y() + model_.bounds.height()), model_.bounds.width(),
-                             model_.bounds.height());
-        }
-        setAcceptedMouseButtons(Qt::NoButton);
+    LayoutPreviewGraphicsItem(const ice::LayoutPreviewModel &model, ice::LayoutRenderer::LayerStyleMap styles,
+                              ice::LayoutRenderer::DeviceStyleMap deviceStyles,
+                              ice::LayoutRenderer::PaintOptions options)
+        : ownedModel_(model), model_(&*ownedModel_), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)),
+          options_(std::move(options)) {
+        initialize();
+    }
+
+    LayoutPreviewGraphicsItem(const ice::LayoutPreviewModel *model, ice::LayoutRenderer::LayerStyleMap styles,
+                              ice::LayoutRenderer::DeviceStyleMap deviceStyles,
+                              ice::LayoutRenderer::PaintOptions options)
+        : model_(model), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)),
+          options_(std::move(options)) {
+        initialize();
     }
 
     QRectF boundingRect() const override { return bounds_; }
 
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
-        ice::LayoutRenderer::PaintOptions options;
-        options.showPorts = true;
-        options.showPlannedDevices = true;
-        options.showLabels = false;
-        ice::LayoutRenderer::paintAtOrigin(*painter, model_, styles_, deviceStyles_, QPointF(0.0, 0.0), options);
+        if (!model_)
+            return;
+        ice::LayoutRenderer::paintAtOrigin(*painter, *model_, styles_, deviceStyles_, QPointF(0.0, 0.0), options_);
     }
 
   private:
-    ice::LayoutPreviewModel model_;
+    void initialize() {
+        options_.showPorts = true;
+        options_.showPlannedDevices = true;
+        options_.showLabels = false;
+        if (model_ && model_->bounds.isValid()) {
+            bounds_ = QRectF(model_->bounds.x(), -(model_->bounds.y() + model_->bounds.height()),
+                             model_->bounds.width(), model_->bounds.height());
+        }
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    std::optional<ice::LayoutPreviewModel> ownedModel_;
+    const ice::LayoutPreviewModel *model_ = nullptr;
     ice::LayoutRenderer::LayerStyleMap styles_;
     ice::LayoutRenderer::DeviceStyleMap deviceStyles_;
+    ice::LayoutRenderer::PaintOptions options_;
     QRectF bounds_;
 };
 } // namespace
 
 QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel &model,
                                        const ice::LayoutRenderer::LayerStyleMap &styles,
-                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles) {
-    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles);
+                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                                       const ice::LayoutRenderer::PaintOptions &options) {
+    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles, options);
+}
+
+QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel *model,
+                                       const ice::LayoutRenderer::LayerStyleMap &styles,
+                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                                       const ice::LayoutRenderer::PaintOptions &options) {
+    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles, options);
 }
 
 LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}

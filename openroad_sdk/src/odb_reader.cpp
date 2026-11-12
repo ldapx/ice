@@ -14,6 +14,7 @@ namespace ice::openroad {
 namespace {
 
 constexpr std::size_t kMaxPreviewShapes = 250000;
+constexpr std::size_t kMaxSpecialPreviewShapes = 100000;
 
 double microns(int value, int dbu) { return dbu > 0 ? static_cast<double>(value) / static_cast<double>(dbu) : 0.0; }
 
@@ -38,8 +39,37 @@ int layerNumber(odb::dbTechLayer *layer) {
     return layer->getNumber();
 }
 
+std::string instanceCategory(odb::dbMaster *master) {
+    if (!master)
+        return "other";
+    if (master->isFiller())
+        return "fill";
+    const auto type = master->getType().getValue();
+    if (type == odb::dbMasterType::BLOCK || type == odb::dbMasterType::BLOCK_BLACKBOX ||
+        type == odb::dbMasterType::BLOCK_SOFT)
+        return "macro";
+    if (type >= odb::dbMasterType::PAD && type <= odb::dbMasterType::PAD_AREAIO)
+        return "pad";
+    if (type == odb::dbMasterType::ENDCAP || type == odb::dbMasterType::ENDCAP_PRE ||
+        type == odb::dbMasterType::ENDCAP_POST || type == odb::dbMasterType::ENDCAP_TOPLEFT ||
+        type == odb::dbMasterType::ENDCAP_TOPRIGHT || type == odb::dbMasterType::ENDCAP_BOTTOMLEFT ||
+        type == odb::dbMasterType::ENDCAP_BOTTOMRIGHT || type >= odb::dbMasterType::ENDCAP_LEF58_BOTTOMEDGE)
+        return "endcap";
+    if (type == odb::dbMasterType::CORE_WELLTAP)
+        return "tap";
+    if (type == odb::dbMasterType::CORE_ANTENNACELL)
+        return "antenna";
+    if (type == odb::dbMasterType::CORE_TIEHIGH || type == odb::dbMasterType::CORE_TIELOW)
+        return "tie";
+    if (type == odb::dbMasterType::CORE_SPACER)
+        return "fill";
+    if (type == odb::dbMasterType::COVER || type == odb::dbMasterType::COVER_BUMP || type == odb::dbMasterType::RING)
+        return "cover";
+    return "stdcell";
+}
+
 void addBoxShape(std::vector<PreviewShape> &shapes, odb::dbTechLayer *layer, const odb::Rect &box, int dbu,
-                 bool &truncated) {
+                 bool &truncated, const std::string &net_name, int net_id, bool special) {
     if (shapes.size() >= kMaxPreviewShapes) {
         truncated = true;
         return;
@@ -48,6 +78,9 @@ void addBoxShape(std::vector<PreviewShape> &shapes, odb::dbTechLayer *layer, con
     shape.layer = layerName(layer);
     shape.layer_number = layerNumber(layer);
     shape.kind = "polygon";
+    shape.net = net_name;
+    shape.net_id = net_id;
+    shape.special = special;
     shape.points = {{microns(box.xMin(), dbu), microns(box.yMin(), dbu)},
                     {microns(box.xMax(), dbu), microns(box.yMin(), dbu)},
                     {microns(box.xMax(), dbu), microns(box.yMax(), dbu)},
@@ -55,16 +88,23 @@ void addBoxShape(std::vector<PreviewShape> &shapes, odb::dbTechLayer *layer, con
     shapes.push_back(std::move(shape));
 }
 
-void addViaShape(std::vector<PreviewShape> &shapes, const odb::dbShape &via, int dbu, bool &truncated) {
+void addViaShape(std::vector<PreviewShape> &shapes, const odb::dbShape &via, int dbu, bool &truncated,
+                 const std::string &net_name, int net_id, bool special) {
     std::vector<odb::dbShape> boxes;
     odb::dbShape::getViaBoxes(via, boxes);
     for (const auto &box : boxes)
-        addBoxShape(shapes, box.getTechLayer(), box.getBox(), dbu, truncated);
+        addBoxShape(shapes, box.getTechLayer(), box.getBox(), dbu, truncated, net_name, net_id, special);
 }
 
-void addWireShapes(std::vector<PreviewShape> &shapes, odb::dbWire *wire, int dbu, bool &truncated) {
+void addWireShapes(std::vector<PreviewShape> &shapes, odb::dbNet *net, int dbu, bool &truncated) {
+    if (!net)
+        return;
+    auto *wire = net->getWire();
     if (!wire)
         return;
+    const auto net_name = net->getName();
+    const auto net_id = static_cast<int>(net->getId());
+    const auto special = net->isSpecial();
     odb::dbWireShapeItr iterator;
     iterator.begin(wire);
     odb::dbShape shape;
@@ -74,40 +114,50 @@ void addWireShapes(std::vector<PreviewShape> &shapes, odb::dbWire *wire, int dbu
             return;
         }
         if (shape.isVia()) {
-            addViaShape(shapes, shape, dbu, truncated);
+            addViaShape(shapes, shape, dbu, truncated, net_name, net_id, special);
             continue;
         }
         if (shape.isSegment() || shape.isViaBox())
-            addBoxShape(shapes, shape.getTechLayer(), shape.getBox(), dbu, truncated);
+            addBoxShape(shapes, shape.getTechLayer(), shape.getBox(), dbu, truncated, net_name, net_id, special);
     }
 }
 
 void addSpecialWireShapes(std::vector<PreviewShape> &shapes, odb::dbNet *net, int dbu, bool &truncated) {
     if (!net || !net->isSpecial())
         return;
+    std::size_t special_shapes = 0;
+    const auto net_name = net->getName();
+    const auto net_id = static_cast<int>(net->getId());
     for (odb::dbSWire *swire : net->getSWires()) {
         for (odb::dbSBox *box : swire->getWires()) {
-            if (shapes.size() >= kMaxPreviewShapes) {
+            if (shapes.size() >= kMaxPreviewShapes || special_shapes >= kMaxSpecialPreviewShapes) {
                 truncated = true;
                 return;
             }
+            ++special_shapes;
             if (box->isVia()) {
                 std::vector<odb::dbShape> via_boxes;
                 box->getViaBoxes(via_boxes);
                 for (const auto &via_box : via_boxes)
-                    addBoxShape(shapes, via_box.getTechLayer(), via_box.getBox(), dbu, truncated);
+                    addBoxShape(shapes, via_box.getTechLayer(), via_box.getBox(), dbu, truncated, net_name, net_id,
+                                true);
                 continue;
             }
-            addBoxShape(shapes, box->getTechLayer(), box->getBox(), dbu, truncated);
+            addBoxShape(shapes, box->getTechLayer(), box->getBox(), dbu, truncated, net_name, net_id, true);
         }
     }
 }
 
 void addPort(odb::dbBTerm *term, int dbu, std::vector<PreviewPort> &ports) {
+    const auto net = term->getNet();
+    const auto net_name = net ? net->getName() : std::string{};
+    const auto net_id = net ? static_cast<int>(net->getId()) : 0;
     for (odb::dbBPin *pin : term->getBPins()) {
         for (odb::dbBox *box : pin->getBoxes()) {
             PreviewPort port;
             port.name = term->getName();
+            port.net = net_name;
+            port.net_id = net_id;
             if (box->isVia()) {
                 std::vector<odb::dbShape> via_boxes;
                 box->getViaBoxes(via_boxes);
@@ -256,23 +306,87 @@ OdbPreview OdbReader::preview(int heatmap_bins) const {
         if (!inst->getPlacementStatus().isPlaced())
             continue;
         PreviewInstance preview;
+        preview.id = static_cast<int>(inst->getId());
         preview.name = inst->getName();
         if (auto *master = inst->getMaster()) {
             preview.master = master->getName();
+            preview.category = instanceCategory(master);
             if (auto *bbox = inst->getBBox())
                 preview.rectangle = toRect(bbox->getBox(), dbu);
         }
+        if (auto *module = inst->getModule())
+            preview.module = module->getName();
         preview.orientation = inst->getOrient().getString();
         if (preview.rectangle.width <= 0.0 && preview.rectangle.height <= 0.0)
             continue;
         result.instances.push_back(std::move(preview));
     }
 
+    for (auto *net : block->getNets()) {
+        PreviewNet preview;
+        preview.id = static_cast<int>(net->getId());
+        preview.name = net->getName();
+        preview.type = net->getSigType().getString();
+        preview.special = net->isSpecial();
+        preview.term_count = static_cast<std::uint64_t>(net->getITerms().size() + net->getBTerms().size());
+        if (net->getSigType() == odb::dbSigType::CLOCK) {
+            for (auto *iterm : net->getITerms()) {
+                if (!iterm)
+                    continue;
+                std::string term = iterm->getInst() ? iterm->getInst()->getName() : std::string{};
+                if (auto *mterm = iterm->getMTerm())
+                    term += "/" + std::string(mterm->getName());
+                preview.terms.push_back(std::move(term));
+            }
+            for (auto *bterm : net->getBTerms()) {
+                if (bterm)
+                    preview.terms.push_back(bterm->getName());
+            }
+        }
+        result.nets.push_back(std::move(preview));
+    }
+
+    for (auto *module : block->getModules()) {
+        PreviewModule preview;
+        preview.id = static_cast<int>(module->getId());
+        preview.name = module->getName();
+        if (auto *parent = module->getParentModule())
+            preview.parent_id = static_cast<int>(parent->getId());
+        preview.instance_count = static_cast<std::uint64_t>(module->getDbInstCount());
+        result.modules.push_back(std::move(preview));
+    }
+
+    for (auto *net : block->getNets()) {
+        for (auto *guide : net->getGuides()) {
+            PreviewGuide preview;
+            preview.net = net->getName();
+            preview.layer = layerName(guide->getLayer());
+            preview.rectangle = toRect(guide->getBox(), dbu);
+            preview.congested = guide->isCongested();
+            result.guides.push_back(std::move(preview));
+        }
+    }
+    for (auto *row : block->getRows()) {
+        PreviewRowInfo preview;
+        preview.rectangle = toRect(row->getBBox(), dbu);
+        if (auto *site = row->getSite())
+            preview.site = site->getName();
+        result.rows.push_back(std::move(preview));
+    }
+    for (auto *blockage : block->getBlockages()) {
+        PreviewBlockage preview;
+        if (auto *bbox = blockage->getBBox())
+            preview.rectangle = toRect(bbox->getBox(), dbu);
+        preview.type = blockage->getInstance() ? "placement" : "routing";
+        if (preview.rectangle.width > 0.0 || preview.rectangle.height > 0.0)
+            result.blockages.push_back(std::move(preview));
+    }
+
     // Routed signal wires.
     for (auto *net : block->getNets()) {
         if (net->isSpecial())
             continue;
-        addWireShapes(result.shapes, net->getWire(), dbu, result.truncated);
+        addWireShapes(result.shapes, net, dbu, result.truncated);
     }
 
     for (auto *term : block->getBTerms())

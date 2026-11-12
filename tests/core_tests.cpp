@@ -212,6 +212,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
     config.sourceCells = {sourceId};
     config.ctsRootBuffer = "BUF_X4";
     config.ctsBuffers = {"BUF_X1", "BUF_X2"};
+    config.utilization = 0.45;
     const auto runId = ice::createImplementationRun(project, config);
     auto &run = project.implementationRuns.at(runId);
 
@@ -230,6 +231,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
     std::ifstream floorplan(preparation.runDirectory / "scripts" / "01-floorplan.tcl");
     const std::string floorplanText((std::istreambuf_iterator<char>(floorplan)), {});
     CHECK(floorplanText.find("initialize_floorplan") != std::string::npos);
+    CHECK(floorplanText.find("-utilization 45") != std::string::npos);
     CHECK(floorplanText.find("place_pins") != std::string::npos);
     CHECK(floorplanText.find("source") != std::string::npos);
     std::ifstream route(preparation.runDirectory / "scripts" / "04-route.tcl");
@@ -430,7 +432,7 @@ case "$name" in
   01-floorplan.tcl) touch db/2_floorplan.odb def/2_floorplan.def final/2_floorplan.sdc ;;
   02-place.tcl) touch db/3_place.odb def/3_place.def final/3_place.sdc ;;
   03-cts.tcl) touch db/4_cts.odb def/4_cts.def final/4_cts.sdc ;;
-  04-route.tcl) touch db/5_route.odb def/5_route.def final/5_route.sdc final/5_route.spef reports/route.guide ;;
+  04-route.tcl) touch db/5_route.odb def/5_route.def final/5_route.sdc final/5_route.spef reports/route.guide reports/route_drc.rpt ;;
   05-final.tcl) touch db/6_final.odb def/6_final.def final/6_final.v final/6_final.spef final/6_final.sdc ;;
 esac
 if [ -n "$metrics" ]; then
@@ -507,6 +509,10 @@ exit 0
     CHECK(std::filesystem::is_regular_file(root / run.directory / "db" / "6_final.odb"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "final" / "6_final.v"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "logs" / "05-final.log"));
+    CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "route_drc.rpt"));
+    CHECK(std::any_of(run.stages.at(ice::ImplementationStage::routing).artifacts.begin(),
+                      run.stages.at(ice::ImplementationStage::routing).artifacts.end(),
+                      [](const std::string &artifact) { return artifact.ends_with("reports/route_drc.rpt"); }));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.svg"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.dot"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis-overview.dot"));

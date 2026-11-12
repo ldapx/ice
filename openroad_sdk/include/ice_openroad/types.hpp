@@ -27,6 +27,7 @@ struct MacroPlacement {
 
 struct StageOptions {
     // Floorplan (dimensions in microns).
+    // Utilization is a fraction of the core area: 0.5 means 50%.
     double utilization = 0.5;
     double aspect_ratio = 1.0;
     double core_space = 2.0;
