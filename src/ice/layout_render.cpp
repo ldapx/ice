@@ -15,6 +15,15 @@
 #include <utility>
 
 namespace ice {
+
+QString layoutPreviewLayerKey(const LayoutPreviewLayer &layer) {
+    if (!layer.name.isEmpty())
+        return layer.name;
+    if (layer.id != 0)
+        return QStringLiteral("id:%1").arg(layer.id);
+    return QStringLiteral("layer:%1/%2").arg(layer.number).arg(layer.datatype);
+}
+
 namespace {
 
 struct DisplayTransform {
@@ -50,6 +59,8 @@ LayoutPreviewLayer layerFor(const Project &project, ObjectId id) {
     layer.id = id;
     if (const auto found = project.layers.find(id); found != project.layers.end()) {
         layer.number = found->second.number;
+        layer.datatype = found->second.datatype;
+        layer.name = QString::fromStdString(found->second.name);
     }
     return layer;
 }
@@ -144,6 +155,20 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 const LayoutRenderer::DeviceStyleMap &deviceStyles, const DisplayTransform &transform,
                 const LayoutRenderer::PaintOptions &options) {
     const auto accent = uiColor(UiColor::Accent4);
+    std::map<int, QString> netTypes;
+    for (const auto &net : model.nets)
+        netTypes[net.id] = net.type.toLower();
+    const auto layerVisible = [&](const LayoutPreviewLayer &layer) {
+        return options.hiddenLayers.find(layoutPreviewLayerKey(layer)) == options.hiddenLayers.end();
+    };
+    const auto netVisible = [&](int net_id, bool special) {
+        if (special && !options.showSpecialNets)
+            return false;
+        const auto type = netTypes.find(net_id);
+        if (type == netTypes.end())
+            return true;
+        return options.hiddenNetTypes.find(type->second) == options.hiddenNetTypes.end();
+    };
 
     for (const auto &connection : model.plannedConnections) {
         QPen pen(accent);
@@ -154,7 +179,37 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
         painter.drawLine(transform.map(connection.line.p1()), transform.map(connection.line.p2()));
     }
 
+    if (options.showRows) {
+        QPen pen(QColor(120, 120, 120, 150), 0.8);
+        pen.setCosmetic(true);
+        pen.setStyle(Qt::DotLine);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        for (const auto &row : model.rows)
+            painter.drawRect(transform.map(row.rectangle));
+    }
+    if (options.showBlockages) {
+        QPen pen(QColor(180, 60, 60, 190), 0.8);
+        pen.setCosmetic(true);
+        painter.setPen(pen);
+        painter.setBrush(QColor(180, 60, 60, 45));
+        for (const auto &blockage : model.blockages)
+            painter.drawRect(transform.map(blockage.rectangle));
+    }
+    if (options.showGuides) {
+        for (const auto &guide : model.guides) {
+            QPen pen(guide.congested ? QColor(220, 38, 38, 220) : QColor(14, 165, 233, 220), 1.0);
+            pen.setCosmetic(true);
+            pen.setStyle(Qt::DashLine);
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(transform.map(guide.rectangle));
+        }
+    }
+
     for (const auto &shape : model.shapes) {
+        if (!layerVisible(shape.layer) || !netVisible(shape.netId, shape.special))
+            continue;
         const auto style = styleFor(shape.layer, styles, deviceStyles);
         if (shape.kind == LayoutPreviewShape::Kind::text)
             continue;
@@ -194,6 +249,9 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
 
     if (options.showPlannedDevices) {
         for (const auto &device : model.plannedDevices) {
+            if (!device.category.isEmpty() &&
+                options.hiddenInstanceCategories.find(device.category) != options.hiddenInstanceCategories.end())
+                continue;
             const auto rectangle = transform.map(device.rectangle);
             QColor fill = accent;
             fill.setAlphaF(std::clamp(options.shapeAlpha / 255.0, 0.0, 1.0) * 0.5);
@@ -213,7 +271,8 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
     // Text labels stay above geometry and below pin overlays, matching the
     // canvas z-order.
     for (const auto &shape : model.shapes) {
-        if (shape.kind != LayoutPreviewShape::Kind::text)
+        if (shape.kind != LayoutPreviewShape::Kind::text || !layerVisible(shape.layer) ||
+            !netVisible(shape.netId, shape.special))
             continue;
         const auto style = styleFor(shape.layer, styles, deviceStyles);
         paintText(painter, transform.map(shape.textRectangle), shape.text, style, options);
@@ -221,6 +280,8 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
 
     if (options.showPorts) {
         for (const auto &port : model.ports) {
+            if (!layerVisible(port.layer) || !netVisible(port.netId, false))
+                continue;
             const auto style = styleFor(port.layer, styles, deviceStyles);
             const auto rectangle = transform.map(port.rectangle);
             QPen pen = penFor(style, options.outlineWidth);

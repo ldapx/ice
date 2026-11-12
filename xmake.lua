@@ -216,4 +216,4 @@ task("openroad-sdk")
     on_run(function ()
         os.exec("bash scripts/build-ice-openroad.sh")
     end)
-    set_menu {usage = "Build the experimental C++ OpenROAD backend"}
+    set_menu {usage = "Build the pinned C++ OpenROAD backend"}

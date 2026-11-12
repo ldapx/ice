@@ -15,6 +15,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -24,7 +25,12 @@ struct LayoutPreviewLayer {
     ObjectId id = 0;
     int number = 0;
     int datatype = 0;
+    QString name;
 };
+
+// Stable key used by preview display controls. ODB layers use their layer name;
+// project-only layers fall back to object/number/datatype identity.
+QString layoutPreviewLayerKey(const LayoutPreviewLayer &layer);
 
 struct LayoutPreviewShape {
     enum class Kind { polygon, path, text };
@@ -37,17 +43,68 @@ struct LayoutPreviewShape {
     std::vector<std::vector<ObjectId>> pointVias;
     QRectF textRectangle;
     QString text;
+    QString net;
+    int netId = 0;
+    bool special = false;
 };
 
 struct LayoutPreviewPort {
     LayoutPreviewLayer layer;
     QRectF rectangle;
     QString label;
+    QString net;
+    int netId = 0;
 };
 
 struct LayoutPreviewPlannedDevice {
     QRectF rectangle;
     QString name;
+    int id = 0;
+    QString master;
+    QString category;
+    QString module;
+    QString orientation;
+};
+
+struct LayoutPreviewNet {
+    int id = 0;
+    QString name;
+    QString type;
+    bool special = false;
+    quint64 termCount = 0;
+    QStringList terms;
+};
+
+struct LayoutPreviewModule {
+    int id = 0;
+    QString name;
+    int parentId = 0;
+    quint64 instanceCount = 0;
+};
+
+struct LayoutPreviewMarker {
+    QString type;
+    QString layer;
+    QRectF rectangle;
+    QString sources;
+    QString comment;
+};
+
+struct LayoutPreviewGuide {
+    QString net;
+    QString layer;
+    QRectF rectangle;
+    bool congested = false;
+};
+
+struct LayoutPreviewRow {
+    QRectF rectangle;
+    QString site;
+};
+
+struct LayoutPreviewBlockage {
+    QRectF rectangle;
+    QString type;
 };
 
 struct LayoutPreviewConnection {
@@ -72,8 +129,16 @@ struct LayoutPreviewModel {
     std::vector<LayoutPreviewPort> ports;
     std::vector<LayoutPreviewPlannedDevice> plannedDevices;
     std::vector<LayoutPreviewConnection> plannedConnections;
+    std::vector<LayoutPreviewNet> nets;
+    std::vector<LayoutPreviewModule> modules;
+    std::vector<LayoutPreviewMarker> markers;
+    std::vector<LayoutPreviewGuide> guides;
+    std::vector<LayoutPreviewRow> rows;
+    std::vector<LayoutPreviewBlockage> blockages;
     std::optional<LayoutPreviewHeatMap> placementDensity;
     std::optional<LayoutPreviewHeatMap> routingCongestion;
+    // The ODB reader may cap the number of emitted shapes.
+    bool truncated = false;
 
     bool empty() const;
 };
@@ -97,6 +162,14 @@ struct LayoutPaintOptions {
     qreal shapeAlpha = 110.0;
     qreal portAlpha = 45.0;
     qreal outlineWidth = 0.8;
+    // Keys produced by layoutPreviewLayerKey(). Empty means every layer visible.
+    std::set<QString> hiddenLayers;
+    std::set<QString> hiddenInstanceCategories;
+    std::set<QString> hiddenNetTypes;
+    bool showSpecialNets = true;
+    bool showGuides = false;
+    bool showRows = false;
+    bool showBlockages = false;
 };
 
 class LayoutRenderer {

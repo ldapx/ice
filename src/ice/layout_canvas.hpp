@@ -156,8 +156,13 @@ QGraphicsItem *createLayoutPolygonHandleItem(ice::ObjectId shapeId, int index);
 // Paints a prepared preview model as a non-interactive child item. Used for
 // instance contents so the canvas and the Properties preview share one
 // renderer.
-QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel &model,
-                                       const ice::LayoutRenderer::LayerStyleMap &styles,
-                                       const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
+QGraphicsItem *
+createLayoutPreviewItem(const ice::LayoutPreviewModel &model, const ice::LayoutRenderer::LayerStyleMap &styles,
+                        const ice::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                        const ice::LayoutRenderer::PaintOptions &options = ice::LayoutRenderer::PaintOptions{});
+QGraphicsItem *
+createLayoutPreviewItem(const ice::LayoutPreviewModel *model, const ice::LayoutRenderer::LayerStyleMap &styles,
+                        const ice::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                        const ice::LayoutRenderer::PaintOptions &options = ice::LayoutRenderer::PaintOptions{});
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent = nullptr);

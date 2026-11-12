@@ -119,29 +119,47 @@ runs therefore do not multiply the top-level tab count. Execution remains
 available through `ice-cli implementation-run`, MCP, and `icepy`, and its output
 is reported in the bottom Messages dock.
 
-`Physical Design` is one workspace whose stage is selected from the left
-`Runs` tab:
+`Physical Design` is one workspace with a stage bar and a left `Runs` tree:
 
 ```text
-Floorplan → Placement → CTS → Routing
+Floorplan → Placement → CTS → Routing → Final
 ```
 
-Each stage pane uses the same three-column shell as Schematic and Layout:
+The stage bar shows a status marker for each checkpoint. Each stage pane uses
+the same three-column shell as Schematic and Layout:
 
 - **Left:** a compact run row with the run selector and icon actions, followed
-  by the `Runs` tree and `Artifacts` list. In the physical workspace the tree
-  shows only the physical stages (Floorplan, Placement, CTS, Routing) for each
-  run. Selecting a stage row switches the stage pane. Floorplan also has a
-  `Netlists` explorer listing technology-mapped `.v` files. The icon actions
-  are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
-  contextual hint below the row shows the next prerequisite, the ready action,
-  or the last failure.
-- **Middle:** a read-only canvas. The physical stages load their stage ODB
-  through the `ice-openroad` reader, with the legacy DEF import as a fallback;
-  an **Overlay** selector shows embedded placement-density or routing-density
-  maps and **Export CSV** writes native OpenROAD heat maps.
-- **Right:** the stage settings form first, followed by `Metrics` and
-  `Properties` for the active run and stage.
+  by the `Runs` tree, a `Display` tree, and an `Artifacts` list. In the physical
+  workspace the tree shows the physical stages (Floorplan, Placement, CTS,
+  Routing, Final) for each run. Selecting a stage row switches the stage pane.
+  Floorplan also has a `Netlists` explorer listing technology-mapped `.v`
+  files. The icon actions are **Run stage**, **Run from here**, **Run all**, and
+  **Cancel**; a small contextual hint below the row shows the next
+  prerequisite, the ready action, or the last failure. **Open in OpenROAD GUI**
+  launches the standalone viewer on the active ODB, and Final adds **Import
+  final layout**. The `Display` tree toggles layers, net types, instance
+  categories, special nets, ports, route guides, rows, and blockages. Fill,
+  endcap, tap, antenna, and cover cells are hidden by default; changing
+  visibility preserves zoom and pan.
+- **Middle:** an interactive canvas. The physical stages load their stage ODB
+  through the `ice-openroad` reader asynchronously, with the legacy DEF import
+  as a fallback. The toolbar provides fit, zoom, find, rulers, labels, clear,
+  and image export. Clicking an instance, port, routed shape, or DRC marker
+  selects it and fills the Inspector. Right-clicking can focus a net, zoom to
+  the selection, or clear it. The status line shows cursor coordinates in
+  microns. The **Heat map** selector shows embedded placement-density or
+  routing-density maps; **Load CSV** displays any exported OpenROAD heat map,
+  and **Export CSV** writes placement, routing, power, pin, RUDY, or IR-drop
+  maps. Heat-map settings provide log/reverse scale, automatic or explicit
+  range, alpha, and a legend. When the ODB reader truncates the preview, the
+  canvas shows a warning. Double-clicking an artifact opens it in a closable
+  tab; large files and ODB databases open externally.
+- **Right:** the stage settings form first, followed by `Inspector`, `Metrics`,
+  `DRC`, `Timing`, `Clock`, `Hierarchy`, and `Properties`. The Inspector shows
+  the selected object's name, master, category, module, net, layer, and
+  sources. DRC lists TritonRoute violations and double-clicking one selects and
+  zooms to the marker. Timing groups run metrics and can generate an OpenROAD
+  STA path report. Clock lists clock nets, and Hierarchy shows the module tree.
 
 The HDL Schematic page shows the project's `.sv` files in the left `Explorer`,
 with a search field and icon buttons to create (`+`) or delete the selected file.
@@ -187,33 +205,36 @@ The Floorplan stage pane adds a `Netlists` tab to its left column. It lists
 every `synth/2_tech_map.v` and exported technology-mapped `.v` present across
 runs; activating an entry selects that run. Floorplan reads the run's
 `2_tech_map.v`, so exporting from Synthesis is required before running the
-floorplan stage. Its settings expose utilization, aspect ratio, optional
-explicit die width/height, placement site, IO horizontal/vertical layers,
-threads, and timeout. Applying settings updates the run configuration and
-invalidates the floorplan, placement, CTS, routing, and final checkpoints so
-stale results are never presented as current.
+floorplan stage. Its settings expose utilization (a fraction of the core area,
+so `0.5` means 50%), aspect ratio, optional explicit die origin/width/height,
+optional explicit core origin/width/height, placement site, IO
+horizontal/vertical layers, threads, and timeout. Applying settings updates the
+run configuration and invalidates the floorplan, placement, CTS, routing, and
+final checkpoints so stale results are never presented as current.
 
-The Placement, CTS, and Routing stage panes use the same pattern:
+The Placement, CTS, Routing, and Final stage panes use the same pattern:
 
 - prerequisites are enforced from stage status:
   - placement requires a successful floorplan;
   - CTS requires placement;
   - routing requires CTS, or placement when CTS is disabled;
+  - final requires routing;
 - editable settings:
   - placement: density, timing-driven, routability-driven;
   - CTS: enable/disable CTS, root buffer, clock buffer list;
   - routing: minimum/maximum routing layers, antenna repair;
+  - final: RC extraction follows the platform rules;
   - every stage also exposes threads and timeout;
 - applying settings invalidates that stage and every later checkpoint;
-- the middle canvas refreshes from `3_place.odb`, `4_cts.odb`, or `5_route.odb`
-  after the stage completes, and shows pending/failed/skipped messages instead
-  of stale geometry;
-- the **Overlay** selector can color the preview by placement density or routed
-  wire density, and **Export CSV** writes placement, routing, or power heat
-  maps under the run's `reports/` directory.
+- the middle canvas refreshes from `3_place.odb`, `4_cts.odb`, `5_route.odb`,
+  or `6_final.odb` after the stage completes, and shows pending/failed/skipped
+  messages instead of stale geometry;
+- the **Heat map** selector can color the preview by placement density or
+  routed wire density, and **Export CSV** writes placement, routing, power,
+  pin, RUDY, or IR-drop heat maps under the run's `reports/` directory.
 
-The Properties and Metrics tabs continue to show the active run and selected
-stage.
+The Inspector, Metrics, DRC, Timing, Clock, Hierarchy, and Properties tabs
+continue to show the active run, selected stage, and selected preview object.
 
 Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
 still runs and the canvases show an explanatory message. Importing a finished

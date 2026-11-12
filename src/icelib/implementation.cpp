@@ -1224,8 +1224,10 @@ ImplementationPreparation prepareImplementationRun(Project &project, Implementat
                 output << " -core_space 2";
             }
         } else {
-            output << " -utilization " << run.config.utilization << " -aspect_ratio " << run.config.aspectRatio
-                   << " -core_space 2";
+            // OpenROAD's initialize_floorplan expects a percentage while the
+            // ICE configuration stores utilization as a fraction.
+            output << " -utilization " << (run.config.utilization * 100.0) << " -aspect_ratio "
+                   << run.config.aspectRatio << " -core_space 2";
         }
         const auto site = run.config.site.empty() ? platform.site : run.config.site;
         if (!site.empty())

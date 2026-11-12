@@ -11887,13 +11887,18 @@ class DocumentWindow : public QMainWindow {
         documents->setTabIcon(simulationTab, ice::tabIcon(QStringLiteral("simulation"), 16));
 
         implementationController_ = new ImplementationUiController(this);
-        implementationController_->addLogListener([this](ice::ImplementationStage, const QString &text) {
+        implementationController_->addLogListener([this](ice::ImplementationStage stage, const QString &text) {
             const auto line = text.trimmed();
             if (line.isEmpty())
                 return;
             logMessageText(ice::logging::implementation, line);
-            if (activityPanel_ && !implementationJobId_.isEmpty())
-                activityPanel_->updateJobDetail(implementationJobId_, line);
+            if (activityPanel_ && !implementationJobId_.isEmpty()) {
+                auto detail = line;
+                if (line.contains(QStringLiteral("Completing")) || line.contains(QStringLiteral("iteration")) ||
+                    line.contains(QStringLiteral("elapsed time =")))
+                    detail = QStringLiteral("%1 · %2").arg(implementationStageLabel(stage), line);
+                activityPanel_->updateJobDetail(implementationJobId_, detail);
+            }
         });
         implementationController_->setOnChanged([this] {
             if (implementationController_ && implementationController_->busy()) {

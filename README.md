@@ -82,6 +82,16 @@ Build the desktop app (requires Qt 6):
 xmake build ice
 ```
 
+Build the C++ OpenROAD helper. The pinned OpenROAD/OpenSTA source pair is
+fetched automatically into `$HOME/.cache/ice/openroad-sdk`:
+
+```sh
+xmake openroad-sdk
+```
+
+Set `ICE_OPENROAD_SRC=/path/to/OpenROAD` to build against an existing source
+checkout instead.
+
 ## Test
 
 ```sh

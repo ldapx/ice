@@ -103,6 +103,9 @@ void printPreview(std::ostream &output, const ice::openroad::OdbPreview &preview
         output << ",\"kind\":\"" << jsonEscape(shape.kind) << "\"";
         output << ",\"width\":" << shape.width;
         output << ",\"text\":\"" << jsonEscape(shape.text) << "\"";
+        output << ",\"net\":\"" << jsonEscape(shape.net) << "\"";
+        output << ",\"net_id\":" << shape.net_id;
+        output << ",\"special\":" << (shape.special ? "true" : "false");
         output << ",\"points\":[";
         for (std::size_t point = 0; point < shape.points.size(); ++point) {
             if (point)
@@ -120,6 +123,8 @@ void printPreview(std::ostream &output, const ice::openroad::OdbPreview &preview
         output << ",\"layer\":\"" << jsonEscape(port.layer) << "\"";
         output << ",\"layer_number\":" << port.layer_number;
         output << ",\"layer_datatype\":" << port.layer_datatype;
+        output << ",\"net\":\"" << jsonEscape(port.net) << "\"";
+        output << ",\"net_id\":" << port.net_id;
         output << ",\"rectangle\":";
         printRect(output, port.rectangle);
         output << "}";
@@ -129,11 +134,76 @@ void printPreview(std::ostream &output, const ice::openroad::OdbPreview &preview
         if (index)
             output << ",";
         const auto &instance = preview.instances[index];
-        output << "{\"name\":\"" << jsonEscape(instance.name) << "\"";
+        output << "{\"id\":" << instance.id;
+        output << ",\"name\":\"" << jsonEscape(instance.name) << "\"";
         output << ",\"master\":\"" << jsonEscape(instance.master) << "\"";
+        output << ",\"category\":\"" << jsonEscape(instance.category) << "\"";
+        output << ",\"module\":\"" << jsonEscape(instance.module) << "\"";
         output << ",\"orientation\":\"" << jsonEscape(instance.orientation) << "\"";
         output << ",\"rectangle\":";
         printRect(output, instance.rectangle);
+        output << "}";
+    }
+    output << "],\"nets\":[";
+    for (std::size_t index = 0; index < preview.nets.size(); ++index) {
+        if (index)
+            output << ",";
+        const auto &net = preview.nets[index];
+        output << "{\"id\":" << net.id;
+        output << ",\"name\":\"" << jsonEscape(net.name) << "\"";
+        output << ",\"type\":\"" << jsonEscape(net.type) << "\"";
+        output << ",\"special\":" << (net.special ? "true" : "false");
+        output << ",\"term_count\":" << net.term_count;
+        output << ",\"terms\":[";
+        for (std::size_t term = 0; term < net.terms.size(); ++term) {
+            if (term)
+                output << ",";
+            output << "\"" << jsonEscape(net.terms[term]) << "\"";
+        }
+        output << "]";
+        output << "}";
+    }
+    output << "],\"modules\":[";
+    for (std::size_t index = 0; index < preview.modules.size(); ++index) {
+        if (index)
+            output << ",";
+        const auto &module = preview.modules[index];
+        output << "{\"id\":" << module.id;
+        output << ",\"name\":\"" << jsonEscape(module.name) << "\"";
+        output << ",\"parent_id\":" << module.parent_id;
+        output << ",\"instance_count\":" << module.instance_count;
+        output << "}";
+    }
+    output << "],\"guides\":[";
+    for (std::size_t index = 0; index < preview.guides.size(); ++index) {
+        if (index)
+            output << ",";
+        const auto &guide = preview.guides[index];
+        output << "{\"net\":\"" << jsonEscape(guide.net) << "\"";
+        output << ",\"layer\":\"" << jsonEscape(guide.layer) << "\"";
+        output << ",\"congested\":" << (guide.congested ? "true" : "false");
+        output << ",\"rectangle\":";
+        printRect(output, guide.rectangle);
+        output << "}";
+    }
+    output << "],\"rows\":[";
+    for (std::size_t index = 0; index < preview.rows.size(); ++index) {
+        if (index)
+            output << ",";
+        const auto &row = preview.rows[index];
+        output << "{\"site\":\"" << jsonEscape(row.site) << "\"";
+        output << ",\"rectangle\":";
+        printRect(output, row.rectangle);
+        output << "}";
+    }
+    output << "],\"blockages\":[";
+    for (std::size_t index = 0; index < preview.blockages.size(); ++index) {
+        if (index)
+            output << ",";
+        const auto &blockage = preview.blockages[index];
+        output << "{\"type\":\"" << jsonEscape(blockage.type) << "\"";
+        output << ",\"rectangle\":";
+        printRect(output, blockage.rectangle);
         output << "}";
     }
     output << "]";
