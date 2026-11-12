@@ -2427,7 +2427,7 @@ class DocumentWindow : public QMainWindow {
         schematicSymbolsLoaded_ = false;
         schematicSymbolsPdk_.clear();
         if (layoutCanvas_)
-            layoutCanvas_->scene()->clear();
+            layoutCanvas_->clearScene();
         if (layoutPropertiesPanel_)
             layoutPropertiesPanel_->clearSelection();
         schematicSelector_->clear();
@@ -3421,7 +3421,7 @@ class DocumentWindow : public QMainWindow {
         refreshEmbeddedPanels();
         if (openLayoutTabs_.empty()) {
             if (layoutCanvas_)
-                layoutCanvas_->scene()->clear();
+                layoutCanvas_->clearScene();
             if (layoutPropertiesPanel_)
                 layoutPropertiesPanel_->clearSelection();
             refreshLayoutProperties();
@@ -5794,7 +5794,7 @@ class DocumentWindow : public QMainWindow {
         if (!layoutCanvas_ || !project_)
             return;
         updateFileTabDirtyIndicators();
-        layoutCanvas_->scene()->clear();
+        layoutCanvas_->clearScene();
         const auto &project = project_->project();
         layoutCanvas_->setGridSpacing(static_cast<qreal>(project.grid));
         if (gridStatusLabel_)
@@ -6238,6 +6238,292 @@ class DocumentWindow : public QMainWindow {
                 instance != cellIt->second.instances.end())
                 project_->setLastHistoryLabel("Snapped " + instance->second.name + " to grid");
         }
+        refreshProject();
+    }
+
+    // Mirrors the canvas tool onto the checkable layout toolbar buttons after a
+    // tool is chosen from the canvas context menu.
+    void refreshLayoutToolChecks() {
+        if (!layoutCanvas_)
+            return;
+        const auto tool = layoutCanvas_->currentTool();
+        const auto set = [](QAction *action, bool checked) {
+            if (!action || action->isChecked() == checked)
+                return;
+            const QSignalBlocker blocker(action);
+            action->setChecked(checked);
+        };
+        set(layoutSelectTool_, tool == LayoutCanvas::Tool::select);
+        set(layoutMoveTool_, tool == LayoutCanvas::Tool::move);
+        set(layoutPlaceDeviceTool_, tool == LayoutCanvas::Tool::placeDevice);
+        set(layoutRectangleTool_, tool == LayoutCanvas::Tool::rectangle);
+        set(layoutPolygonTool_, tool == LayoutCanvas::Tool::polygon);
+        set(layoutTextPolygonTool_, tool == LayoutCanvas::Tool::textPolygon);
+        set(layoutPathTool_, tool == LayoutCanvas::Tool::path);
+        set(layoutTextTool_, tool == LayoutCanvas::Tool::text);
+        set(layoutPinTool_, tool == LayoutCanvas::Tool::pin);
+        set(layoutRulerTool_, tool == LayoutCanvas::Tool::ruler);
+    }
+
+    // Context menu for empty canvas space: Paste first, then the editing tools.
+    void showLayoutEmptyContextMenu(const QPoint &globalPos) {
+        QMenu menu(this);
+        auto *pasteAction = menu.addAction(QStringLiteral("Paste"));
+        pasteAction->setEnabled(!layoutShapeClipboard_.empty());
+        connect(pasteAction, &QAction::triggered, this, [this] { pasteLayoutShapes(); });
+        menu.addSeparator();
+        const auto addToolEntry = [&](QAction *action) {
+            if (!action)
+                return;
+            auto *entry = menu.addAction(action->icon(), action->text());
+            entry->setCheckable(action->isCheckable());
+            entry->setChecked(action->isChecked());
+            entry->setEnabled(action->isEnabled());
+            connect(entry, &QAction::triggered, this, [this, action] {
+                action->trigger();
+                refreshLayoutToolChecks();
+            });
+        };
+        addToolEntry(layoutSelectTool_);
+        addToolEntry(layoutMoveTool_);
+        addToolEntry(layoutPlaceDeviceTool_);
+        addToolEntry(layoutRectangleTool_);
+        addToolEntry(layoutPolygonTool_);
+        addToolEntry(layoutPathTool_);
+        addToolEntry(layoutTextTool_);
+        addToolEntry(layoutPinTool_);
+        addToolEntry(layoutRulerTool_);
+        menu.exec(globalPos);
+    }
+
+    // ----- Right-click menu on a selected layout figure ---------------------
+    void runLayoutFigureAction(ice::ObjectId id, LayoutCanvas::FigureContextAction action) {
+        switch (action) {
+        case LayoutCanvas::FigureContextAction::traceNet:
+            highlightLayoutNet(id);
+            return;
+        case LayoutCanvas::FigureContextAction::rotate:
+            rotateSelectedLayoutFigures();
+            return;
+        case LayoutCanvas::FigureContextAction::flip:
+            flipSelectedLayoutFigures();
+            return;
+        case LayoutCanvas::FigureContextAction::copy:
+            copySelectedLayoutShapes();
+            return;
+        case LayoutCanvas::FigureContextAction::cut:
+            if (copySelectedLayoutShapes() && layoutCanvas_)
+                layoutCanvas_->deleteSelectedShapes();
+            return;
+        case LayoutCanvas::FigureContextAction::paste:
+            pasteLayoutShapes();
+            return;
+        case LayoutCanvas::FigureContextAction::deleteShape:
+            if (layoutCanvas_)
+                layoutCanvas_->deleteSelectedShapes();
+            return;
+        }
+    }
+
+    bool copySelectedLayoutShapes() {
+        if (!project_ || !layoutCanvas_)
+            return false;
+        const auto &project = project_->project();
+        const auto cellIt = project.layoutCells.find(activeLayoutId_);
+        if (cellIt == project.layoutCells.end() || cellIt->second.library)
+            return false;
+        layoutShapeClipboard_.clear();
+        int skippedPaths = 0;
+        for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+            if (item->data(3).toString() == QStringLiteral("resize-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id == 0)
+                continue;
+            const auto shapeIt = cellIt->second.shapes.find(id);
+            if (shapeIt == cellIt->second.shapes.end())
+                continue;
+            if (shapeIt->second.isPath()) {
+                ++skippedPaths;
+                continue;
+            }
+            if (std::none_of(layoutShapeClipboard_.begin(), layoutShapeClipboard_.end(),
+                             [id](const ice::Shape &copied) { return copied.id == id; }))
+                layoutShapeClipboard_.push_back(shapeIt->second);
+        }
+        if (layoutShapeClipboard_.empty()) {
+            statusBar()->showMessage(skippedPaths > 0 ? QStringLiteral("Copying paths is not supported yet")
+                                                      : QStringLiteral("Select a layout figure first"));
+            return false;
+        }
+        auto message = QStringLiteral("Copied %1 shape(s)").arg(layoutShapeClipboard_.size());
+        if (skippedPaths > 0)
+            message += QStringLiteral(" (paths are not copied yet)");
+        statusBar()->showMessage(message);
+        return true;
+    }
+
+    void pasteLayoutShapes() {
+        if (!project_ || layoutShapeClipboard_.empty()) {
+            statusBar()->showMessage(QStringLiteral("Layout clipboard is empty"));
+            return;
+        }
+        const auto cellId = activeLayoutId_;
+        const auto cellIt = project_->project().layoutCells.find(cellId);
+        if (cellId == 0 || cellIt == project_->project().layoutCells.end() || cellIt->second.library) {
+            statusBar()->showMessage(QStringLiteral("Open an editable layout cell to paste"));
+            return;
+        }
+        // Anchor the pasted group at the cursor: translate so the clipboard
+        // bounding-box center lands on the last cursor position.
+        double minX = 0.0;
+        double maxX = 0.0;
+        double minY = 0.0;
+        double maxY = 0.0;
+        bool hasBounds = false;
+        for (const auto &shape : layoutShapeClipboard_) {
+            double left = shape.rectangle.x;
+            double right = static_cast<double>(shape.rectangle.x) + shape.rectangle.width;
+            double top = shape.rectangle.y;
+            double bottom = static_cast<double>(shape.rectangle.y) + shape.rectangle.height;
+            if (!shape.polygon.empty()) {
+                left = right = shape.polygon.front().x;
+                top = bottom = shape.polygon.front().y;
+                for (const auto &point : shape.polygon) {
+                    left = std::min(left, static_cast<double>(point.x));
+                    right = std::max(right, static_cast<double>(point.x));
+                    top = std::min(top, static_cast<double>(point.y));
+                    bottom = std::max(bottom, static_cast<double>(point.y));
+                }
+            }
+            if (!hasBounds) {
+                minX = left;
+                maxX = right;
+                minY = top;
+                maxY = bottom;
+                hasBounds = true;
+            } else {
+                minX = std::min(minX, left);
+                maxX = std::max(maxX, right);
+                minY = std::min(minY, top);
+                maxY = std::max(maxY, bottom);
+            }
+        }
+        // Fall back to a small nudge when there is no cursor to anchor to.
+        ice::Coordinate dx = 100;
+        ice::Coordinate dy = 100;
+        if (hasBounds && layoutCanvas_) {
+            const auto scenePos = layoutCanvas_->cursorScenePosition();
+            const auto centerX = (minX + maxX) * 0.5;
+            const auto centerY = (minY + maxY) * 0.5;
+            dx = static_cast<ice::Coordinate>(std::lround(scenePos.x() - centerX));
+            // Scene Y grows downwards while layout Y grows upwards.
+            dy = static_cast<ice::Coordinate>(std::lround(-scenePos.y() - centerY));
+        }
+        try {
+            project_->execute("paste layout shapes", [&](ice::Project &project) {
+                for (const auto &shape : layoutShapeClipboard_) {
+                    if (!shape.polygon.empty()) {
+                        auto points = shape.polygon;
+                        for (auto &point : points) {
+                            point.x += dx;
+                            point.y += dy;
+                        }
+                        ice::addPolygon(project, cellId, shape.layer, points, shape.net);
+                    } else if (shape.isText()) {
+                        ice::addText(project, cellId, shape.layer, shape.rectangle.x + dx,
+                                     shape.rectangle.y + dy, shape.text, shape.rectangle.height, shape.net);
+                    } else {
+                        auto rectangle = shape.rectangle;
+                        rectangle.x += dx;
+                        rectangle.y += dy;
+                        ice::addRectangle(project, cellId, shape.layer, rectangle, shape.net);
+                    }
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Paste failed: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Pasted %1 shape(s)").arg(layoutShapeClipboard_.size()));
+    }
+
+    void flipSelectedLayoutFigures() {
+        if (!project_ || !layoutCanvas_)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        std::set<ice::ObjectId> ids;
+        for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+            if (item->data(3).toString() == QStringLiteral("resize-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id != 0)
+                ids.insert(id);
+        }
+        if (ids.empty()) {
+            statusBar()->showMessage(QStringLiteral("Select a layout figure first"));
+            return;
+        }
+        // Mirror horizontally about the center of the selection. Axis-aligned
+        // rectangles are symmetric about their own center, so only polygons
+        // and text anchors change for a single rectangle.
+        double minX = 0.0;
+        double maxX = 0.0;
+        bool hasCenter = false;
+        for (const auto id : ids) {
+            const auto shapeIt = cellIt->second.shapes.find(id);
+            if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.isPath())
+                continue;
+            const auto &shape = shapeIt->second;
+            double left = shape.rectangle.x;
+            double right = static_cast<double>(shape.rectangle.x) + shape.rectangle.width;
+            if (!shape.polygon.empty()) {
+                left = right = shape.polygon.front().x;
+                for (const auto &point : shape.polygon) {
+                    left = std::min(left, static_cast<double>(point.x));
+                    right = std::max(right, static_cast<double>(point.x));
+                }
+            }
+            if (!hasCenter) {
+                minX = left;
+                maxX = right;
+                hasCenter = true;
+            } else {
+                minX = std::min(minX, left);
+                maxX = std::max(maxX, right);
+            }
+        }
+        if (!hasCenter) {
+            statusBar()->showMessage(QStringLiteral("Flip works on rectangles, polygons and text"));
+            return;
+        }
+        const auto centerX = (minX + maxX) * 0.5;
+        project_->execute("flip layout figures", [&](ice::Project &project) {
+            auto &cell = project.layoutCells.at(activeLayoutId_);
+            for (const auto id : ids) {
+                auto shapeIt = cell.shapes.find(id);
+                if (shapeIt == cell.shapes.end())
+                    continue;
+                auto &shape = shapeIt->second;
+                if (shape.isPath())
+                    continue;
+                if (!shape.polygon.empty()) {
+                    for (auto &point : shape.polygon)
+                        point.x = static_cast<ice::Coordinate>(std::lround(2.0 * centerX - point.x));
+                    continue;
+                }
+                const auto right = static_cast<double>(shape.rectangle.x) + shape.rectangle.width;
+                shape.rectangle.x = static_cast<ice::Coordinate>(std::lround(2.0 * centerX - right));
+            }
+            updateRoutedConnectionPaths(project);
+        });
+        project_->setLastHistoryLabel("Flipped layout figures");
         refreshProject();
     }
 
@@ -12501,11 +12787,26 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setPolygonPointMovedCallback(
                 [this](ice::ObjectId id, int index, QPointF position) { moveLayoutPolygonPoint(id, index, position); });
             layoutCanvas_->setShapeActivatedCallback([this](ice::ObjectId id) { highlightLayoutNet(id); });
+            layoutCanvas_->setFigureContextActionCallback(
+                [this](ice::ObjectId id, LayoutCanvas::FigureContextAction action) {
+                    runLayoutFigureAction(id, action);
+                });
+            layoutCanvas_->setEmptyContextMenuCallback(
+                [this](const QPoint &globalPos) { showLayoutEmptyContextMenu(globalPos); });
             layoutCanvas_->setCallbacks(
                 [this](QPointF first, QPointF second) {
                     if (!project_ || layoutLayers(project_->project(), activeLayoutId_).empty()) {
-                        QMessageBox::information(this, QStringLiteral("Create Shape"),
-                                                 QStringLiteral("Create a layer before drawing shapes."));
+                        QMessageBox box(this);
+                        box.setIcon(QMessageBox::Information);
+                        box.setWindowTitle(QStringLiteral("Create Shape"));
+                        box.setText(QStringLiteral("Create a layer before drawing shapes."));
+                        auto *createLayerButton =
+                            box.addButton(QStringLiteral("Create Layer"), QMessageBox::AcceptRole);
+                        box.addButton(QStringLiteral("Close"), QMessageBox::RejectRole);
+                        box.setDefaultButton(createLayerButton);
+                        box.exec();
+                        if (box.clickedButton() == createLayerButton)
+                            createLayer();
                         return;
                     }
                     if (layoutLayers(project_->project(), activeLayoutId_).size() > 1 && activeLayoutLayerId_ == 0) {
@@ -13276,6 +13577,8 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeLayoutPathId_ = 0;
     ice::ObjectId activeLayoutPathCellId_ = 0;
     int activeLayoutPathWidth_ = 0;
+    // Shapes captured by the layout figure context menu's Copy/Cut entries.
+    std::vector<ice::Shape> layoutShapeClipboard_;
     std::set<ice::ObjectId> openSchematicTabs_;
     std::set<ice::ObjectId> openLayoutTabs_;
     std::set<ice::ObjectId> knownSchematicCells_;
