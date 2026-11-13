@@ -6296,6 +6296,25 @@ class DocumentWindow : public QMainWindow {
         menu.exec(globalPos);
     }
 
+    // Context menu for empty schematic canvas space: the editing tools of the
+    // vertical toolbar, mirroring the layout editor's empty-space menu.
+    void showSchematicEmptyContextMenu(const QPoint &globalPos) {
+        QMenu menu(this);
+        const auto addToolEntry = [&](QAction *action) {
+            if (!action)
+                return;
+            auto *entry = menu.addAction(action->icon(), action->text());
+            entry->setCheckable(action->isCheckable());
+            entry->setChecked(action->isChecked());
+            entry->setEnabled(action->isEnabled());
+            connect(entry, &QAction::triggered, this, [action] { action->trigger(); });
+        };
+        addToolEntry(schematicSelectTool_);
+        addToolEntry(schematicPlaceSymbolTool_);
+        addToolEntry(schematicPlaceCommentTool_);
+        menu.exec(globalPos);
+    }
+
     // ----- Right-click menu on a selected layout figure ---------------------
     void runLayoutFigureAction(ice::ObjectId id, LayoutCanvas::FigureContextAction action) {
         switch (action) {
@@ -6631,6 +6650,24 @@ class DocumentWindow : public QMainWindow {
             });
             return model;
         };
+        // Preview model for one selected figure. Only that shape (and the
+        // members of its text polygon) is kept, so the Properties preview does
+        // not keep showing every figure of the editor.
+        const auto shapePreviewModelFor = [&](const ice::LayoutCell &cell, const ice::Shape &shape) {
+            ice::LayoutCell single;
+            single.id = cell.id;
+            single.name = cell.name;
+            single.pdk = cell.pdk;
+            single.library = cell.library;
+            if (shape.textGroup != 0) {
+                for (const auto &[memberId, member] : cell.shapes)
+                    if (member.textGroup == shape.textGroup)
+                        single.shapes.emplace(memberId, member);
+            } else {
+                single.shapes.emplace(shape.id, shape);
+            }
+            return previewModelFor(single);
+        };
         if (project_ && layoutCanvas_ &&
             (layoutCanvas_->currentTool() == LayoutCanvas::Tool::select ||
              layoutCanvas_->currentTool() == LayoutCanvas::Tool::move)) {
@@ -6721,7 +6758,8 @@ class DocumentWindow : public QMainWindow {
                             layerIt != project_->project().layers.end())
                             layerName = QString::fromStdString(layerIt->second.name);
                         layoutPropertiesPanel_->setLayoutShape(shape, layerName.toStdString(),
-                                                               displayName.toStdString(), typeName.toStdString());
+                                                               displayName.toStdString(), typeName.toStdString(),
+                                                               shapePreviewModelFor(activeIt->second, shape));
                         if (bringToFront && layoutRightTabs_)
                             layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
                         return;
@@ -12704,6 +12742,8 @@ class DocumentWindow : public QMainWindow {
             });
             schematicCanvas_->setPlaceSymbolCycleCallback([this](int delta) { cycleSchematicPlacementDevice(delta); });
             schematicCanvas_->setToolEscapeCallback([this] { selectSchematicTool(); });
+            schematicCanvas_->setEmptyContextMenuCallback(
+                [this](const QPoint &globalPos) { showSchematicEmptyContextMenu(globalPos); });
             schematicCanvas_->setSignalPickedCallback(
                 [this](ice::ObjectId netId) { finishSimulationSignalPick(netId); });
             schematicCanvas_->setSignalPickCancelledCallback([this] { cancelSimulationSignalPick(); });

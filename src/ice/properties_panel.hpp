@@ -65,8 +65,10 @@ class PropertiesPanel : public QWidget {
     void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model);
     void setLayoutDevice(const ice::LayoutDeviceCell *cell);
     void setPathTool(int width, const std::string &layerName);
+    // The model carries only the selected figure (including the members of a
+    // text polygon), so the preview never shows the rest of the cell.
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
-                        const std::string &typeName);
+                        const std::string &typeName, const ice::LayoutPreviewModel &model);
     void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName);
     void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model, int spacing);
 

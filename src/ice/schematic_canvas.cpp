@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QBrush>
+#include <QContextMenuEvent>
 #include <QCursor>
 #include <QEvent>
 #include <QGraphicsColorizeEffect>
@@ -234,6 +235,10 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
+
+    void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) override {
+        emptyContextMenu_ = std::move(callback);
+    }
 
     void setPlaceSymbolPreview(const QByteArray &artwork) override {
         placeSymbolArtwork_ = artwork;
@@ -676,6 +681,22 @@ class SchematicCanvasImpl : public SchematicCanvas {
         syncSelectionFromScene();
     }
 
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        // Empty canvas space: the host builds the tool menu. Pins are connection
+        // points rather than schematic figures, so a right-click on one still
+        // offers the tools (mirrors the layout canvas).
+        auto *hit = itemAt(event->pos());
+        while (hit && hit->data(0).toString().isEmpty())
+            hit = hit->parentItem();
+        const bool onPin = hit && hit->data(0).toString() == QStringLiteral("pin");
+        if (emptyContextMenu_ && (!hit || onPin)) {
+            emptyContextMenu_(event->globalPos());
+            event->accept();
+            return;
+        }
+        QGraphicsView::contextMenuEvent(event);
+    }
+
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape && signalPickMode_) {
             setSignalPickMode(false);
@@ -1036,6 +1057,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     std::function<void(QPointF)> symbolPlacementRequested_;
     std::function<void(int)> placeSymbolCycleRequested_;
     std::function<void()> toolEscapeRequested_;
+    std::function<void(const QPoint &)> emptyContextMenu_;
     std::set<ice::ObjectId> selectedInstances_;
     ice::ObjectId hoveredInstanceId_ = 0;
     ice::ObjectId hoveredNetId_ = 0;

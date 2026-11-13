@@ -34,6 +34,9 @@ class SchematicCanvas : public QGraphicsView {
     virtual void setSymbolPlacementCallback(std::function<void(QPointF)> callback) = 0;
     virtual void setPlaceSymbolCycleCallback(std::function<void(int)> callback) = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
+    // Invoked when the user right-clicks empty canvas space. The host owns the
+    // menu contents (the editor tools shown in the vertical toolbar).
+    virtual void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) = 0;
     virtual void setDeleteCallback(std::function<void(std::vector<ice::ObjectId>)> callback) = 0;
     virtual void setDisconnectCallback(std::function<void(ice::ObjectId)> callback) = 0;
     virtual void
