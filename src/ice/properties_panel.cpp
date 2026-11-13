@@ -332,7 +332,8 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
 }
 
 void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string &layerName,
-                                     const std::string &displayName, const std::string &typeName) {
+                                     const std::string &displayName, const std::string &typeName,
+                                     const ice::LayoutPreviewModel &model) {
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -348,6 +349,9 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
         gridOptions_->setVisible(false);
     setParametersVisible(true);
     setTitle(QString::fromStdString(displayName));
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
+    layoutDevicePreview_->setModel(model);
+    previewStack_->setCurrentWidget(layoutDevicePreview_);
     previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
