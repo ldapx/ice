@@ -200,21 +200,30 @@ void writeCell(const Project &project, const LayoutCell &cell, const std::filesy
             continue;
         }
         if (shape.isPath()) {
-            const auto half = shape.width / 2;
+            const auto viaExtent = [&](std::size_t pointIndex) {
+                Coordinate extent = 0;
+                if (pointIndex > 0)
+                    extent = std::max(extent, shape.widthForSegment(pointIndex - 1));
+                if (pointIndex + 1 < shape.centerline.size())
+                    extent = std::max(extent, shape.widthForSegment(pointIndex));
+                return extent > 0 ? extent : shape.width;
+            };
             const auto hasVia = [&](std::size_t pointIndex) {
                 return pointIndex < shape.pointVias.size() && !shape.pointVias[pointIndex].empty();
             };
             for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
                 const auto layerId = shape.layerForSegment(index);
                 const auto [layerNumber, datatype] = layerStream(project, layerId);
-                const auto startExtension = hasVia(index) ? half : 0;
-                const auto endExtension = hasVia(index + 1) ? half : 0;
+                const auto width = shape.widthForSegment(index);
+                const auto startExtension = hasVia(index) ? viaExtent(index) / 2 : 0;
+                const auto endExtension = hasVia(index + 1) ? viaExtent(index + 1) / 2 : 0;
                 writeBoundary(layerNumber, datatype,
-                              pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1], shape.width,
+                              pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1], width,
                                                  startExtension, endExtension));
             }
             for (std::size_t index = 0; index < shape.pointVias.size() && index < shape.centerline.size(); ++index) {
                 const auto &point = shape.centerline[index];
+                const auto half = viaExtent(index) / 2;
                 for (const auto viaLayer : shape.pointVias[index]) {
                     const auto [layerNumber, datatype] = layerStream(project, viaLayer);
                     writeBoundary(layerNumber, datatype,
@@ -330,6 +339,7 @@ void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::
             flattened.segmentLayers = shape.segmentLayers;
             flattened.pointVias = shape.pointVias;
             flattened.width = shape.width;
+            flattened.segmentWidths = shape.segmentWidths;
         }
         targetCell.shapes.emplace(shapeId, std::move(flattened));
     }

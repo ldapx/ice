@@ -105,12 +105,13 @@ confirmation.
 RTL-to-GDS is part of the main document tab strip, not a separate workspace:
 
 ```text
-A/MS Schematic | HDL Schematic | Synthesis | Physical Design | Layout | Simulation
+A/MS Schematic | HDL Schematic | Synthesis | Physical Design | Layout | A/MS Simulation | Digital Testbenches
 ```
 
 Each top-level document tab has a custom SVG icon. Analog/mixed-signal
-workspaces (`A/MS Schematic`, `Layout`, `Simulation`) use red icons; digital
-workspaces (`HDL Schematic`, `Synthesis`, `Physical Design`) use blue icons.
+workspaces (`A/MS Schematic`, `Layout`, `A/MS Simulation`) use red icons; digital
+workspaces (`HDL Schematic`, `Synthesis`, `Physical Design`, `Digital Testbenches`)
+use blue icons.
 
 The implementation tabs are global views over one selected implementation
 run. Selecting a run in the left `Runs` tree changes the active run; selecting
@@ -119,32 +120,29 @@ runs therefore do not multiply the top-level tab count. Execution remains
 available through `ice-cli implementation-run`, MCP, and `icepy`, and its output
 is reported in the bottom Messages dock.
 
-`Physical Design` is one workspace with a stage bar and a left `Runs` tree:
-
-```text
-Floorplan → Placement → CTS → Routing → Final
-```
-
-The stage bar shows a status marker for each checkpoint. Each stage pane uses
-the same three-column shell as Schematic and Layout:
+`Physical Design` is one workspace controlled by the left `Runs` tree. The
+stage rows for the active run select which stage is shown; there is no separate
+stage tab bar. Each stage pane uses the same three-column shell as Schematic
+and Layout:
 
 - **Left:** a compact run row with the run selector and icon actions, followed
-  by the `Runs` tree, a `Display` tree, and an `Artifacts` list. In the physical
-  workspace the tree shows the physical stages (Floorplan, Placement, CTS,
-  Routing, Final) for each run. Selecting a stage row switches the stage pane.
-  Floorplan also has a `Netlists` explorer listing technology-mapped `.v`
-  files. The icon actions are **Run stage**, **Run from here**, **Run all**, and
-  **Cancel**; a small contextual hint below the row shows the next
-  prerequisite, the ready action, or the last failure. **Open in OpenROAD GUI**
-  launches the standalone viewer on the active ODB, and Final adds **Import
-  final layout**. The `Display` tree toggles layers, net types, instance
+  by the `Runs` tree and a `Display` tree. In the physical workspace the tree
+  shows the physical stages (Floorplan, Placement, CTS, Routing, Final) for
+  each run. Selecting a stage row switches the stage pane. The icon actions
+  are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
+  contextual hint below the row shows the next prerequisite, the ready action,
+  or the last failure. Below the tree, **Open in OpenROAD GUI** launches the
+  standalone viewer on the active ODB, and Final places **Import final layout**
+  next to it. The `Display` tree toggles layers, net types, instance
   categories, special nets, ports, route guides, rows, and blockages. Fill,
   endcap, tap, antenna, and cover cells are hidden by default; changing
   visibility preserves zoom and pan.
 - **Middle:** an interactive canvas. The physical stages load their stage ODB
   through the `ice-openroad` reader asynchronously, with the legacy DEF import
-  as a fallback. The toolbar provides fit, zoom, find, rulers, labels, clear,
-  and image export. Clicking an instance, port, routed shape, or DRC marker
+  as a fallback. A vertical icon toolbar left of the canvas provides fit, zoom,
+  find, rulers, labels, clear, and image export. Middle-button drag pans the
+  canvas, and a bottom-left scale bar shows the current view in nm, µm, or mm.
+  Clicking an instance, port, routed shape, or DRC marker
   selects it and fills the Inspector. Right-clicking can focus a net, zoom to
   the selection, or clear it. The status line shows cursor coordinates in
   microns. The **Heat map** selector shows embedded placement-density or
@@ -154,12 +152,13 @@ the same three-column shell as Schematic and Layout:
   range, alpha, and a legend. When the ODB reader truncates the preview, the
   canvas shows a warning. Double-clicking an artifact opens it in a closable
   tab; large files and ODB databases open externally.
-- **Right:** the stage settings form first, followed by `Inspector`, `Metrics`,
-  `DRC`, `Timing`, `Clock`, `Hierarchy`, and `Properties`. The Inspector shows
-  the selected object's name, master, category, module, net, layer, and
-  sources. DRC lists TritonRoute violations and double-clicking one selects and
-  zooms to the marker. Timing groups run metrics and can generate an OpenROAD
-  STA path report. Clock lists clock nets, and Hierarchy shows the module tree.
+- **Right:** a `Properties` tab first, followed by `Metrics`. With nothing
+  selected in the canvas the `Properties` tab shows the active stage settings;
+  selecting an object switches it to that object's name, master, category,
+  module, net, layer, and sources. Preview DRC markers, timing metrics, and
+  generated OpenROAD STA path reports appear in the bottom `Reports` tab; its
+  selector switches between the DRC, LVS, and Timing reports. Activating a DRC
+  row selects and zooms to the marker in the physical canvas.
 
 The HDL Schematic page shows the project's `.sv` files in the left `Explorer`,
 with a search field and icon buttons to create (`+`) or delete the selected file.
@@ -173,17 +172,18 @@ creation lives there, not in the A/MS Schematic tab.
 
 The Synthesis page uses an HDL file Explorer with an **Elaborate design** action
 next to its search bar. Below that Explorer, a `Runs` tab contains a search bar,
-a `Run`/`Stage` table, and **Synthesize**, **Show graph**, **Export .v**, and
-**Remove run** actions. **Elaborate design** prompts for a PDK, creates a run, and runs Yosys
+a `Run`/`Stage` table with a per-row remove button, and **Synthesize**,
+**Show graph**, and **Export .v** actions. **Elaborate design** prompts for a
+PDK, creates a run, and runs Yosys
 elaboration; the table shows `elaborating` and then `elaborated`, and the run
 gets an `elaboration.svg` artifact. **Synthesize** prompts for a PDK and
 produces `synthesis.svg` plus the generic synthesized netlist `1_synth.v`.
 **Export .v** runs the Yosys technology-mapping step against the platform
 Liberty files, writes `synth/2_tech_map.v` directly into the run directory, and
 adds it to the synthesis artifact list. **Show graph** opens the elaboration
-and/or synthesis graph as document tabs. **Remove run** deletes the selected
-run from the project and removes its `build/impl` directory. Graph tabs render
-SVG and recolor Graphviz output to match the active dark or light theme.
+and/or synthesis graph as document tabs. The remove button in a run row deletes
+that run from the project and removes its `build/impl` directory. Graph tabs
+render SVG and recolor Graphviz output to match the active dark or light theme.
 
 The Synthesis page uses the same padded Explorer and artifact containers. Its
 left column lists HDL source files. The middle panel has no permanent graph
@@ -201,14 +201,12 @@ lay out, ICE uses a compact graph captured before memory and technology
 mapping, so the result stays viewable. If no graph can be rendered, the DOT is
 kept as a text artifact and a warning is written to the Jobs/Messages views.
 
-The Floorplan stage pane adds a `Netlists` tab to its left column. It lists
-every `synth/2_tech_map.v` and exported technology-mapped `.v` present across
-runs; activating an entry selects that run. Floorplan reads the run's
-`2_tech_map.v`, so exporting from Synthesis is required before running the
-floorplan stage. Its settings expose utilization (a fraction of the core area,
-so `0.5` means 50%), aspect ratio, optional explicit die origin/width/height,
-optional explicit core origin/width/height, placement site, IO
-horizontal/vertical layers, threads, and timeout. Applying settings updates the
+Floorplan reads the run's `2_tech_map.v`, so exporting from Synthesis is
+required before running the floorplan stage. Its settings expose utilization
+(a fraction of the core area, so `0.5` means 50%), aspect ratio, optional
+explicit die origin/width/height, optional explicit core origin/width/height,
+placement site, IO horizontal/vertical layers, threads, and timeout. Applying
+settings updates the
 run configuration and invalidates the floorplan, placement, CTS, routing, and
 final checkpoints so stale results are never presented as current.
 
@@ -233,8 +231,9 @@ The Placement, CTS, Routing, and Final stage panes use the same pattern:
   routed wire density, and **Export CSV** writes placement, routing, power,
   pin, RUDY, or IR-drop heat maps under the run's `reports/` directory.
 
-The Inspector, Metrics, DRC, Timing, Clock, Hierarchy, and Properties tabs
-continue to show the active run, selected stage, and selected preview object.
+The `Properties` and `Metrics` tabs continue to show the active run, selected
+stage, and selected preview object. Physical preview DRC markers, LVS results,
+timing metrics, and STA reports appear together in the bottom `Reports` tab.
 
 Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
 still runs and the canvases show an explanatory message. Importing a finished
@@ -326,19 +325,29 @@ SPICE source minus analysis-control directives such as `.tran`, `.dc`, `.ac`,
 are hidden for source cells; only **Run Simulation** is shown, and it runs
 directly without a separate build step.
 
-The Simulation panel **+** menu offers **Add Simulation…**, **Add SystemVerilog
-Testbench…**, and **Add Simulation Script…**. **Add SystemVerilog Testbench…**
-creates the testbench source cell and a simulation that targets it with the
-**Icarus Verilog (SystemVerilog)** simulator and **Digital / VCD** analysis, then
-opens the **Testbench** tab in the simulation editor. The tab edits the source
-directly with SystemVerilog syntax highlighting and has its own **Run
-Simulation** button. Selecting a SystemVerilog
-cell created elsewhere in the Simulation tab switches the simulator and analysis
-the same way. The source is compiled with `iverilog`, run with `vvp`, and the
-generated VCD is loaded as the result traces. If the source has no
-`$dumpfile`/`$dumpvars`, ICE adds a small wrapper module that dumps the design.
-The first successful run fills the **Signals to capture** list and any empty
-graph Y selections from the VCD traces.
+The A/MS Simulation panel **+** menu offers **Add Simulation…** and **Add
+Simulation Script…**. Testbenches are created from the **Add Testbench** button
+in the Digital Testbenches tab. It creates the testbench source cell and a
+simulation that targets it with the **Icarus Verilog (SystemVerilog)** simulator
+and **Digital / VCD** analysis, then
+opens the new top-level **Digital Testbenches** tab. That tab lists the project's
+SystemVerilog testbench files in a left panel with search and add controls, opens
+the selected files in a central tabbed source editor with syntax highlighting,
+and shows an **Outline** plus **Testbench** details in the right panel. When no
+testbench or result tab is open, the center shows an **Open a testbench**
+creation prompt with a direct **SystemVerilog Testbench** action. It has its
+own **Run Simulation** button next to **Add Testbench** in the Explorer panel.
+Running a testbench opens its simulation graph as a tab in the same central tab
+area as the source files. Digital testbench simulations are not listed in the
+A/MS Simulation hierarchy, which is reserved for analog and mixed-signal
+simulations. Adding a testbench asks only for its name; the source cell is
+PDK-independent. The A/MS Simulation schematic chooser excludes SystemVerilog
+testbench cells. The
+source is compiled with `iverilog`, run with `vvp`, and the generated VCD is
+loaded as the result traces. If the source has no `$dumpfile`/`$dumpvars`, ICE
+adds a small wrapper module that dumps the design. The first successful run fills
+the **Signals to capture** list and any empty graph Y selections from the VCD
+traces.
 
 A drawn schematic with SystemVerilog instances is detected as mixed-signal.
 The simulator selector then defaults to **Mixed-signal (ngspice + Icarus)** and
@@ -501,14 +510,16 @@ the path start and click again to commit each segment. Escape or Space finishes
 the current path and leaves the tool. Holding Shift
 constrains the active segment to horizontal or vertical so all turns are right
 angles. While the Path tool is active, **Properties** shows the current path
-layer and an editable `width (nm)` value (200 nm by default). After the first
-path click, scroll the wheel to move the next segment up or down one metal
+layer. Each segment is drawn at its layer's PDK minimum width, and the width is
+not user-editable. Path points follow the layout grid snap setting. After the
+first path click, scroll the wheel to move the
+next segment up or down one metal
 layer; ICE inserts the corresponding via at the connection point automatically.
 For the IHP stack, for example, scrolling from Metal2 down to Metal1 adds a
 Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
 Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
 stored as one path shape
-with an editable centerline, width, and cached outline; it moves as a single
+with an editable centerline and cached outline; it moves as a single
 object rather than as independent segment rectangles. The Draw Path tool and
 manually drawn paths use the waypoints icon, while automatically routed paths
 are listed as Routed Path shapes with the route icon. Select a manual path to
@@ -520,8 +531,9 @@ other automatically routed paths on different nets by choosing another metal
 layer, trying an alternate Manhattan trace, or bridging a segment through an
 adjacent layer with vias. If no conflict-free route exists, the direct route is
 kept. Changing layers while drawing
-keeps the same path and records the layer for each segment; changing the width
-starts a new path at the current endpoint. Corners and endpoints are square,
+keeps the same path and records the layer for each segment; each segment uses
+its own layer's minimum width. Hiding a layer hides only that layer's path
+segments and vias. Corners and endpoints are square,
 not rounded. Layer-change vias are stored with the path and move with it.
 Segments adjacent to a via extend by half the via size so the copper fully
 overlaps the via on both layers.
@@ -619,10 +631,12 @@ path tool.
 
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
 runs `gdscheck` with the process deck derived from the cell's PDK, and parses
-the generated `.lyrdb` report. Violations appear in the **DRC Report** tab of
-the activity dock with severity, rule, message, cell, and location columns.
-Clicking a violation row opens the checked layout and centers the canvas on
-the reported location with a temporary highlight.
+the generated `.lyrdb` report. Violations appear in the **Reports** tab of the
+activity dock with **DRC** selected, showing severity, rule, message, cell, and
+location columns. Clicking a violation row opens the checked layout and centers
+the canvas on the reported location with a temporary highlight. The DRC view
+also lists markers from the current Physical Design preview; activating one
+switches to the physical canvas and selects and zooms to that marker.
 
 **Tools → Run LVS** compares the active layout against its source schematic.
 ICE infers the schematic from planned-device links, then from matching layout
@@ -637,9 +651,9 @@ layout devices, and pins converted from them are not compared as schematic
 ports. Top-level schematic ports created with `Input`/`Output` symbols are
 matched to layout pins by name, including pins produced by **Convert to Pin**;
 missing pins, extra pins, direction changes, and net-binding changes are
-reported. Results appear in the **LVS Report** tab with mismatch categories
-and schematic/layout object ids. Text SPICE and SystemVerilog source cells are
-not supported by LVS yet.
+reported. Results appear in the **Reports** tab with **LVS** selected, showing
+mismatch categories and schematic/layout object ids. Text SPICE and
+SystemVerilog source cells are not supported by LVS yet.
 
 **Tools → Run PEX** (or right-clicking a layout cell and choosing
 **Extract Parasitics (PEX)**) extracts first-order parasitics from the active
@@ -737,14 +751,14 @@ application messages use the same category-aware sinks.
 
 ## Simulation scripts
 
-The Simulation panel **+** menu offers **Add Simulation…**, **Add SystemVerilog
-Testbench…**, and **Add Simulation Script…**. Simulation scripts are
+The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation
+Script…**. Simulation scripts are
 project-level Python files under `scripts/`,
 recorded in `project.icepro`, and listed as top-level entries in the simulation
 hierarchy alongside simulations. Adding a script does not require an active
 simulation and always creates a new Python file from the built-in template.
 
-Selecting a script shows the project-level script view in the Simulation
+Selecting a script shows the project-level script view in the A/MS Simulation
 workspace, replacing the simulation editor on the right. It is not a separate
 top-level document tab and is not stored inside any simulation. The right pane
 is an editable Python source editor with syntax highlighting. Script run

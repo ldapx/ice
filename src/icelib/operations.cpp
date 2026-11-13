@@ -567,18 +567,21 @@ std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
 }
 
 ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout, std::string pdk, int datatype,
-                  std::string stack) {
+                  std::string stack, Coordinate minimumWidth) {
     if (name.empty())
         throw ProjectError("layout.layer", "Layer name must not be empty");
     if (number < 0)
         throw ProjectError("layout.layer", "Layer number must not be negative");
     if (datatype < 0 || datatype > 65535)
         throw ProjectError("layout.layer", "Layer datatype out of GDSII range");
+    if (minimumWidth < 0)
+        throw ProjectError("layout.layer", "Layer minimum width must not be negative");
     if (stack.find_first_of("/\\") != std::string::npos)
         throw ProjectError("layout.stack", "Layer stack must be a valid stack identifier");
     ObjectId id = project.nextId();
     Layer layer{id, std::move(name), number, true, layout, std::move(pdk), datatype};
     layer.stack = std::move(stack);
+    layer.minimumWidth = minimumWidth;
     project.layers.emplace(id, std::move(layer));
     return id;
 }

@@ -40,12 +40,14 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     ice::Project project;
     project.identity = "layer-datatype";
     project.name = "layer-datatype";
-    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2, {}, 140);
     project.layers.at(layer).color = "#123456";
     project.layers.at(layer).pattern = 3;
     CHECK(project.layers.at(layer).number == 8);
     CHECK(project.layers.at(layer).datatype == 2);
+    CHECK(project.layers.at(layer).minimumWidth == 140);
     CHECK_THROWS_AS(ice::addLayer(project, "bad", 1, 0, {}, 70000), ice::ProjectError);
+    CHECK_THROWS_AS(ice::addLayer(project, "bad-width", 1, 0, {}, 0, {}, -1), ice::ProjectError);
 
     const auto roundTrip = ice::Project::deserialize(project.serialize());
     CHECK(roundTrip.layers.at(layer).number == 8);
@@ -53,6 +55,7 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     CHECK(roundTrip.layers.at(layer).name == "Metal1.pin");
     CHECK(roundTrip.layers.at(layer).color == "#123456");
     CHECK(roundTrip.layers.at(layer).pattern == 3);
+    CHECK(roundTrip.layers.at(layer).minimumWidth == 140);
 
     auto missingDatatype = project.serialize();
     const auto datatype = missingDatatype.find("\"datatype\": 2");
@@ -1756,8 +1759,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
            "\n[pdk.implementation.orfs]\nplatform = \"example\"\nmetal_option = \"base\"\n"
            "\n[[pdk.stack]]\nid = \"base\"\ndisplay_name = \"Base stack\"\n"
            "layers = [\"diff.drawing\", \"metal1.drawing\"]\n"
-           "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\n"
-           "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\n";
+           "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\nminimum_width = 150\n"
+           "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\nminimum_width = 230\n";
     std::ofstream(repositoryRoot / "example-pdk/layout/layer-styles.json")
         << R"({"schema_version": 1, "layers": [{"name": "diff", "color": "#123456", "pattern": "Diagonal /", "visible": true}]})";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
@@ -1777,6 +1780,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
         CHECK(pdk.pdk->layers.front().name == "diff.drawing");
         CHECK(pdk.pdk->layers.front().number == 65);
         CHECK(pdk.pdk->layers.front().datatype == 20);
+        CHECK(pdk.pdk->layers.front().minimumWidth == 150);
+        CHECK(pdk.pdk->layers.back().minimumWidth == 230);
         CHECK(pdk.pdk->defaultStack == "base");
         CHECK(pdk.pdk->stacks.size() == 1);
         if (!pdk.pdk->stacks.empty()) {
@@ -2949,7 +2954,8 @@ TEST_CASE("layout paths persist and move as one shape") {
     path.centerline = {{0, 0}, {1000, 0}, {1000, 200}};
     path.segmentLayers = {layer, secondLayer};
     path.pointVias = {{}, {viaLayer}, {}};
-    path.width = 200;
+    path.width = 300;
+    path.segmentWidths = {200, 300};
     path.polygon = {{-100, -100}, {1100, -100}, {1100, 300}, {-100, 300}};
     project.layoutCells.at(cell).shapes.emplace(pathId, path);
     CHECK(project.validate().empty());
@@ -2957,10 +2963,13 @@ TEST_CASE("layout paths persist and move as one shape") {
     auto roundTrip = ice::Project::deserialize(project.serialize());
     const auto &loaded = roundTrip.layoutCells.at(cell).shapes.at(pathId);
     CHECK(loaded.isPath());
-    CHECK(loaded.width == 200);
+    CHECK(loaded.width == 300);
     CHECK(loaded.centerline.size() == 3);
     CHECK(loaded.segmentLayers.size() == 2);
     CHECK(loaded.layerForSegment(1) == secondLayer);
+    CHECK(loaded.segmentWidths.size() == 2);
+    CHECK(loaded.widthForSegment(0) == 200);
+    CHECK(loaded.widthForSegment(1) == 300);
     CHECK(loaded.pointVias.size() == 3);
     CHECK(loaded.pointVias[1].size() == 1);
     CHECK(loaded.pointVias[1].front() == viaLayer);
@@ -2985,9 +2994,9 @@ TEST_CASE("layout paths persist and move as one shape") {
         if (importedLayer == imported.layers.end())
             continue;
         if (importedLayer->second.number == 1)
-            metal1ReachesVia = shape.rectangle.x + shape.rectangle.width == 1100;
+            metal1ReachesVia = shape.rectangle.x + shape.rectangle.width == 1150;
         else if (importedLayer->second.number == 2)
-            metal2ReachesVia = shape.rectangle.y == -100;
+            metal2ReachesVia = shape.rectangle.y == -150;
         else if (importedLayer->second.number == 3)
             viaExported = true;
     }

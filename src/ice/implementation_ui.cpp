@@ -4,6 +4,7 @@
 #include "icelib/interchange.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/verification.hpp"
 #include "icons.hpp"
 #include "layout_canvas.hpp"
 #include "layout_render.hpp"
@@ -11,6 +12,7 @@
 #include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
+#include <QAction>
 #include <QApplication>
 #include <QBrush>
 #include <QCheckBox>
@@ -57,6 +59,8 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -71,6 +75,7 @@
 #include <QTemporaryDir>
 #include <QTextCursor>
 #include <QTimer>
+#include <QToolBar>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QUrl>
@@ -90,6 +95,16 @@
 #include <sstream>
 
 namespace {
+
+bool isDigitalTestbenchCell(const ice::Project &project, ice::ObjectId cellId) {
+    if (cellId == 0)
+        return false;
+    return std::any_of(project.simulations.begin(), project.simulations.end(), [&](const auto &entry) {
+        const auto &simulation = entry.second;
+        return simulation.schematic == cellId &&
+               (simulation.simulator == "iverilog" || simulation.analysis == "digital");
+    });
+}
 
 QString stageTitle(ice::ImplementationStage stage) {
     switch (stage) {
@@ -180,53 +195,6 @@ QString runStatusColor(ice::ImplementationStatus status) {
     }
     return QStringLiteral("#4b5563");
 }
-
-namespace {
-
-QString stageSummaryText(const ice::ImplementationRun *run, ice::ImplementationStage stage) {
-    if (!run)
-        return {};
-    const auto metric = [&](const char *name) -> std::optional<double> {
-        const auto found = run->metrics.find(name);
-        return found == run->metrics.end() ? std::nullopt : std::optional<double>(found->second);
-    };
-    QStringList parts;
-    if (const auto instances = metric("design__instance__count"))
-        parts << QStringLiteral("%1 instances").arg(static_cast<qulonglong>(std::max(0.0, *instances)));
-    if (stage == ice::ImplementationStage::floorplan) {
-        if (const auto die = metric("design__die__area"))
-            parts << QStringLiteral("die %1 µm²").arg(*die, 0, 'f', 0);
-        if (const auto core = metric("design__core__area"))
-            parts << QStringLiteral("core %1 µm²").arg(*core, 0, 'f', 0);
-    } else if (stage == ice::ImplementationStage::placement || stage == ice::ImplementationStage::cts) {
-        if (const auto wns = metric("timing__setup__ws")) {
-            if (std::abs(*wns) > 1.0e20)
-                parts << QStringLiteral("timing unconstrained");
-            else
-                parts << QStringLiteral("setup WNS %1 ns").arg(*wns * 1.0e9, 0, 'f', 3);
-        }
-    } else if (stage == ice::ImplementationStage::routing || stage == ice::ImplementationStage::final) {
-        if (const auto drc = metric("route__drc_errors"))
-            parts << QStringLiteral("%1 DRC").arg(static_cast<qulonglong>(std::max(0.0, *drc)));
-        if (const auto wirelength = metric("route__wirelength"))
-            parts << QStringLiteral("%1 µm wirelength").arg(*wirelength, 0, 'f', 0);
-        if (const auto vias = metric("route__vias"))
-            parts << QStringLiteral("%1 vias").arg(static_cast<qulonglong>(std::max(0.0, *vias)));
-        if (const auto antenna = metric("antenna__violating__nets"))
-            parts << QStringLiteral("%1 antenna nets").arg(static_cast<qulonglong>(std::max(0.0, *antenna)));
-        if (stage == ice::ImplementationStage::final) {
-            if (const auto wns = metric("timing__setup__ws"); wns && std::abs(*wns) <= 1.0e20)
-                parts << QStringLiteral("setup WNS %1 ns").arg(*wns * 1.0e9, 0, 'f', 3);
-            if (const auto power = metric("power__total"); power && *power >= 0.0)
-                parts << QStringLiteral("power %1 mW").arg(*power * 1.0e3, 0, 'f', 2);
-        }
-    }
-    if (parts.isEmpty())
-        return {};
-    return QStringLiteral("%1 succeeded · %2").arg(stageTitle(stage), parts.join(QStringLiteral(" · ")));
-}
-
-} // namespace
 
 std::string stageDefPath(ice::ImplementationStage stage) {
     switch (stage) {
@@ -666,12 +634,16 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     void setPreview(const std::shared_ptr<ice::Project> &project, ice::ObjectId cell, const QString &message,
                     const std::shared_ptr<ice::LayoutPreviewModel> &model = {},
                     const ice::Project *styleProject = nullptr) {
+        const bool hadSelection = selection_.valid();
+        selection_ = {};
         project_ = project;
         cell_ = cell;
         message_ = message;
         model_ = model;
         styleProject_ = styleProject ? styleProject : project.get();
         rebuild();
+        if (hadSelection && selectionCallback_)
+            selectionCallback_(selection_);
     }
 
     void setHeatMap(ice::LayoutHeatMapKind kind) {
@@ -981,6 +953,17 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::MiddleButton) {
+            panning_ = true;
+            fitOnResize_ = false;
+            panStart_ = event->pos();
+            panStartHorizontal_ = horizontalScrollBar()->value();
+            panStartVertical_ = verticalScrollBar()->value();
+            panPreviousCursor_ = cursor();
+            setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
+        }
         if (event->button() != Qt::LeftButton) {
             QGraphicsView::mousePressEvent(event);
             return;
@@ -1011,6 +994,13 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     }
 
     void mouseMoveEvent(QMouseEvent *event) override {
+        if (panning_) {
+            const auto delta = event->pos() - panStart_;
+            horizontalScrollBar()->setValue(panStartHorizontal_ - delta.x());
+            verticalScrollBar()->setValue(panStartVertical_ - delta.y());
+            event->accept();
+            return;
+        }
         const auto point = viewToModel(event->pos());
         if (statusCallback_)
             statusCallback_(point, tool_ == Tool::ruler ? QStringLiteral("Ruler: click and drag") : QString());
@@ -1018,6 +1008,12 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::MiddleButton && panning_) {
+            panning_ = false;
+            setCursor(panPreviousCursor_);
+            event->accept();
+            return;
+        }
         if (tool_ == Tool::ruler && rulerBuilding_ && event->button() == Qt::LeftButton) {
             const auto end = viewToModel(event->pos());
             if (QLineF(rulerStart_, end).length() > 0.5)
@@ -1072,6 +1068,49 @@ class ImplementationPreviewCanvas : public QGraphicsView {
 
     void paintEvent(QPaintEvent *event) override {
         QGraphicsView::paintEvent(event);
+        QPainter painter(viewport());
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        drawScaleIndicator(painter);
+        drawHeatMapLegend(painter);
+    }
+
+  private:
+    static QString formatScaleLength(qreal length) {
+        if (length >= 1000000.0)
+            return QStringLiteral("%1 mm").arg(length / 1000000.0, 0, 'g', 4);
+        if (length >= 1000.0)
+            return QStringLiteral("%1 um").arg(length / 1000.0, 0, 'g', 4);
+        if (length >= 1.0)
+            return QStringLiteral("%1 nm").arg(length, 0, 'g', 4);
+        return QStringLiteral("%1 pm").arg(length * 1000.0, 0, 'g', 4);
+    }
+
+    void drawScaleIndicator(QPainter &painter) const {
+        const auto scale = std::abs(transform().m11());
+        if (scale <= 0.0)
+            return;
+        constexpr qreal targetPixels = 100.0;
+        const qreal rawLength = targetPixels / scale;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawLength)));
+        const qreal normalized = rawLength / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const qreal length = magnitude * factor;
+        const qreal pixels = length * scale;
+
+        const qreal left = 14.0;
+        const qreal bottom = viewport()->height() - 16.0;
+        const auto color = ice::uiColor(ice::UiColor::Axis1);
+        QPen pen(color);
+        pen.setWidthF(2.0);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(left, bottom), QPointF(left + pixels, bottom));
+        painter.drawLine(QPointF(left, bottom - 5.0), QPointF(left, bottom + 1.0));
+        painter.drawLine(QPointF(left + pixels, bottom - 5.0), QPointF(left + pixels, bottom + 1.0));
+        painter.setPen(color);
+        painter.drawText(QPointF(left, bottom - 8.0), formatScaleLength(length));
+    }
+
+    void drawHeatMapLegend(QPainter &painter) const {
         if (!heatMapOptions_.showLegend)
             return;
         const auto heatmap = currentHeatMap();
@@ -1081,7 +1120,6 @@ class ImplementationPreviewCanvas : public QGraphicsView {
         const auto maximum = heatMapOptions_.maximum.value_or(heatmap->maximum);
         if (maximum <= minimum)
             return;
-        QPainter painter(viewport());
         constexpr int width = 180;
         constexpr int height = 12;
         const int left = viewport()->width() - width - 18;
@@ -1096,8 +1134,6 @@ class ImplementationPreviewCanvas : public QGraphicsView {
         painter.drawText(left, top + height + 14, QString::number(minimum, 'g', 4));
         painter.drawText(left + width - 55, top + height + 14, QString::number(maximum, 'g', 4));
     }
-
-  private:
     static QPointF scenePoint(QPointF point) { return QPointF(point.x(), -point.y()); }
     static QRectF sceneRect(QRectF rectangle) {
         return QRectF(rectangle.left(), -(rectangle.top() + rectangle.height()), rectangle.width(), rectangle.height());
@@ -1504,6 +1540,11 @@ class ImplementationPreviewCanvas : public QGraphicsView {
     std::function<void(const QPointF &, const QString &)> statusCallback_;
     std::vector<LayerEntry> layers_;
     bool fitOnResize_ = true;
+    bool panning_ = false;
+    QPoint panStart_;
+    int panStartHorizontal_ = 0;
+    int panStartVertical_ = 0;
+    QCursor panPreviousCursor_;
 };
 
 std::optional<std::filesystem::path> regularFile(const std::filesystem::path &path) {
@@ -2692,10 +2733,12 @@ void ImplementationPage::buildUi() {
             runSearch_->setPlaceholderText(QStringLiteral("Search runs…"));
             runSearch_->setClearButtonEnabled(true);
             runsLayout->addWidget(runSearch_);
-            runsTable_ = new QTableWidget(0, 2);
-            runsTable_->setHorizontalHeaderLabels({QStringLiteral("Run"), QStringLiteral("Stage")});
+            runsTable_ = new QTableWidget(0, 3);
+            runsTable_->setHorizontalHeaderLabels({QStringLiteral("Run"), QStringLiteral("Stage"), QString()});
             runsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
             runsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+            runsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+            runsTable_->setColumnWidth(2, 30);
             runsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
             runsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
             runsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2703,14 +2746,11 @@ void ImplementationPage::buildUi() {
             synthesizeButton_ = new QPushButton(QStringLiteral("Synthesize"));
             showGraphButton_ = new QPushButton(QStringLiteral("Show graph"));
             exportVerilogButton_ = new QPushButton(QStringLiteral("Export .v"));
-            removeRunButton_ = new QPushButton(QStringLiteral("Remove run"));
-            removeRunButton_->setToolTip(QStringLiteral("Delete the selected run and its build directory"));
             auto *runActions = new QGridLayout;
             runActions->setSpacing(4);
             runActions->addWidget(synthesizeButton_, 0, 0, 1, 2);
             runActions->addWidget(showGraphButton_, 1, 0);
             runActions->addWidget(exportVerilogButton_, 1, 1);
-            runActions->addWidget(removeRunButton_, 2, 0, 1, 2);
             runsLayout->addLayout(runActions);
             runsTabs_->addTab(runsPage, QStringLiteral("Runs"));
             splitter->addWidget(runsTabs_);
@@ -2722,11 +2762,6 @@ void ImplementationPage::buildUi() {
         }
         leftTabs_->addTab(explorerPage, QStringLiteral("Explorer"));
     } else {
-        if (floorplanMode()) {
-            netlistList_ = new QListWidget;
-            netlistList_->setAlternatingRowColors(true);
-            netlistList_->setToolTip(QStringLiteral("Technology-mapped netlists exported from Synthesis runs"));
-        }
         runTree_ = new QTreeWidget;
         runTree_->setHeaderLabels({QStringLiteral("Run / Stage"), QStringLiteral("Status")});
         runTree_->setRootIsDecorated(true);
@@ -2750,11 +2785,10 @@ void ImplementationPage::buildUi() {
 
                 const auto addIconButton = [&](const QString &icon, const QString &tooltip) {
                     auto *button = new QPushButton;
-                    button->setFlat(true);
-                    button->setFixedSize(22, 22);
+                    button->setFixedWidth(28);
                     button->setToolTip(tooltip);
                     button->setAccessibleName(tooltip);
-                    setLucideIcon(button, icon, 12);
+                    setLucideIcon(button, icon, 16);
                     runRow->addWidget(button);
                     return button;
                 };
@@ -2775,9 +2809,14 @@ void ImplementationPage::buildUi() {
                 hintFont.setPointSizeF(std::max(7.0, hintFont.pointSizeF() - 1.0));
                 stageHintLabel_->setFont(hintFont);
                 runsLayout->addWidget(stageHintLabel_);
+            }
+            runsLayout->addWidget(runTree_, 1);
+            if (embedded_) {
+                auto *stageActions = new QHBoxLayout;
+                stageActions->setSpacing(4);
                 auto *openGuiButton = new QPushButton(QStringLiteral("Open in OpenROAD GUI"));
                 openGuiButton->setToolTip(QStringLiteral("Open the active stage ODB in the standalone OpenROAD GUI"));
-                runsLayout->addWidget(openGuiButton);
+                stageActions->addWidget(openGuiButton, 1);
                 QObject::connect(openGuiButton, &QPushButton::clicked, this, [this] {
                     QString error;
                     if (!controller_->openInOpenRoadGui(stage_, error))
@@ -2786,7 +2825,7 @@ void ImplementationPage::buildUi() {
                 if (stage_ == ice::ImplementationStage::final) {
                     auto *importButton = new QPushButton(QStringLiteral("Import final layout"));
                     importButton->setToolTip(QStringLiteral("Import the final DEF as a layout cell"));
-                    runsLayout->addWidget(importButton);
+                    stageActions->addWidget(importButton, 1);
                     QObject::connect(importButton, &QPushButton::clicked, this, [this] {
                         const auto id = controller_->activeRunId();
                         if (id == 0)
@@ -2799,8 +2838,8 @@ void ImplementationPage::buildUi() {
                                                      QStringLiteral("The final layout was imported."));
                     });
                 }
+                runsLayout->addLayout(stageActions);
             }
-            runsLayout->addWidget(runTree_, 1);
             if (!embedded_) {
                 auto *runActions = new QHBoxLayout;
                 runActions->setSpacing(4);
@@ -2831,14 +2870,8 @@ void ImplementationPage::buildUi() {
         } else {
             leftTabs_->addTab(runTree_, QStringLiteral("Runs"));
         }
-        if (netlistList_)
-            leftTabs_->addTab(netlistList_, QStringLiteral("Netlists"));
-        artifactsList_ = new QListWidget;
-        leftTabs_->addTab(artifactsList_, QStringLiteral("Artifacts"));
         if (runsPage && embedded_)
             leftTabs_->setCurrentWidget(runsPage);
-        else if (netlistList_)
-            leftTabs_->setCurrentWidget(netlistList_);
     }
     contentLayout->addWidget(leftTabs_, 0);
 
@@ -3041,66 +3074,78 @@ void ImplementationPage::buildUi() {
         });
         previewCanvas_ = new ImplementationPreviewCanvas;
         previewLayout->addWidget(previewCanvas_, 1);
-        auto *toolRow = new QHBoxLayout;
-        toolRow->setContentsMargins(6, 4, 6, 0);
-        const auto addToolButton = [&](const QString &text, const QString &tooltip) {
-            auto *button = new QPushButton(text);
-            button->setFlat(true);
-            button->setToolTip(tooltip);
-            toolRow->addWidget(button);
-            return button;
-        };
-        auto *fitButton = addToolButton(QStringLiteral("Fit"), QStringLiteral("Fit the layout"));
-        auto *zoomInButton = addToolButton(QStringLiteral("+"), QStringLiteral("Zoom in"));
-        auto *zoomOutButton = addToolButton(QStringLiteral("−"), QStringLiteral("Zoom out"));
-        auto *rulerButton = addToolButton(QStringLiteral("Ruler"), QStringLiteral("Draw a ruler"));
-        rulerButton->setCheckable(true);
-        auto *labelButton = addToolButton(QStringLiteral("Label"), QStringLiteral("Place a text label"));
-        labelButton->setCheckable(true);
-        auto *clearAnnotationsButton =
-            addToolButton(QStringLiteral("Clear"), QStringLiteral("Clear rulers and labels"));
-        auto *saveImageButton = addToolButton(QStringLiteral("Save image"), QStringLiteral("Save the visible preview"));
-        auto *findButton = addToolButton(QStringLiteral("Find"), QStringLiteral("Find an instance, port, or net"));
-        toolRow->addStretch(1);
-        previewLayout->insertLayout(0, toolRow);
         previewCoordinateLabel_ = new QLabel;
         previewCoordinateLabel_->setContentsMargins(6, 0, 6, 2);
         previewCoordinateLabel_->setStyleSheet(
             QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
         previewLayout->addWidget(previewCoordinateLabel_);
-        QObject::connect(fitButton, &QPushButton::clicked, this, [this] {
+
+        auto *previewToolbar = new QToolBar(QStringLiteral("Preview tools"), this);
+        previewToolbar->setMovable(false);
+        previewToolbar->setIconSize(QSize(18, 18));
+        previewToolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        previewToolbar->setOrientation(Qt::Vertical);
+        previewToolbar->setAccessibleName(QStringLiteral("Physical preview toolbar"));
+        const auto addPreviewTool = [previewToolbar](const QString &iconName, const QString &name) {
+            auto *action = previewToolbar->addAction(name);
+            setLucideIcon(action, iconName);
+            action->setToolTip(name);
+            action->setStatusTip(name);
+            return action;
+        };
+        auto *fitTool = addPreviewTool(QStringLiteral("scan"), QStringLiteral("Fit to view"));
+        auto *zoomInTool = addPreviewTool(QStringLiteral("plus"), QStringLiteral("Zoom in"));
+        auto *zoomOutTool = addPreviewTool(QStringLiteral("minus"), QStringLiteral("Zoom out"));
+        previewToolbar->addSeparator();
+        auto *rulerTool = addPreviewTool(QStringLiteral("ruler"), QStringLiteral("Draw a ruler"));
+        rulerTool->setCheckable(true);
+        auto *labelTool = addPreviewTool(QStringLiteral("tag"), QStringLiteral("Place a text label"));
+        labelTool->setCheckable(true);
+        auto *clearAnnotationsTool = addPreviewTool(QStringLiteral("trash"), QStringLiteral("Clear rulers and labels"));
+        previewToolbar->addSeparator();
+        auto *saveImageTool = addPreviewTool(QStringLiteral("download"), QStringLiteral("Save image"));
+        auto *findTool = addPreviewTool(QStringLiteral("microscope"), QStringLiteral("Find an instance, port, or net"));
+        auto *previewToolbarColumn = new QWidget;
+        auto *previewToolbarLayout = new QVBoxLayout(previewToolbarColumn);
+        previewToolbarLayout->setContentsMargins(0, 0, 0, 0);
+        previewToolbarLayout->addStretch(1);
+        previewToolbarLayout->addWidget(previewToolbar, 0, Qt::AlignHCenter);
+        previewToolbarLayout->addStretch(1);
+        contentLayout->addWidget(previewToolbarColumn, 0);
+
+        QObject::connect(fitTool, &QAction::triggered, this, [this] {
             if (previewCanvas_)
                 previewCanvas_->fitView();
         });
-        QObject::connect(zoomInButton, &QPushButton::clicked, this, [this] {
+        QObject::connect(zoomInTool, &QAction::triggered, this, [this] {
             if (previewCanvas_)
                 previewCanvas_->zoomIn();
         });
-        QObject::connect(zoomOutButton, &QPushButton::clicked, this, [this] {
+        QObject::connect(zoomOutTool, &QAction::triggered, this, [this] {
             if (previewCanvas_)
                 previewCanvas_->zoomOut();
         });
-        QObject::connect(rulerButton, &QPushButton::toggled, this, [this, labelButton](bool checked) {
+        QObject::connect(rulerTool, &QAction::toggled, this, [this, labelTool](bool checked) {
             if (!previewCanvas_)
                 return;
-            if (checked)
-                labelButton->setChecked(false);
+            if (checked && labelTool->isChecked())
+                labelTool->setChecked(false);
             previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::ruler
                                             : ImplementationPreviewCanvas::Tool::none);
         });
-        QObject::connect(labelButton, &QPushButton::toggled, this, [this, rulerButton](bool checked) {
+        QObject::connect(labelTool, &QAction::toggled, this, [this, rulerTool](bool checked) {
             if (!previewCanvas_)
                 return;
-            if (checked)
-                rulerButton->setChecked(false);
+            if (checked && rulerTool->isChecked())
+                rulerTool->setChecked(false);
             previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::label
                                             : ImplementationPreviewCanvas::Tool::none);
         });
-        QObject::connect(clearAnnotationsButton, &QPushButton::clicked, this, [this] {
+        QObject::connect(clearAnnotationsTool, &QAction::triggered, this, [this] {
             if (previewCanvas_)
                 previewCanvas_->clearAnnotations();
         });
-        QObject::connect(saveImageButton, &QPushButton::clicked, this, [this] {
+        QObject::connect(saveImageTool, &QAction::triggered, this, [this] {
             if (!previewCanvas_)
                 return;
             const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Save preview"),
@@ -3109,7 +3154,7 @@ void ImplementationPage::buildUi() {
             if (!path.isEmpty())
                 previewCanvas_->saveImage(path);
         });
-        QObject::connect(findButton, &QPushButton::clicked, this, [this] {
+        QObject::connect(findTool, &QAction::triggered, this, [this] {
             if (!previewCanvas_)
                 return;
             bool accepted = false;
@@ -3223,11 +3268,6 @@ void ImplementationPage::buildUi() {
         artifactsLayout->addWidget(artifactsList_, 1);
         rightTabs_->addTab(artifactsPage, QStringLiteral("Artifacts"));
     } else {
-        propertiesTree_ = new QTreeWidget;
-        propertiesTree_->setHeaderLabels({QStringLiteral("Property"), QStringLiteral("Value")});
-        propertiesTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        propertiesTree_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-        rightTabs_->addTab(propertiesTree_, QStringLiteral("Properties"));
         metricsTable_ = new QTableWidget(0, 2);
         metricsTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
         metricsTable_->horizontalHeader()->setStretchLastSection(false);
@@ -3242,53 +3282,6 @@ void ImplementationPage::buildUi() {
         inspectorTree_->setHeaderLabels({QStringLiteral("Property"), QStringLiteral("Value")});
         inspectorTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         inspectorTree_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-        rightTabs_->addTab(inspectorTree_, QStringLiteral("Inspector"));
-        drcTable_ = new QTableWidget(0, 3);
-        drcTable_->setHorizontalHeaderLabels(
-            {QStringLiteral("Type"), QStringLiteral("Layer"), QStringLiteral("Sources")});
-        drcTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        drcTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        drcTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-        drcTable_->verticalHeader()->setVisible(false);
-        drcTable_->setAlternatingRowColors(true);
-        drcTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        rightTabs_->addTab(drcTable_, QStringLiteral("DRC"));
-        timingTable_ = new QTableWidget(0, 2);
-        timingTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
-        timingTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        timingTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        timingTable_->verticalHeader()->setVisible(false);
-        timingTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        auto *timingPage = new QWidget;
-        auto *timingLayout = new QVBoxLayout(timingPage);
-        timingLayout->setContentsMargins(4, 4, 4, 4);
-        auto *timingButton = new QPushButton(QStringLiteral("Generate timing report"));
-        timingButton->setToolTip(QStringLiteral("Run OpenROAD STA and show the worst setup/hold paths"));
-        timingLayout->addWidget(timingButton);
-        timingLayout->addWidget(timingTable_, 1);
-        timingReportView_ = new QPlainTextEdit;
-        timingReportView_->setReadOnly(true);
-        timingReportView_->setPlaceholderText(QStringLiteral("Generate a report to inspect worst paths."));
-        timingLayout->addWidget(timingReportView_, 1);
-        rightTabs_->addTab(timingPage, QStringLiteral("Timing"));
-        QObject::connect(timingButton, &QPushButton::clicked, this, [this] {
-            QString error;
-            const auto report = controller_->timingReport(stage_, error);
-            if (timingReportView_)
-                timingReportView_->setPlainText(report.isEmpty() ? error : report);
-            if (!error.isEmpty())
-                QMessageBox::warning(this, QStringLiteral("Timing report"), error);
-        });
-        clockTree_ = new QTreeWidget;
-        clockTree_->setHeaderLabels({QStringLiteral("Clock net"), QStringLiteral("Pins")});
-        clockTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-        clockTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        rightTabs_->addTab(clockTree_, QStringLiteral("Clock"));
-        hierarchyTree_ = new QTreeWidget;
-        hierarchyTree_->setHeaderLabels({QStringLiteral("Module"), QStringLiteral("Instances")});
-        hierarchyTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-        hierarchyTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        rightTabs_->addTab(hierarchyTree_, QStringLiteral("Hierarchy"));
         if (physicalStageMode()) {
             auto *formPage = new QWidget;
             auto *outer = new QVBoxLayout(formPage);
@@ -3420,8 +3413,18 @@ void ImplementationPage::buildUi() {
             applyStageButton_ = new QPushButton(QStringLiteral("Apply %1 settings").arg(stageTitle(stage_)));
             outer->addWidget(applyStageButton_);
             outer->addStretch(1);
-            const auto settingsIndex = rightTabs_->addTab(formPage, stageTitle(stage_));
-            rightTabs_->tabBar()->moveTab(settingsIndex, 0);
+            auto *formScroll = new QScrollArea;
+            formScroll->setFrameShape(QFrame::NoFrame);
+            formScroll->setWidgetResizable(true);
+            formScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            formScroll->setWidget(formPage);
+            rightInspectorStack_ = new QStackedWidget;
+            rightInspectorStack_->addWidget(formScroll);
+            rightInspectorStack_->addWidget(inspectorTree_);
+            const auto inspectorIndex = rightTabs_->addTab(rightInspectorStack_, QStringLiteral("Properties"));
+            rightTabs_->setTabToolTip(
+                inspectorIndex, QStringLiteral("Stage settings, or selection details when an object is selected."));
+            rightTabs_->tabBar()->moveTab(inspectorIndex, 0);
             rightTabs_->setCurrentIndex(0);
         }
     }
@@ -3541,47 +3544,30 @@ void ImplementationPage::buildUi() {
             if (id != 0 && exportVerilogCallback_)
                 exportVerilogCallback_(id);
         });
-        QObject::connect(removeRunButton_, &QPushButton::clicked, this, [this] {
-            const auto id = actionRunId();
-            if (id != 0 && removeRunCallback_)
-                removeRunCallback_(id);
-        });
     } else {
-        QObject::connect(runTree_, &QTreeWidget::currentItemChanged, this,
-                         [this](QTreeWidgetItem *item, QTreeWidgetItem *) {
-                             if (!item)
-                                 return;
-                             const auto value = item->data(0, Qt::UserRole);
-                             const auto stageValue = item->data(0, Qt::UserRole + 1);
-                             if (!value.isValid())
-                                 return;
-                             controller_->setActiveRunId(static_cast<ice::ObjectId>(value.toULongLong()));
-                             if (stageValue.isValid() && stageActivatedCallback_)
-                                 stageActivatedCallback_(static_cast<ice::ImplementationStage>(stageValue.toInt()));
-                         });
-        if (netlistList_) {
-            QObject::connect(netlistList_, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        QObject::connect(
+            runTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *) {
                 if (!item)
                     return;
-                const auto id = static_cast<ice::ObjectId>(item->data(Qt::UserRole).toULongLong());
-                if (id != 0)
-                    controller_->setActiveRunId(id);
-            });
-            QObject::connect(netlistList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-                if (!item)
+                const auto value = item->data(0, Qt::UserRole);
+                if (!value.isValid())
                     return;
-                const auto id = static_cast<ice::ObjectId>(item->data(Qt::UserRole).toULongLong());
-                if (id != 0)
-                    controller_->setActiveRunId(id);
+                const auto runId = static_cast<ice::ObjectId>(value.toULongLong());
+                const auto stageValue = item->data(0, Qt::UserRole + 1);
+                const auto stage = stageValue.isValid() ? std::optional<ice::ImplementationStage>(
+                                                              static_cast<ice::ImplementationStage>(stageValue.toInt()))
+                                                        : std::nullopt;
+                if (runSelectionCallback_)
+                    runSelectionCallback_(runId, stage);
+                // Rebuilding the runs trees while Qt is emitting
+                // currentItemChanged deletes the selected item.
+                // Apply the active-run change once the signal has
+                // finished so the rebuilt trees can restore it.
+                QTimer::singleShot(0, this, [this, runId] {
+                    if (controller_ && controller_->activeRunId() != runId)
+                        controller_->setActiveRunId(runId);
+                });
             });
-        }
-        QObject::connect(artifactsList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-            if (!item)
-                return;
-            const auto path = item->data(Qt::UserRole).toString();
-            if (!path.isEmpty())
-                openArtifact(path);
-        });
         if (displayTree_) {
             QObject::connect(displayTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int) {
                 if (!previewCanvas_ || !item)
@@ -3605,12 +3591,6 @@ void ImplementationPage::buildUi() {
                     previewCanvas_->setShowRows(visible);
                 else if (group == QStringLiteral("option") && key == QStringLiteral("blockages"))
                     previewCanvas_->setShowBlockages(visible);
-            });
-        }
-        if (drcTable_) {
-            QObject::connect(drcTable_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
-                if (previewCanvas_ && row >= 0)
-                    previewCanvas_->selectMarker(row);
             });
         }
         if (runStageButton_) {
@@ -3653,7 +3633,26 @@ void ImplementationPage::buildUi() {
 }
 
 void ImplementationPage::refreshRunTree() {
+    if (!runTree_)
+        return;
     refreshRunCombo();
+
+    // Keep the user's row selected across refreshes. Rebuilding the tree
+    // unconditionally used to snap the selection back to the run row while a
+    // stage was being activated.
+    ice::ObjectId previousRunId = 0;
+    std::optional<ice::ImplementationStage> previousStage;
+    if (const auto *current = runTree_->currentItem()) {
+        previousRunId = static_cast<ice::ObjectId>(current->data(0, Qt::UserRole).toULongLong());
+        const auto stageValue = current->data(0, Qt::UserRole + 1);
+        if (stageValue.isValid())
+            previousStage = static_cast<ice::ImplementationStage>(stageValue.toInt());
+    }
+
+    const auto activeRunId = controller_->activeRunId();
+    const bool activeRunChanged = activeRunId != lastRunTreeActiveRunId_;
+    lastRunTreeActiveRunId_ = activeRunId;
+
     QSignalBlocker blocker(runTree_);
     runTree_->clear();
     const auto *project = controller_->project();
@@ -3664,9 +3663,11 @@ void ImplementationPage::refreshRunTree() {
                stage == ice::ImplementationStage::cts || stage == ice::ImplementationStage::routing ||
                stage == ice::ImplementationStage::final;
     };
-    QTreeWidgetItem *activeItem = nullptr;
+    std::map<ice::ObjectId, QTreeWidgetItem *> runItems;
+    std::map<std::pair<ice::ObjectId, ice::ImplementationStage>, QTreeWidgetItem *> stageItems;
     for (const auto &[id, run] : project->implementationRuns) {
         auto *item = new QTreeWidgetItem(runTree_);
+        runItems.emplace(id, item);
         item->setText(0, QString::fromStdString(run.name));
         item->setData(0, Qt::UserRole, static_cast<qulonglong>(id));
         item->setText(1, runStatusText(run.status));
@@ -3681,6 +3682,7 @@ void ImplementationPage::refreshRunTree() {
             if (state == run.stages.end())
                 continue;
             auto *stageItem = new QTreeWidgetItem(item);
+            stageItems.emplace(std::make_pair(id, stage), stageItem);
             stageItem->setText(0, stageTitle(stage));
             stageItem->setData(0, Qt::UserRole, static_cast<qulonglong>(id));
             stageItem->setData(0, Qt::UserRole + 1, static_cast<int>(stage));
@@ -3689,12 +3691,68 @@ void ImplementationPage::refreshRunTree() {
             if (!state->second.error.empty())
                 stageItem->setToolTip(0, QString::fromStdString(state->second.error));
         }
-        item->setExpanded(id == controller_->activeRunId());
-        if (id == controller_->activeRunId())
-            activeItem = item;
+        item->setExpanded(id == activeRunId);
     }
-    if (activeItem)
-        runTree_->setCurrentItem(activeItem);
+
+    QTreeWidgetItem *selection = nullptr;
+    if (previousRunId != 0 && (!activeRunChanged || previousRunId == activeRunId)) {
+        if (previousStage) {
+            const auto stageItem = stageItems.find({previousRunId, *previousStage});
+            if (stageItem != stageItems.end())
+                selection = stageItem->second;
+        }
+        if (!selection) {
+            const auto runItem = runItems.find(previousRunId);
+            if (runItem != runItems.end())
+                selection = runItem->second;
+        }
+    }
+    if (!selection) {
+        const auto activeStage = stageItems.find({activeRunId, stage_});
+        if (activeStage != stageItems.end())
+            selection = activeStage->second;
+    }
+    if (!selection) {
+        const auto activeItem = runItems.find(activeRunId);
+        if (activeItem != runItems.end())
+            selection = activeItem->second;
+    }
+    if (selection) {
+        if (auto *parent = selection->parent())
+            parent->setExpanded(true);
+        runTree_->setCurrentItem(selection);
+        runTree_->scrollToItem(selection);
+    }
+}
+
+void ImplementationPage::selectRunStage(ice::ObjectId runId, std::optional<ice::ImplementationStage> stage) {
+    if (!runTree_ || runId == 0)
+        return;
+    QTreeWidgetItem *runItem = nullptr;
+    for (int index = 0; index < runTree_->topLevelItemCount(); ++index) {
+        auto *candidate = runTree_->topLevelItem(index);
+        if (static_cast<ice::ObjectId>(candidate->data(0, Qt::UserRole).toULongLong()) == runId) {
+            runItem = candidate;
+            break;
+        }
+    }
+    if (!runItem)
+        return;
+    QSignalBlocker blocker(runTree_);
+    QTreeWidgetItem *selection = runItem;
+    if (stage) {
+        for (int index = 0; index < runItem->childCount(); ++index) {
+            auto *stageItem = runItem->child(index);
+            const auto value = stageItem->data(0, Qt::UserRole + 1);
+            if (value.isValid() && static_cast<ice::ImplementationStage>(value.toInt()) == *stage) {
+                selection = stageItem;
+                break;
+            }
+        }
+    }
+    runItem->setExpanded(true);
+    runTree_->setCurrentItem(selection);
+    runTree_->scrollToItem(selection);
 }
 
 void ImplementationPage::refreshRunCombo() {
@@ -3722,66 +3780,6 @@ void ImplementationPage::refreshRunCombo() {
     }
     runCombo_->setEnabled(true);
     runCombo_->setCurrentIndex(activeIndex >= 0 ? activeIndex : 0);
-}
-
-void ImplementationPage::refreshNetlistExplorer() {
-    if (!netlistList_)
-        return;
-    QSignalBlocker blocker(netlistList_);
-    netlistList_->clear();
-    const auto *project = controller_->project();
-    if (!project)
-        return;
-    const auto root = std::filesystem::path(controller_->projectRoot().toStdString());
-    struct Entry {
-        std::string display;
-        std::string path;
-        ice::ObjectId run = 0;
-    };
-    std::vector<Entry> entries;
-    std::set<std::string> seen;
-    const auto addNetlist = [&](const std::filesystem::path &path, ice::ObjectId runId) {
-        std::error_code status;
-        if (path.empty() || !std::filesystem::is_regular_file(path, status) || status)
-            return;
-        const auto normalized = path.lexically_normal().generic_string();
-        if (!seen.insert(normalized).second)
-            return;
-        const auto relative = path.lexically_relative(root);
-        const auto display =
-            !relative.empty() && !relative.generic_string().starts_with("..") ? relative.generic_string() : normalized;
-        entries.push_back({display, normalized, runId});
-    };
-    for (const auto &[id, run] : project->implementationRuns) {
-        if (!run.directory.empty())
-            addNetlist(root / run.directory / ice::implementationMappedNetlistRelativePath(), id);
-        // Exported copies are recorded on the run as well.
-        for (const auto &artifact : run.artifacts) {
-            if (!artifact.ends_with(".v") || artifact.ends_with("/synth/1_synth.v") ||
-                artifact.find("/final/") != std::string::npos)
-                continue;
-            std::filesystem::path path(artifact);
-            if (path.is_relative())
-                path = root / path;
-            addNetlist(path, id);
-        }
-    }
-    std::sort(entries.begin(), entries.end(),
-              [](const Entry &left, const Entry &right) { return left.display < right.display; });
-    for (const auto &entry : entries) {
-        auto *item = new QListWidgetItem(QString::fromStdString(entry.display));
-        item->setData(Qt::UserRole, static_cast<qulonglong>(entry.run));
-        item->setToolTip(QString::fromStdString(entry.path));
-        netlistList_->addItem(item);
-        if (entry.run == controller_->activeRunId())
-            netlistList_->setCurrentItem(item);
-    }
-    if (entries.empty()) {
-        auto *item = new QListWidgetItem(QStringLiteral("No technology-mapped netlists yet."));
-        item->setFlags(Qt::NoItemFlags);
-        item->setToolTip(QStringLiteral("Run Synthesize, then Export .v in the Synthesis tab."));
-        netlistList_->addItem(item);
-    }
 }
 
 void ImplementationPage::refreshStageForm() {
@@ -3925,6 +3923,7 @@ void ImplementationPage::updateStageActions() {
     if (applyStageButton_)
         applyStageButton_->setEnabled(run && !busy);
     if (stageHintLabel_) {
+        stageHintLabel_->setVisible(true);
         if (busy) {
             stageHintLabel_->setText(QStringLiteral("Running %1…").arg(stageTitle(controller_->runningStage())));
             stageHintLabel_->setStyleSheet(QStringLiteral("color: #2563eb;"));
@@ -3943,10 +3942,8 @@ void ImplementationPage::updateStageActions() {
                 stageHintLabel_->setText(message);
                 stageHintLabel_->setStyleSheet(QStringLiteral("color: #b91c1c;"));
             } else if (statusValue == ice::ImplementationStageStatus::succeeded) {
-                const auto summary = stageSummaryText(run, stage_);
-                stageHintLabel_->setText(summary.isEmpty() ? QStringLiteral("%1 succeeded.").arg(stageTitle(stage_))
-                                                           : summary);
-                stageHintLabel_->setStyleSheet(QStringLiteral("color: #15803d;"));
+                stageHintLabel_->clear();
+                stageHintLabel_->setVisible(false);
             } else {
                 stageHintLabel_->setText(hint);
                 stageHintLabel_->setStyleSheet(ready ? QStringLiteral("color: #15803d;")
@@ -4047,13 +4044,14 @@ void ImplementationPage::refreshSynthesisExplorer() {
     };
     std::vector<Entry> entries;
     for (const auto &[id, cell] : project->schematicCells) {
-        if (cell.systemVerilogSchematic)
+        if (cell.systemVerilogSchematic && !isDigitalTestbenchCell(*project, id))
             entries.push_back({id, cell.name});
     }
     std::sort(entries.begin(), entries.end(),
               [](const Entry &left, const Entry &right) { return left.name < right.name; });
     if (activeHdlCellId_ == 0 || !project->schematicCells.contains(activeHdlCellId_) ||
-        !project->schematicCells.at(activeHdlCellId_).systemVerilogSchematic)
+        !project->schematicCells.at(activeHdlCellId_).systemVerilogSchematic ||
+        isDigitalTestbenchCell(*project, activeHdlCellId_))
         activeHdlCellId_ = entries.empty() ? 0 : entries.front().id;
     int activeRow = -1;
     for (const auto &entry : entries) {
@@ -4270,6 +4268,27 @@ void ImplementationPage::refreshRunsTable() {
         runsTable_->setItem(row, 0, runItem);
         const auto &run = project->implementationRuns.at(id);
         runsTable_->setItem(row, 1, new QTableWidgetItem(runStageLabel(run)));
+        auto *removeButton = new QPushButton;
+        removeButton->setFlat(true);
+        removeButton->setFixedSize(20, 20);
+        removeButton->setFocusPolicy(Qt::NoFocus);
+        setLucideIcon(removeButton, QStringLiteral("trash"), 12);
+        const bool removable = !controller_->busy() && run.status != ice::ImplementationStatus::running;
+        removeButton->setEnabled(removable);
+        removeButton->setToolTip(removable ? QStringLiteral("Remove run and delete its build directory")
+                                           : QStringLiteral("Cannot remove a running run"));
+        removeButton->setAccessibleName(QStringLiteral("Remove run %1").arg(QString::fromStdString(run.name)));
+        QObject::connect(removeButton, &QPushButton::clicked, this, [this, id] {
+            if (removeRunCallback_)
+                removeRunCallback_(id);
+        });
+        auto *removeCell = new QWidget;
+        auto *removeCellLayout = new QHBoxLayout(removeCell);
+        removeCellLayout->setContentsMargins(0, 0, 0, 0);
+        removeCellLayout->addStretch(1);
+        removeCellLayout->addWidget(removeButton, 0, Qt::AlignCenter);
+        removeCellLayout->addStretch(1);
+        runsTable_->setCellWidget(row, 2, removeCell);
         if (id == selected)
             selectedRow = row;
     }
@@ -4323,8 +4342,6 @@ void ImplementationPage::updateRunActions() {
         synthesizeButton_->setEnabled(false);
         showGraphButton_->setEnabled(false);
         exportVerilogButton_->setEnabled(false);
-        if (removeRunButton_)
-            removeRunButton_->setEnabled(false);
         return;
     }
     const auto stageStatus = [&](ice::ImplementationStage stage) {
@@ -4339,8 +4356,6 @@ void ImplementationPage::updateRunActions() {
     synthesizeButton_->setEnabled(elaborated && !busy);
     showGraphButton_->setEnabled((elaborated || synthesized) && !busy);
     exportVerilogButton_->setEnabled(synthesized && !busy);
-    if (removeRunButton_)
-        removeRunButton_->setEnabled(!busy && run->status != ice::ImplementationStatus::running);
 }
 
 void ImplementationPage::showRunGraph(ice::ObjectId runId) {
@@ -4800,74 +4815,10 @@ void ImplementationPage::refreshIpLibraries() {
 }
 
 void ImplementationPage::refreshProperties() {
-    if (hdlMode()) {
-        refreshOutline();
-        refreshIpLibraries();
+    if (!hdlMode())
         return;
-    }
-    QSignalBlocker blocker(propertiesTree_);
-    propertiesTree_->clear();
-    const auto section = [&](const QString &title) {
-        auto *item = new QTreeWidgetItem(propertiesTree_);
-        item->setText(0, title);
-        item->setFirstColumnSpanned(true);
-        auto font = item->font(0);
-        font.setBold(true);
-        item->setFont(0, font);
-        return item;
-    };
-    const auto value = [](QTreeWidgetItem *parent, const QString &key, const QString &text) {
-        auto *item = new QTreeWidgetItem(parent);
-        item->setText(0, key);
-        item->setText(1, text);
-        item->setToolTip(1, text);
-    };
-
-    const auto *run = controller_->activeRun();
-    if (!run)
-        return;
-    auto *runItem = section(QStringLiteral("Run"));
-    value(runItem, QStringLiteral("Name"), QString::fromStdString(run->name));
-    value(runItem, QStringLiteral("Top"), QString::fromStdString(run->config.top));
-    value(runItem, QStringLiteral("PDK"), QString::fromStdString(run->config.pdk));
-    value(runItem, QStringLiteral("Stack"), QString::fromStdString(run->config.stack));
-    value(runItem, QStringLiteral("Status"), runStatusText(run->status));
-    value(runItem, QStringLiteral("Current stage"), stageTitle(run->currentStage));
-    value(runItem, QStringLiteral("Directory"), QString::fromStdString(run->directory));
-    value(runItem, QStringLiteral("Config hash"), QString::fromStdString(run->configHash));
-    if (run->resultLayout != 0)
-        value(runItem, QStringLiteral("Layout"), QString::number(run->resultLayout));
-
-    const auto state = run->stages.find(stage_);
-    if (state != run->stages.end()) {
-        auto *stageItem = section(stageTitle(stage_));
-        value(stageItem, QStringLiteral("Status"), statusText(state->second.status));
-        value(stageItem, QStringLiteral("Started"), QString::fromStdString(state->second.startedAt));
-        value(stageItem, QStringLiteral("Finished"), QString::fromStdString(state->second.finishedAt));
-        value(stageItem, QStringLiteral("Artifacts"), QString::number(state->second.artifacts.size()));
-        if (!state->second.error.empty())
-            value(stageItem, QStringLiteral("Error"), QString::fromStdString(state->second.error));
-    }
-
-    if (!run->toolVersions.empty()) {
-        auto *toolsItem = section(QStringLiteral("Tools"));
-        for (const auto &[name, version] : run->toolVersions)
-            value(toolsItem, QString::fromStdString(name), QString::fromStdString(version));
-    }
-
-    auto *settingsItem = section(QStringLiteral("Settings"));
-    value(settingsItem, QStringLiteral("Corner"), QString::fromStdString(run->config.corner));
-    value(settingsItem, QStringLiteral("Threads"), QString::number(run->config.threads));
-    value(settingsItem, QStringLiteral("Timeout (s)"), QString::number(run->config.timeoutSeconds));
-    value(settingsItem, QStringLiteral("Utilization"), QString::number(run->config.utilization, 'g', 6));
-    value(settingsItem, QStringLiteral("Aspect ratio"), QString::number(run->config.aspectRatio, 'g', 6));
-    value(settingsItem, QStringLiteral("CTS"),
-          run->config.ctsEnabled ? QStringLiteral("Enabled") : QStringLiteral("Disabled"));
-    if (!run->config.routingMinLayer.empty())
-        value(settingsItem, QStringLiteral("Routing min"), QString::fromStdString(run->config.routingMinLayer));
-    if (!run->config.routingMaxLayer.empty())
-        value(settingsItem, QStringLiteral("Routing max"), QString::fromStdString(run->config.routingMaxLayer));
-    propertiesTree_->expandAll();
+    refreshOutline();
+    refreshIpLibraries();
 }
 
 void ImplementationPage::refresh() {
@@ -4883,23 +4834,20 @@ void ImplementationPage::refresh() {
         refreshArtifacts();
         return;
     }
-    refreshNetlistExplorer();
     refreshRunTree();
     refreshStageForm();
     updateStageActions();
     const auto *run = controller_->activeRun();
     if (!run) {
         metricsTable_->setRowCount(0);
-        artifactsList_->clear();
         if (previewCanvas_)
             previewCanvas_->setPreview({}, 0, QStringLiteral("Select an implementation run in the Runs panel."), {},
                                        controller_->project());
-        refreshProperties();
+        refreshInspector();
+        refreshTiming();
         return;
     }
     refreshMetrics();
-    refreshArtifacts();
-    refreshProperties();
     if (isVisible())
         refreshPreview();
 }
@@ -4962,6 +4910,8 @@ void ImplementationPage::refreshMetrics() {
 }
 
 void ImplementationPage::refreshArtifacts() {
+    if (!artifactsList_)
+        return;
     artifactsList_->clear();
     const auto *run = controller_->activeRun();
     if (!run)
@@ -5115,17 +5065,12 @@ void ImplementationPage::refreshInspector() {
         return;
     QSignalBlocker blocker(inspectorTree_);
     inspectorTree_->clear();
-    if (!previewCanvas_) {
+    const auto selection = previewCanvas_ ? previewCanvas_->selection() : ImplementationPreviewCanvas::Selection{};
+    const bool hasSelection = selection.valid();
+    if (rightInspectorStack_)
+        rightInspectorStack_->setCurrentIndex(hasSelection ? 1 : 0);
+    if (!hasSelection)
         return;
-    }
-    const auto selection = previewCanvas_->selection();
-    if (!selection.valid()) {
-        auto *item = new QTreeWidgetItem(inspectorTree_);
-        item->setText(0, QStringLiteral("Select an object in the canvas."));
-        item->setFirstColumnSpanned(true);
-        item->setFlags(Qt::NoItemFlags);
-        return;
-    }
     const auto add = [&](const QString &name, const QString &value) {
         auto *item = new QTreeWidgetItem(inspectorTree_);
         item->setText(0, name);
@@ -5165,122 +5110,75 @@ void ImplementationPage::refreshInspector() {
     inspectorTree_->expandAll();
 }
 
+bool ImplementationPage::selectDrcMarker(int index) {
+    if (!previewCanvas_ || index < 0 || index >= static_cast<int>(previewCanvas_->drcMarkers().size()))
+        return false;
+    previewCanvas_->selectMarker(index);
+    return true;
+}
+
 void ImplementationPage::refreshDrc() {
-    if (!drcTable_)
+    if (!drcReportCallback_)
         return;
-    drcTable_->setRowCount(0);
-    if (!previewCanvas_)
-        return;
-    const auto markers = previewCanvas_->drcMarkers();
-    for (int row = 0; row < static_cast<int>(markers.size()); ++row) {
-        const auto &marker = markers[static_cast<std::size_t>(row)];
-        drcTable_->insertRow(row);
-        drcTable_->setItem(row, 0, new QTableWidgetItem(marker.type));
-        drcTable_->setItem(row, 1, new QTableWidgetItem(marker.layer));
-        auto *sources = new QTableWidgetItem(marker.sources);
-        sources->setToolTip(marker.comment.isEmpty() ? marker.sources : marker.comment);
-        drcTable_->setItem(row, 2, sources);
+    ice::VerificationReport report;
+    if (previewCanvas_) {
+        const auto markers = previewCanvas_->drcMarkers();
+        const auto *run = controller_->activeRun();
+        auto cellName = run ? QString::fromStdString(run->config.top) : QString();
+        if (cellName.isEmpty() && run)
+            cellName = QString::fromStdString(run->name);
+        report.drc.reserve(markers.size());
+        for (int index = 0; index < static_cast<int>(markers.size()); ++index) {
+            const auto &marker = markers[static_cast<std::size_t>(index)];
+            ice::DrcViolation violation;
+            violation.severity = ice::VerificationSeverity::error;
+            violation.rule = marker.type.toStdString();
+            QStringList details;
+            if (!marker.comment.isEmpty())
+                details << marker.comment;
+            if (!marker.sources.isEmpty() && marker.sources != marker.comment)
+                details << marker.sources;
+            if (!marker.layer.isEmpty())
+                details << QStringLiteral("Layer %1").arg(marker.layer);
+            violation.message = details.join(QStringLiteral(" · ")).toStdString();
+            violation.cell = cellName.toStdString();
+            // The bottom DRC report uses this to select the matching marker
+            // when its row is activated.
+            violation.object = static_cast<ice::ObjectId>(index);
+            const auto rectangle = marker.rectangle.normalized();
+            violation.location = {
+                static_cast<ice::Coordinate>(std::llround(rectangle.left())),
+                static_cast<ice::Coordinate>(std::llround(rectangle.top())),
+                static_cast<ice::Coordinate>(std::llround(rectangle.width())),
+                static_cast<ice::Coordinate>(std::llround(rectangle.height())),
+            };
+            report.drc.push_back(std::move(violation));
+        }
     }
-    if (markers.empty()) {
-        drcTable_->insertRow(0);
-        auto *item = new QTableWidgetItem(QStringLiteral("No DRC markers."));
-        item->setFlags(Qt::NoItemFlags);
-        drcTable_->setItem(0, 0, item);
-        drcTable_->setSpan(0, 0, 1, 3);
-    }
+    drcReportCallback_(report, stageTitle(stage_));
 }
 
 void ImplementationPage::refreshTiming() {
-    if (!timingTable_)
-        return;
-    timingTable_->setRowCount(0);
+    std::vector<std::pair<QString, QString>> metrics;
     const auto *run = controller_->activeRun();
-    if (!run)
-        return;
-    int row = 0;
-    const auto add = [&](const QString &name, const QString &value) {
-        timingTable_->insertRow(row);
-        timingTable_->setItem(row, 0, new QTableWidgetItem(name));
-        auto *item = new QTableWidgetItem(value);
-        item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        timingTable_->setItem(row, 1, item);
-        ++row;
-    };
-    for (const auto &[name, value] : run->metrics) {
-        if (name.starts_with("timing__")) {
-            if (std::abs(value) > 1.0e20)
-                add(QString::fromStdString(name), QStringLiteral("unconstrained"));
-            else
-                add(QString::fromStdString(name), QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4));
-        } else if (name.starts_with("power__")) {
-            add(QString::fromStdString(name), QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4));
-        } else if (name == "route__drc_errors") {
-            add(QString::fromStdString(name), QString::number(value, 'g', 8));
-        } else if (name.starts_with("antenna__")) {
-            add(QString::fromStdString(name), QString::number(value, 'g', 8));
+    if (run) {
+        for (const auto &[name, value] : run->metrics) {
+            if (name.starts_with("timing__")) {
+                metrics.emplace_back(QString::fromStdString(name),
+                                     std::abs(value) > 1.0e20 ? QStringLiteral("unconstrained")
+                                                              : QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4));
+            } else if (name.starts_with("power__")) {
+                metrics.emplace_back(QString::fromStdString(name),
+                                     QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4));
+            } else if (name == "route__drc_errors") {
+                metrics.emplace_back(QString::fromStdString(name), QString::number(value, 'g', 8));
+            } else if (name.starts_with("antenna__")) {
+                metrics.emplace_back(QString::fromStdString(name), QString::number(value, 'g', 8));
+            }
         }
     }
-    if (row == 0) {
-        timingTable_->insertRow(0);
-        auto *item = new QTableWidgetItem(QStringLiteral("No timing metrics for this run yet."));
-        item->setFlags(Qt::NoItemFlags);
-        timingTable_->setItem(0, 0, item);
-        timingTable_->setSpan(0, 0, 1, 2);
-    }
-}
-
-void ImplementationPage::refreshClock() {
-    if (!clockTree_)
-        return;
-    QSignalBlocker blocker(clockTree_);
-    clockTree_->clear();
-    if (!previewCanvas_)
-        return;
-    int clocks = 0;
-    for (const auto &net : previewCanvas_->nets()) {
-        if (net.type.toLower() != QStringLiteral("clock"))
-            continue;
-        auto *item = new QTreeWidgetItem(clockTree_);
-        item->setText(0, net.name);
-        item->setText(1, QString::number(net.termCount));
-        item->setToolTip(0, net.special ? QStringLiteral("Special clock net") : QStringLiteral("Clock net"));
-        for (const auto &term : net.terms) {
-            auto *child = new QTreeWidgetItem(item);
-            child->setText(0, term);
-        }
-        item->setExpanded(item->childCount() <= 32);
-        ++clocks;
-    }
-    if (clocks == 0) {
-        auto *item = new QTreeWidgetItem(clockTree_);
-        item->setText(0, QStringLiteral("No clock nets in the current preview."));
-        item->setFlags(Qt::NoItemFlags);
-    }
-}
-
-void ImplementationPage::refreshHierarchy() {
-    if (!hierarchyTree_)
-        return;
-    QSignalBlocker blocker(hierarchyTree_);
-    hierarchyTree_->clear();
-    if (!previewCanvas_)
-        return;
-    const auto modules = previewCanvas_->modules();
-    if (modules.empty()) {
-        auto *item = new QTreeWidgetItem(hierarchyTree_);
-        item->setText(0, QStringLiteral("No module hierarchy in this preview."));
-        item->setFlags(Qt::NoItemFlags);
-        return;
-    }
-    std::map<int, QTreeWidgetItem *> items;
-    for (const auto &module : modules) {
-        auto *parent = items.find(module.parentId) == items.end() ? nullptr : items.at(module.parentId);
-        auto *item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(hierarchyTree_);
-        item->setText(0, module.name);
-        item->setText(1, QString::number(module.instanceCount));
-        items[module.id] = item;
-    }
-    hierarchyTree_->expandAll();
+    if (timingMetricsCallback_)
+        timingMetricsCallback_(metrics);
 }
 
 void ImplementationPage::refreshPreview() {
@@ -5310,8 +5208,6 @@ void ImplementationPage::refreshPreview() {
                 refreshInspector();
                 refreshDrc();
                 refreshTiming();
-                refreshClock();
-                refreshHierarchy();
                 return;
             }
         }
@@ -5343,86 +5239,27 @@ void ImplementationPage::refreshPreview() {
             self->refreshInspector();
             self->refreshDrc();
             self->refreshTiming();
-            self->refreshClock();
-            self->refreshHierarchy();
             (void)stage;
         });
 }
 
-PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent)
-    : QWidget(parent), controller_(controller) {
+PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent) : QWidget(parent) {
     stages_ = {ice::ImplementationStage::floorplan, ice::ImplementationStage::placement, ice::ImplementationStage::cts,
                ice::ImplementationStage::routing, ice::ImplementationStage::final};
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    stageBar_ = new QTabBar;
-    stageBar_->setDocumentMode(true);
-    stageBar_->setExpanding(false);
-    stageBar_->setDrawBase(false);
-    for (const auto stage : stages_)
-        stageBar_->addTab(stageTitle(stage));
-    layout->addWidget(stageBar_);
     stageStack_ = new QStackedWidget;
     for (const auto stage : stages_) {
         auto *page = new ImplementationPage(stage, controller, stageStack_, true);
-        page->setStageActivatedCallback([this](ice::ImplementationStage activated) { setCurrentStage(activated); });
+        page->setRunSelectionCallback([this](ice::ObjectId runId, std::optional<ice::ImplementationStage> activated) {
+            selectRunStage(runId, activated);
+        });
         pages_.push_back(page);
         stageStack_->addWidget(page);
     }
     layout->addWidget(stageStack_, 1);
-    QObject::connect(stageBar_, &QTabBar::currentChanged, this, [this](int index) {
-        if (index >= 0 && stageStack_)
-            stageStack_->setCurrentIndex(index);
-    });
     stageStack_->setCurrentIndex(0);
-    stageTimer_ = new QTimer(this);
-    stageTimer_->setInterval(750);
-    QObject::connect(stageTimer_, &QTimer::timeout, this, [this] { refreshStageBar(); });
-    stageTimer_->start();
-    refreshStageBar();
-}
-
-void PhysicalDesignPage::refreshStageBar() {
-    if (!stageBar_ || !controller_)
-        return;
-    const auto *run = controller_->activeRun();
-    for (int index = 0; index < stageBar_->count(); ++index) {
-        const auto stage = stageAt(index);
-        auto label = stageTitle(stage);
-        QColor color = palette().color(QPalette::Text);
-        if (run) {
-            const auto found = run->stages.find(stage);
-            if (found != run->stages.end()) {
-                switch (found->second.status) {
-                case ice::ImplementationStageStatus::running:
-                    label = QStringLiteral("▶ %1").arg(label);
-                    color = QColor(37, 99, 235);
-                    break;
-                case ice::ImplementationStageStatus::succeeded:
-                    label = QStringLiteral("✓ %1").arg(label);
-                    color = QColor(21, 128, 61);
-                    break;
-                case ice::ImplementationStageStatus::failed:
-                    label = QStringLiteral("✗ %1").arg(label);
-                    color = QColor(185, 28, 28);
-                    break;
-                case ice::ImplementationStageStatus::cancelled:
-                    label = QStringLiteral("■ %1").arg(label);
-                    color = QColor(161, 98, 7);
-                    break;
-                case ice::ImplementationStageStatus::skipped:
-                    label = QStringLiteral("– %1").arg(label);
-                    color = QColor(107, 114, 128);
-                    break;
-                case ice::ImplementationStageStatus::pending:
-                    break;
-                }
-            }
-        }
-        stageBar_->setTabText(index, label);
-        stageBar_->setTabTextColor(index, color);
-    }
 }
 
 void PhysicalDesignPage::setCurrentStage(ice::ImplementationStage stage) {
@@ -5430,10 +5267,13 @@ void PhysicalDesignPage::setCurrentStage(ice::ImplementationStage stage) {
     if (index < 0 || !stageStack_)
         return;
     stageStack_->setCurrentIndex(index);
-    if (stageBar_) {
-        QSignalBlocker blocker(stageBar_);
-        stageBar_->setCurrentIndex(index);
-    }
+}
+
+void PhysicalDesignPage::selectRunStage(ice::ObjectId runId, std::optional<ice::ImplementationStage> stage) {
+    if (stage)
+        setCurrentStage(*stage);
+    for (auto *page : pages_)
+        page->selectRunStage(runId, stage);
 }
 
 ice::ImplementationStage PhysicalDesignPage::currentStage() const {

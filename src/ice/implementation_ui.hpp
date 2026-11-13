@@ -38,7 +38,8 @@ class SvgPreviewCanvas;
 
 namespace ice {
 struct LayoutPreviewModel;
-}
+struct VerificationReport;
+} // namespace ice
 
 // Shared state for the RTL-to-GDS phase tabs. It intentionally lives in the
 // GUI layer: run mutation and stage execution stay in icelib / ice-cli.
@@ -166,9 +167,20 @@ class ImplementationPage : public QWidget {
     void setApplyConfigCallback(std::function<void(ice::ObjectId, const ice::ImplementationConfig &)> callback) {
         applyConfigCallback_ = std::move(callback);
     }
-    void setStageActivatedCallback(std::function<void(ice::ImplementationStage)> callback) {
-        stageActivatedCallback_ = std::move(callback);
+    void setRunSelectionCallback(std::function<void(ice::ObjectId, std::optional<ice::ImplementationStage>)> callback) {
+        runSelectionCallback_ = std::move(callback);
     }
+    void
+    setDrcReportCallback(std::function<void(const ice::VerificationReport &, const QString &stageLabel)> callback) {
+        drcReportCallback_ = std::move(callback);
+    }
+    void setTimingMetricsCallback(std::function<void(const std::vector<std::pair<QString, QString>> &)> callback) {
+        timingMetricsCallback_ = std::move(callback);
+    }
+    // Selects a run (and optionally one of its stages) in the Runs tree
+    // without emitting the user-selection signal.
+    void selectRunStage(ice::ObjectId runId, std::optional<ice::ImplementationStage> stage);
+    bool selectDrcMarker(int index);
     void selectHdlCell(ice::ObjectId id);
 
   protected:
@@ -178,7 +190,6 @@ class ImplementationPage : public QWidget {
     void buildUi();
     void refreshRunTree();
     void refreshRunCombo();
-    void refreshNetlistExplorer();
     void refreshExplorer();
     void applyHdlFilter(const QString &text);
     void openHdlFile(ice::ObjectId id);
@@ -210,8 +221,6 @@ class ImplementationPage : public QWidget {
     void refreshInspector();
     void refreshDrc();
     void refreshTiming();
-    void refreshClock();
-    void refreshHierarchy();
     bool hdlMode() const { return stage_ == ice::ImplementationStage::created; }
     bool synthesisMode() const { return stage_ == ice::ImplementationStage::synthesis; }
     bool floorplanMode() const { return stage_ == ice::ImplementationStage::floorplan; }
@@ -228,16 +237,10 @@ class ImplementationPage : public QWidget {
     QString stageHint_;
     QTabWidget *leftTabs_ = nullptr;
     QTreeWidget *runTree_ = nullptr;
-    QListWidget *netlistList_ = nullptr;
     QTreeWidget *displayTree_ = nullptr;
     QLabel *previewStatusLabel_ = nullptr;
     QLabel *previewCoordinateLabel_ = nullptr;
     QTreeWidget *inspectorTree_ = nullptr;
-    QTableWidget *drcTable_ = nullptr;
-    QTableWidget *timingTable_ = nullptr;
-    QPlainTextEdit *timingReportView_ = nullptr;
-    QTreeWidget *clockTree_ = nullptr;
-    QTreeWidget *hierarchyTree_ = nullptr;
     QListWidget *hdlFileList_ = nullptr;
     QLineEdit *hdlSearch_ = nullptr;
     QPushButton *newHdlButton_ = nullptr;
@@ -249,18 +252,18 @@ class ImplementationPage : public QWidget {
     QPushButton *synthesizeButton_ = nullptr;
     QPushButton *showGraphButton_ = nullptr;
     QPushButton *exportVerilogButton_ = nullptr;
-    QPushButton *removeRunButton_ = nullptr;
     TextDocumentEditor *hdlEditor_ = nullptr;
     std::map<ice::ObjectId, TextDocumentEditor *> hdlEditors_;
     QTimer *hdlEditTimer_ = nullptr;
     ice::ObjectId activeHdlCellId_ = 0;
     ice::ObjectId hdlEditCellId_ = 0;
+    ice::ObjectId lastRunTreeActiveRunId_ = 0;
     bool loadingHdlEditor_ = false;
     bool hdlTabsInitialized_ = false;
     QString hdlProjectKey_;
     QTabWidget *middleTabs_ = nullptr;
     QTabWidget *rightTabs_ = nullptr;
-    QTreeWidget *propertiesTree_ = nullptr;
+    QStackedWidget *rightInspectorStack_ = nullptr;
     QTreeWidget *outlineTree_ = nullptr;
     QTreeWidget *ipLibrariesTree_ = nullptr;
     QTableWidget *metricsTable_ = nullptr;
@@ -309,7 +312,9 @@ class ImplementationPage : public QWidget {
     std::function<void(ice::ObjectId)> exportVerilogCallback_;
     std::function<void(ice::ObjectId)> removeRunCallback_;
     std::function<void(ice::ObjectId, const ice::ImplementationConfig &)> applyConfigCallback_;
-    std::function<void(ice::ImplementationStage)> stageActivatedCallback_;
+    std::function<void(ice::ObjectId, std::optional<ice::ImplementationStage>)> runSelectionCallback_;
+    std::function<void(const ice::VerificationReport &, const QString &stageLabel)> drcReportCallback_;
+    std::function<void(const std::vector<std::pair<QString, QString>> &)> timingMetricsCallback_;
 };
 
 // One top-level workspace that hosts the four physical stages. Stage
@@ -329,12 +334,9 @@ class PhysicalDesignPage : public QWidget {
   private:
     int stageIndex(ice::ImplementationStage stage) const;
     ice::ImplementationStage stageAt(int index) const;
-    void refreshStageBar();
+    void selectRunStage(ice::ObjectId runId, std::optional<ice::ImplementationStage> stage);
 
     QStackedWidget *stageStack_ = nullptr;
-    QTabBar *stageBar_ = nullptr;
-    QTimer *stageTimer_ = nullptr;
-    ImplementationUiController *controller_ = nullptr;
     std::vector<ImplementationPage *> pages_;
     std::vector<ice::ImplementationStage> stages_;
 };

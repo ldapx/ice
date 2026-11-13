@@ -559,7 +559,6 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
         onDrcViolationActivated_(drcViolations_[static_cast<std::size_t>(index)]);
     });
     drcLayout->addWidget(drcTable_, 1);
-    drcTabIndex_ = tabs->addTab(drcPage, QStringLiteral("DRC Report"));
 
     auto *lvsPage = new QWidget;
     auto *lvsLayout = new QVBoxLayout(lvsPage);
@@ -583,10 +582,67 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
         QStringLiteral("LVS report will appear here after a layout-versus-schematic check."));
     lvsReport_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
     lvsLayout->addWidget(lvsReport_, 1);
-    lvsTabIndex_ = tabs->addTab(lvsPage, QStringLiteral("LVS Report"));
     connect(copyLvsButton, &QPushButton::clicked, this, [this] {
         if (lvsReport_)
             QApplication::clipboard()->setText(lvsReport_->toPlainText());
+    });
+
+    auto *timingPage = new QWidget;
+    auto *timingLayout = new QVBoxLayout(timingPage);
+    auto *timingHeader = new QHBoxLayout;
+    timingHeader->setSpacing(6);
+    auto *timingHint = new QLabel(QStringLiteral("Timing metrics from the active implementation run."));
+    timingHint->setWordWrap(true);
+    timingHint->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    timingHeader->addWidget(timingHint, 1);
+    auto *generateTimingButton = new QPushButton(QStringLiteral("Generate timing report"));
+    generateTimingButton->setToolTip(QStringLiteral("Run OpenROAD STA and show the worst setup/hold paths"));
+    timingHeader->addWidget(generateTimingButton);
+    timingLayout->addLayout(timingHeader);
+    timingTable_ = new QTableWidget(0, 2);
+    timingTable_->setAccessibleName(QStringLiteral("Timing metrics"));
+    timingTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
+    timingTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    timingTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    timingTable_->verticalHeader()->setVisible(false);
+    timingTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    timingLayout->addWidget(timingTable_, 1);
+    timingReport_ = new QPlainTextEdit;
+    timingReport_->setReadOnly(true);
+    timingReport_->setAccessibleName(QStringLiteral("Timing report"));
+    timingReport_->setPlaceholderText(QStringLiteral("Generate a report to inspect worst paths."));
+    timingLayout->addWidget(timingReport_, 1);
+    connect(generateTimingButton, &QPushButton::clicked, this, [this] {
+        if (onGenerateTimingReport_)
+            onGenerateTimingReport_();
+    });
+
+    auto *reportsPage = new QWidget;
+    auto *reportsLayout = new QVBoxLayout(reportsPage);
+    reportsLayout->setContentsMargins(4, 4, 4, 4);
+    reportsLayout->setSpacing(4);
+    auto *reportsHeader = new QHBoxLayout;
+    reportsHeader->setSpacing(6);
+    auto *reportLabel = new QLabel(QStringLiteral("Report"));
+    reportsHeader->addWidget(reportLabel);
+    reportSelector_ = new QComboBox;
+    reportSelector_->setAccessibleName(QStringLiteral("Bottom report type"));
+    reportSelector_->setToolTip(QStringLiteral("Choose the DRC, LVS, or timing report"));
+    reportSelector_->addItem(QStringLiteral("DRC"));
+    reportSelector_->addItem(QStringLiteral("LVS"));
+    reportSelector_->addItem(QStringLiteral("Timing"));
+    reportsHeader->addWidget(reportSelector_);
+    reportsHeader->addStretch(1);
+    reportsLayout->addLayout(reportsHeader);
+    reportStack_ = new QStackedWidget;
+    drcPageIndex_ = reportStack_->addWidget(drcPage);
+    lvsPageIndex_ = reportStack_->addWidget(lvsPage);
+    timingPageIndex_ = reportStack_->addWidget(timingPage);
+    reportsLayout->addWidget(reportStack_, 1);
+    reportsTabIndex_ = tabs->addTab(reportsPage, QStringLiteral("Reports"));
+    connect(reportSelector_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (reportStack_)
+            reportStack_->setCurrentIndex(index);
     });
 
     auto *jobsPage = new QWidget;
@@ -2185,28 +2241,14 @@ QString drcLocationLabel(const ice::Rect &rect) {
 }
 } // namespace
 
-void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QString &reportPath) {
-    if (!drcTable_ || !drcSummary_)
+void ActivityPanel::populateDrcTable(const ice::VerificationReport &report) {
+    if (!drcTable_)
         return;
     drcTable_->setSortingEnabled(false);
     drcTable_->setRowCount(0);
     drcViolations_.clear();
     drcViolations_.reserve(report.drc.size());
-    int errors = 0;
-    int warnings = 0;
-    int infos = 0;
     for (const auto &violation : report.drc) {
-        switch (violation.severity) {
-        case ice::VerificationSeverity::error:
-            ++errors;
-            break;
-        case ice::VerificationSeverity::warning:
-            ++warnings;
-            break;
-        case ice::VerificationSeverity::info:
-            ++infos;
-            break;
-        }
         const auto violationIndex = static_cast<int>(drcViolations_.size());
         drcViolations_.push_back(violation);
         const int row = drcTable_->rowCount();
@@ -2225,6 +2267,28 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
         drcTable_->setItem(row, 4, location);
     }
     drcTable_->setSortingEnabled(true);
+}
+
+void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QString &reportPath) {
+    if (!drcTable_ || !drcSummary_)
+        return;
+    populateDrcTable(report);
+    int errors = 0;
+    int warnings = 0;
+    int infos = 0;
+    for (const auto &violation : report.drc) {
+        switch (violation.severity) {
+        case ice::VerificationSeverity::error:
+            ++errors;
+            break;
+        case ice::VerificationSeverity::warning:
+            ++warnings;
+            break;
+        case ice::VerificationSeverity::info:
+            ++infos;
+            break;
+        }
+    }
     QString summary;
     if (report.drc.empty()) {
         summary = QStringLiteral("DRC completed: no violations found.");
@@ -2250,6 +2314,19 @@ void ActivityPanel::setDrcReport(const ice::VerificationReport &report, const QS
     showDrcTab();
 }
 
+void ActivityPanel::setDrcPreviewReport(const ice::VerificationReport &report, const QString &stageLabel) {
+    if (!drcTable_ || !drcSummary_)
+        return;
+    populateDrcTable(report);
+    const auto label = stageLabel.isEmpty() ? QStringLiteral("Physical preview") : stageLabel;
+    if (report.drc.empty())
+        drcSummary_->setText(QStringLiteral("%1 preview: no DRC markers.").arg(label));
+    else
+        drcSummary_->setText(QStringLiteral("%1 preview: %2 DRC marker(s). Select a row to focus it in the canvas.")
+                                 .arg(label)
+                                 .arg(report.drc.size()));
+}
+
 void ActivityPanel::setDrcRunning(const QString &message) {
     if (!drcSummary_ || !drcTable_)
         return;
@@ -2273,10 +2350,20 @@ void ActivityPanel::setDrcError(const QString &message) {
     showDrcTab();
 }
 
-void ActivityPanel::showDrcTab() {
-    if (tabs_ && drcTabIndex_ >= 0)
-        tabs_->setCurrentIndex(drcTabIndex_);
+void ActivityPanel::showReportPage(int index) {
+    if (index < 0)
+        return;
+    if (reportStack_)
+        reportStack_->setCurrentIndex(index);
+    if (reportSelector_ && reportSelector_->currentIndex() != index) {
+        const QSignalBlocker blocker(reportSelector_);
+        reportSelector_->setCurrentIndex(index);
+    }
+    if (tabs_ && reportsTabIndex_ >= 0)
+        tabs_->setCurrentIndex(reportsTabIndex_);
 }
+
+void ActivityPanel::showDrcTab() { showReportPage(drcPageIndex_); }
 
 void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
     if (!lvsReport_)
@@ -2357,10 +2444,41 @@ void ActivityPanel::setLvsError(const QString &message) {
     showLvsTab();
 }
 
-void ActivityPanel::showLvsTab() {
-    if (tabs_ && lvsTabIndex_ >= 0)
-        tabs_->setCurrentIndex(lvsTabIndex_);
+void ActivityPanel::showLvsTab() { showReportPage(lvsPageIndex_); }
+
+void ActivityPanel::setTimingMetrics(const std::vector<std::pair<QString, QString>> &metrics) {
+    if (!timingTable_)
+        return;
+    timingTable_->setRowCount(0);
+    timingTable_->clearSpans();
+    for (const auto &[name, value] : metrics) {
+        const auto row = timingTable_->rowCount();
+        timingTable_->insertRow(row);
+        timingTable_->setItem(row, 0, new QTableWidgetItem(name));
+        auto *item = new QTableWidgetItem(value);
+        item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        timingTable_->setItem(row, 1, item);
+    }
+    if (metrics.empty()) {
+        timingTable_->insertRow(0);
+        auto *item = new QTableWidgetItem(QStringLiteral("No timing metrics for this run yet."));
+        item->setFlags(Qt::NoItemFlags);
+        timingTable_->setItem(0, 0, item);
+        timingTable_->setSpan(0, 0, 1, 2);
+    }
 }
+
+void ActivityPanel::setTimingReport(const QString &report, const QString &error) {
+    if (!timingReport_)
+        return;
+    if (!report.isEmpty())
+        timingReport_->setPlainText(report);
+    else if (!error.isEmpty())
+        timingReport_->setPlainText(error);
+    showTimingTab();
+}
+
+void ActivityPanel::showTimingTab() { showReportPage(timingPageIndex_); }
 
 void ActivityPanel::showAgentTab() {
     if (tabs_ && agentTabIndex_ >= 0)

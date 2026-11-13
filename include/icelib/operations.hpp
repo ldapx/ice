@@ -60,7 +60,7 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
 ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {},
                                    std::string stack = {});
 ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout = 0, std::string pdk = {},
-                  int datatype = 0, std::string stack = {});
+                  int datatype = 0, std::string stack = {}, Coordinate minimumWidth = 0);
 std::string nextShapeName(const LayoutCell &cell, const std::string &type);
 ObjectId addRectangle(Project &project, ObjectId cellId, ObjectId layerId, Rect rectangle,
                       std::optional<ObjectId> net = std::nullopt);

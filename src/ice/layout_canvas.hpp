@@ -26,6 +26,9 @@ struct LayoutPathLayer {
     ice::ObjectId layer = 0;
     ice::ObjectId viaToNext = 0;
     std::string name;
+    // PDK minimum drawn width in database units. Zero falls back to the path
+    // tool's previous/default width.
+    int minimumWidth = 0;
 };
 
 struct LayoutPathConfig {
@@ -120,8 +123,10 @@ QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
 // Builds the outline of an open polyline using KLayout-style corner joins.
 // The miter is used only while both offset-line intersections stay within
 // width/2 of the corner; sharper corners are cut off at width/2 instead of
-// producing long elbows. Points are in scene coordinates.
+// producing long elbows. Points are in scene coordinates. A width vector may
+// supply one width per segment.
 QPolygonF layoutPathOutline(const std::vector<QPointF> &points, qreal width);
+QPolygonF layoutPathOutline(const std::vector<QPointF> &points, const std::vector<qreal> &widths);
 
 // Creates the single selectable item used for a routed path. Points are in
 // scene coordinates. When pointEditable is true, handles become visible while
@@ -130,6 +135,7 @@ QPolygonF layoutPathOutline(const std::vector<QPointF> &points, qreal width);
 // endpointHandlesOnly is true, only the first and last points expose handles
 // and point insertion/deletion are disabled.
 QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
+                                    const std::vector<qreal> &segmentWidths, const std::vector<bool> &segmentVisible,
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
                                     bool pointEditable, bool endpointHandlesOnly,
