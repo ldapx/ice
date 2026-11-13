@@ -156,19 +156,9 @@ class PlannedDeviceItem : public QGraphicsItem {
         const auto radius = std::min(rect.width(), rect.height()) * 0.08;
         painter->setRenderHint(QPainter::Antialiasing);
 
-        if (selected) {
-            QColor halo = outline;
-            halo.setAlpha(70);
-            QPen haloPen(halo);
-            haloPen.setCosmetic(true);
-            haloPen.setWidthF(6.0);
-            painter->setPen(haloPen);
-            painter->setBrush(Qt::NoBrush);
-            painter->drawRoundedRect(rect, radius, radius);
-        }
-
+        // Use fully opaque fill to completely cover any previous drawing
         QColor fill = accent;
-        fill.setAlpha(selected ? 70 : 35);
+        fill.setAlpha(255);
         QPen pen(outline);
         pen.setCosmetic(true);
         pen.setWidthF(selected ? 2.5 : 1.5);
@@ -1014,6 +1004,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setTool(Tool tool) override {
         clearLayoutNetHighlight();
+        // A mode switch starts a fresh click cycle.
+        hasLastFigureClick_ = false;
+        cyclingFigureId_ = 0;
         if (readOnly_ && tool != Tool::select)
             tool = Tool::select;
         cancelManualPathDrag();
@@ -1134,6 +1127,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
         shapeActivated_ = std::move(callback);
     }
 
+    void setFigureContextActionCallback(
+        std::function<void(ice::ObjectId, FigureContextAction)> callback) override {
+        figureContextAction_ = std::move(callback);
+    }
+
+    void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) override {
+        emptyContextMenu_ = std::move(callback);
+    }
+
+    QPointF cursorScenePosition() const override { return cursorScenePosition_; }
+
     void clearLayoutNetHighlight() override {
         if (!scene())
             return;
@@ -1234,6 +1238,35 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
+
+    void clearScene() override {
+        cancelManualPathDrag();
+        cancelPolygonDrag();
+        cancelRectangleDrawing();
+        clearRuler();
+        clearLayoutNetHighlight();
+        if (pinDrawPreview_) {
+            scene()->removeItem(pinDrawPreview_);
+            delete pinDrawPreview_;
+            pinDrawPreview_ = nullptr;
+        }
+        pinDrawing_ = false;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        drawPreview_ = nullptr;
+        movingItem_ = nullptr;
+        resizingItem_ = nullptr;
+        draggingInstance_ = nullptr;
+        polygonDragItem_ = nullptr;
+        rulerItem_ = nullptr;
+        selectedLayoutInstance_ = 0;
+        cyclingFigureId_ = 0;
+        hasLastFigureClick_ = false;
+        suppressFigureContextMenu_ = false;
+        if (scene())
+            scene()->clear();
+    }
 
     void deleteSelectedShapes() override {
         if (readOnly_)
@@ -1665,6 +1698,24 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         cursorScenePosition_ = mapToScene(event->pos());
+        if (event->button() == Qt::RightButton && !readOnly_ && (tool_ == Tool::select || tool_ == Tool::move)) {
+            // Consume the press on a figure so Qt never treats it as a click on
+            // empty space (which cleared the selection and hid the menu).
+            auto *hit = itemAt(event->pos());
+            if (pathHandleAt(event->pos())) {
+                // Let the path item handle it and keep the figure menu closed.
+                suppressFigureContextMenu_ = true;
+            } else if (hit && hit->data(2).toString().isEmpty()) {
+                if (auto *figure = layoutFigureOwner(hit)) {
+                    if (!figure->isSelected())
+                        selectLayoutFigure(figure);
+                    cyclingFigureId_ = static_cast<ice::ObjectId>(figure->data(0).toULongLong());
+                    hasLastFigureClick_ = true;
+                    event->accept();
+                    return;
+                }
+            }
+        }
         if (event->button() == Qt::MiddleButton) {
             panning_ = true;
             panStartPosition_ = event->pos();
@@ -1934,39 +1985,43 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 selectedLayoutInstance_ = 0;
                 applyLayoutInstanceSelection();
             }
+            // Get the figure at the click position (topmost selectable)
             auto *clickedFigure = layoutFigureOwner(clicked);
             const bool plainClick =
                 !event->modifiers().testFlag(Qt::ControlModifier) && !event->modifiers().testFlag(Qt::ShiftModifier);
             if (tool_ == Tool::select && plainClick) {
+                // Figures under the cursor, topmost first. Repeated clicks walk
+                // this list so covered figures stay reachable.
                 const auto figures = layoutFiguresAt(event->pos());
-                const bool repeatedClick =
-                    hasLastFigureClick_ && (event->pos() - lastFigureClickPosition_).manhattanLength() <= 4;
-                if (repeatedClick) {
-                    // Step down from the selected figure to the one directly
-                    // beneath it in the stack at this position.
-                    for (std::size_t index = 0; index + 1 < figures.size(); ++index) {
-                        if (!figures[index]->isSelected())
-                            continue;
-                        selectLayoutFigure(figures[index + 1]);
-                        lastFigureClickPosition_ = event->pos();
-                        hasLastFigureClick_ = true;
-                        event->accept();
-                        return;
+                if (!figures.empty()) {
+                    const auto scenePos = mapToScene(event->pos());
+                    // Find the figure that was selected by the previous click.
+                    std::size_t current = figures.size();
+                    if (hasLastFigureClick_ && cyclingFigureId_ != 0) {
+                        for (std::size_t index = 0; index < figures.size(); ++index) {
+                            if (static_cast<ice::ObjectId>(figures[index]->data(0).toULongLong()) ==
+                                cyclingFigureId_) {
+                                current = index;
+                                break;
+                            }
+                        }
                     }
-                }
-                hasLastFigureClick_ = clickedFigure != nullptr;
-                if (hasLastFigureClick_)
+                    const bool repeatedClick =
+                        current < figures.size() && figures[current]->sceneBoundingRect().contains(scenePos);
+                    // Repeated clicks walk down the stack one level, wrapping
+                    // from the bottom figure back to the topmost so the user
+                    // keeps cycling as long as they click.
+                    const std::size_t next =
+                        repeatedClick ? (current + 1) % figures.size() : std::size_t(0);
+                    selectLayoutFigure(figures[next]);
+                    cyclingFigureId_ = static_cast<ice::ObjectId>(figures[next]->data(0).toULongLong());
                     lastFigureClickPosition_ = event->pos();
-            }
-            if (tool_ == Tool::select && plainClick && clickedFigure && clickedFigure->isSelected() &&
-                (dynamic_cast<QGraphicsRectItem *>(clickedFigure) ||
-                 dynamic_cast<QGraphicsPolygonItem *>(clickedFigure))) {
-                const auto id = static_cast<ice::ObjectId>(clickedFigure->data(0).toULongLong());
-                if (id != 0 && shapeActivated_) {
-                    shapeActivated_(id);
+                    hasLastFigureClick_ = true;
                     event->accept();
                     return;
                 }
+                hasLastFigureClick_ = false;
+                cyclingFigureId_ = 0;
             }
             if (tool_ == Tool::move &&
                 (!clickedFigure || !(clickedFigure->flags() & QGraphicsItem::ItemIsSelectable))) {
@@ -2356,6 +2411,69 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void contextMenuEvent(QContextMenuEvent *event) override {
+        const bool suppressed = suppressFigureContextMenu_;
+        suppressFigureContextMenu_ = false;
+        if (!suppressed && !readOnly_ && emptyContextMenu_) {
+            // Empty canvas space: the host builds the tool/clipboard menu.
+            auto *hit = itemAt(event->pos());
+            const bool onTagged = hit && !hit->data(2).toString().isEmpty();
+            auto *figure = (!hit || onTagged) ? nullptr : layoutFigureOwner(hit);
+            if (!hit || (!figure && !onTagged)) {
+                emptyContextMenu_(event->globalPos());
+                event->accept();
+                return;
+            }
+        }
+        if (!suppressed && !readOnly_ && (tool_ == Tool::select || tool_ == Tool::move)) {
+            // Right-clicking a figure opens its menu. The press handler already
+            // selected it; select here too so the menu never silently vanishes.
+            auto *hit = itemAt(event->pos());
+            auto *figure = hit && hit->data(2).toString().isEmpty() ? layoutFigureOwner(hit) : nullptr;
+            if (figure) {
+                const auto id = static_cast<ice::ObjectId>(figure->data(0).toULongLong());
+                if (id != 0) {
+                    if (!figure->isSelected())
+                        selectLayoutFigure(figure);
+                    QMenu menu(this);
+                    auto *traceAction = menu.addAction(QStringLiteral("Traced net"));
+                    auto *rotateAction = menu.addAction(QStringLiteral("Rotate"));
+                    auto *flipAction = menu.addAction(QStringLiteral("Flip"));
+                    menu.addSeparator();
+                    auto *copyAction = menu.addAction(QStringLiteral("Copy"));
+                    auto *cutAction = menu.addAction(QStringLiteral("Cut"));
+                    auto *pasteAction = menu.addAction(QStringLiteral("Paste"));
+                    menu.addSeparator();
+                    auto *deleteAction = menu.addAction(QStringLiteral("Delete"));
+                    auto *chosen = menu.exec(event->globalPos());
+                    if (!chosen) {
+                        event->accept();
+                        return;
+                    }
+                    auto action = FigureContextAction::traceNet;
+                    if (chosen == rotateAction)
+                        action = FigureContextAction::rotate;
+                    else if (chosen == flipAction)
+                        action = FigureContextAction::flip;
+                    else if (chosen == copyAction)
+                        action = FigureContextAction::copy;
+                    else if (chosen == cutAction)
+                        action = FigureContextAction::cut;
+                    else if (chosen == pasteAction)
+                        action = FigureContextAction::paste;
+                    else if (chosen == deleteAction)
+                        action = FigureContextAction::deleteShape;
+                    if (figureContextAction_) {
+                        figureContextAction_(id, action);
+                    } else if (action == FigureContextAction::traceNet && shapeActivated_) {
+                        shapeActivated_(id);
+                    } else if (action == FigureContextAction::deleteShape && deleted_) {
+                        deleted_({id});
+                    }
+                    event->accept();
+                    return;
+                }
+            }
+        }
         if (!readOnly_) {
             auto *planned = itemAt(event->pos());
             while (planned && planned->data(2).toString().isEmpty())
@@ -2392,6 +2510,21 @@ class LayoutCanvasImpl : public LayoutCanvas {
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
              tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text ||
              tool_ == Tool::textPolygon)) {
+            if (tool_ == Tool::rectangle) {
+                // Escape aborts the rectangle being drawn but leaves the tool
+                // active; a second Escape (nothing being drawn) returns to
+                // Select. Other tools keep their documented Escape behaviour
+                // (polygon/path finish, then back to Select).
+                const bool wasDrawing = drawing_ || drawPreview_ != nullptr;
+                abortActiveDrawing();
+                if (!wasDrawing) {
+                    setTool(Tool::select);
+                    if (toolEscapeRequested_)
+                        toolEscapeRequested_();
+                }
+                event->accept();
+                return;
+            }
             cancelRectangleDrawing();
             setTool(Tool::select);
             if (toolEscapeRequested_)
@@ -2402,14 +2535,37 @@ class LayoutCanvasImpl : public LayoutCanvas {
         QGraphicsView::keyPressEvent(event);
     }
 
+    // Cancels whatever drawing is in progress without changing the tool.
+    void abortActiveDrawing() {
+        cancelRectangleDrawing();
+        cancelManualPathDrag();
+        if (pinDrawPreview_) {
+            scene()->removeItem(pinDrawPreview_);
+            delete pinDrawPreview_;
+            pinDrawPreview_ = nullptr;
+        }
+        pinDrawing_ = false;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        clearRuler();
+        viewport()->update();
+    }
+
     bool eventFilter(QObject *watched, QEvent *event) override {
         if (rectangleSizeEditor_ && watched == rectangleSizeEditor_ && event->type() == QEvent::KeyPress) {
             auto *key = static_cast<QKeyEvent *>(event);
             if (key->key() == Qt::Key_Escape) {
-                cancelRectangleDrawing();
-                setTool(Tool::select);
-                if (toolEscapeRequested_)
-                    toolEscapeRequested_();
+                // Abort the rectangle being drawn and keep the tool active.
+                const bool wasDrawing = drawing_;
+                abortActiveDrawing();
+                if (!wasDrawing) {
+                    setTool(Tool::select);
+                    if (toolEscapeRequested_)
+                        toolEscapeRequested_();
+                } else {
+                    setFocus(Qt::OtherFocusReason);
+                }
                 return true;
             }
             if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
@@ -2636,6 +2792,30 @@ class LayoutCanvasImpl : public LayoutCanvas {
     // Figures are the top-level selectable layout objects (shapes, pins,
     // paths, planned devices). Children such as pin captions and handles must
     // resolve to the figure that owns them.
+    // Path point handles own the right-click menu (delete point), so the
+    // figure menu must not steal right-clicks that land on one.
+    LayoutPathItem *pathHandleAt(const QPoint &position) const {
+        if (!scene())
+            return nullptr;
+        const auto scenePos = mapToScene(position);
+        LayoutPathItem *best = nullptr;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        for (auto *item : scene()->items()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (!path || !path->isVisible())
+                continue;
+            const int handle = path->handleAtScenePosition(scenePos);
+            if (handle < 0)
+                continue;
+            const auto distance = QLineF(scenePos, path->handleScenePosition(handle)).length();
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = path;
+            }
+        }
+        return best;
+    }
+
     QGraphicsItem *layoutFigureOwner(QGraphicsItem *item) const {
         QGraphicsItem *owner = nullptr;
         for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
@@ -2996,6 +3176,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
     // spot cycle through stacked figures instead of reselecting the top one.
     QPoint lastFigureClickPosition_;
     bool hasLastFigureClick_ = false;
+    // Id (not pointer) of the figure the next click should step beneath.
+    // Scene items are rebuilt on refresh, so a raw pointer could dangle.
+    ice::ObjectId cyclingFigureId_ = 0;
+    bool suppressFigureContextMenu_ = false;
     ice::ObjectId manualPathDragId_ = 0;
     int manualPathDragHandle_ = -1;
     QGraphicsPolygonItem *polygonDragItem_ = nullptr;
@@ -3023,6 +3207,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     std::function<void(ice::ObjectId)> instanceSelectionChanged_;
     std::function<void()> toolEscapeRequested_;
     std::function<void(ice::ObjectId)> shapeActivated_;
+    std::function<void(ice::ObjectId, FigureContextAction)> figureContextAction_;
+    std::function<void(const QPoint &)> emptyContextMenu_;
     ice::ObjectId notifiedLayoutInstance_ = 0;
     const ice::LayoutDeviceCell *devicePreview_ = nullptr;
     ice::LayoutPreviewModel devicePreviewModel_;
