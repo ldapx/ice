@@ -1,6 +1,7 @@
 #include "icelib/agent_api.hpp"
 #include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
+#include "icelib/drc.hpp"
 #include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
@@ -31,6 +32,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
@@ -490,12 +492,15 @@ json helpJson(const std::string &requestedTopic) {
     json topics = {
         {"overview",
          {{"summary", "Open or create a project, build a schematic, validate it, create a simulation, run it, "
-                      "and inspect the stored traces."},
+                      "and inspect the stored traces. Digital flows add SystemVerilog cells, implementation runs, "
+                      "final GDS export, and DRC."},
           {"steps",
            json::array({"project_open or project_create",
                         "schematic_create and schematic_add_component/schematic_add_hdl_instance",
                         "schematic_add_net or schematic_add_circuit", "schematic_validate", "simulation_create",
-                        "simulation_run", "simulation_result/simulation_trace/simulation_measure"})}}},
+                        "simulation_run", "simulation_result/simulation_trace/simulation_measure",
+                        "implementation_create -> implementation_run -> implementation_import_layout -> "
+                        "implementation_export_gds"})}}},
         {"project",
          {{"tools", json::array({"project_create", "project_open", "project_summary", "project_validate",
                                  "project_recover", "project_repair", "project_undo", "project_redo"})},
@@ -515,10 +520,59 @@ json helpJson(const std::string &requestedTopic) {
                                  "schematic_set_parameter", "schematic_add_net", "schematic_validate_hierarchy",
                                  "simulation_create", "simulation_run"})},
           {"notes",
-           json::array({"Mixed mode currently supports top-level scalar logic input/output ports.",
-                        "For a PWM DAC, drive the analog RC filter from a logic PWM output; real ports are "
-                        "rejected explicitly.",
+           json::array({"Mixed mode supports top-level HDL instances with logic or real ports; buses must be "
+                        "flattened with bus_mode=\"flatten\" before simulation.",
+                        "For a PWM DAC, drive the analog RC filter from a logic PWM output; the bridge maps logic "
+                        "outputs to 0/1 PWL sources and samples analog inputs through a logic threshold.",
                         "A requested signal such as v(U1.out) is invalid for a digital port; use U1.out instead."})}}},
+        {"digital",
+         {{"summary", "Create SystemVerilog source/testbench cells, simulate them with Icarus Verilog, then run "
+                      "Yosys synthesis and OpenROAD physical stages to a final GDS."},
+          {"tools",
+           json::array({"schematic_create_systemverilog", "schematic_set_text", "schematic_hdl_ports",
+                        "schematic_add_hdl_instance", "simulation_create", "simulation_run", "simulation_result",
+                        "implementation_create", "implementation_update", "implementation_prepare",
+                        "implementation_map", "implementation_run", "implementation_status", "implementation_log",
+                        "implementation_import_layout", "implementation_export_gds", "lvs_run", "drc_run"})},
+          {"steps",
+           json::array({"schematic_create_systemverilog(name=\"top\", text=\"module top(...); ... endmodule\") for RTL",
+                        "schematic_create_systemverilog(name=\"top_tb\", text=\"...\") for a self-checking or "
+                        "waveform testbench",
+                        "simulation_create(name=\"top_sim\", schematic=\"top_tb\") then simulation_run",
+                        "implementation_create(name=\"top_impl\", top=\"top\", source_cells=[\"top\"], pdk=\"sky130\")",
+                        "implementation_run(run=\"top_impl\")", "implementation_import_layout(run=\"top_impl\")",
+                        "implementation_export_gds(run=\"top_impl\")",
+                        "drc_run(layout=\"top_impl layout\") after mapping the layout PDK"})},
+          {"notes", json::array({"A SystemVerilog source cell may contain both the design and its testbench; "
+                                 "the module containing $dumpfile/$dumpvars is preferred as the simulation top.",
+                                 "Use an SDC file for clocks and I/O delays; without one, timing metrics are "
+                                 "unconstrained but the physical flow still runs.",
+                                 "implementation_status returns stage states, artifacts, tool versions, and metrics, "
+                                 "including timing and power keys produced by OpenROAD."})}}},
+        {"implementation",
+         {{"summary", "Drive an RTL-to-GDS run through Yosys and OpenROAD, inspect metrics, import the final DEF, "
+                      "and stream a merged GDS."},
+          {"tools",
+           json::array({"implementation_create", "implementation_update", "implementation_list",
+                        "implementation_status", "implementation_toolchain", "implementation_prepare",
+                        "implementation_map", "implementation_run", "implementation_log", "implementation_cancel",
+                        "implementation_import_layout", "implementation_export_gds", "implementation_delete"})},
+          {"notes", json::array({"Stages: elaboration, synthesis, floorplan, placement, cts, routing, final.",
+                                 "implementation_run defaults to synthesis through final; use from/to to "
+                                 "run one stage or resume from a checkpoint.",
+                                 "implementation_update invalidates the selected stage and all later stages; the "
+                                 "default is elaboration.",
+                                 "The final stage attempts a KLayout GDS export automatically when the PDK provides "
+                                 "standard-cell GDS decks and KLayout is installed."})}}},
+        {"verification",
+         {{"tools", json::array({"schematic_validate", "schematic_validate_hierarchy", "lvs_run", "drc_run", "pex_run",
+                                 "project_validate"})},
+          {"notes", json::array({"drc_run exports the layout, invokes gdscheck with the PDK process deck, and "
+                                 "returns normalized violations.",
+                                 "lvs_run compares a layout against a schematic; the schematic is inferred when "
+                                 "omitted.",
+                                 "Use implementation_log and implementation_status to inspect route DRC, antenna, "
+                                 "timing, and power results from the physical flow."})}}},
         {"simulation",
          {{"tools", json::array({"simulation_create", "simulation_update", "simulation_run", "simulation_result",
                                  "simulation_signals", "simulation_trace", "simulation_measure",
@@ -875,6 +929,165 @@ std::vector<std::string> parseSignalListValue(const json &value, const char *nam
         return signals;
     }
     throw ToolError(std::string("Argument must be a string or string array: ") + name);
+}
+
+ice::Rect rectValue(const json &value, const char *name) {
+    ice::Rect rect;
+    if (value.is_array()) {
+        if (value.size() != 4)
+            throw ToolError(std::string(name) + " must be [x, y, width, height]");
+        rect.x = coordinateValue(value[0], name);
+        rect.y = coordinateValue(value[1], name);
+        rect.width = coordinateValue(value[2], name);
+        rect.height = coordinateValue(value[3], name);
+        return rect;
+    }
+    if (value.is_object()) {
+        rect.x = coordinateValue(requiredValue(value, "x"), name);
+        rect.y = coordinateValue(requiredValue(value, "y"), name);
+        rect.width = coordinateValue(requiredValue(value, "width"), name);
+        rect.height = coordinateValue(requiredValue(value, "height"), name);
+        return rect;
+    }
+    throw ToolError(std::string(name) + " must be an object or [x, y, width, height]");
+}
+
+void applyImplementationConfigJson(ice::ImplementationConfig &config, const ice::Project &project,
+                                   const json &arguments) {
+    const auto has = [&](const char *name) {
+        const auto it = arguments.find(name);
+        return it != arguments.end() && !it->is_null();
+    };
+    if (has("top"))
+        config.top = requiredString(arguments, "top");
+    if (has("pdk"))
+        config.pdk = requiredString(arguments, "pdk");
+    if (has("stack"))
+        config.stack = optionalString(arguments, "stack");
+    if (has("sources")) {
+        config.sources.clear();
+        const auto &value = arguments.at("sources");
+        if (value.is_string()) {
+            config.sources.emplace_back(value.get<std::string>());
+        } else if (value.is_array()) {
+            for (const auto &source : value) {
+                if (!source.is_string())
+                    throw ToolError("Argument 'sources' must contain only strings.");
+                config.sources.emplace_back(source.get<std::string>());
+            }
+        } else {
+            throw ToolError("Argument 'sources' must be a string or string array.");
+        }
+    }
+    if (has("source_cells")) {
+        config.sourceCells.clear();
+        const auto &value = arguments.at("source_cells");
+        if (!value.is_array())
+            throw ToolError("Argument 'source_cells' must be an array.");
+        for (const auto &sourceCell : value)
+            config.sourceCells.push_back(lookupByIdOrName(project.schematicCells, sourceCell, "schematic"));
+    }
+    if (has("sdc"))
+        config.sdc = optionalString(arguments, "sdc");
+    if (has("corner"))
+        config.corner = requiredString(arguments, "corner");
+    if (has("standard_cell_library"))
+        config.standardCellLibrary = optionalString(arguments, "standard_cell_library");
+    if (has("utilization"))
+        config.utilization = numberValue(arguments.at("utilization"), "utilization");
+    if (has("aspect_ratio"))
+        config.aspectRatio = numberValue(arguments.at("aspect_ratio"), "aspect_ratio");
+    if (has("placement_density"))
+        config.placementDensity = numberValue(arguments.at("placement_density"), "placement_density");
+    if (has("threads"))
+        config.threads = static_cast<int>(optionalInteger(arguments, "threads").value_or(config.threads));
+    if (has("seed"))
+        config.seed = static_cast<std::uint32_t>(optionalInteger(arguments, "seed").value_or(config.seed));
+    if (has("timeout_seconds"))
+        config.timeoutSeconds =
+            static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(config.timeoutSeconds));
+    if (has("backend"))
+        config.backend = optionalString(arguments, "backend");
+    if (has("site"))
+        config.site = optionalString(arguments, "site");
+    if (has("die_area"))
+        config.dieArea = rectValue(arguments.at("die_area"), "die_area");
+    if (optionalBoolean(arguments, "clear_die_area", false))
+        config.dieArea.reset();
+    if (has("core_area"))
+        config.coreArea = rectValue(arguments.at("core_area"), "core_area");
+    if (optionalBoolean(arguments, "clear_core_area", false))
+        config.coreArea.reset();
+    if (has("io_horizontal_layers"))
+        config.ioHorizontalLayers = parseSignalListValue(arguments.at("io_horizontal_layers"), "io_horizontal_layers");
+    if (has("io_vertical_layers"))
+        config.ioVerticalLayers = parseSignalListValue(arguments.at("io_vertical_layers"), "io_vertical_layers");
+    if (has("macros")) {
+        config.macros.clear();
+        const auto &macros = arguments.at("macros");
+        if (!macros.is_array())
+            throw ToolError("Argument 'macros' must be an array.");
+        for (const auto &entry : macros) {
+            if (!entry.is_object())
+                throw ToolError("Each macro entry must be an object.");
+            ice::ImplementationMacroPlacement macro;
+            macro.cell = requiredString(entry, "cell");
+            macro.x = coordinateValue(requiredValue(entry, "x"), "macro x");
+            macro.y = coordinateValue(requiredValue(entry, "y"), "macro y");
+            macro.orientation = optionalString(entry, "orientation", "r0");
+            config.macros.push_back(std::move(macro));
+        }
+    }
+    if (optionalBoolean(arguments, "clear_macros", false))
+        config.macros.clear();
+    if (has("timing_driven"))
+        config.timingDriven = optionalBoolean(arguments, "timing_driven", config.timingDriven);
+    if (has("routability_driven"))
+        config.routabilityDriven = optionalBoolean(arguments, "routability_driven", config.routabilityDriven);
+    if (has("cts_enabled"))
+        config.ctsEnabled = optionalBoolean(arguments, "cts_enabled", config.ctsEnabled);
+    if (has("cts_root_buffer"))
+        config.ctsRootBuffer = optionalString(arguments, "cts_root_buffer");
+    if (has("cts_buffers"))
+        config.ctsBuffers = parseSignalListValue(arguments.at("cts_buffers"), "cts_buffers");
+    if (has("routing_min_layer"))
+        config.routingMinLayer = optionalString(arguments, "routing_min_layer");
+    if (has("routing_max_layer"))
+        config.routingMaxLayer = optionalString(arguments, "routing_max_layer");
+    if (has("antenna_repair"))
+        config.antennaRepair = optionalBoolean(arguments, "antenna_repair", config.antennaRepair);
+}
+
+json drcReportJson(const ice::VerificationReport &report) {
+    json violations = json::array();
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+    std::size_t info = 0;
+    for (const auto &violation : report.drc) {
+        if (violation.severity == ice::VerificationSeverity::error)
+            ++errors;
+        else if (violation.severity == ice::VerificationSeverity::warning)
+            ++warnings;
+        else
+            ++info;
+        json entry = {{"severity", ice::verificationSeverityName(violation.severity)},
+                      {"rule", violation.rule},
+                      {"message", violation.message},
+                      {"cell", violation.cell},
+                      {"location",
+                       {{"x", violation.location.x},
+                        {"y", violation.location.y},
+                        {"width", violation.location.width},
+                        {"height", violation.location.height}}}};
+        if (violation.object)
+            entry["object"] = *violation.object;
+        violations.push_back(std::move(entry));
+    }
+    return {{"total", report.drc.size()},
+            {"errors", errors},
+            {"warnings", warnings},
+            {"info", info},
+            {"violations", std::move(violations)}};
 }
 
 json graphJson(const ice::SimulationGraph &graph) {
@@ -1449,7 +1662,7 @@ class IceMcpServer {
             result["migrated"] = true;
             result["agents_updated"] = before != after;
             result["pdk_ids_updated"] = pdkIdsUpdated;
-            result["guidance_version"] = 3;
+            result["guidance_version"] = 5;
             return result;
         }
         if (name == "project_summary")
@@ -1644,9 +1857,10 @@ class IceMcpServer {
             } else if (schematic->second.systemVerilogSchematic) {
                 request.analysis = "digital";
                 request.simulator = "iverilog";
-                std::istringstream source(schematic->second.systemVerilogText);
+                const auto source = ice::buildSystemVerilogSimulationSource(session.project(), simulation.schematic);
+                std::istringstream lines(source);
                 std::string line;
-                while (std::getline(source, line))
+                while (std::getline(lines, line))
                     request.netlist.push_back(line);
             } else {
                 request.simulator = "ngspice";
@@ -2975,8 +3189,12 @@ class IceMcpServer {
         if (name == "layout_export_gds") {
             const auto cell = resolveLayoutCell(session.project(), arguments);
             const auto path = requiredString(arguments, "path");
-            ice::LayoutInterchange::exportGds(session.project(), cell, path);
-            return {{"cell", cell}, {"path", path}};
+            const bool flatten = optionalBoolean(arguments, "flatten", false);
+            if (flatten)
+                ice::LayoutInterchange::exportFlattenedGds(session.project(), cell, path);
+            else
+                ice::LayoutInterchange::exportGds(session.project(), cell, path);
+            return {{"cell", cell}, {"path", path}, {"flattened", flatten}};
         }
         if (name == "layout_export_lef") {
             const auto cell = resolveLayoutCell(session.project(), arguments);
@@ -2989,6 +3207,52 @@ class IceMcpServer {
             const auto path = requiredString(arguments, "path");
             ice::LayoutInterchange::exportDef(session.project(), cell, path);
             return {{"cell", cell}, {"path", path}};
+        }
+        if (name == "layout_import_def") {
+            const auto path = requiredString(arguments, "path");
+            ice::DefImportOptions options;
+            options.pdk = optionalString(arguments, "pdk", ice::genericPdkId);
+            options.stack = optionalString(arguments, "stack");
+            options.cellName = optionalString(arguments, "name");
+            options.importMasters = optionalBoolean(arguments, "import_masters", true);
+            options.importRoutes = optionalBoolean(arguments, "import_routes", true);
+            if (const auto techLef = optionalString(arguments, "tech_lef"); !techLef.empty())
+                options.techLef = techLef;
+            if (const auto cellLef = optionalString(arguments, "cell_lef"); !cellLef.empty())
+                options.cellLef = cellLef;
+            if (options.pdk != ice::genericPdkId) {
+                const auto pdks = ice::findPdks(options.pdk);
+                if (!pdks.empty()) {
+                    const auto package = ice::PackageManager::readManifest(pdks.front().packageRoot);
+                    if (package.pdk) {
+                        options.pdk = package.pdk->id.empty() ? package.name : package.pdk->id;
+                        if (options.stack.empty()) {
+                            try {
+                                options.stack = ice::resolvePdkStack(*package.pdk, {});
+                            } catch (const ice::ProjectError &) {
+                            }
+                        }
+                        for (const auto &layer : package.pdk->layers)
+                            options.layers[lowerCopy(layer.name)] = {layer.number, layer.datatype};
+                    }
+                }
+            }
+            if (const auto replace = optionalString(arguments, "replace"); !replace.empty()) {
+                options.replaceCell = lookupByIdOrName(session.project().layoutCells, replace, "layout cell");
+            }
+            ice::ObjectId layoutId = 0;
+            session.execute("mcp layout-import-def", [&](ice::Project &project) {
+                layoutId = ice::LayoutInterchange::importDefIntoProject(project, path, options);
+            });
+            const auto &layout = session.project().layoutCells.at(layoutId);
+            return {{"layout", layoutId},
+                    {"name", layout.name},
+                    {"pdk", layout.pdk},
+                    {"stack", layout.stack},
+                    {"shapes", layout.shapes.size()},
+                    {"ports", layout.ports.size()},
+                    {"nets", layout.nets.size()},
+                    {"instances", layout.instances.size()}};
         }
 
         if (name == "pex_run") {
@@ -3041,38 +3305,100 @@ class IceMcpServer {
             config.top = optionalString(arguments, "top", config.name);
             config.pdk = requiredString(arguments, "pdk");
             config.stack = optionalString(arguments, "stack");
+            config.corner = optionalString(arguments, "corner", "tt");
+            applyImplementationConfigJson(config, session.project(), arguments);
             if (config.stack.empty())
                 config.stack = resolveLayoutStack(config.pdk, {});
-            const auto sourcesValue = arguments.find("sources");
-            if (sourcesValue != arguments.end() && !sourcesValue->is_null()) {
-                if (!sourcesValue->is_array())
-                    throw ToolError("Argument 'sources' must be an array of paths.");
-                for (const auto &source : *sourcesValue)
-                    config.sources.emplace_back(source.get<std::string>());
-            }
-            const auto sourceCellsValue = arguments.find("source_cells");
-            if (sourceCellsValue != arguments.end() && !sourceCellsValue->is_null()) {
-                if (!sourceCellsValue->is_array())
-                    throw ToolError("Argument 'source_cells' must be an array.");
-                for (const auto &sourceCell : *sourceCellsValue)
-                    config.sourceCells.push_back(
-                        lookupByIdOrName(session.project().schematicCells, sourceCell, "schematic"));
-            }
-            config.sdc = optionalString(arguments, "sdc");
-            config.corner = optionalString(arguments, "corner", "tt");
-            config.standardCellLibrary = optionalString(arguments, "standard_cell_library");
-            config.utilization = arguments.value("utilization", config.utilization);
-            config.aspectRatio = arguments.value("aspect_ratio", config.aspectRatio);
-            config.placementDensity = arguments.value("placement_density", config.placementDensity);
-            config.threads = static_cast<int>(optionalInteger(arguments, "threads").value_or(config.threads));
-            config.backend = optionalString(arguments, "backend", config.backend);
-            config.ctsEnabled = optionalBoolean(arguments, "cts_enabled", config.ctsEnabled);
-            config.timeoutSeconds =
-                static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(config.timeoutSeconds));
             ice::ObjectId id = 0;
             session.execute("mcp implementation-create",
                             [&](ice::Project &project) { id = ice::createImplementationRun(project, config); });
             return implementationRunSummaryJson(session.project().implementationRuns.at(id));
+        }
+        if (name == "implementation_update") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            auto config = session.project().implementationRuns.at(runId).config;
+            applyImplementationConfigJson(config, session.project(), arguments);
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            const auto diagnostics = ice::validateImplementationConfig(session.project(), config);
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == ice::Diagnostic::Severity::error)
+                    throw ToolError(diagnostic.message);
+            }
+            auto from = implementationStageArgument(arguments, "from", ice::ImplementationStage::elaboration);
+            session.execute("mcp implementation-update", [&](ice::Project &project) {
+                ice::updateImplementationConfig(project.implementationRuns.at(runId), std::move(config), from);
+            });
+            return implementationRunSummaryJson(session.project().implementationRuns.at(runId));
+        }
+        if (name == "implementation_toolchain")
+            return ice::implementationToolchainJson(ice::discoverImplementationToolchain());
+        if (name == "implementation_prepare") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &run = session.project().implementationRuns.at(runId);
+            const auto package = implementationPackageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ToolError("No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            ice::ImplementationPreparation preparation;
+            session.execute("mcp implementation-prepare", [&](ice::Project &project) {
+                auto found = project.implementationRuns.find(runId);
+                if (found == project.implementationRuns.end())
+                    return;
+                preparation = ice::prepareImplementationRun(project, found->second, platform, projectRootPath());
+            });
+            for (auto &diagnostic : preparation.diagnostics)
+                diagnostics.push_back(std::move(diagnostic));
+            json scripts = json::array();
+            for (const auto &script : preparation.scripts)
+                scripts.push_back(script.generic_string());
+            json rtl = json::array();
+            for (const auto &file : preparation.rtlFiles)
+                rtl.push_back(file);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            return {{"ready", preparation.ready},
+                    {"run", implementationRunSummaryJson(session.project().implementationRuns.at(runId))},
+                    {"run_directory", preparation.runDirectory.generic_string()},
+                    {"scripts", std::move(scripts)},
+                    {"rtl_files", std::move(rtl)},
+                    {"diagnostics", std::move(diagnosticArray)},
+                    {"toolchain", ice::implementationToolchainJson(ice::discoverImplementationToolchain())}};
+        }
+        if (name == "implementation_map") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &run = session.project().implementationRuns.at(runId);
+            const auto package = implementationPackageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ToolError("No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == ice::Diagnostic::Severity::error)
+                    throw ToolError(diagnostic.message);
+            }
+            std::filesystem::path output;
+            if (const auto path = optionalString(arguments, "output"); !path.empty()) {
+                output = path;
+                if (output.is_relative())
+                    output = std::filesystem::absolute(output);
+            }
+            std::function<void(const std::string &)> logger;
+            if (optionalBoolean(arguments, "verbose", false))
+                logger = [](const std::string &chunk) { std::cerr << chunk; };
+            ice::ImplementationMapResult result;
+            session.execute("mcp implementation-map", [&](ice::Project &project) {
+                auto found = project.implementationRuns.find(runId);
+                if (found == project.implementationRuns.end())
+                    return;
+                result = ice::mapImplementationRun(found->second, platform, projectRootPath(), output, logger);
+            });
+            return {{"success", result.success},
+                    {"error", result.error},
+                    {"netlist", result.netlist.generic_string()},
+                    {"run", ice::implementationRunJson(session.project().implementationRuns.at(runId))}};
         }
         if (name == "implementation_list") {
             json runs = json::array();
@@ -3213,6 +3539,90 @@ class IceMcpServer {
                     {"instances", layout.instances.size()},
                     {"run", ice::implementationRunJson(session.project().implementationRuns.at(runId))}};
         }
+        if (name == "implementation_export_gds") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &run = session.project().implementationRuns.at(runId);
+            const auto package = implementationPackageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ToolError("No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == ice::Diagnostic::Severity::error)
+                    throw ToolError(diagnostic.message);
+            }
+            const auto output = optionalString(arguments, "output");
+            ice::ImplementationGdsExport exported;
+            session.execute("mcp implementation-export-gds", [&](ice::Project &project) {
+                auto found = project.implementationRuns.find(runId);
+                if (found == project.implementationRuns.end())
+                    return;
+                exported = ice::exportImplementationGds(found->second, platform, projectRootPath(), output);
+            });
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : exported.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            if (!exported.success)
+                throw ToolError(exported.error.empty() ? "Unable to export the implementation GDS." : exported.error);
+            return {{"success", true},
+                    {"path", exported.path.generic_string()},
+                    {"def", exported.defPath.generic_string()},
+                    {"log", exported.logPath.generic_string()},
+                    {"missing_cells", exported.missingCells},
+                    {"empty_cells", exported.emptyCells},
+                    {"diagnostics", std::move(diagnosticArray)},
+                    {"run", implementationRunSummaryJson(session.project().implementationRuns.at(runId))}};
+        }
+        if (name == "implementation_delete") {
+            const auto runId = resolveImplementationRun(session.project(), requiredValue(arguments, "run"));
+            const auto &run = session.project().implementationRuns.at(runId);
+            const auto runName = run.name;
+            const auto directory = run.directory;
+            const bool purge = optionalBoolean(arguments, "purge", false);
+            session.execute("mcp implementation-delete",
+                            [&](ice::Project &project) { ice::removeImplementationRun(project, runId); });
+            bool purged = false;
+            if (purge && !directory.empty()) {
+                const auto root = projectRootPath().lexically_normal();
+                auto path = (root / directory).lexically_normal();
+                const auto allowed = (root / "build" / "impl").lexically_normal();
+                if (path.string().starts_with(allowed.string() + "/")) {
+                    std::error_code status;
+                    purged = std::filesystem::remove_all(path, status) > 0 && !status;
+                }
+            }
+            return {{"id", runId}, {"name", runName}, {"deleted", true}, {"purged", purged}};
+        }
+        if (name == "drc_run") {
+            const auto layout =
+                lookupByIdOrName(session.project().layoutCells, requiredValue(arguments, "layout"), "layout cell");
+            const auto &cell = session.project().layoutCells.at(layout);
+            ice::LayoutDrcOptions options;
+            options.flatten = optionalBoolean(arguments, "flatten", true);
+            options.suite = optionalString(arguments, "suite", "main");
+            options.topCell = optionalString(arguments, "top_cell");
+            options.timeoutSeconds = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(0));
+            const auto output = optionalString(arguments, "output");
+            options.workDirectory =
+                output.empty() ? (projectRootPath() / "build" / "drc" / cell.name) : std::filesystem::path(output);
+            const auto result = ice::runLayoutDrc(session.project(), layout, options);
+            auto report = drcReportJson(result.report);
+            json response = {{"ok", result.ok},
+                             {"layout", result.layout},
+                             {"name", result.layoutName},
+                             {"pdk", cell.pdk},
+                             {"process", ice::gdsCheckProcessForPdk(cell.pdk)},
+                             {"gds", result.gdsPath.generic_string()},
+                             {"report", result.reportPath.generic_string()},
+                             {"log", result.logPath.generic_string()},
+                             {"error", result.error},
+                             {"process_exit_code", result.process.exitCode},
+                             {"process_timed_out", result.process.timedOut},
+                             {"drc", report}};
+            if (!result.ok)
+                throw ToolError(result.error.empty() ? "DRC failed" : result.error);
+            return response;
+        }
 
         throw ToolError("Unknown tool: " + name);
     }
@@ -3273,11 +3683,13 @@ class IceMcpServer {
                 .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
-        tools.push_back(
-            tool_builder("ice_help")
-                .with_description("Return workflow help, common tools, and example payloads.")
-                .with_string_param("topic", "overview, project, schematic, mixed-signal, simulation, pdk", false)
-                .build());
+        tools.push_back(tool_builder("ice_help")
+                            .with_description("Return workflow help, common tools, and example payloads.")
+                            .with_string_param("topic",
+                                               "overview, project, schematic, mixed-signal, digital, implementation, "
+                                               "verification, simulation, pdk",
+                                               false)
+                            .build());
         tools.push_back(
             tool_builder("ice_doctor")
                 .with_description("Inspect ngspice, Python, report-runner, PDK readiness/model libraries, "
@@ -3651,6 +4063,7 @@ class IceMcpServer {
                             .with_description("Export a layout cell to GDSII, including pins and labels.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("path", "Output GDS path")
+                            .with_boolean_param("flatten", "Flatten instance hierarchy into one cell", false)
                             .build());
         tools.push_back(tool_builder("layout_export_lef")
                             .with_description("Export layout pin metadata as a minimal LEF macro.")
@@ -3662,6 +4075,19 @@ class IceMcpServer {
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("path", "Output DEF path")
                             .build());
+        tools.push_back(
+            tool_builder("layout_import_def")
+                .with_description("Import a routed DEF into the open project as a layout cell.")
+                .with_string_param("path", "Input DEF path")
+                .with_string_param("name", "Optional imported cell name", false)
+                .with_string_param("pdk", "Optional PDK identifier for layer mapping", false)
+                .with_string_param("stack", "Optional PDK stack identifier", false)
+                .with_string_param("tech_lef", "Optional technology LEF path", false)
+                .with_string_param("cell_lef", "Optional cell LEF path", false)
+                .with_string_param("replace", "Optional existing layout name or id to replace", false)
+                .with_boolean_param("import_masters", "Create standard-cell master layouts (default true)", false)
+                .with_boolean_param("import_routes", "Import routed paths (default true)", false)
+                .build());
         tools.push_back(
             tool_builder("lvs_run")
                 .with_description("Compare a layout against its schematic and report mismatches.")
@@ -3703,13 +4129,46 @@ class IceMcpServer {
             "implementation_create", "Create an RTL-to-GDS implementation run for a PDK and stack.",
             R"({"type":"object","properties":{)"
             R"("name":{"type":"string"},"top":{"type":"string"},"pdk":{"type":"string"},"stack":{"type":"string"},)"
-            R"("sources":{"type":"array","items":{"type":"string"}},)"
+            R"("sources":{"type":["array","string"],"items":{"type":"string"}},)"
             R"("source_cells":{"type":"array","items":{}},)"
             R"("sdc":{"type":"string"},"corner":{"type":"string"},)"
             R"("standard_cell_library":{"type":"string"},"utilization":{"type":"number"},)"
             R"("aspect_ratio":{"type":"number"},"placement_density":{"type":"number"},)"
-            R"("threads":{"type":"integer"},"backend":{"type":"string"},"cts_enabled":{"type":"boolean"},)"
-            R"("timeout_seconds":{"type":"integer"}},"required":["name","pdk"]})"));
+            R"("threads":{"type":"integer"},"seed":{"type":"integer"},"backend":{"type":"string"},)"
+            R"("site":{"type":"string"},"die_area":{"type":["array","object"]},"core_area":{"type":["array","object"]},)"
+            R"("io_horizontal_layers":{"type":["array","string"]},"io_vertical_layers":{"type":["array","string"]},)"
+            R"("macros":{"type":"array","items":{"type":"object","properties":{"cell":{"type":"string"},)"
+            R"("x":{"type":"integer"},"y":{"type":"integer"},"orientation":{"type":"string"}},)"
+            R"("required":["cell","x","y"]}},)"
+            R"("timing_driven":{"type":"boolean"},"routability_driven":{"type":"boolean"},)"
+            R"("cts_enabled":{"type":"boolean"},"cts_root_buffer":{"type":"string"},)"
+            R"("cts_buffers":{"type":["array","string"]},)"
+            R"("routing_min_layer":{"type":"string"},"routing_max_layer":{"type":"string"},)"
+            R"("antenna_repair":{"type":"boolean"},"timeout_seconds":{"type":"integer"}},)"
+            R"("required":["name","pdk"]})"));
+        tools.push_back(customTool(
+            "implementation_update",
+            "Update an implementation run's configuration and invalidate downstream stage checkpoints.",
+            R"({"type":"object","properties":{"run":{"type":["string","integer"]},)"
+            R"("from":{"type":"string","description":"First invalidated stage; default elaboration"},)"
+            R"("top":{"type":"string"},"pdk":{"type":"string"},"stack":{"type":"string"},)"
+            R"("sources":{"type":["array","string"],"items":{"type":"string"}},)"
+            R"("source_cells":{"type":"array","items":{}},"sdc":{"type":"string"},"corner":{"type":"string"},)"
+            R"("standard_cell_library":{"type":"string"},"utilization":{"type":"number"},)"
+            R"("aspect_ratio":{"type":"number"},"placement_density":{"type":"number"},)"
+            R"("threads":{"type":"integer"},"seed":{"type":"integer"},"backend":{"type":"string"},)"
+            R"("site":{"type":"string"},"die_area":{"type":["array","object"]},"core_area":{"type":["array","object"]},)"
+            R"("clear_die_area":{"type":"boolean"},"clear_core_area":{"type":"boolean"},)"
+            R"("io_horizontal_layers":{"type":["array","string"]},"io_vertical_layers":{"type":["array","string"]},)"
+            R"("macros":{"type":"array","items":{"type":"object","properties":{"cell":{"type":"string"},)"
+            R"("x":{"type":"integer"},"y":{"type":"integer"},"orientation":{"type":"string"}},)"
+            R"("required":["cell","x","y"]}},"clear_macros":{"type":"boolean"},)"
+            R"("timing_driven":{"type":"boolean"},"routability_driven":{"type":"boolean"},)"
+            R"("cts_enabled":{"type":"boolean"},"cts_root_buffer":{"type":"string"},)"
+            R"("cts_buffers":{"type":["array","string"]},)"
+            R"("routing_min_layer":{"type":"string"},"routing_max_layer":{"type":"string"},)"
+            R"("antenna_repair":{"type":"boolean"},"timeout_seconds":{"type":"integer"}},)"
+            R"("required":["run"]})"));
         tools.push_back(tool_builder("implementation_list")
                             .with_description("List RTL-to-GDS implementation runs and stage status.")
                             .build());
@@ -3717,12 +4176,26 @@ class IceMcpServer {
                             .with_description("Return stage states, metrics, artifacts, and tool versions for a run.")
                             .with_string_param("run", "Implementation run name or id")
                             .build());
+        tools.push_back(tool_builder("implementation_toolchain")
+                            .with_description("Report the resolved OpenROAD, Yosys, and KLayout executables.")
+                            .build());
+        tools.push_back(
+            tool_builder("implementation_prepare")
+                .with_description("Prepare the run directory, copied RTL/SDC, Yosys scripts, and stage scripts.")
+                .with_string_param("run", "Implementation run name or id")
+                .build());
         tools.push_back(tool_builder("implementation_run")
                             .with_description("Execute Yosys/OpenROAD stages synchronously and return the run state.")
                             .with_string_param("run", "Implementation run name or id")
                             .with_string_param("from", "First stage (default synthesis)", false)
                             .with_string_param("to", "Last stage (default final)", false)
                             .with_integer_param("timeout_seconds", "Optional per-stage timeout override", false)
+                            .build());
+        tools.push_back(tool_builder("implementation_map")
+                            .with_description("Technology-map the synthesized netlist with Yosys and Liberty files.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_string_param("output", "Optional destination for the mapped netlist", false)
+                            .with_boolean_param("verbose", "Stream Yosys output to stderr", false)
                             .build());
         tools.push_back(tool_builder("implementation_log")
                             .with_description("Return the bounded process log for an implementation stage.")
@@ -3740,6 +4213,27 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .with_string_param("layout_name", "Optional imported layout name", false)
                             .with_boolean_param("replace", "Replace the layout previously produced by this run", false)
+                            .build());
+        tools.push_back(tool_builder("implementation_export_gds")
+                            .with_description("Stream the newest implementation DEF plus standard-cell GDS to a final "
+                                              "GDSII through KLayout.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_string_param("output", "Optional output GDS path", false)
+                            .build());
+        tools.push_back(tool_builder("implementation_delete")
+                            .with_description("Delete an implementation run; optionally purge its build directory.")
+                            .with_string_param("run", "Implementation run name or id")
+                            .with_boolean_param("purge", "Remove build/impl/<run> as well", false)
+                            .build());
+        tools.push_back(tool_builder("drc_run")
+                            .with_description("Export a layout, run gdscheck with the PDK process deck, and return DRC "
+                                              "violations.")
+                            .with_string_param("layout", "Layout cell name or id")
+                            .with_boolean_param("flatten", "Flatten hierarchy before checking (default true)", false)
+                            .with_string_param("suite", "Optional gdscheck suite (default main)", false)
+                            .with_string_param("top_cell", "Optional top-cell override for gdscheck", false)
+                            .with_string_param("output", "Optional DRC work directory", false)
+                            .with_integer_param("timeout_seconds", "Optional gdscheck timeout", false)
                             .build());
         return tools;
     }

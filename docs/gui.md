@@ -201,8 +201,10 @@ lay out, ICE uses a compact graph captured before memory and technology
 mapping, so the result stays viewable. If no graph can be rendered, the DOT is
 kept as a text artifact and a warning is written to the Jobs/Messages views.
 
-Floorplan reads the run's `2_tech_map.v`, so exporting from Synthesis is
-required before running the floorplan stage. Its settings expose utilization
+Floorplan reads the run's `2_tech_map.v`. If the mapped netlist is missing when
+the floorplan stage starts, ICE runs the technology-mapping step automatically
+after a successful synthesis; the **Export .v** action remains available for an
+explicit export. Its settings expose utilization
 (a fraction of the core area, so `0.5` means 50%), aspect ratio, optional
 explicit die origin/width/height, optional explicit core origin/width/height,
 placement site, IO horizontal/vertical layers, threads, and timeout. Applying
@@ -236,9 +238,13 @@ stage, and selected preview object. Physical preview DRC markers, LVS results,
 timing metrics, and STA reports appear together in the bottom `Reports` tab.
 
 Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
-still runs and the canvases show an explanatory message. Importing a finished
-DEF into a layout cell is exposed through `ice-cli implementation-import`, MCP,
-and `icepy`.
+still runs and the canvases show an explanatory message. The final stage also
+attempts a KLayout merge of the routed DEF with the platform standard-cell GDS
+decks and records `final/6_final.gds`; missing decks or KLayout are reported as
+warnings. Importing a finished DEF into a layout cell is exposed through
+`ice-cli implementation-import`, MCP, and `icepy`; `ice-cli
+implementation-export-gds` and `implementation_export_gds` rerun or redirect the
+stream export.
 
 ## Command and transaction model
 

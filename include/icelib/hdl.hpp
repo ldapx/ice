@@ -48,6 +48,12 @@ std::string systemVerilogIdentifier(const std::string &text);
 HdlParseResult parseSystemVerilogModule(const std::string &source, const std::string &preferredModule = {});
 HdlParseResult parseSystemVerilogModule(const SchematicCell &cell);
 
+// Builds one compilation unit for a digital simulation from the selected
+// SystemVerilog source cell and every project source cell it recursively
+// instantiates. This lets a testbench cell reference a separate design cell
+// without concatenating source by hand.
+std::string buildSystemVerilogSimulationSource(const Project &project, ObjectId cellId);
+
 // Builds a simple box symbol whose pins match the module ports. Pin ids are
 // left at zero so the caller can assign project-stable ids.
 HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module, bool flattenBuses = false);

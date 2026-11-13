@@ -43,6 +43,12 @@ automatically. Use **Add SystemVerilog Testbench…** in the Simulation panel
 simulation editor then opens a **Testbench** tab for editing that source. The
 source is compiled with Icarus Verilog 13 (`-g2012`).
 
+A simulation cell may reference modules defined in other project
+SystemVerilog cells. ICE follows module references and concatenates the
+selected cell with the source cells it recursively instantiates, so a
+`<design>_tb` cell can instantiate a separate `<design>` cell without copying
+the design source into the testbench file.
+
 If the source already contains `$dumpfile` and `$dumpvars`, ICE runs its inferred
 top module directly. Otherwise ICE generates a wrapper top module that
 instantiates the inferred design top, dumps all signals to a temporary VCD, and

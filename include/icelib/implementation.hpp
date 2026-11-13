@@ -63,6 +63,10 @@ struct ImplementationPlatform {
     std::filesystem::path techLef;
     std::filesystem::path cellLef;
     std::filesystem::path gds;
+    // Standard-cell GDS decks merged into the final stream. A package may
+    // provide one merged file; ORFS platform fallbacks may provide one file
+    // per standard-cell master.
+    std::vector<std::filesystem::path> gdsFiles;
     std::map<std::string, std::vector<std::filesystem::path>> liberty;
     std::vector<std::string> ioHorizontalLayers;
     std::vector<std::string> ioVerticalLayers;
@@ -209,5 +213,26 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
                                                       const PackageSpec &package,
                                                       const std::filesystem::path &projectRoot,
                                                       const std::string &layoutName = {}, bool replace = false);
+
+struct ImplementationGdsExport {
+    bool success = false;
+    std::filesystem::path path;
+    std::filesystem::path logPath;
+    std::filesystem::path defPath;
+    std::vector<std::string> missingCells;
+    std::vector<std::string> emptyCells;
+    std::vector<Diagnostic> diagnostics;
+    std::string error;
+};
+
+// Streams the newest physical checkpoint (final DEF when present) to GDSII.
+// The DEF routing and standard-cell instances are merged with the platform's
+// standard-cell GDS decks through KLayout. The default output is
+// build/impl/<run>/final/6_final.gds. Missing KLayout or standard-cell GDS
+// decks produce an explicit error instead of silently writing an incomplete
+// abstract-only file.
+ImplementationGdsExport exportImplementationGds(ImplementationRun &run, const ImplementationPlatform &platform,
+                                                const std::filesystem::path &projectRoot,
+                                                const std::filesystem::path &output = {});
 
 } // namespace ice

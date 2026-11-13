@@ -453,6 +453,31 @@ TEST_CASE("Mixed-signal co-simulation supports real ports") {
     }
 }
 
+TEST_CASE("Digital simulation source includes referenced project source cells") {
+    ice::Project project;
+    project.identity = "digital-source";
+    project.name = "digital-source";
+    const auto design = ice::createSystemVerilogCell(project, "counter", ice::genericPdkId,
+                                                     "module counter(input logic clk, output logic q);\n"
+                                                     "    always_ff @(posedge clk) q <= ~q;\n"
+                                                     "endmodule\n");
+    const auto testbench = ice::createSystemVerilogCell(project, "counter_tb", ice::genericPdkId,
+                                                        "`timescale 1ns/1ps\n"
+                                                        "module counter_tb;\n"
+                                                        "    logic clk = 0;\n"
+                                                        "    logic q;\n"
+                                                        "    counter dut(clk, q);\n"
+                                                        "    always #5 clk = ~clk;\n"
+                                                        "    initial #40 $finish;\n"
+                                                        "endmodule\n");
+    CHECK(design != 0);
+    CHECK(testbench != 0);
+    const auto source = ice::buildSystemVerilogSimulationSource(project, testbench);
+    CHECK(source.find("module counter_tb") != std::string::npos);
+    CHECK(source.find("module counter(") != std::string::npos);
+    CHECK(source.find("// counter") != std::string::npos);
+}
+
 TEST_CASE("Mixed-signal co-simulation drives analog outputs from a digital block") {
     if (std::system("command -v iverilog >/dev/null 2>&1") != 0 ||
         std::system("command -v ngspice >/dev/null 2>&1") != 0)
