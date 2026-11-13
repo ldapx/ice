@@ -1084,7 +1084,16 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             if (!metrics.empty())
                 process.arguments.insert(process.arguments.end(),
                                          {"-metrics", (runDirectory / metrics).generic_string()});
-            process.arguments.push_back(scriptPath.generic_string());
+            // OpenROAD feeds the script argument to Tcl as an unquoted
+            // `source`, so an absolute path breaks whenever it contains a
+            // space (run directories are named "<run> <id>" and run names
+            // usually end in "run"). Pass it relative to the working
+            // directory instead.
+            auto scriptArgument = scriptPath;
+            const auto scriptRelative = scriptPath.lexically_relative(runDirectory);
+            if (!scriptRelative.empty() && !scriptRelative.generic_string().starts_with(".."))
+                scriptArgument = scriptRelative;
+            process.arguments.push_back(scriptArgument.generic_string());
         }
 
         if (stage == ImplementationStage::elaboration || stage == ImplementationStage::synthesis) {

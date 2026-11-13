@@ -1351,7 +1351,12 @@ ImplementationPreparation prepareImplementationRun(Project &project, Implementat
     routing << "write_db " << tclPath(runDirectory / "db" / "5_route.odb") << "\n";
     routing << "write_def " << tclPath(runDirectory / "def" / "5_route.def") << "\n";
     routing << "write_sdc " << tclPath(runDirectory / "final" / "5_route.sdc") << "\n";
-    routing << "report_congestion\n";
+    // Congestion reporting is advisory. Some OpenROAD releases no longer
+    // provide report_congestion (removed from GRT in 26Q2), so keep it
+    // optional instead of failing the stage after routing has finished.
+    routing << "if {[catch {report_congestion} congestionError]} {\n";
+    routing << "  puts \"warning: congestion report skipped: $congestionError\"\n";
+    routing << "}\n";
     writeStage("04-route.tcl", routing.str());
 
     std::ostringstream finalStage;
@@ -1362,8 +1367,12 @@ ImplementationPreparation prepareImplementationRun(Project &project, Implementat
     if (!extractionModel.empty()) {
         finalStage << "define_process_corner -ext_model_index 0 X\n";
         finalStage << "extract_parasitics -ext_model_file " << tclPath(extractionModel) << "\n";
-        finalStage << "write_spef " << tclPath(runDirectory / "final" / "6_final.spef") << "\n";
-        finalStage << "read_spef " << tclPath(runDirectory / "final" / "6_final.spef") << "\n";
+        // write_spef/read_spef do not cope with absolute paths containing
+        // spaces (they brace the path and then try to open it literally). The
+        // process working directory is the run directory, so use the relative
+        // path here.
+        finalStage << "write_spef \"final/6_final.spef\"\n";
+        finalStage << "read_spef \"final/6_final.spef\"\n";
     }
     finalStage << "write_db " << tclPath(runDirectory / "db" / "6_final.odb") << "\n";
     finalStage << "write_def " << tclPath(runDirectory / "def" / "6_final.def") << "\n";
