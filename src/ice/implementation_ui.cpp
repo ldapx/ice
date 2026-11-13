@@ -2346,8 +2346,11 @@ bool ImplementationUiController::openInOpenRoadGui(ice::ImplementationStage stag
     output << script.toStdString();
     output.close();
 
+    // OpenROAD evaluates the script argument as an unquoted Tcl `source`, so
+    // hand it a path relative to the run directory: run directories contain a
+    // space ("<run name> <id>").
     QStringList arguments = {QStringLiteral("-gui"), QStringLiteral("-no_init"), QStringLiteral("-no_splash"),
-                             QString::fromStdString(scriptPath.string())};
+                             QStringLiteral("logs/openroad-gui.tcl")};
     if (!QProcess::startDetached(QString::fromStdString(openroad.string()), arguments,
                                  QString::fromStdString(runRoot.string()))) {
         error = QStringLiteral("Unable to launch OpenROAD GUI.");
@@ -2436,7 +2439,7 @@ QString ImplementationUiController::timingReport(ice::ImplementationStage stage,
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start(QString::fromStdString(openroad.string()),
                   {QStringLiteral("-no_init"), QStringLiteral("-no_splash"), QStringLiteral("-exit"),
-                   QString::fromStdString(scriptPath.string())});
+                   QStringLiteral("logs/timing-report.tcl")});
     const bool started = process.waitForStarted(5000);
     const bool finished = started && process.waitForFinished(180000);
     QApplication::restoreOverrideCursor();
