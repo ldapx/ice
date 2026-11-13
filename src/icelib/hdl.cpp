@@ -567,6 +567,53 @@ HdlParseResult parseSystemVerilogModule(const SchematicCell &cell) {
     return parseSystemVerilogModule(cell.systemVerilogText, cell.name);
 }
 
+std::string buildSystemVerilogSimulationSource(const Project &project, ObjectId cellId) {
+    std::map<std::string, ObjectId> moduleCells;
+    for (const auto &[id, cell] : project.schematicCells) {
+        if (!cell.systemVerilogSchematic)
+            continue;
+        for (const auto &module : rawModules(cell.systemVerilogText))
+            moduleCells.emplace(lowerCopy(module.name), id);
+    }
+    const auto target = project.schematicCells.find(cellId);
+    if (target == project.schematicCells.end())
+        return {};
+    // A selected source cell owns its own module names even when another cell
+    // happens to define the same name.
+    for (const auto &module : rawModules(target->second.systemVerilogText))
+        moduleCells[lowerCopy(module.name)] = cellId;
+
+    std::set<ObjectId> included;
+    std::vector<ObjectId> pending{cellId};
+    std::vector<const SchematicCell *> sources;
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        if (!included.insert(id).second)
+            continue;
+        const auto cell = project.schematicCells.find(id);
+        if (cell == project.schematicCells.end() || !cell->second.systemVerilogSchematic)
+            continue;
+        sources.push_back(&cell->second);
+        for (const auto &[moduleName, moduleCell] : moduleCells) {
+            if (moduleCell == id || included.contains(moduleCell))
+                continue;
+            if (containsWord(cell->second.systemVerilogText, moduleName))
+                pending.push_back(moduleCell);
+        }
+    }
+
+    std::ostringstream output;
+    for (const auto *cell : sources) {
+        if (cell->systemVerilogText.empty())
+            continue;
+        output << "// " << cell->name << "\n" << cell->systemVerilogText;
+        if (cell->systemVerilogText.back() != '\n')
+            output << "\n";
+    }
+    return output.str();
+}
+
 HdlSymbolTemplate makeHdlSymbolTemplate(const HdlModule &module, bool flattenBuses) {
     HdlModule flattened;
     if (flattenBuses) {

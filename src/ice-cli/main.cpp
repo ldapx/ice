@@ -1,6 +1,7 @@
 #include "icelib/agent_api.hpp"
 #include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
+#include "icelib/drc.hpp"
 #include "icelib/implementation.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/measure.hpp"
@@ -199,6 +200,38 @@ json implementationSummary(const ice::ImplementationRun &run) {
             {"result_layout", run.resultLayout}};
 }
 
+json drcReportJson(const ice::VerificationReport &report) {
+    json violations = json::array();
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+    std::size_t info = 0;
+    for (const auto &violation : report.drc) {
+        if (violation.severity == ice::VerificationSeverity::error)
+            ++errors;
+        else if (violation.severity == ice::VerificationSeverity::warning)
+            ++warnings;
+        else
+            ++info;
+        json entry = {{"severity", ice::verificationSeverityName(violation.severity)},
+                      {"rule", violation.rule},
+                      {"message", violation.message},
+                      {"cell", violation.cell},
+                      {"location",
+                       {{"x", violation.location.x},
+                        {"y", violation.location.y},
+                        {"width", violation.location.width},
+                        {"height", violation.location.height}}}};
+        if (violation.object)
+            entry["object"] = *violation.object;
+        violations.push_back(std::move(entry));
+    }
+    return {{"total", report.drc.size()},
+            {"errors", errors},
+            {"warnings", warnings},
+            {"info", info},
+            {"violations", std::move(violations)}};
+}
+
 ice::ObjectId resolveLayer(const ice::Project &project, const std::string &text) {
     return resolveByIdOrName(project.layers, text, "layer");
 }
@@ -354,6 +387,108 @@ std::vector<std::string> splitSignals(const std::string &text) {
     }
     flush();
     return signals;
+}
+
+ice::Rect parseRectArgument(const std::string &text, const char *what) {
+    const auto parts = splitSignals(text);
+    if (parts.size() != 4)
+        argumentError(std::string(what) + " must be x,y,width,height");
+    ice::Rect rect;
+    rect.x = parseInteger(parts[0], what);
+    rect.y = parseInteger(parts[1], what);
+    rect.width = parseInteger(parts[2], what);
+    rect.height = parseInteger(parts[3], what);
+    return rect;
+}
+
+void applyImplementationConfigOption(const ice::Project &project, const std::vector<std::string> &args,
+                                     std::size_t &index, ice::ImplementationConfig &config) {
+    const auto &option = args[index];
+    const auto value = [&]() -> const std::string & {
+        if (++index >= args.size())
+            argumentError("Missing value for " + option);
+        return args[index];
+    };
+    if (option == "--top") {
+        config.top = value();
+    } else if (option == "--pdk") {
+        config.pdk = value();
+    } else if (option == "--stack") {
+        config.stack = value();
+    } else if (option == "--source") {
+        config.sources.emplace_back(value());
+    } else if (option == "--source-cell") {
+        config.sourceCells.push_back(resolveSchematic(project, value()));
+    } else if (option == "--sdc") {
+        config.sdc = value();
+    } else if (option == "--std-cell-lib") {
+        config.standardCellLibrary = value();
+    } else if (option == "--corner") {
+        config.corner = value();
+    } else if (option == "--site") {
+        config.site = value();
+    } else if (option == "--utilization") {
+        config.utilization = parseDouble(value(), "utilization");
+    } else if (option == "--aspect-ratio") {
+        config.aspectRatio = parseDouble(value(), "aspect ratio");
+    } else if (option == "--placement-density") {
+        config.placementDensity = parseDouble(value(), "placement density");
+    } else if (option == "--threads") {
+        config.threads = static_cast<int>(parseInteger(value(), "threads"));
+    } else if (option == "--seed") {
+        config.seed = static_cast<std::uint32_t>(parseInteger(value(), "seed"));
+    } else if (option == "--timeout") {
+        config.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+    } else if (option == "--backend") {
+        config.backend = value();
+    } else if (option == "--die-area") {
+        config.dieArea = parseRectArgument(value(), "die area");
+    } else if (option == "--core-area") {
+        config.coreArea = parseRectArgument(value(), "core area");
+    } else if (option == "--clear-die-area") {
+        config.dieArea.reset();
+    } else if (option == "--clear-core-area") {
+        config.coreArea.reset();
+    } else if (option == "--io-horizontal-layers") {
+        config.ioHorizontalLayers = splitSignals(value());
+    } else if (option == "--io-vertical-layers") {
+        config.ioVerticalLayers = splitSignals(value());
+    } else if (option == "--macro") {
+        const auto parts = splitSignals(value());
+        if (parts.size() < 3 || parts.size() > 4)
+            argumentError("--macro must be cell,x,y[,orientation]");
+        ice::ImplementationMacroPlacement macro;
+        macro.cell = parts[0];
+        macro.x = parseInteger(parts[1], "macro x");
+        macro.y = parseInteger(parts[2], "macro y");
+        if (parts.size() == 4)
+            macro.orientation = parts[3];
+        config.macros.push_back(std::move(macro));
+    } else if (option == "--clear-macros") {
+        config.macros.clear();
+    } else if (option == "--timing-driven") {
+        config.timingDriven = true;
+    } else if (option == "--routability-driven") {
+        config.routabilityDriven = true;
+    } else if (option == "--cts") {
+        config.ctsEnabled = true;
+    } else if (option == "--no-cts") {
+        config.ctsEnabled = false;
+    } else if (option == "--cts-root-buffer") {
+        config.ctsRootBuffer = value();
+    } else if (option == "--cts-buffers") {
+        config.ctsBuffers = splitSignals(value());
+    } else if (option == "--routing-min-layer") {
+        config.routingMinLayer = value();
+    } else if (option == "--routing-max-layer") {
+        config.routingMaxLayer = value();
+    } else if (option == "--antenna-repair") {
+        config.antennaRepair = true;
+    } else if (option == "--no-antenna-repair") {
+        config.antennaRepair = false;
+    } else {
+        argumentError("Unknown implementation option: " + option);
+    }
 }
 
 std::string trimText(const std::string &text) {
@@ -934,6 +1069,7 @@ void printHelp() {
               << "  schematic-add-cell <project> <name> [pdk]\n"
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
               << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
+              << "  schematic-add-sv <project> <name> [pdk] [source-file]\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]\n"
@@ -980,7 +1116,14 @@ void printHelp() {
               << "Implementation:\n"
               << "  implementation-create <project> <name> --top <module> --pdk <pdk> [--stack <stack>] "
                  "[--source <file>]... [--source-cell <cell>]... [--sdc <file>] [--std-cell-lib <name>] "
-                 "[--corner <corner>] [--utilization <value>] [--threads <n>]\n"
+                 "[--corner <corner>] [--utilization <value>] [--aspect-ratio <value>] "
+                 "[--placement-density <value>] [--threads <n>] [--backend <name>] "
+                 "[--die-area x,y,w,h] [--core-area x,y,w,h] [--site <name>] "
+                 "[--io-horizontal-layers <a,b>] [--io-vertical-layers <a,b>] [--macro cell,x,y[,orientation]]... "
+                 "[--timing-driven] [--routability-driven] [--no-cts] [--cts-root-buffer <cell>] "
+                 "[--cts-buffers <a,b>] [--routing-min-layer <layer>] [--routing-max-layer <layer>] "
+                 "[--no-antenna-repair] [--seed <n>] [--timeout <seconds>]\n"
+              << "  implementation-update <project> <run> [--from <stage>] [same options as implementation-create]\n"
               << "  implementation-list <project>\n"
               << "  implementation-status <project> <run>\n"
               << "  implementation-prepare <project> <run>\n"
@@ -990,12 +1133,15 @@ void printHelp() {
               << "  implementation-log <project> <run> [--stage <stage>] [--tail <lines>]\n"
               << "  implementation-cancel <project> <run>\n"
               << "  implementation-import <project> <run> [--layout-name <name>] [--replace]\n"
+              << "  implementation-export-gds <project> <run> [--output <path>]\n"
               << "  implementation-toolchain\n"
-              << "  implementation-delete <project> <run>\n\n"
+              << "  implementation-delete <project> <run> [--purge]\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n"
-              << "  pex <project> <layout> [schematic-name]\n\n"
+              << "  pex <project> <layout> [schematic-name]\n"
+              << "  drc <project> <layout> [--no-flatten] [--output <dir>] [--suite <name>] "
+                 "[--top-cell <name>] [--timeout <seconds>]\n\n"
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
                  "[signals...]\n"
@@ -1196,6 +1342,58 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "drc") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli drc <project> <layout> [--no-flatten] [--output <dir>] "
+                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto &layoutCell = project.layoutCells.at(layout);
+            ice::LayoutDrcOptions options;
+            options.workDirectory = projectRootForCli(args[1]) / "build" / "drc" / layoutCell.name;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--no-flatten") {
+                    options.flatten = false;
+                } else if (option == "--output") {
+                    options.workDirectory = value();
+                } else if (option == "--suite") {
+                    options.suite = value();
+                } else if (option == "--top-cell") {
+                    options.topCell = value();
+                } else if (option == "--timeout") {
+                    options.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else {
+                    argumentError("Unknown drc option: " + option);
+                }
+            }
+            const auto result = ice::runLayoutDrc(project, layout, options);
+            const auto report = drcReportJson(result.report);
+            printJson({{"ok", result.ok},
+                       {"layout", result.layout},
+                       {"name", result.layoutName},
+                       {"pdk", layoutCell.pdk},
+                       {"gds", result.gdsPath.generic_string()},
+                       {"report", result.reportPath.generic_string()},
+                       {"log", result.logPath.generic_string()},
+                       {"error", result.error},
+                       {"process_exit_code", result.process.exitCode},
+                       {"process_timed_out", result.process.timedOut},
+                       {"drc", report},
+                       {"counts",
+                        {{"total", report["total"]},
+                         {"errors", report["errors"]},
+                         {"warnings", report["warnings"]},
+                         {"info", report["info"]}}}});
+            const auto errors = report["errors"].get<std::size_t>();
+            return result.ok && errors == 0 ? 0 : 1;
+        }
+
         if (command == "project-repair") {
             expectArguments(args, 2, 2, "project-repair <folder|project.icepro>");
             ice::ProjectLoadOptions options;
@@ -1227,7 +1425,7 @@ int main(int argc, char **argv) {
             printJson({{"migrated", true},
                        {"agents_updated", before != after},
                        {"pdk_ids_updated", pdkIdsUpdated},
-                       {"guidance_version", 3}});
+                       {"guidance_version", 5}});
             return 0;
         }
 
@@ -2272,11 +2470,18 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-export-gds") {
-            expectArguments(args, 4, 4, "layout-export-gds <project> <cell> <output.gds>");
+            if (args.size() < 4 || args.size() > 5)
+                argumentError("Usage: ice-cli layout-export-gds <project> <cell> <output.gds> [--flatten]");
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveLayout(project, args[2]);
-            ice::LayoutInterchange::exportGds(project, cell, args[3]);
-            printJson({{"cell", cell}, {"output", args[3]}});
+            const bool flatten = args.size() == 5 && args[4] == "--flatten";
+            if (args.size() == 5 && !flatten)
+                argumentError("Unknown layout-export-gds option: " + args[4]);
+            if (flatten)
+                ice::LayoutInterchange::exportFlattenedGds(project, cell, args[3]);
+            else
+                ice::LayoutInterchange::exportGds(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", flatten}});
             return 0;
         }
 
@@ -2364,42 +2569,8 @@ int main(int argc, char **argv) {
             ice::ImplementationConfig config;
             config.name = args[2];
             config.top = args[2];
-            for (std::size_t index = 3; index < args.size(); ++index) {
-                const auto &option = args[index];
-                const auto value = [&]() -> const std::string & {
-                    if (++index >= args.size())
-                        argumentError("Missing value for " + option);
-                    return args[index];
-                };
-                if (option == "--top")
-                    config.top = value();
-                else if (option == "--pdk")
-                    config.pdk = value();
-                else if (option == "--stack")
-                    config.stack = value();
-                else if (option == "--source")
-                    config.sources.emplace_back(value());
-                else if (option == "--source-cell")
-                    config.sourceCells.push_back(resolveSchematic(project, value()));
-                else if (option == "--sdc")
-                    config.sdc = value();
-                else if (option == "--std-cell-lib")
-                    config.standardCellLibrary = value();
-                else if (option == "--corner")
-                    config.corner = value();
-                else if (option == "--utilization")
-                    config.utilization = parseDouble(value(), "utilization");
-                else if (option == "--aspect-ratio")
-                    config.aspectRatio = parseDouble(value(), "aspect ratio");
-                else if (option == "--placement-density")
-                    config.placementDensity = parseDouble(value(), "placement density");
-                else if (option == "--threads")
-                    config.threads = static_cast<int>(parseInteger(value(), "threads"));
-                else if (option == "--backend")
-                    config.backend = value();
-                else
-                    argumentError("Unknown implementation-create option: " + option);
-            }
+            for (std::size_t index = 3; index < args.size(); ++index)
+                applyImplementationConfigOption(project, args, index, config);
             if (config.stack.empty())
                 config.stack = resolveLayoutStack(config.pdk, {});
             ice::ObjectId id = 0;
@@ -2408,6 +2579,43 @@ int main(int argc, char **argv) {
                             [&](ice::Project &p) { id = ice::createImplementationRun(p, config); });
             session.save(args[1]);
             printJson(implementationSummary(session.project().implementationRuns.at(id)));
+            return 0;
+        }
+
+        if (command == "implementation-update") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-update <project> <run> [--from <stage>] "
+                              "[implementation options]");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto config = project.implementationRuns.at(runId).config;
+            auto invalidateFrom = ice::ImplementationStage::elaboration;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--from") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --from");
+                    const auto parsed = ice::parseImplementationStage(args[index]);
+                    if (!parsed || *parsed == ice::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    invalidateFrom = *parsed;
+                    continue;
+                }
+                applyImplementationConfigOption(project, args, index, config);
+            }
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            const auto diagnostics = ice::validateImplementationConfig(project, config);
+            const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                return diagnostic.severity == ice::Diagnostic::Severity::error;
+            });
+            if (fatal != diagnostics.end())
+                throw ice::ProjectError(fatal->code, fatal->message);
+            ice::ProjectSession session(project);
+            session.execute("update implementation run", [&](ice::Project &p) {
+                ice::updateImplementationConfig(p.implementationRuns.at(runId), std::move(config), invalidateFrom);
+            });
+            session.save(args[1]);
+            printJson(implementationSummary(session.project().implementationRuns.at(runId)));
             return 0;
         }
 
@@ -2710,16 +2918,77 @@ int main(int argc, char **argv) {
             return imported.layout != 0 ? 0 : 1;
         }
 
+        if (command == "implementation-export-gds") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli implementation-export-gds <project> <run> [--output <path>]");
+            auto project = ice::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::filesystem::path output;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--output") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --output");
+                    output = args[index];
+                } else {
+                    argumentError("Unknown implementation-export-gds option: " + args[index]);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw ice::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<ice::Diagnostic> diagnostics;
+            const auto platform = ice::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                return diagnostic.severity == ice::Diagnostic::Severity::error;
+            });
+            if (fatal != diagnostics.end())
+                throw ice::ProjectError(fatal->code, fatal->message);
+            ice::ProjectSession session(project);
+            auto exported = ice::exportImplementationGds(session.project().implementationRuns.at(runId), platform,
+                                                         projectRootForCli(args[1]), output);
+            session.save(args[1]);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : exported.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            printJson({{"success", exported.success},
+                       {"path", exported.success ? json(exported.path.generic_string()) : json(nullptr)},
+                       {"def", exported.defPath.generic_string()},
+                       {"log", exported.logPath.generic_string()},
+                       {"missing_cells", exported.missingCells},
+                       {"empty_cells", exported.emptyCells},
+                       {"error", exported.error},
+                       {"diagnostics", std::move(diagnosticArray)},
+                       {"run", implementationSummary(session.project().implementationRuns.at(runId))}});
+            return exported.success ? 0 : 1;
+        }
+
         if (command == "implementation-delete") {
-            expectArguments(args, 3, 3, "implementation-delete <project> <run>");
+            if (args.size() < 3 || args.size() > 4)
+                argumentError("Usage: ice-cli implementation-delete <project> <run> [--purge]");
             auto project = ice::Project::load(args[1]);
             const auto runId = resolveImplementationRun(project, args[2]);
             const auto name = project.implementationRuns.at(runId).name;
+            const auto directory = project.implementationRuns.at(runId).directory;
+            const bool purge = args.size() == 4 && args[3] == "--purge";
+            if (args.size() == 4 && !purge)
+                argumentError("Unknown implementation-delete option: " + args[3]);
             ice::ProjectSession session(project);
             session.execute("remove implementation run",
                             [&](ice::Project &p) { ice::removeImplementationRun(p, runId); });
             session.save(args[1]);
-            printJson({{"id", runId}, {"name", name}, {"deleted", true}});
+            bool purged = false;
+            if (purge && !directory.empty()) {
+                const auto root = projectRootForCli(args[1]).lexically_normal();
+                const auto path = (root / directory).lexically_normal();
+                const auto allowed = (root / "build" / "impl").lexically_normal();
+                if (path.string().starts_with(allowed.string() + "/")) {
+                    std::error_code status;
+                    purged = std::filesystem::remove_all(path, status) > 0 && !status;
+                }
+            }
+            printJson({{"id", runId}, {"name", name}, {"deleted", true}, {"purged", purged}});
             return 0;
         }
 
@@ -2849,9 +3118,10 @@ int main(int argc, char **argv) {
             } else if (schematic->second.systemVerilogSchematic) {
                 request.analysis = "digital";
                 request.simulator = "iverilog";
-                std::istringstream source(schematic->second.systemVerilogText);
+                const auto source = ice::buildSystemVerilogSimulationSource(project, simulation.schematic);
+                std::istringstream lines(source);
                 std::string line;
-                while (std::getline(source, line))
+                while (std::getline(lines, line))
                     request.netlist.push_back(line);
             } else {
                 request.simulator = "ngspice";
@@ -3296,9 +3566,10 @@ int main(int argc, char **argv) {
                 if (schematic.systemVerilogSchematic) {
                     request.simulator = "iverilog";
                     request.analysis = "digital";
-                    std::istringstream source(schematic.systemVerilogText);
+                    const auto source = ice::buildSystemVerilogSimulationSource(project, schematicId);
+                    std::istringstream lines(source);
                     std::string line;
-                    while (std::getline(source, line))
+                    while (std::getline(lines, line))
                         request.netlist.push_back(line);
                 } else if (ice::schematicContainsHdl(project, schematicId)) {
                     std::string error;

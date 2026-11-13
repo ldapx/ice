@@ -114,16 +114,24 @@ and ask the user to rebuild/restart ICE.
 | `layout_add_instance` | Instance another layout cell. |
 | `layout_info` | Read a layout cell's pins, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
-| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels. |
+| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels; `flatten` merges instances. |
 | `layout_export_lef` | Export pins as a minimal LEF macro. |
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
+| `layout_import_def` | Import a routed DEF into the open project as a layout cell. |
 | `implementation_create` | Create an RTL-to-GDS run for a PDK/stack with sources, source cells, SDC, floorplan, and execution policy. |
+| `implementation_update` | Edit a run's configuration and invalidate the selected and later stage checkpoints. |
 | `implementation_list` | List implementation runs with stage status and result layout ids. |
 | `implementation_status` | Return stage states, artifacts, tool versions, and metrics. |
+| `implementation_toolchain` | Report the resolved OpenROAD, Yosys, and KLayout executables. |
+| `implementation_prepare` | Prepare the run directory, copied RTL/SDC, Yosys scripts, and stage scripts. |
 | `implementation_run` | Execute Yosys/OpenROAD stages synchronously; supports `from`/`to` and a per-stage timeout. |
+| `implementation_map` | Technology-map the synthesized netlist with Yosys and Liberty files. |
 | `implementation_log` | Return the bounded log for a stage, optionally as the last N lines. |
 | `implementation_cancel` | Signal the OpenROAD/Yosys process recorded for a run. |
 | `implementation_import_layout` | Import the newest DEF checkpoint as a package-mapped layout with pins, nets, instances, and routes. |
+| `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
+| `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
+| `drc_run` | Export a layout, run gdscheck with the PDK process deck, and return normalized DRC violations. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports `template="tran"`, `"mixed"`, `"pwm_dac"`, or `"digital"`. |
@@ -277,10 +285,51 @@ are rejected explicitly.
 probe uses analog syntax for a digital port, for example `v(U1.pwm_out)`, the
 hint tells you to use `U1.pwm_out` instead.
 
+## Digital RTL-to-GDS flow
+
+Use `schematic_create_systemverilog` (or `schematic_create` with
+`kind: "systemverilog"`) for RTL and testbench cells. A cell may contain both a
+design and its testbench; the module containing `$dumpfile`/`$dumpvars` is
+preferred as the simulation top. A testbench cell may also instantiate modules
+defined in other project SystemVerilog cells; `simulation_run` follows those
+references and compiles the combined source. `simulation_create` selects
+`iverilog` and the `digital` analysis for these cells, and `simulation_run`
+returns VCD-derived traces.
+
+An implementation run drives the same project model through elaboration,
+synthesis, floorplan, placement, CTS, routing, and final:
+
+```text
+implementation_create(name="top_impl", top="top", pdk="sky130",
+                      source_cells=["top"], sdc="constraints/top.sdc",
+                      utilization=0.45, timing_driven=true)
+implementation_run(run="top_impl")
+implementation_status(run="top_impl")
+implementation_log(run="top_impl", stage="routing", tail=80)
+implementation_import_layout(run="top_impl")
+implementation_export_gds(run="top_impl")
+drc_run(layout="top_impl layout")
+```
+
+`implementation_run` defaults to `synthesis` through `final`. If the mapped
+netlist is missing when floorplan starts, ICE runs the Yosys technology map
+automatically; `implementation_map` remains available for an explicit export.
+`implementation_status` returns stage states, artifacts, tool versions, and
+metrics, including OpenROAD timing and power keys. `implementation_update`
+edits a run and invalidates the selected `from` stage and every later stage.
+The `final` stage attempts a KLayout merge of the routed DEF with the platform
+standard-cell GDS decks and records `final/6_final.gds`; missing KLayout or GDS
+decks produce a warning, and `implementation_export_gds` can rerun the export.
+
+`drc_run` exports the layout, invokes `gdscheck` with the process deck derived
+from its PDK, and returns normalized violations. DRC and LVS results are
+separate from physical-flow route DRC metrics in `implementation_status`.
+
 ## Agent authoring shortcuts
 
 `ice_help(topic)` exposes common workflows and exact tool names:
-`overview`, `project`, `schematic`, `mixed-signal`, `simulation`, and `pdk`.
+`overview`, `project`, `schematic`, `mixed-signal`, `digital`,
+`implementation`, `verification`, `simulation`, and `pdk`.
 
 `schematic_add_component` creates a primitive and returns its pin handles.
 `schematic_add_circuit` accepts components and nets in one atomic call.

@@ -377,6 +377,61 @@ std::optional<std::filesystem::path> findFirstFile(const std::filesystem::path &
     return matches.front();
 }
 
+bool isGdsFile(const std::filesystem::path &path) {
+    const auto extension = lowercase(path.extension().string());
+    if (extension == ".gds")
+        return true;
+    if (extension == ".gz") {
+        const auto stem = lowercase(path.stem().extension().string());
+        return stem == ".gds";
+    }
+    return false;
+}
+
+std::vector<std::filesystem::path> collectGdsFiles(const std::filesystem::path &directory,
+                                                   const std::string &preferredSubdirectory = {}) {
+    std::vector<std::filesystem::path> result;
+    std::error_code status;
+    if (!std::filesystem::is_directory(directory, status) || status)
+        return result;
+    const auto collectDirect = [&](const std::filesystem::path &source) {
+        std::error_code sourceStatus;
+        if (!std::filesystem::is_directory(source, sourceStatus) || sourceStatus)
+            return false;
+        for (std::filesystem::directory_iterator iterator(source, sourceStatus), end; !sourceStatus && iterator != end;
+             iterator.increment(sourceStatus)) {
+            if (iterator->is_regular_file() && isGdsFile(iterator->path()))
+                result.push_back(iterator->path());
+        }
+        return !result.empty();
+    };
+    if (!preferredSubdirectory.empty()) {
+        const auto preferred = directory / preferredSubdirectory;
+        if (collectDirect(preferred)) {
+            std::sort(result.begin(), result.end());
+            return result;
+        }
+        result.clear();
+    }
+    if (collectDirect(directory)) {
+        std::sort(result.begin(), result.end());
+        return result;
+    }
+    // Per-master decks are commonly stored one directory deeper.
+    std::error_code iteratorStatus;
+    std::vector<std::filesystem::path> children;
+    for (std::filesystem::directory_iterator iterator(directory, iteratorStatus), end;
+         !iteratorStatus && iterator != end; iterator.increment(iteratorStatus)) {
+        if (iterator->is_directory())
+            children.push_back(iterator->path());
+    }
+    std::sort(children.begin(), children.end());
+    for (const auto &child : children)
+        collectDirect(child);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 std::optional<std::filesystem::path> findOrfsExecutable(const std::string &tool, const std::string &name) {
     const auto *root = std::getenv("OPENROAD_FLOW_SCRIPTS");
     const auto *iceRoot = std::getenv("ICE_OPENROAD_FLOW_SCRIPTS");
@@ -682,6 +737,8 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
     platform.techLef = resolve(files->techLef);
     platform.cellLef = resolve(files->cellLef);
     platform.gds = resolve(files->gds);
+    if (!platform.gds.empty())
+        platform.gdsFiles.push_back(platform.gds);
     for (const auto &[corner, paths] : files->liberty) {
         auto &resolved = platform.liberty[corner];
         for (const auto &path : paths)
@@ -851,10 +908,16 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
                             platform.rcxRules = *found;
                     }
                 }
+                if (platform.gdsFiles.empty()) {
+                    const auto gdsDirectory = platformDirectory / "gds";
+                    auto preferredTrack = lowercase(implementation.orfsTrackOption);
+                    if (preferredTrack.empty() && implementation.orfsPlatform == "gf180")
+                        preferredTrack = "9t";
+                    platform.gdsFiles = collectGdsFiles(gdsDirectory, preferredTrack);
+                }
             }
         }
     }
-
     const auto requireFile = [&](const std::filesystem::path &path, const std::string &label, bool required) {
         if (path.empty()) {
             if (required)
@@ -902,6 +965,13 @@ json implementationPlatformJson(const ImplementationPlatform &platform) {
             {"tech_lef", platform.techLef.generic_string()},
             {"cell_lef", platform.cellLef.generic_string()},
             {"gds", platform.gds.generic_string()},
+            {"gds_files",
+             [&] {
+                 json files = json::array();
+                 for (const auto &file : platform.gdsFiles)
+                     files.push_back(file.generic_string());
+                 return files;
+             }()},
             {"liberty", std::move(liberty)},
             {"io_horizontal_layers", platform.ioHorizontalLayers},
             {"io_vertical_layers", platform.ioVerticalLayers},
@@ -1448,6 +1518,189 @@ std::filesystem::path writeTechnologyMapScript(const ImplementationRun &run, con
     const auto script = runDirectory / implementationTechnologyMapScriptRelativePath();
     writeText(script, yosys.str());
     return script;
+}
+
+namespace {
+
+constexpr const char *kKlayoutGdsScript = R"(# Generated by ICE. Do not edit by hand.
+import json
+import os
+import pya
+import sys
+
+config_path = globals().get("config", "")
+if not config_path:
+    raise SystemExit("missing config path")
+with open(config_path, "r", encoding="utf-8") as handle:
+    config = json.load(handle)
+
+options = pya.LoadLayoutOptions()
+lef_files = [path for path in config.get("lefs", []) if path and os.path.isfile(path)]
+if lef_files:
+    options.lefdef_config.lef_files = lef_files
+    options.lefdef_config.read_lef_with_def = True
+
+layout = pya.Layout()
+layout.read(config["def"], options)
+design = config.get("design", "")
+top = layout.cell(design) if design else None
+if top is None:
+    top = layout.top_cell()
+if top is None:
+    raise SystemExit("DEF contains no top cell")
+top_index = top.cell_index()
+for cell in layout.each_cell():
+    if cell.cell_index() != top_index and not cell.name.startswith("VIA_"):
+        cell.clear()
+
+read_files = []
+for path in config.get("gds", []):
+    if not path or not os.path.isfile(path):
+        continue
+    layout.read(path)
+    read_files.append(path)
+
+output = pya.Layout()
+output.dbu = layout.dbu
+out_top = output.create_cell(top.name)
+out_top.copy_tree(layout.cell(top.name))
+
+empty_cells = []
+for cell in output.each_cell():
+    if cell.is_empty():
+        empty_cells.append(cell.name)
+
+output_path = config["out"]
+parent = os.path.dirname(output_path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+output.write(output_path)
+
+summary = {
+    "top_cell": top.name,
+    "cells": sum(1 for _ in output.each_cell()),
+    "gds_files": read_files,
+    "empty_cells": sorted(empty_cells),
+}
+with open(config["summary"], "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2)
+)";
+
+std::string readTextFile(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        return {};
+    std::ostringstream text;
+    text << input.rdbuf();
+    return text.str();
+}
+
+} // namespace
+
+ImplementationGdsExport exportImplementationGds(ImplementationRun &run, const ImplementationPlatform &platform,
+                                                const std::filesystem::path &projectRoot,
+                                                const std::filesystem::path &output) {
+    ImplementationGdsExport result;
+    const auto fail = [&](std::string message) {
+        result.error = std::move(message);
+        addDiagnostic(result.diagnostics, Diagnostic::Severity::error, "implementation.gds", result.error);
+        return result;
+    };
+    if (run.directory.empty())
+        return fail("Implementation run has no build directory");
+    const auto runDirectory = projectRoot / run.directory;
+    for (const auto *candidate :
+         {"def/6_final.def", "def/5_route.def", "def/4_cts.def", "def/3_place.def", "def/2_floorplan.def"}) {
+        const auto path = runDirectory / candidate;
+        std::error_code status;
+        if (std::filesystem::is_regular_file(path, status) && !status) {
+            result.defPath = path;
+            break;
+        }
+    }
+    if (result.defPath.empty())
+        return fail("No DEF checkpoint exists for run '" + run.name + "'. Run at least the floorplan stage first.");
+    if (platform.gdsFiles.empty())
+        return fail("PDK '" + platform.pdk + "' does not provide standard-cell GDS decks for the final stream");
+    const auto klayout = findExecutable("klayout");
+    if (!klayout)
+        return fail("KLayout was not found. Install KLayout or set ICE_KLAYOUT to its executable.");
+
+    result.path = output.empty() ? (runDirectory / "final" / "6_final.gds")
+                                 : (output.is_absolute() ? output : (projectRoot / output).lexically_normal());
+    const auto scriptPath = runDirectory / "scripts" / "06-gds.py";
+    const auto configPath = runDirectory / "config" / "gds.json";
+    const auto summaryPath = runDirectory / "reports" / "gds.json";
+    result.logPath = runDirectory / "logs" / "06-gds.log";
+    writeText(scriptPath, kKlayoutGdsScript);
+    json config = {{"def", result.defPath.generic_string()},
+                   {"design", run.config.top},
+                   {"lefs", json::array({platform.techLef.generic_string(), platform.cellLef.generic_string()})},
+                   {"gds", json::array()},
+                   {"out", result.path.generic_string()},
+                   {"summary", summaryPath.generic_string()}};
+    for (const auto &file : platform.gdsFiles)
+        config["gds"].push_back(file.generic_string());
+    writeText(configPath, config.dump(2) + "\n");
+
+    ProcessOptions process;
+    process.arguments = {klayout->generic_string(),
+                         "-b",
+                         "-z",
+                         "-r",
+                         scriptPath.generic_string(),
+                         "-rd",
+                         "config=" + configPath.generic_string()};
+    process.workingDirectory = runDirectory;
+    process.logPath = result.logPath;
+    process.timeoutSeconds = std::max(0, run.config.timeoutSeconds);
+    const auto processResult = runProcess(process);
+    if (!processResult.succeeded()) {
+        const auto tail = readTextFile(result.logPath);
+        std::string message = "KLayout GDS export failed";
+        if (processResult.timedOut)
+            message += " (timeout)";
+        else if (processResult.exitCode >= 0)
+            message += " (exit " + std::to_string(processResult.exitCode) + ")";
+        if (!tail.empty())
+            message += ": " + tail.substr(0, 4000);
+        return fail(std::move(message));
+    }
+
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(result.path, status) || status)
+        return fail("KLayout completed but did not write " + result.path.string());
+
+    const auto summaryText = readTextFile(summaryPath);
+    if (!summaryText.empty()) {
+        const auto summary = json::parse(summaryText, nullptr, false);
+        if (!summary.is_discarded()) {
+            if (summary.contains("empty_cells") && summary["empty_cells"].is_array()) {
+                for (const auto &cell : summary["empty_cells"])
+                    result.emptyCells.push_back(cell.get<std::string>());
+            }
+        }
+    }
+    result.missingCells = result.emptyCells;
+    if (!result.emptyCells.empty()) {
+        addDiagnostic(result.diagnostics, Diagnostic::Severity::warning, "implementation.gds",
+                      "Some standard-cell GDS masters are missing or empty in the final stream (" +
+                          std::to_string(result.emptyCells.size()) + " cells)");
+    }
+    run.updatedAt = nowUtc();
+    const auto relative = result.path.lexically_relative(projectRoot).generic_string();
+    if (!relative.empty() && !relative.starts_with("..") &&
+        std::find(run.artifacts.begin(), run.artifacts.end(), relative) == run.artifacts.end())
+        run.artifacts.push_back(relative);
+    auto &finalState = run.stages[ImplementationStage::final];
+    if (std::find(finalState.artifacts.begin(), finalState.artifacts.end(), relative) == finalState.artifacts.end())
+        finalState.artifacts.push_back(relative);
+    const auto logRelative = result.logPath.lexically_relative(projectRoot).generic_string();
+    if (!logRelative.empty() && !logRelative.starts_with("..") &&
+        std::find(run.artifacts.begin(), run.artifacts.end(), logRelative) == run.artifacts.end())
+        run.artifacts.push_back(logRelative);
+    result.success = true;
+    return result;
 }
 
 } // namespace ice

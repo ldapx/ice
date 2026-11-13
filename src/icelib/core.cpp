@@ -1241,7 +1241,7 @@ void ensureGitignore(const std::filesystem::path &root) {
 
 std::string generatedAgentsGuidance() {
     std::ostringstream output;
-    output << "<!-- ICE generated guidance: begin (version 4) -->\n"
+    output << "<!-- ICE generated guidance: begin (version 5) -->\n"
            << "This directory is an ICE project.\n\n"
            << "- `project.icepro` contains project metadata.\n"
            << "- `sch/*.icesch` contains schematic cells.\n"
@@ -1329,6 +1329,26 @@ std::string generatedAgentsGuidance() {
               "so explicitly and ask whether that is acceptable. A successful transient run is not proof "
               "of oscillation: use `simulation_measure` and report zero crossings, frequency or period, "
               "amplitude, and startup behavior before claiming the circuit works.\n\n"
+           << "Digital and mixed-signal chips use the same project model plus RTL-to-GDS implementation runs. "
+              "For digital logic, create SystemVerilog source cells with `schematic_create_systemverilog` (or "
+              "`schematic_create` with `kind=\"systemverilog\"`). A source cell may contain both a design and its "
+              "testbench; the module containing `$dumpfile`/`$dumpvars` is preferred as the simulation top. "
+              "A testbench cell may also instantiate modules defined in other project SystemVerilog cells; ICE "
+              "compiles the referenced sources automatically. "
+              "Create a simulation for a testbench cell and run it with Icarus Verilog, then inspect VCD-derived "
+              "traces with `simulation_result`, `simulation_trace`, and `simulation_measure`. For mixed signal, "
+              "place a SystemVerilog cell in a drawn schematic with `schematic_add_hdl_instance`, connect its pins "
+              "with `schematic_add_net`, and let `simulation_create` select the `mixed` simulator; use "
+              "`bus_mode=\"flatten\"` for buses and validate the hierarchy first. To build a digital chip, create "
+              "an implementation run with `implementation_create` (top module, PDK, source cells/files, optional "
+              "SDC), run the stages with `implementation_run`, inspect `implementation_status`, `implementation_log`, "
+              "and metrics before changing the design, import the final DEF with `implementation_import_layout`, and "
+              "export the merged GDS with `implementation_export_gds`. `implementation_update` edits run settings and "
+              "invalidates downstream checkpoints. Run `lvs_run` and `drc_run` on the imported layout for signoff. "
+              "If a stage fails, read the bounded stage log and fix the first actionable error instead of rerunning "
+              "blindly. Do not claim timing closure, DRC cleanliness, or a manufacturable GDS unless the relevant "
+              "metrics, report, or file was actually produced; report missing tools (Yosys, OpenROAD, KLayout, "
+              "gdscheck) or PDK data explicitly.\n\n"
            << "Use `project_migrate` after upgrading ICE to refresh this generated guidance. Existing "
               "user text outside the generated markers is preserved.\n\n"
            << "For scripted work, use `ice-cli` or `ice-mcp`. Successful `ice-mcp` project mutations "
@@ -1758,7 +1778,13 @@ BuildInfo buildInfo() {
                      "implementation_openroad_plan",
                      "implementation_toolchain",
                      "implementation_execute",
-                     "implementation_import"};
+                     "implementation_import",
+                     "implementation_prepare",
+                     "implementation_map",
+                     "implementation_update",
+                     "implementation_gds",
+                     "drc_gdscheck",
+                     "digital_flow_help"};
     return info;
 }
 } // namespace ice

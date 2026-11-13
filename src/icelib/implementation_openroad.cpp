@@ -878,9 +878,25 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
 
         const bool useCppStage = useCppOpenRoadBackend(cppHelper) && stage != ImplementationStage::elaboration &&
                                  stage != ImplementationStage::synthesis;
+        std::error_code fileStatus;
+        if (stage == ImplementationStage::floorplan) {
+            const auto mappedNetlist = runDirectory / implementationMappedNetlistRelativePath();
+            if (!std::filesystem::is_regular_file(mappedNetlist, fileStatus) || fileStatus) {
+                // A full synthesis-to-GDS run must not require a separate
+                // manual mapping step. Map automatically when synthesis has
+                // completed and the run has Liberty data.
+                const auto synthesis = run.stages.find(ImplementationStage::synthesis);
+                if (synthesis != run.stages.end() && synthesis->second.status == ImplementationStageStatus::succeeded) {
+                    report(stage, ImplementationStageStatus::running, "Technology mapping is required; mapping now");
+                    const auto mapped = mapImplementationRun(run, platform, projectRoot, {}, options.log);
+                    if (!mapped.success)
+                        return fail(stage, "Technology mapping failed: " + mapped.error);
+                    changed();
+                }
+            }
+        }
         const auto scriptPath = runDirectory / implementationStageScriptRelativePath(stage);
         const auto input = stageInput(stage, ctsEnabled);
-        std::error_code fileStatus;
         if (!useCppStage && (!std::filesystem::is_regular_file(scriptPath, fileStatus) || fileStatus)) {
             return fail(stage, "Generated stage script is missing: " + scriptPath.string());
         }
@@ -888,7 +904,7 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             const auto inputPath = runDirectory / input;
             if (!std::filesystem::is_regular_file(inputPath, fileStatus) || fileStatus) {
                 const auto hint = stage == ImplementationStage::floorplan
-                                      ? "Export a technology-mapped netlist from the Synthesis tab first."
+                                      ? "Run synthesis first so ICE can technology-map the netlist."
                                       : "Run the preceding stage first.";
                 return fail(stage, "Stage input is missing: " + inputPath.string() + ". " + hint);
             }
@@ -1166,6 +1182,27 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             for (const auto &output : missing)
                 message << " " << output;
             return fail(stage, message.str());
+        }
+
+        if (stage == ImplementationStage::final) {
+            // A final RTL-to-GDS run is only useful when the routed DEF can be
+            // streamed to a real GDS with standard-cell geometry. KLayout is
+            // optional; when it or the platform GDS decks are unavailable the
+            // stage still succeeds and records an actionable warning.
+            auto gds = exportImplementationGds(run, platform, projectRoot);
+            for (auto &diagnostic : gds.diagnostics)
+                result.diagnostics.push_back(std::move(diagnostic));
+            if (!gds.success) {
+                Diagnostic diagnostic{Diagnostic::Severity::warning, "implementation.gds", gds.error, std::nullopt};
+                result.diagnostics.push_back(std::move(diagnostic));
+                if (options.log)
+                    options.log("warning: final GDS was not generated: " + gds.error + "\n");
+            } else {
+                for (const auto &artifact : run.stages[ImplementationStage::final].artifacts)
+                    addArtifact(state.artifacts, artifact);
+                if (options.log)
+                    options.log("Final GDS written to " + gds.path.generic_string() + "\n");
+            }
         }
 
         state.status = ImplementationStageStatus::succeeded;

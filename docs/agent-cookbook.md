@@ -152,6 +152,50 @@ Notes:
 - Mixed simulations with default timing use a 1 µs stop and 1 ns step. Set an
   explicit stop/step for slower RC filters or faster clocks.
 
+## Digital RTL-to-GDS chip
+
+Use SystemVerilog source cells for RTL and testbenches. A source cell may
+contain both; the module with `$dumpfile`/`$dumpvars` becomes the simulation
+top.
+
+```text
+schematic_create_systemverilog(
+  name="counter",
+  text="module counter(input logic clk, input logic rst, output logic [3:0] q);\n"
+       "  always_ff @(posedge clk) q <= rst ? 4'd0 : q + 1'b1;\n"
+       "endmodule\n"
+)
+schematic_create_systemverilog(
+  name="counter_tb",
+  text="`timescale 1ns/1ps\n"
+       "module counter_tb;\n"
+       "  logic clk = 0, rst = 1; logic [3:0] q;\n"
+       "  counter dut(clk, rst, q);\n"
+       "  always #5 clk = ~clk;\n"
+       "  initial begin $dumpfile(\"counter.vcd\"); $dumpvars(0, counter_tb);\n"
+       "    #20 rst = 0; #200 $finish; end\n"
+       "endmodule\n"
+)
+simulation_create(name="counter_sim", schematic="counter_tb")
+simulation_run(simulation="counter_sim")
+implementation_create(
+  name="counter_impl", top="counter", pdk="sky130",
+  source_cells=["counter"], utilization=0.35, timing_driven=true
+)
+implementation_run(run="counter_impl")
+implementation_import_layout(run="counter_impl")
+implementation_export_gds(run="counter_impl")
+drc_run(layout="counter_impl layout")
+```
+
+`implementation_run` runs synthesis through final and maps the netlist
+automatically before floorplan. The final stage also attempts a KLayout GDS
+merge when the PDK provides standard-cell GDS decks. Inspect
+`implementation_status` for stage states, artifacts, timing, power, route DRC,
+and antenna metrics; use `implementation_log` for the failing stage first.
+`implementation_update(from="floorplan", utilization=0.5)` changes settings and
+invalidates the affected checkpoints.
+
 ## PDK setup matrix
 
 ICE applies the package PDK setup automatically. `pdk_info` is authoritative;
@@ -210,5 +254,8 @@ them and cleans the removed HDL symbol pins from parent nets. Use
 | `schematic.spice.pdk_manual` | Text SPICE contains manual `.include`/`.lib` setup. | Remove it; ICE applies the package setup from the cell PDK. |
 | `hdl.mixed` | Mixed port/bit mapping is invalid. | Run `schematic_validate_hierarchy`; use `bus_mode="flatten"` or fix pin names. |
 | `simulation.result` | No stored run is available. | Run `simulation_run` without an external-only output path, then retry. |
+| `implementation.stage` | A Yosys/OpenROAD stage failed or a required artifact is missing. | Call `implementation_log` for that stage, fix the first actionable error, then rerun from the stage. |
+| `implementation.gds` | KLayout or standard-cell GDS decks are unavailable. | Run `implementation_toolchain`; install KLayout or fix the PDK/ORFS GDS path, then call `implementation_export_gds`. |
+| `drc.lyrdb` | The gdscheck report could not be parsed. | Check `drc_run` `log` and rerun with a valid PDK process deck. |
 | `mixed-signal digital input node ... not returned` | ngspice did not probe the input net. | Check the net is connected and not named only as ground. |
 | `v(U1.port)` hint | You requested analog syntax for a digital trace. | Use `U1.port` in graph/trace calls. |

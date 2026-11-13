@@ -20,9 +20,11 @@ CLI invokes the same operations through `ProjectSession`.
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
 | SPICE import | Yes | Schematic import | `schematic-import-spice` | Core API |
 | Stored waveform sampling | Yes | Graph/result inspection | `simulation-trace` | Core API |
-| Create/inspect implementation runs | Yes | Physical Design | `implementation-create`, `implementation-list`, `implementation-status` | `Project.create_implementation`, `Project.implementation_runs` |
-| Prepare and execute OpenROAD/Yosys stages | Yes | Physical Design (Run stage / Run from here / Run all / Cancel) | `implementation-run`, `implementation-log`, `implementation-cancel` | `Project.run_implementation` |
+| Create/inspect implementation runs | Yes | Physical Design | `implementation-create`, `implementation-update`, `implementation-list`, `implementation-status` | `Project.create_implementation`, `Project.implementation_runs` |
+| Prepare and execute OpenROAD/Yosys stages | Yes | Physical Design (Run stage / Run from here / Run all / Cancel) | `implementation-prepare`, `implementation-map`, `implementation-run`, `implementation-log`, `implementation-cancel` | `Project.run_implementation` |
 | Import final DEF into Layout | Yes | CLI/MCP/Python | `implementation-import` | `Project.import_implementation_layout` |
+| Stream final GDS | Yes | Physical Design artifacts | `implementation-export-gds` | Core API |
+| Run DRC with a PDK deck | Yes | Tools → Run DRC | `drc` | Core API |
 | Import GDS into Layout | Yes | Layout import | `layout-import-gds` | Core API |
 | Spatial query | Yes | Layout integration | Core API | Core API |
 

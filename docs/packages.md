@@ -181,8 +181,8 @@ ss = ["implementation/ss.lib.gz"]
 ```
 
 When `[pdk.implementation.orfs]` is present, ICE may resolve missing LEF,
-Liberty, site, IO-layer, routing, and OpenRCX rule defaults from an
-OpenROAD-flow-scripts platform under `OPENROAD_FLOW_SCRIPTS` or
+Liberty, site, IO-layer, routing, OpenRCX rule, and standard-cell GDS defaults
+from an OpenROAD-flow-scripts platform under `OPENROAD_FLOW_SCRIPTS` or
 `ICE_OPENROAD_FLOW_SCRIPTS`. The Liberty pattern should include the standard-cell
 variant (for GF180MCU, `mcu9t5v0` for 9-track data) so Liberty masters match the
 cell LEF. Explicit per-stack paths take precedence. `implementation-toolchain`

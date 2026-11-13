@@ -1,7 +1,10 @@
 #include "icelib/drc.hpp"
 
+#include "icelib/interchange.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -302,6 +305,90 @@ std::vector<std::string> gdsCheckArguments(const GdsCheckOptions &options) {
         arguments.push_back(options.suite);
     }
     return arguments;
+}
+
+LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, const LayoutDrcOptions &options,
+                             const ProcessCancellation *cancellation, const ProcessOutputCallback &onOutput) {
+    LayoutDrcResult result;
+    result.layout = layoutCellId;
+    const auto cell = project.layoutCells.find(layoutCellId);
+    if (cell == project.layoutCells.end()) {
+        result.error = "Layout cell does not exist";
+        return result;
+    }
+    result.layoutName = cell->second.name;
+    const auto process = gdsCheckProcessForPdk(cell->second.pdk);
+    if (process.empty()) {
+        result.error = "The layout PDK has no gdscheck process deck";
+        return result;
+    }
+
+    const auto workDirectory =
+        options.workDirectory.empty()
+            ? (std::filesystem::temp_directory_path() /
+               ("ice-drc-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+            : options.workDirectory;
+    std::error_code status;
+    std::filesystem::create_directories(workDirectory, status);
+    if (status) {
+        result.error = "Unable to create DRC work directory: " + status.message();
+        return result;
+    }
+    result.gdsPath = workDirectory / "layout.gds";
+    result.reportPath = workDirectory / "drc.lyrdb";
+    result.logPath = workDirectory / "drc.log";
+    try {
+        if (options.flatten)
+            LayoutInterchange::exportFlattenedGds(project, layoutCellId, result.gdsPath);
+        else
+            LayoutInterchange::exportGds(project, layoutCellId, result.gdsPath);
+    } catch (const ProjectError &error) {
+        result.error = error.what();
+        return result;
+    } catch (const std::exception &error) {
+        result.error = error.what();
+        return result;
+    }
+
+    std::filesystem::remove(result.reportPath, status);
+    GdsCheckOptions check;
+    check.input = result.gdsPath;
+    check.report = result.reportPath;
+    check.process = process;
+    check.topCell = options.topCell.empty() ? "TOP" : options.topCell;
+    check.suite = options.suite;
+
+    ProcessOptions processOptions;
+    processOptions.arguments.push_back("gdscheck");
+    for (const auto &argument : gdsCheckArguments(check))
+        processOptions.arguments.push_back(argument);
+    processOptions.workingDirectory = workDirectory;
+    processOptions.logPath = result.logPath;
+    processOptions.timeoutSeconds = options.timeoutSeconds;
+    result.process = runProcess(processOptions, cancellation, onOutput);
+
+    if (!std::filesystem::is_regular_file(result.reportPath, status) || status) {
+        std::ostringstream message;
+        message << "gdscheck did not produce a report";
+        if (result.process.timedOut)
+            message << " (timeout)";
+        else if (result.process.exitCode >= 0)
+            message << " (exit " << result.process.exitCode << ")";
+        if (!result.process.error.empty())
+            message << ": " << result.process.error;
+        if (!result.process.logTail.empty())
+            message << ": " << result.process.logTail;
+        result.error = message.str();
+        return result;
+    }
+    try {
+        result.report = parseGdsCheckLyrdb(result.reportPath);
+    } catch (const ProjectError &error) {
+        result.error = error.what();
+        return result;
+    }
+    result.ok = true;
+    return result;
 }
 
 VerificationReport parseGdsCheckLyrdbText(const std::string &text) {

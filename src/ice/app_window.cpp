@@ -8853,9 +8853,10 @@ class DocumentWindow : public QMainWindow {
                 hdl = true;
                 request.simulator = "iverilog";
                 request.analysis = "digital";
-                std::istringstream source(cell.systemVerilogText);
+                const auto source = ice::buildSystemVerilogSimulationSource(project, cellId);
+                std::istringstream lines(source);
                 std::string line;
-                while (std::getline(source, line))
+                while (std::getline(lines, line))
                     request.netlist.push_back(line);
                 netlistNotes << QStringLiteral("SystemVerilog source cell");
             } else if (ice::schematicContainsHdl(project, cellId)) {

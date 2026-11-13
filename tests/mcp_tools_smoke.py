@@ -146,7 +146,22 @@ def main() -> int:
                 "layout_export_gds",
                 "layout_export_lef",
                 "layout_export_def",
+                "layout_import_def",
                 "pex_run",
+                "implementation_create",
+                "implementation_update",
+                "implementation_list",
+                "implementation_status",
+                "implementation_toolchain",
+                "implementation_prepare",
+                "implementation_map",
+                "implementation_run",
+                "implementation_log",
+                "implementation_cancel",
+                "implementation_import_layout",
+                "implementation_export_gds",
+                "implementation_delete",
+                "drc_run",
             }:
                 if required not in tools:
                     raise RuntimeError(f"Missing MCP tool: {required}")
@@ -166,6 +181,8 @@ def main() -> int:
             assert "mixed_signal" in version.get("features", []), version
             assert "agent_authoring" in version.get("features", []), version
             assert "simulation_trace" in version.get("features", []), version
+            assert "implementation_gds" in version.get("features", []), version
+            assert "drc_gdscheck" in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -362,13 +379,28 @@ def main() -> int:
             assert sv_stored["time_points"] > 1, sv_stored
             help_result = mcp.tool("ice_help", topic="mixed-signal")
             assert "help" in help_result, help_result
+            for topic in ("digital", "implementation", "verification"):
+                topic_help = mcp.tool("ice_help", topic=topic)
+                assert "help" in topic_help, topic_help
+            toolchain = mcp.tool("implementation_toolchain")
+            assert (
+                "openroad" in toolchain
+                and "yosys" in toolchain
+                and "klayout" in toolchain
+            ), toolchain
             symbols = mcp.tool("schematic_list_symbols", query="resistor")
-            assert any(symbol["name"] == "Resistor" for symbol in symbols["symbols"]), symbols
+            assert any(symbol["name"] == "Resistor" for symbol in symbols["symbols"]), (
+                symbols
+            )
 
             mcp.tool("schematic_create", name="alias_symbols")
-            alias_symbol = mcp.tool("schematic_add_symbol", cell="alias_symbols", name="RES")
+            alias_symbol = mcp.tool(
+                "schematic_add_symbol", cell="alias_symbols", name="RES"
+            )
             assert alias_symbol["artwork"] is True, alias_symbol
-            assert {pin["name"] for pin in alias_symbol["pins"]} == {"1", "2"}, alias_symbol
+            assert {pin["name"] for pin in alias_symbol["pins"]} == {"1", "2"}, (
+                alias_symbol
+            )
             mcp.tool(
                 "schematic_add_instance",
                 cell="alias_symbols",
@@ -385,8 +417,16 @@ def main() -> int:
                 "schematic_add_circuit",
                 cell="agent_rc",
                 components=[
-                    {"type": "resistor", "name": "R1", "parameters": {"resistance": "10k"}},
-                    {"type": "capacitor", "name": "C1", "parameters": {"capacitance": "1n"}},
+                    {
+                        "type": "resistor",
+                        "name": "R1",
+                        "parameters": {"resistance": "10k"},
+                    },
+                    {
+                        "type": "capacitor",
+                        "name": "C1",
+                        "parameters": {"capacitance": "1n"},
+                    },
                     {
                         "type": "voltage source",
                         "name": "V1",
@@ -410,8 +450,12 @@ def main() -> int:
                 source="* RC\nV1 in 0 PULSE(0 1 1n 1n 1n 10n 20n)\nR1 in out 1k\nC1 out 0 1n\n.end\n",
             )
             assert imported["mode"] == "drawn", imported
-            dry_delete = mcp.tool("schematic_delete", schematic="agent_import_rc", dry_run=True)
-            assert dry_delete["dry_run"] is True and dry_delete["blocked"] is False, dry_delete
+            dry_delete = mcp.tool(
+                "schematic_delete", schematic="agent_import_rc", dry_run=True
+            )
+            assert dry_delete["dry_run"] is True and dry_delete["blocked"] is False, (
+                dry_delete
+            )
 
             mcp.tool(
                 "schematic_create_systemverilog",
@@ -433,7 +477,9 @@ def main() -> int:
                 bus_mode="flatten",
             )
             bus_pins = {pin["name"] for pin in bus_instance["pins"]}
-            assert {"in[0]", "in[1]", "out[0]", "out[1]"}.issubset(bus_pins), bus_instance
+            assert {"in[0]", "in[1]", "out[0]", "out[1]"}.issubset(bus_pins), (
+                bus_instance
+            )
             bus_ports = mcp.tool("schematic_hdl_ports", schematic="bus_buffer")
             assert bus_ports["ports"][0]["width"] == 2, bus_ports
 
@@ -454,7 +500,9 @@ def main() -> int:
                 name="auto_buffer_symbol",
                 source_cell="mixed_buffer",
             )
-            assert {pin["name"] for pin in auto_symbol["pins"]} == {"in", "out"}, auto_symbol
+            assert {pin["name"] for pin in auto_symbol["pins"]} == {"in", "out"}, (
+                auto_symbol
+            )
             assert all(pin["width"] == 1 for pin in auto_symbol["pins"]), auto_symbol
             mcp.tool("schematic_create", name="mixed_top")
             mcp.tool(
@@ -547,10 +595,16 @@ def main() -> int:
             )
             hdl_ports = mcp.tool("schematic_hdl_ports", schematic="mixed_buffer")
             assert hdl_ports["module"] == "mixed_buffer", hdl_ports
-            assert {port["name"] for port in hdl_ports["ports"]} == {"in", "out"}, hdl_ports
-            mixed_validation = mcp.tool("schematic_validate_hierarchy", schematic="mixed_top")
+            assert {port["name"] for port in hdl_ports["ports"]} == {"in", "out"}, (
+                hdl_ports
+            )
+            mixed_validation = mcp.tool(
+                "schematic_validate_hierarchy", schematic="mixed_top"
+            )
             assert mixed_validation["ok"] is True, mixed_validation
-            assert mixed_validation["hdl_instances"][0]["instance"] == "U1", mixed_validation
+            assert mixed_validation["hdl_instances"][0]["instance"] == "U1", (
+                mixed_validation
+            )
 
             mcp.tool(
                 "simulation_create",
@@ -564,10 +618,17 @@ def main() -> int:
             assert mixed_run["state"] == "succeeded", mixed_run
             assert mixed_run["analysis"] == "mixed", mixed_run
             mixed_signals = set(mixed_run["available_signals"])
-            assert any(name == "U1.out" or name.endswith(".U1.out") for name in mixed_signals), mixed_run
-            assert any(name.lower() in {"v(out)", "out"} for name in mixed_signals), mixed_run
+            assert any(
+                name == "U1.out" or name.endswith(".U1.out") for name in mixed_signals
+            ), mixed_run
+            assert any(name.lower() in {"v(out)", "out"} for name in mixed_signals), (
+                mixed_run
+            )
             sampled = mcp.tool(
-                "simulation_trace", simulation="mixed_sim", signals=["U1.out"], max_points=16
+                "simulation_trace",
+                simulation="mixed_sim",
+                signals=["U1.out"],
+                max_points=16,
             )
             assert sampled["returned_points"] <= 16, sampled
             assert sampled["signals"][0]["name"].endswith("U1.out"), sampled
@@ -581,7 +642,31 @@ def main() -> int:
             )
             bad_probe = mcp.tool("simulation_run", simulation="mixed_bad_probe")
             assert bad_probe["state"] == "succeeded", bad_probe
-            assert any("without v(" in hint for hint in bad_probe.get("hints", [])), bad_probe
+            assert any("without v(" in hint for hint in bad_probe.get("hints", [])), (
+                bad_probe
+            )
+
+            impl = mcp.tool(
+                "implementation_create",
+                name="sv_impl",
+                top="sv_kind",
+                pdk="sky130",
+                source_cells=["sv_kind"],
+                utilization=0.4,
+                threads=2,
+            )
+            assert impl["top"] == "sv_kind", impl
+            updated_impl = mcp.tool(
+                "implementation_update",
+                run="sv_impl",
+                **{"from": "floorplan"},
+                utilization=0.45,
+                cts_enabled=False,
+                timing_driven=True,
+            )
+            assert updated_impl["status"] == "pending", updated_impl
+            deleted_impl = mcp.tool("implementation_delete", run="sv_impl")
+            assert deleted_impl["deleted"] is True, deleted_impl
 
             mcp.tool(
                 "simulation_create",
@@ -609,7 +694,7 @@ def main() -> int:
             assert "pdks" in pdk, pdk
 
             migrated = mcp.tool("project_migrate")
-            assert migrated.get("guidance_version") == 3, migrated
+            assert migrated.get("guidance_version") == 5, migrated
 
             doctor = mcp.tool("ice_doctor")
             assert "pdk_roots" in doctor

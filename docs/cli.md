@@ -138,7 +138,7 @@ ice-cli layout-add-net <project> <cell> <name>
 ice-cli layout-assign-port-net <project> <cell> <port> <net|none>
 ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
 ice-cli layout-connectivity <project> <cell>
-ice-cli layout-export-gds <project> <cell> <output.gds>
+ice-cli layout-export-gds <project> <cell> <output.gds> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
 ice-cli layout-export-def <project> <cell> <output.def>
 ice-cli layout-import-gds <input.gds> <project> [pin-label-layer]
@@ -176,7 +176,15 @@ ice-cli implementation-create <project> <name> --top <module> --pdk <pdk> \
   [--stack <stack>] [--source <file>]... [--source-cell <cell>]... \
   [--sdc <file>] [--std-cell-lib <name>] [--corner <corner>] \
   [--utilization <value>] [--aspect-ratio <value>] \
-  [--placement-density <value>] [--threads <n>] [--backend <name>]
+  [--placement-density <value>] [--threads <n>] [--backend <name>] \
+  [--die-area x,y,w,h] [--core-area x,y,w,h] [--site <name>] \
+  [--io-horizontal-layers <a,b>] [--io-vertical-layers <a,b>] \
+  [--macro cell,x,y[,orientation]]... \
+  [--timing-driven] [--routability-driven] [--no-cts] \
+  [--cts-root-buffer <cell>] [--cts-buffers <a,b>] \
+  [--routing-min-layer <layer>] [--routing-max-layer <layer>] [--no-antenna-repair] \
+  [--seed <n>] [--timeout <seconds>]
+ice-cli implementation-update <project> <run> [--from <stage>] [implementation options]
 ice-cli implementation-list <project>
 ice-cli implementation-status <project> <run>
 ice-cli implementation-prepare <project> <run>
@@ -185,16 +193,21 @@ ice-cli implementation-map <project> <run> [--output <path>] [--verbose]
 ice-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]
 ice-cli implementation-cancel <project> <run>
 ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]
+ice-cli implementation-export-gds <project> <run> [--output <path>]
 ice-cli implementation-toolchain
-ice-cli implementation-delete <project> <run>
+ice-cli implementation-delete <project> <run> [--purge]
 ```
 
 `implementation-create` resolves the package default stack when `--stack` is
 omitted. `--source-cell` refers to an existing SystemVerilog source cell in the
 project; `--source` refers to an external Verilog/SystemVerilog file.
 `--utilization` is a fraction of the core area (`0.5` means 50%).
-`implementation-prepare` resolves the package's implementation platform, copies
-the RTL and SDC inputs into the run directory, and generates:
+`--die-area` and `--core-area` take `x,y,width,height` in database units;
+`--macro` may be repeated. `implementation-update` edits an existing run and
+invalidates `--from` (default `elaboration`) and every later stage. Run
+`implementation-prepare` to inspect the resolved platform, copied RTL, and
+generated scripts without executing an external tool. The preparation
+generates:
 
 - `scripts/00-synth.ys` for Yosys synthesis;
 - `scripts/01-techmap.ys` for technology mapping (`implementation-map`);
@@ -218,8 +231,10 @@ it from the pinned OpenROAD/OpenSTA revisions with `xmake openroad-sdk`; use
 the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform
 standard cells with `dfflibmap`/`abc`, writes `synth/2_tech_map.v`, records
 `logs/01-techmap.log` and `scripts/01-techmap.ys`, and copies the result to
-`--output` when provided. Floorplan consumes `synth/2_tech_map.v`, so a run must
-be mapped before starting the physical stages. Re-running synthesis deletes the
+`--output` when provided. Floorplan consumes `synth/2_tech_map.v`; if the mapped
+netlist is missing when the floorplan stage starts, `implementation-run` maps it
+automatically after a successful synthesis, so a full run does not require a
+separate manual export. Re-running synthesis deletes the
 stale mapped netlist. When Graphviz (`dot`) is available, Yosys also writes
 `reports/elaboration.svg` and `reports/synthesis.svg`. Each stage records
 start/finish timestamps, status, merged log, artifact paths, and OpenROAD
@@ -227,6 +242,13 @@ start/finish timestamps, status, merged log, artifact paths, and OpenROAD
 `synth.cells`, `synth.wires`, `synth.chip_area_um2`, and related keys. A failed stage
 keeps the preceding ODB checkpoint intact, and rerunning from a stage resets
 only that stage and the stages after it.
+
+After `final`, ICE attempts to stream `def/6_final.def` plus the platform
+standard-cell GDS decks to `final/6_final.gds` with KLayout. Package stacks can
+declare a merged `gds` file; OpenROAD-flow-scripts platform fallbacks discover
+`gds/*.gds` automatically. If KLayout or standard-cell GDS decks are missing,
+the final stage still succeeds and records a warning. Use
+`implementation-export-gds` to rerun or redirect the export explicitly.
 
 `--from` defaults to `synthesis`, `--to` defaults to `final`, and `--timeout`
 sets the per-stage timeout. HDL runs may start at `elaboration`; when Graphviz
@@ -257,6 +279,8 @@ Liberty, site, IO-layer, routing, and OpenRCX rule defaults from
 ice-cli lvs <project> <schematic> <layout>
 ice-cli lvs-auto <project> <layout>
 ice-cli pex <project> <layout> [schematic-name]
+ice-cli drc <project> <layout> [--no-flatten] [--output <dir>] [--suite <name>] \
+  [--top-cell <name>] [--timeout <seconds>]
 ```
 
 `project-repair` loads a project with recovery enabled: malformed sidecar files
@@ -278,6 +302,13 @@ device types, shared device parameters, net topology from planned connections,
 and top-level pins matched by name, direction, and bound net. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.
+
+`drc` exports the layout to a temporary GDS, runs `gdscheck` with the process
+deck derived from the layout PDK, and prints normalized violations. The work
+directory defaults to `build/drc/<layout>/` and contains `layout.gds`,
+`drc.lyrdb`, and `drc.log`. The command exits with status `1` when the report
+cannot be produced or contains error-severity violations; warnings alone keep
+status `0`.
 
 `pex` extracts placed device-library instances, PDK-rule polygon devices, and
 first-order per-net resistance and capacitance from layout geometry, then
@@ -378,7 +409,9 @@ directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because
 
 `simulation-add` on a SystemVerilog cell stores the `iverilog` simulator and
 `digital` analysis automatically. `simulation-run` compiles the source with
-`iverilog`, runs `vvp`, and returns VCD-derived traces. `digital` is accepted as
+`iverilog`, runs `vvp`, and returns VCD-derived traces. The selected cell may
+instantiate modules defined in other project SystemVerilog cells; ICE follows
+those references and compiles the combined source. `digital` is accepted as
 an analysis alias when creating a simulation explicitly. Direct `simulate` on a
 SystemVerilog cell, and `simulate-netlist` on a `.sv` file, use the same backend.
 If the source has no `$dumpfile`/`$dumpvars`, ICE adds a wrapper module that
@@ -392,12 +425,12 @@ times are given. `simulation-run` then iterates between ngspice and Icarus
 Verilog: digital outputs drive PWL sources in the analog deck, analog input
 nodes are sampled through a logic threshold, and the loop stops when the sampled
 input bits stabilize. Results contain both analog node traces and
-`<instance>.<port>` digital traces. Mixed mode currently requires top-level HDL
-instances with scalar `input`/`output` ports; `schematic-validate-hierarchy`
-reports buses, `inout` ports, missing connections, and duplicate output drivers.
-Use `schematic-add-hdl-instance ... --flatten-buses` for scalar mixed simulation
-of a bus; pins become `data[0]`, `data[1]`, … and are concatenated in the
-generated testbench. `real` ports are bridged without logic thresholding.
+`<instance>.<port>` digital traces. Mixed mode requires top-level HDL
+instances; `schematic-validate-hierarchy` reports `inout` ports, buses, missing
+connections, and duplicate output drivers. Use `schematic-add-hdl-instance ...
+--flatten-buses` for scalar mixed simulation of a bus; pins become `data[0]`,
+`data[1]`, … and are concatenated in the generated testbench. `real` ports are
+bridged without logic thresholding.
 
 `simulation-trace` returns decimated waveform samples for the latest stored run,
 which avoids writing a script just to inspect `v(out)` or a digital port.
