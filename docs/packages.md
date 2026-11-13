@@ -91,11 +91,13 @@ default_stack = "5LM_1TM"
 name = "nwell.drawing"
 number = 64
 datatype = 20
+minimum_width = 840
 
 [[pdk.layer]]
 name = "diff.drawing"
 number = 65
 datatype = 20
+minimum_width = 150
 
 [[pdk.stack]]
 id = "3LM_1TM"
@@ -112,7 +114,9 @@ layers = ["nwell.drawing", "diff.drawing", "metal1.drawing",
 
 Each stack lists the PDK layers it exposes. Entries may name either a full
 layer (`metal1.drawing`) or its base (`metal1`); purpose layers such as
-`metal1.pin` follow their base entry. A layout cell stores exactly one PDK and
+`metal1.pin` follow their base entry. `minimum_width` is the layer's minimum
+drawn width in nanometres; the Path tool uses it as the default and refuses to
+draw narrower paths on that layer. A layout cell stores exactly one PDK and
 one stack; layers added for that layout carry the same stack and only appear in
 layouts using it. `default_stack` is preselected when a layout is
 created and is used when a layout is generated from a schematic. A PDK

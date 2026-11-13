@@ -220,9 +220,9 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 const auto layerId = index < shape.segmentLayers.size() ? shape.segmentLayers[index] : shape.layer.id;
                 const auto segmentStyle =
                     layerId == shape.layer.id ? style : styleFor(layerIdOnly(layerId), styles, deviceStyles);
-                const auto polygon =
-                    pathPolygon(transform.map(shape.centerline[index]), transform.map(shape.centerline[index + 1]),
-                                shape.width * transform.scale);
+                const auto polygon = pathPolygon(
+                    transform.map(shape.centerline[index]), transform.map(shape.centerline[index + 1]),
+                    (index < shape.segmentWidths.size() ? shape.segmentWidths[index] : shape.width) * transform.scale);
                 paintPolygon(painter, polygon, segmentStyle, options);
             }
             for (std::size_t index = 0; index < shape.centerline.size(); ++index) {
@@ -398,6 +398,9 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 preview.layer = layer;
                 preview.kind = LayoutPreviewShape::Kind::path;
                 preview.width = shape.width;
+                preview.segmentWidths.reserve(shape.segmentWidths.size());
+                for (const auto width : shape.segmentWidths)
+                    preview.segmentWidths.push_back(static_cast<qreal>(width));
                 preview.segmentLayers = shape.segmentLayers;
                 preview.pointVias = shape.pointVias;
                 for (const auto &point : shape.centerline) {

@@ -75,6 +75,7 @@
 #include <QGraphicsView>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QImage>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -94,6 +95,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
 #include <QSettings>
@@ -109,6 +111,8 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -130,6 +134,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -181,6 +186,17 @@ std::vector<std::reference_wrapper<const ice::Layer>> layoutLayers(const ice::Pr
     return result;
 }
 
+int layoutPathMinimumWidth(const ice::Layer &layer) {
+    return static_cast<int>(std::clamp<ice::Coordinate>(layer.minimumWidth, 0, 1000000));
+}
+
+ice::Coordinate layoutLayerMinimumWidth(const ice::Project &project, ice::ObjectId layerId) {
+    const auto layer = project.layers.find(layerId);
+    if (layer == project.layers.end())
+        return 0;
+    return std::max<ice::Coordinate>(0, layer->second.minimumWidth);
+}
+
 QString layerPurposeSuffix(const ice::Layer &layer) {
     const auto name = QString::fromStdString(layer.name);
     const auto dot = name.indexOf('.');
@@ -221,15 +237,21 @@ QPainterPath layoutShapeScenePath(const ice::Shape &shape) {
         return path;
     }
     if (shape.isPath() && !shape.centerline.empty()) {
-        QPainterPath centerline;
-        centerline.moveTo(shape.centerline.front().x, -shape.centerline.front().y);
-        for (std::size_t index = 1; index < shape.centerline.size(); ++index)
-            centerline.lineTo(shape.centerline[index].x, -shape.centerline[index].y);
-        QPainterPathStroker stroker;
-        stroker.setWidth(std::max<qreal>(1.0, shape.width));
-        stroker.setCapStyle(Qt::FlatCap);
-        stroker.setJoinStyle(Qt::MiterJoin);
-        return stroker.createStroke(centerline);
+        std::vector<QPointF> centerline;
+        std::vector<qreal> widths;
+        centerline.reserve(shape.centerline.size());
+        widths.reserve(shape.centerline.size() - 1);
+        for (const auto &point : shape.centerline)
+            centerline.emplace_back(point.x, -point.y);
+        for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index)
+            widths.push_back(std::max<qreal>(1.0, static_cast<qreal>(shape.widthForSegment(index))));
+        QPainterPath path;
+        const auto outline = layoutPathOutline(centerline, widths);
+        if (!outline.isEmpty()) {
+            path.addPolygon(outline);
+            path.closeSubpath();
+        }
+        return path;
     }
     QPainterPath path;
     path.addRect(QRectF(static_cast<qreal>(shape.rectangle.x),
@@ -774,8 +796,9 @@ AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::Pl
             if (shape.centerline[index].x == shape.centerline[index + 1].x &&
                 shape.centerline[index].y == shape.centerline[index + 1].y)
                 continue;
-            result.segments.push_back(
-                {shape.centerline[index], shape.centerline[index + 1], shape.layerForSegment(index), halfWidth});
+            result.segments.push_back({shape.centerline[index], shape.centerline[index + 1],
+                                       shape.layerForSegment(index),
+                                       std::max<ice::Coordinate>(1, shape.widthForSegment(index)) / 2});
         }
         for (std::size_t index = 0; index < shape.centerline.size() && index < shape.pointVias.size(); ++index) {
             for (const auto via : shape.pointVias[index]) {
@@ -1418,7 +1441,6 @@ class DocumentWindow : public QMainWindow {
         activeProceduralLayoutId_ = 0;
         activeLayoutPathId_ = 0;
         activeLayoutPathCellId_ = 0;
-        activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -2379,7 +2401,6 @@ class DocumentWindow : public QMainWindow {
         activeProceduralLayoutId_ = 0;
         activeLayoutPathId_ = 0;
         activeLayoutPathCellId_ = 0;
-        activeLayoutPathWidth_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -2434,6 +2455,7 @@ class DocumentWindow : public QMainWindow {
         simulationPlot_->clear();
         if (simulationPanel_)
             simulationPanel_->clear();
+        clearDigitalTestbenchTabs();
         activeSimulationId_ = 0;
         rebuildGraphTabs({});
         setWindowTitle(QStringLiteral("ICE"));
@@ -4017,8 +4039,16 @@ class DocumentWindow : public QMainWindow {
         const auto connection = connectionIt->second;
 
         std::string routeError;
-        const auto routeWidth = std::max<ice::Coordinate>(1, layoutPathWidth_);
-        const auto geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, routeWidth, &routeError);
+        auto routeWidth = ice::Coordinate{1};
+        auto geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, routeWidth, &routeError);
+        if (geometry) {
+            const auto minimum = layoutLayerMinimumWidth(project, geometry->layer);
+            const auto targetWidth = minimum > 0 ? minimum : ice::Coordinate{200};
+            if (targetWidth > routeWidth) {
+                routeWidth = targetWidth;
+                geometry = computeLayoutAutoRoute(project, activeLayoutId_, connection, routeWidth, &routeError);
+            }
+        }
         if (!geometry) {
             if (routeError == "The two pins already touch; no route is needed.")
                 statusBar()->showMessage(QString::fromStdString(routeError));
@@ -4045,8 +4075,9 @@ class DocumentWindow : public QMainWindow {
                 shape.name = ice::nextShapeName(cell->second, "Routed Path");
                 shape.centerline = points;
                 shape.segmentLayers = geometry->segmentLayers;
+                shape.segmentWidths.assign(points.size() > 0 ? points.size() - 1 : 0, routeWidth);
                 shape.pointVias = pointVias;
-                shape.width = std::max(1, layoutPathWidth_);
+                shape.width = routeWidth;
                 rebuildLayoutPathGeometry(shape);
                 pathId = shape.id;
                 cell->second.shapes.emplace(shape.id, std::move(shape));
@@ -4131,11 +4162,20 @@ class DocumentWindow : public QMainWindow {
         const auto layers = layoutLayers(project, activeLayoutId_);
         const auto findLayer = [&](const char *name) -> ice::ObjectId {
             const auto wanted = QString::fromLatin1(name);
+            QStringList wantedNames{wanted};
+            // SKY130 names its metal layers met1-met5 instead of Metal1-Metal5.
+            if (wanted.startsWith(QStringLiteral("Metal"), Qt::CaseInsensitive))
+                wantedNames.push_back(QStringLiteral("met") + wanted.mid(5));
             for (const auto &[id, layer] : project.layers) {
                 if (!layerAvailableForLayout(project, activeLayoutId_, layer))
                     continue;
-                if (QString::fromStdString(layer.name).compare(wanted, Qt::CaseInsensitive) == 0)
-                    return id;
+                const auto candidate = QString::fromStdString(layer.name);
+                const auto base = candidate.section('.', 0, 0);
+                for (const auto &candidateName : wantedNames) {
+                    if (candidate.compare(candidateName, Qt::CaseInsensitive) == 0 ||
+                        base.compare(candidateName, Qt::CaseInsensitive) == 0)
+                        return id;
+                }
             }
             return 0;
         };
@@ -4149,44 +4189,38 @@ class DocumentWindow : public QMainWindow {
             {"TopMetal2", nullptr},
         }};
         LayoutPathConfig config;
-        config.width = std::max(1, layoutPathWidth_);
+        config.width = 0;
         config.cell = activeLayoutId_;
         for (const auto &[metal, via] : steps) {
             const auto layerId = findLayer(metal);
             if (layerId == 0)
                 break;
             const auto viaId = via ? findLayer(via) : 0;
-            config.layers.push_back({layerId, viaId, metal});
+            const auto layerIt = project.layers.find(layerId);
+            const auto minimum = layerIt == project.layers.end() ? 0 : layoutPathMinimumWidth(layerIt->second);
+            config.layers.push_back({layerId, viaId, metal, minimum});
         }
         if (config.layers.empty() && !layers.empty()) {
             for (const auto &layerRef : layers) {
                 const auto &layer = layerRef.get();
-                config.layers.push_back({layer.id, 0, layer.name});
+                config.layers.push_back({layer.id, 0, layer.name, layoutPathMinimumWidth(layer)});
             }
         }
         layoutCanvas_->setPathConfig(config);
-    }
-
-    void setLayoutPathWidth(int width) {
-        if (width <= 0)
-            return;
-        layoutPathWidth_ = std::min(width, 1000000);
-        if (layoutCanvas_) {
-            layoutCanvas_->setPathWidth(layoutPathWidth_);
-            if (layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
-                updateLayoutPathConfig();
-        }
-        statusBar()->showMessage(QStringLiteral("Path width: %1 nm").arg(layoutPathWidth_));
     }
 
     static void rebuildLayoutPathGeometry(ice::Shape &shape) {
         if (!shape.isPath() || shape.centerline.size() < 2)
             return;
         std::vector<QPointF> centerline;
+        std::vector<qreal> widths;
         centerline.reserve(shape.centerline.size());
+        widths.reserve(shape.centerline.size() - 1);
         for (const auto &point : shape.centerline)
             centerline.emplace_back(point.x, -point.y);
-        const auto polygon = layoutPathOutline(centerline, shape.width);
+        for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index)
+            widths.push_back(std::max<qreal>(1.0, static_cast<qreal>(shape.widthForSegment(index))));
+        const auto polygon = layoutPathOutline(centerline, widths);
         shape.polygon.clear();
         shape.polygon.reserve(static_cast<std::size_t>(polygon.size()));
         ice::Coordinate minX = std::numeric_limits<ice::Coordinate>::max();
@@ -4237,10 +4271,16 @@ class DocumentWindow : public QMainWindow {
                 }
                 std::string error;
                 const auto pathShape = cell.shapes.find(path->second);
-                const auto routeWidth = pathShape != cell.shapes.end()
-                                            ? std::max<ice::Coordinate>(1, pathShape->second.width)
-                                            : std::max<ice::Coordinate>(1, project.grid);
-                const auto geometry = computeLayoutAutoRoute(project, cellId, connection, routeWidth, &error);
+                auto routeWidth = pathShape != cell.shapes.end() ? std::max<ice::Coordinate>(1, pathShape->second.width)
+                                                                 : std::max<ice::Coordinate>(1, project.grid);
+                auto geometry = computeLayoutAutoRoute(project, cellId, connection, routeWidth, &error);
+                if (geometry) {
+                    const auto minimum = layoutLayerMinimumWidth(project, geometry->layer);
+                    if (minimum > routeWidth) {
+                        routeWidth = minimum;
+                        geometry = computeLayoutAutoRoute(project, cellId, connection, routeWidth, &error);
+                    }
+                }
                 if (!geometry) {
                     if (const auto shape = cell.shapes.find(path->second); shape != cell.shapes.end())
                         cell.shapes.erase(shape);
@@ -4255,18 +4295,16 @@ class DocumentWindow : public QMainWindow {
                     shape.net.reset();
                 shape.centerline = geometry->points;
                 shape.segmentLayers = geometry->segmentLayers;
+                shape.segmentWidths.assign(geometry->points.size() > 0 ? geometry->points.size() - 1 : 0, routeWidth);
                 shape.pointVias = geometry->pointVias;
-                if (shape.width <= 0)
-                    shape.width = std::max<ice::Coordinate>(1, project.grid);
+                if (shape.width <= 0 || shape.width < routeWidth)
+                    shape.width = std::max<ice::Coordinate>(1, routeWidth);
                 rebuildLayoutPathGeometry(shape);
             }
         }
     }
 
-    void finishActiveLayoutPath() {
-        activeLayoutPathId_ = 0;
-        activeLayoutPathWidth_ = 0;
-    }
+    void finishActiveLayoutPath() { activeLayoutPathId_ = 0; }
 
     void moveLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
         if (!project_ || activeLayoutId_ == 0)
@@ -4350,10 +4388,14 @@ class DocumentWindow : public QMainWindow {
                 auto &path = shape->second;
                 if (path.segmentLayers.empty() && path.centerline.size() > 1)
                     path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+                if (path.segmentWidths.empty() && path.centerline.size() > 1)
+                    path.segmentWidths.assign(path.centerline.size() - 1, path.width);
                 if (path.pointVias.empty())
                     path.pointVias.assign(path.centerline.size(), std::vector<ice::ObjectId>{});
                 if (!path.segmentLayers.empty() && index - 1 < static_cast<int>(path.segmentLayers.size()))
                     path.segmentLayers.insert(path.segmentLayers.begin() + index - 1, path.segmentLayers[index - 1]);
+                if (!path.segmentWidths.empty() && index - 1 < static_cast<int>(path.segmentWidths.size()))
+                    path.segmentWidths.insert(path.segmentWidths.begin() + index - 1, path.segmentWidths[index - 1]);
                 // Insert an explicit empty vector: `insert(pos, {})` selects the
                 // initializer-list overload and adds nothing, which would leave
                 // the via count out of step with the centerline and make the
@@ -4388,10 +4430,17 @@ class DocumentWindow : public QMainWindow {
                 auto &path = shape->second;
                 if (path.segmentLayers.empty() && path.centerline.size() > 1)
                     path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
+                if (path.segmentWidths.empty() && path.centerline.size() > 1)
+                    path.segmentWidths.assign(path.centerline.size() - 1, path.width);
                 if (!path.segmentLayers.empty()) {
                     const auto removeIndex =
                         std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentLayers.size() - 1);
                     path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
+                }
+                if (!path.segmentWidths.empty()) {
+                    const auto removeIndex =
+                        std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentWidths.size() - 1);
+                    path.segmentWidths.erase(path.segmentWidths.begin() + removeIndex);
                 }
                 if (index < static_cast<int>(path.pointVias.size()))
                     path.pointVias.erase(path.pointVias.begin() + index);
@@ -4425,14 +4474,14 @@ class DocumentWindow : public QMainWindow {
             project_->execute("draw layout path", [&](ice::Project &project) {
                 auto &cell = project.layoutCells.at(activeLayoutId_);
                 auto shape = activeLayoutPathId_ == 0 ? cell.shapes.end() : cell.shapes.find(activeLayoutPathId_);
-                const bool append =
-                    shape != cell.shapes.end() && shape->second.isPath() && activeLayoutPathWidth_ == width;
+                const bool append = shape != cell.shapes.end() && shape->second.isPath();
                 if (!append) {
                     const auto shapeId = project.nextId();
                     ice::Shape path{shapeId, layerId, std::nullopt, {}, {}};
                     path.name = ice::nextShapeName(cell, "Path");
                     path.centerline = {startPoint, endPoint};
                     path.segmentLayers = {layerId};
+                    path.segmentWidths = {width};
                     path.pointVias = {{}, {}};
                     for (const auto viaLayer : viaLayers) {
                         if (viaLayer != 0 && project.layers.contains(viaLayer) &&
@@ -4444,13 +4493,14 @@ class DocumentWindow : public QMainWindow {
                     cell.shapes.emplace(shapeId, std::move(path));
                     activeLayoutPathId_ = shapeId;
                     activeLayoutPathCellId_ = activeLayoutId_;
-                    activeLayoutPathWidth_ = width;
                 } else {
                     activeLayoutPathCellId_ = activeLayoutId_;
                     auto &path = shape->second;
                     if (path.segmentLayers.empty())
                         path.segmentLayers.assign(path.centerline.size() > 0 ? path.centerline.size() - 1 : 0,
                                                   path.layer);
+                    if (path.segmentWidths.empty() && path.centerline.size() > 1)
+                        path.segmentWidths.assign(path.centerline.size() - 1, path.width);
                     if (path.pointVias.size() != path.centerline.size())
                         path.pointVias.resize(path.centerline.size());
                     for (const auto viaLayer : viaLayers) {
@@ -4465,8 +4515,13 @@ class DocumentWindow : public QMainWindow {
                         path.centerline.back().y != endPoint.y) {
                         path.centerline.push_back(endPoint);
                         path.segmentLayers.push_back(layerId);
+                        path.segmentWidths.push_back(width);
                         path.pointVias.emplace_back();
                     }
+                    // Each segment keeps its own layer minimum; `width` remains
+                    // the nominal maximum used by bounds and via size.
+                    if (width > path.width)
+                        path.width = width;
                     rebuildLayoutPathGeometry(path);
                 }
             });
@@ -5871,7 +5926,7 @@ class DocumentWindow : public QMainWindow {
         };
         std::map<ice::ObjectId, QGraphicsItemGroup *> textPolygonItems;
         for (const auto &[id, shape] : cellIt->second.shapes) {
-            if (!layerVisible(shape.layer))
+            if (!shape.isPath() && !layerVisible(shape.layer))
                 continue;
             const auto style = styles.contains(shape.layer)
                                    ? styles.at(shape.layer)
@@ -5941,24 +5996,40 @@ class DocumentWindow : public QMainWindow {
                     points.emplace_back(point.x, -point.y);
                 std::vector<QColor> segmentColors;
                 segmentColors.reserve(shape.centerline.size() > 0 ? shape.centerline.size() - 1 : 0);
+                std::vector<qreal> segmentWidths;
+                segmentWidths.reserve(shape.centerline.size() > 0 ? shape.centerline.size() - 1 : 0);
+                std::vector<bool> segmentVisible;
+                segmentVisible.reserve(shape.centerline.size() > 0 ? shape.centerline.size() - 1 : 0);
+                bool anySegmentVisible = false;
                 for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
                     const auto layerId = shape.layerForSegment(index);
                     const auto segmentStyle = styles.contains(layerId) ? styles.at(layerId) : style;
                     segmentColors.push_back(segmentStyle.color);
+                    segmentWidths.push_back(static_cast<qreal>(shape.widthForSegment(index)));
+                    const auto visible = layerVisible(layerId);
+                    segmentVisible.push_back(visible);
+                    anySegmentVisible = anySegmentVisible || visible;
                 }
                 std::vector<std::vector<QColor>> pointViaColors;
                 pointViaColors.reserve(shape.pointVias.size());
+                bool anyViaVisible = false;
                 for (const auto &vias : shape.pointVias) {
                     std::vector<QColor> colors;
                     colors.reserve(vias.size());
                     for (const auto layerId : vias) {
+                        if (!layerVisible(layerId))
+                            continue;
                         const auto viaStyle = styles.contains(layerId) ? styles.at(layerId) : style;
                         colors.push_back(viaStyle.color);
+                        anyViaVisible = true;
                     }
                     pointViaColors.push_back(std::move(colors));
                 }
+                if (!anySegmentVisible && !anyViaVisible)
+                    continue;
                 item = createLayoutPathItem(
-                    id, points, shape.width, segmentColors, pointViaColors, readOnly, true, shape.routedConnection != 0,
+                    id, points, shape.width, segmentWidths, segmentVisible, segmentColors, pointViaColors, readOnly,
+                    true, shape.routedConnection != 0,
                     [this](ice::ObjectId pathId, int index, QPointF position) {
                         QTimer::singleShot(
                             0, this, [this, pathId, index, position] { moveLayoutPathPoint(pathId, index, position); });
@@ -6451,8 +6522,8 @@ class DocumentWindow : public QMainWindow {
                         }
                         ice::addPolygon(project, cellId, shape.layer, points, shape.net);
                     } else if (shape.isText()) {
-                        ice::addText(project, cellId, shape.layer, shape.rectangle.x + dx,
-                                     shape.rectangle.y + dy, shape.text, shape.rectangle.height, shape.net);
+                        ice::addText(project, cellId, shape.layer, shape.rectangle.x + dx, shape.rectangle.y + dy,
+                                     shape.text, shape.rectangle.height, shape.net);
                     } else {
                         auto rectangle = shape.rectangle;
                         rectangle.x += dx;
@@ -6631,7 +6702,7 @@ class DocumentWindow : public QMainWindow {
         if (!layoutPropertiesPanel_)
             return;
         if (layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path) {
-            layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), layoutCanvas_->pathLayerName());
+            layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathLayerName());
             if (bringToFront && layoutRightTabs_)
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             return;
@@ -6643,6 +6714,23 @@ class DocumentWindow : public QMainWindow {
                 return layer == project_->project().layers.end() || layer->second.visible;
             };
             std::erase_if(model.shapes, [&](const ice::LayoutPreviewShape &shape) {
+                if (shape.kind == ice::LayoutPreviewShape::Kind::path) {
+                    bool anyVisible = false;
+                    for (std::size_t index = 0; index + 1 < shape.centerline.size() && !anyVisible; ++index)
+                        anyVisible = layerVisible(index < shape.segmentLayers.size() ? shape.segmentLayers[index]
+                                                                                     : shape.layer.id);
+                    for (const auto &vias : shape.pointVias) {
+                        for (const auto layerId : vias) {
+                            if (layerVisible(layerId)) {
+                                anyVisible = true;
+                                break;
+                            }
+                        }
+                        if (anyVisible)
+                            break;
+                    }
+                    return !anyVisible;
+                }
                 return shape.layer.id != 0 && !layerVisible(shape.layer.id);
             });
             std::erase_if(model.ports, [&](const ice::LayoutPreviewPort &port) {
@@ -7836,9 +7924,11 @@ class DocumentWindow : public QMainWindow {
             ice::SimulationItem sim;
             sim.id = newId;
             sim.name = name.trimmed().toStdString();
-            // Default to first schematic if available.
-            if (!project.schematicCells.empty())
-                sim.schematic = project.schematicCells.begin()->first;
+            // Default to the first analog/mixed-signal schematic if available.
+            const auto first = std::find_if(project.schematicCells.begin(), project.schematicCells.end(),
+                                            [](const auto &entry) { return !entry.second.systemVerilogSchematic; });
+            if (first != project.schematicCells.end())
+                sim.schematic = first->first;
             if (sim.schematic != 0 && ice::schematicContainsHdl(project, sim.schematic)) {
                 sim.stop = 1.0e-6;
                 sim.step = 1.0e-9;
@@ -7862,27 +7952,19 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
-        const auto installDirectory = configuredPackageInstallDirectory();
-        CreateSchematicDialog dialog(installDirectory, nextSchematicDefaultName() + QStringLiteral(" Testbench"), this);
-        dialog.setWindowTitle(QStringLiteral("Add SystemVerilog Testbench"));
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        const auto name = dialog.schematicName().trimmed();
-        if (name.isEmpty())
-            return;
-        const auto pdk = dialog.pdkId();
-        QString pdkLabel;
-        bool addDependency = false;
-        if (!resolveSchematicPdk(pdk, &pdkLabel, &addDependency))
+        bool ok = false;
+        const auto name = QInputDialog::getText(this, QStringLiteral("Add SystemVerilog Testbench"),
+                                                QStringLiteral("Testbench name:"), QLineEdit::Normal,
+                                                nextSchematicDefaultName() + QStringLiteral(" Testbench"), &ok);
+        if (!ok || name.trimmed().isEmpty())
             return;
 
+        const std::string pdk = ice::genericPdkId;
         ice::ObjectId testbenchId = 0;
         ice::ObjectId simulationId = 0;
         try {
             project_->execute("add SystemVerilog testbench", [&](ice::Project &project) {
-                if (addDependency)
-                    project.packageDependencies.push_back(pdk);
-                testbenchId = ice::createSystemVerilogCell(project, name.toStdString(), pdk,
+                testbenchId = ice::createSystemVerilogCell(project, name.trimmed().toStdString(), pdk,
                                                            systemVerilogTemplate(name, true).toStdString());
                 const auto baseName = name.toStdString() + " Simulation";
                 auto simulationName = baseName;
@@ -7908,19 +7990,14 @@ class DocumentWindow : public QMainWindow {
                 graph.xAxis = "time";
                 project.simulations.at(simulationId).graphs.push_back(std::move(graph));
             });
-            project_->setLastHistoryLabel("Created SystemVerilog testbench " + name.toStdString());
+            project_->setLastHistoryLabel("Created SystemVerilog testbench " + name.trimmed().toStdString());
             refreshProject();
-            if (simulationPanel_) {
+            if (simulationPanel_)
                 simulationPanel_->setProject(project_->project());
-                simulationPanel_->selectSimulation(simulationId);
-            }
-            if (documents_ && simulationPage_)
-                documents_->setCurrentWidget(simulationPage_);
-            if (simulationTabs_ && simulationTestbenchPage_) {
-                updateSimulationTestbenchTab();
-                simulationTabs_->setCurrentWidget(simulationTestbenchPage_);
-            }
-            statusBar()->showMessage(QStringLiteral("SystemVerilog testbench %1 created with %2").arg(name, pdkLabel));
+            selectDigitalTestbenchSimulation(simulationId);
+            if (documents_ && simulationTestbenchPage_)
+                documents_->setCurrentWidget(simulationTestbenchPage_);
+            statusBar()->showMessage(QStringLiteral("SystemVerilog testbench %1 created").arg(name.trimmed()));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Add SystemVerilog Testbench"),
                                   QString::fromStdString(error.what()));
@@ -8841,6 +8918,31 @@ class DocumentWindow : public QMainWindow {
         return cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
     }
 
+    bool simulationItemIsDigital(const ice::SimulationItem &simulation) const {
+        if (!project_)
+            return false;
+        const auto cell = project_->project().schematicCells.find(simulation.schematic);
+        return cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
+    }
+
+    ice::ObjectId activeSimulationSchematicId() const {
+        if (!project_ || activeSimulationId_ == 0)
+            return 0;
+        const auto simulation = project_->project().simulations.find(activeSimulationId_);
+        return simulation == project_->project().simulations.end() ? 0 : simulation->second.schematic;
+    }
+
+    void selectDigitalTestbenchSimulation(ice::ObjectId id) {
+        if (!project_ || id == 0)
+            return;
+        const auto simulation = project_->project().simulations.find(id);
+        if (simulation == project_->project().simulations.end() || !simulationItemIsDigital(simulation->second))
+            return;
+        activeSimulationId_ = id;
+        updateSimulationTestbenchTab();
+        updateDigitalTestbenchEditorPage();
+    }
+
     ice::SimulationItem currentSimulationFormItem() const {
         ice::SimulationItem sim;
         sim.schematic = selectedSimulationSchematicId();
@@ -8893,14 +8995,83 @@ class DocumentWindow : public QMainWindow {
             simulationRunButton_->setEnabled(hasSimulation && hasSchematic && (textSchematic || upToDate));
     }
 
-    void onSimulationTestbenchEdited(const QString &text) {
-        if (!project_ || activeSimulationId_ == 0)
+    TextDocumentEditor *currentDigitalTestbenchEditor() const {
+        if (!digitalTestbenchEditorTabs_)
+            return nullptr;
+        return dynamic_cast<TextDocumentEditor *>(digitalTestbenchEditorTabs_->currentWidget());
+    }
+
+    void closeDigitalTestbenchTab(int index) {
+        if (!digitalTestbenchEditorTabs_ || index < 0 || index >= digitalTestbenchEditorTabs_->count())
+            return;
+        const auto cellId =
+            static_cast<ice::ObjectId>(digitalTestbenchEditorTabs_->tabBar()->tabData(index).toULongLong());
+        auto *widget = digitalTestbenchEditorTabs_->widget(index);
+        digitalTestbenchEditorTabs_->removeTab(index);
+        if (dynamic_cast<SimulationPlot *>(widget)) {
+            for (auto it = digitalTestbenchResultPlots_.begin(); it != digitalTestbenchResultPlots_.end();) {
+                if (it->second == widget)
+                    it = digitalTestbenchResultPlots_.erase(it);
+                else
+                    ++it;
+            }
+        } else {
+            digitalTestbenchEditors_.erase(cellId);
+        }
+        delete widget;
+        updateDigitalTestbenchEditorPage();
+    }
+
+    void clearDigitalTestbenchTabs() {
+        if (!digitalTestbenchEditorTabs_)
+            return;
+        QSignalBlocker blocker(*digitalTestbenchEditorTabs_);
+        while (digitalTestbenchEditorTabs_->count() > 0) {
+            auto *widget = digitalTestbenchEditorTabs_->widget(0);
+            digitalTestbenchEditorTabs_->removeTab(0);
+            delete widget;
+        }
+        digitalTestbenchEditors_.clear();
+        digitalTestbenchResultPlots_.clear();
+        updateDigitalTestbenchEditorPage();
+    }
+
+    void updateDigitalTestbenchEditorPage() {
+        if (!digitalTestbenchEditorStack_ || !digitalTestbenchEditorTabs_ || !digitalTestbenchEmptyPage_)
+            return;
+        digitalTestbenchEditorStack_->setCurrentWidget(digitalTestbenchEditorTabs_->count() > 0
+                                                           ? static_cast<QWidget *>(digitalTestbenchEditorTabs_)
+                                                           : digitalTestbenchEmptyPage_);
+    }
+
+    void openDigitalTestbenchCell(ice::ObjectId cellId) {
+        if (!project_ || !digitalTestbenchEditorTabs_ || cellId == 0)
+            return;
+        const auto cell = project_->project().schematicCells.find(cellId);
+        if (cell == project_->project().schematicCells.end() || !cell->second.systemVerilogSchematic)
+            return;
+        if (const auto existing = digitalTestbenchEditors_.find(cellId); existing != digitalTestbenchEditors_.end()) {
+            digitalTestbenchEditorTabs_->setCurrentWidget(existing->second);
+            return;
+        }
+        auto *editor = new TextDocumentEditor;
+        editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+        editor->setText(QString::fromStdString(cell->second.systemVerilogText));
+        editor->setOnTextEdited(
+            [this, cellId](const QString &text) { onSimulationTestbenchEditedForCell(cellId, text); });
+        const int index = digitalTestbenchEditorTabs_->addTab(editor, QString::fromStdString(cell->second.name) +
+                                                                          QStringLiteral(".sv"));
+        digitalTestbenchEditorTabs_->tabBar()->setTabData(index, static_cast<qulonglong>(cellId));
+        digitalTestbenchEditors_.emplace(cellId, editor);
+        digitalTestbenchEditorTabs_->setCurrentIndex(index);
+        updateDigitalTestbenchEditorPage();
+    }
+
+    void onSimulationTestbenchEditedForCell(ice::ObjectId cellId, const QString &text) {
+        if (!project_ || cellId == 0)
             return;
         auto &project = project_->project();
-        const auto simulation = project.simulations.find(activeSimulationId_);
-        if (simulation == project.simulations.end())
-            return;
-        const auto cell = project.schematicCells.find(simulation->second.schematic);
+        const auto cell = project.schematicCells.find(cellId);
         if (cell == project.schematicCells.end() || !cell->second.systemVerilogSchematic)
             return;
         const auto value = text.toStdString();
@@ -8912,23 +9083,270 @@ class DocumentWindow : public QMainWindow {
         updateSimulationNetlistState();
     }
 
-    void updateSimulationTestbenchTab() {
-        if (!project_ || !simulationTabs_ || simulationTestbenchTabIndex_ < 0)
+    void showDigitalTestbenchResult(const ice::SimulationItem &simulation,
+                                    std::shared_ptr<ice::SimulationResult> result) {
+        if (!project_ || !digitalTestbenchEditorTabs_)
             return;
-        const auto id = selectedSimulationSchematicId();
-        const auto cell = project_->project().schematicCells.find(id);
-        const bool hdl = cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
-        simulationTabs_->setTabVisible(simulationTestbenchTabIndex_, hdl);
-        if (!hdl)
-            return;
-        if (simulationTestbenchEditor_) {
-            const auto text = QString::fromStdString(cell->second.systemVerilogText);
-            if (simulationTestbenchEditor_->text() != text)
-                simulationTestbenchEditor_->setText(text);
+        const auto cell = project_->project().schematicCells.find(simulation.schematic);
+        const auto cellName = cell == project_->project().schematicCells.end()
+                                  ? QString::fromStdString(simulation.name)
+                                  : QString::fromStdString(cell->second.name);
+        auto graphs = simulation.graphs;
+        if (graphs.empty()) {
+            ice::SimulationGraph graph;
+            graph.name = "Graph 1";
+            graph.xAxis = "time";
+            graphs.push_back(std::move(graph));
         }
-        simulationTabs_->setTabToolTip(
-            simulationTestbenchTabIndex_,
-            QStringLiteral("SystemVerilog testbench: %1").arg(QString::fromStdString(cell->second.name)));
+        for (const auto &graph : graphs) {
+            SimulationPlot *plot = nullptr;
+            if (const auto existing = digitalTestbenchResultPlots_.find(graph.id);
+                existing != digitalTestbenchResultPlots_.end() &&
+                digitalTestbenchEditorTabs_->indexOf(existing->second) >= 0) {
+                plot = existing->second;
+            }
+            if (!plot) {
+                plot = new SimulationPlot;
+                const auto tabName = graphs.size() > 1
+                                         ? QStringLiteral("%1 · %2").arg(cellName, QString::fromStdString(graph.name))
+                                         : QStringLiteral("%1 Simulation").arg(cellName);
+                const int index = digitalTestbenchEditorTabs_->addTab(plot, tabName);
+                digitalTestbenchEditorTabs_->tabBar()->setTabData(index, static_cast<qulonglong>(graph.id));
+                digitalTestbenchResultPlots_.emplace(graph.id, plot);
+            }
+            auto displayGraph = graph;
+            std::vector<std::string> normalizedSignals;
+            for (const auto &signal : displayGraph.ySignals) {
+                for (const auto &part : parseSignalList(QString::fromStdString(signal))) {
+                    const auto value = part.toStdString();
+                    if (std::find(normalizedSignals.begin(), normalizedSignals.end(), value) == normalizedSignals.end())
+                        normalizedSignals.push_back(value);
+                }
+            }
+            if (!normalizedSignals.empty() || displayGraph.ySignals.empty())
+                displayGraph.ySignals = std::move(normalizedSignals);
+            plot->clear();
+            plot->setGraph(displayGraph);
+            plot->setGridVisible(graphGridVisible_);
+            plot->setResult(result);
+            digitalTestbenchEditorTabs_->setCurrentWidget(plot);
+        }
+        if (documents_)
+            documents_->setCurrentWidget(simulationTestbenchPage_);
+        updateDigitalTestbenchEditorPage();
+    }
+
+    void updateSimulationTestbenchTab() {
+        if (!project_ || !simulationTestbenchPage_)
+            return;
+        const auto &project = project_->project();
+        if (digitalTestbenchList_) {
+            QSignalBlocker blocker(digitalTestbenchList_);
+            const auto previous =
+                digitalTestbenchList_->currentItem()
+                    ? static_cast<ice::ObjectId>(digitalTestbenchList_->currentItem()->data(Qt::UserRole).toULongLong())
+                    : ice::ObjectId{0};
+            digitalTestbenchList_->clear();
+            std::vector<std::pair<std::string, ice::ObjectId>> entries;
+            for (const auto &[id, simulation] : project.simulations) {
+                if (!simulationItemIsDigital(simulation))
+                    continue;
+                const auto cell = project.schematicCells.find(simulation.schematic);
+                const auto name = cell == project.schematicCells.end() ? simulation.name : cell->second.name;
+                entries.emplace_back(name, id);
+            }
+            std::sort(entries.begin(), entries.end(),
+                      [](const auto &left, const auto &right) { return left.first < right.first; });
+            const auto wanted = activeSimulationId_ != 0 ? activeSimulationId_ : previous;
+            int activeRow = -1;
+            for (const auto &[name, id] : entries) {
+                auto *item = new QListWidgetItem(QString::fromStdString(name) + QStringLiteral(".sv"));
+                item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+                item->setToolTip(QStringLiteral("%1.sv · SystemVerilog testbench").arg(QString::fromStdString(name)));
+                digitalTestbenchList_->addItem(item);
+                if (id == wanted)
+                    activeRow = digitalTestbenchList_->count() - 1;
+            }
+            if (activeRow >= 0)
+                digitalTestbenchList_->setCurrentRow(activeRow);
+            else
+                digitalTestbenchList_->clearSelection();
+            digitalTestbenchList_->setEnabled(digitalTestbenchList_->count() > 0);
+            const auto needle = digitalTestbenchSearch_ ? digitalTestbenchSearch_->text().trimmed() : QString();
+            for (int row = 0; row < digitalTestbenchList_->count(); ++row) {
+                auto *item = digitalTestbenchList_->item(row);
+                item->setHidden(!needle.isEmpty() && !item->text().contains(needle, Qt::CaseInsensitive));
+            }
+            if (auto *current = digitalTestbenchList_->currentItem(); current && current->isHidden()) {
+                digitalTestbenchList_->clearSelection();
+                digitalTestbenchList_->setCurrentRow(-1);
+            }
+        }
+
+        const auto id = activeSimulationSchematicId();
+        const auto cell = project.schematicCells.find(id);
+        const bool hdl =
+            activeSimulationId_ != 0 && cell != project.schematicCells.end() && cell->second.systemVerilogSchematic;
+        if (digitalTestbenchEditorTabs_) {
+            for (auto it = digitalTestbenchEditors_.begin(); it != digitalTestbenchEditors_.end();) {
+                const auto editorCell = project.schematicCells.find(it->first);
+                if (editorCell == project.schematicCells.end() || !editorCell->second.systemVerilogSchematic) {
+                    const auto tabIndex = digitalTestbenchEditorTabs_->indexOf(it->second);
+                    ++it;
+                    if (tabIndex >= 0)
+                        closeDigitalTestbenchTab(tabIndex);
+                    continue;
+                }
+                const auto text = QString::fromStdString(editorCell->second.systemVerilogText);
+                if (it->second->text() != text)
+                    it->second->setText(text);
+                ++it;
+            }
+            if (hdl)
+                openDigitalTestbenchCell(id);
+        }
+        if (simulationTestbenchRunButton_)
+            simulationTestbenchRunButton_->setEnabled(hdl);
+        updateDigitalTestbenchRightPanel();
+        updateDigitalTestbenchEditorPage();
+    }
+
+    void updateDigitalTestbenchRightPanel() {
+        if (!digitalTestbenchOutline_ || !digitalTestbenchInfo_)
+            return;
+        QSignalBlocker outlineBlocker(*digitalTestbenchOutline_);
+        QSignalBlocker infoBlocker(*digitalTestbenchInfo_);
+        digitalTestbenchOutline_->clear();
+        digitalTestbenchInfo_->clear();
+        const auto addOutlineItem = [&](QTreeWidgetItem *parent, const QString &text, int line,
+                                        const QString &tooltip = {}) {
+            auto *item = new QTreeWidgetItem(parent);
+            item->setText(0, text);
+            if (line > 0)
+                item->setText(1, QString::number(line));
+            item->setData(0, Qt::UserRole, line);
+            if (!tooltip.isEmpty())
+                item->setToolTip(0, tooltip);
+            return item;
+        };
+        const auto addOutlineTop = [&](const QString &text, int line = 0) {
+            auto *item = new QTreeWidgetItem(digitalTestbenchOutline_);
+            item->setText(0, text);
+            if (line > 0)
+                item->setText(1, QString::number(line));
+            item->setData(0, Qt::UserRole, line);
+            return item;
+        };
+        const auto addOutlineGroup = [&](const QString &title) {
+            auto *item = new QTreeWidgetItem(digitalTestbenchOutline_);
+            item->setText(0, title);
+            item->setFirstColumnSpanned(true);
+            auto font = item->font(0);
+            font.setBold(true);
+            item->setFont(0, font);
+            return item;
+        };
+        const auto addInfo = [&](const QString &name, const QString &value) {
+            auto *item = new QTreeWidgetItem(digitalTestbenchInfo_);
+            item->setText(0, name);
+            item->setText(1, value);
+            item->setToolTip(1, value);
+            return item;
+        };
+
+        if (!project_ || activeSimulationId_ == 0) {
+            addOutlineTop(QStringLiteral("No testbench open"));
+            return;
+        }
+        const auto &project = project_->project();
+        const auto cell = project.schematicCells.find(activeSimulationSchematicId());
+        if (cell == project.schematicCells.end() || !cell->second.systemVerilogSchematic) {
+            addOutlineTop(QStringLiteral("No testbench open"));
+            return;
+        }
+        const auto simulation = project.simulations.find(activeSimulationId_);
+        addInfo(QStringLiteral("file"), QString::fromStdString(cell->second.name) + QStringLiteral(".sv"));
+        if (simulation != project.simulations.end()) {
+            addInfo(QStringLiteral("simulation"), QString::fromStdString(simulation->second.name));
+            addInfo(QStringLiteral("simulator"), QString::fromStdString(simulation->second.simulator));
+            addInfo(QStringLiteral("analysis"), QString::fromStdString(simulation->second.analysis));
+            addInfo(QStringLiteral("stop"), QString::number(simulation->second.stop));
+            addInfo(QStringLiteral("step"), QString::number(simulation->second.step));
+        }
+
+        QString source = QString::fromStdString(cell->second.systemVerilogText);
+        if (auto *editor = currentDigitalTestbenchEditor())
+            source = editor->text();
+        const auto lines = source.split(QLatin1Char('\n'));
+        const auto parsed = ice::parseSystemVerilogModule(source.toStdString(), cell->second.name);
+
+        QTreeWidgetItem *parsedModuleItem = nullptr;
+        const QRegularExpression moduleExpression(QStringLiteral(R"(^\s*module\s+([A-Za-z_]\w*))"));
+        for (int index = 0; index < lines.size(); ++index) {
+            const auto match = moduleExpression.match(lines.at(index));
+            if (!match.hasMatch())
+                continue;
+            auto *moduleItem = addOutlineTop(QStringLiteral("module %1").arg(match.captured(1)), index + 1);
+            if (parsed.ok && match.captured(1).toStdString() == parsed.module.name)
+                parsedModuleItem = moduleItem;
+        }
+        if (parsed.ok) {
+            if (!parsedModuleItem)
+                parsedModuleItem =
+                    addOutlineTop(QStringLiteral("module %1").arg(QString::fromStdString(parsed.module.name)));
+            for (const auto &port : parsed.module.ports) {
+                QString direction = port.direction == ice::HdlPortDirection::input    ? QStringLiteral("input")
+                                    : port.direction == ice::HdlPortDirection::output ? QStringLiteral("output")
+                                                                                      : QStringLiteral("inout");
+                QString text = direction;
+                if (port.real)
+                    text += QStringLiteral(" real");
+                else if (port.width > 1)
+                    text += QStringLiteral(" [%1:0]").arg(port.width - 1);
+                text += QStringLiteral(" %1").arg(QString::fromStdString(port.name));
+                addOutlineItem(parsedModuleItem, text, 0);
+            }
+        }
+
+        const QRegularExpression parameterExpression(
+            QStringLiteral(R"(^\s*(?:parameter|localparam)\s+(?:[A-Za-z_]\w*\s+)?([A-Za-z_]\w*))"));
+        const QRegularExpression alwaysExpression(
+            QStringLiteral(R"(^\s*(always_ff|always_comb|always_latch|always)\b)"));
+        const QRegularExpression assignExpression(QStringLiteral(R"(^\s*assign\s+(.+?)\s*=)"));
+        const QRegularExpression functionExpression(QStringLiteral(R"(^\s*(function|task)\b)"));
+        QTreeWidgetItem *parameters = nullptr;
+        QTreeWidgetItem *alwaysBlocks = nullptr;
+        QTreeWidgetItem *assignments = nullptr;
+        QTreeWidgetItem *functions = nullptr;
+        for (int index = 0; index < lines.size(); ++index) {
+            const auto &line = lines.at(index);
+            if (const auto match = parameterExpression.match(line); match.hasMatch()) {
+                if (!parameters)
+                    parameters = addOutlineGroup(QStringLiteral("Parameters"));
+                addOutlineItem(parameters, match.captured(1), index + 1);
+            }
+            if (const auto match = alwaysExpression.match(line); match.hasMatch()) {
+                if (!alwaysBlocks)
+                    alwaysBlocks = addOutlineGroup(QStringLiteral("Always blocks"));
+                addOutlineItem(alwaysBlocks, match.captured(1), index + 1);
+            }
+            if (const auto match = assignExpression.match(line); match.hasMatch()) {
+                if (!assignments)
+                    assignments = addOutlineGroup(QStringLiteral("Assignments"));
+                addOutlineItem(assignments, QStringLiteral("assign %1").arg(match.captured(1).trimmed()), index + 1);
+            }
+            if (const auto match = functionExpression.match(line); match.hasMatch()) {
+                if (!functions)
+                    functions = addOutlineGroup(QStringLiteral("Functions / Tasks"));
+                addOutlineItem(functions, match.captured(1), index + 1);
+            }
+        }
+        digitalTestbenchOutline_->expandAll();
+        digitalTestbenchInfo_->expandAll();
+        for (int column = 0; column < 2; ++column) {
+            digitalTestbenchOutline_->resizeColumnToContents(column);
+            digitalTestbenchInfo_->resizeColumnToContents(column);
+        }
     }
 
     void applySimulationLanguageDefaults() {
@@ -8936,19 +9354,11 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto id = selectedSimulationSchematicId();
         const auto cell = project_->project().schematicCells.find(id);
-        const bool hdl = cell != project_->project().schematicCells.end() && cell->second.systemVerilogSchematic;
-        const bool mixed = cell != project_->project().schematicCells.end() && !hdl &&
-                           ice::schematicContainsHdl(project_->project(), id);
+        const bool mixed =
+            cell != project_->project().schematicCells.end() && ice::schematicContainsHdl(project_->project(), id);
         QSignalBlocker simulatorBlocker(simulatorSelector_);
         QSignalBlocker analysisBlocker(analysisSelector_);
-        if (hdl) {
-            const auto simulator = simulatorSelector_->findData(QStringLiteral("iverilog"));
-            if (simulator >= 0)
-                simulatorSelector_->setCurrentIndex(simulator);
-            const auto analysis = analysisSelector_->findData(QStringLiteral("digital"));
-            if (analysis >= 0)
-                analysisSelector_->setCurrentIndex(analysis);
-        } else if (mixed) {
+        if (mixed) {
             const auto simulator = simulatorSelector_->findData(QStringLiteral("mixed"));
             if (simulator >= 0)
                 simulatorSelector_->setCurrentIndex(simulator);
@@ -8956,16 +9366,10 @@ class DocumentWindow : public QMainWindow {
             if (analysis >= 0)
                 analysisSelector_->setCurrentIndex(analysis);
         } else {
-            if (simulatorSelector_->currentData().toString() == QStringLiteral("iverilog") ||
-                simulatorSelector_->currentData().toString() == QStringLiteral("mixed")) {
+            if (simulatorSelector_->currentData().toString() == QStringLiteral("mixed")) {
                 const auto simulator = simulatorSelector_->findData(QStringLiteral("ngspice"));
                 if (simulator >= 0)
                     simulatorSelector_->setCurrentIndex(simulator);
-            }
-            if (analysisSelector_->currentData().toString() == QStringLiteral("digital")) {
-                const auto analysis = analysisSelector_->findData(QStringLiteral("transient"));
-                if (analysis >= 0)
-                    analysisSelector_->setCurrentIndex(analysis);
             }
         }
         updateAnalysisControlLine();
@@ -9167,9 +9571,9 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Select a simulation first."));
             return;
         }
-        if (selectedSimulationSchematicId() == 0) {
+        if (activeSimulationId_ == 0) {
             QMessageBox::information(this, QStringLiteral("Run Simulation"),
-                                     QStringLiteral("Select a schematic first."));
+                                     QStringLiteral("Select a simulation first."));
             return;
         }
         const auto simIt = project_->project().simulations.find(activeSimulationId_);
@@ -9179,25 +9583,38 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Select a simulation first."));
             return;
         }
-        const auto formSim = currentSimulationFormItem();
-        // Honor edits currently visible in the form while retaining the
-        // selected simulation's graphs.
+        const bool digitalSimulation = simulationItemIsDigital(simIt->second);
+        if (!digitalSimulation && selectedSimulationSchematicId() == 0) {
+            QMessageBox::information(this, QStringLiteral("Run Simulation"),
+                                     QStringLiteral("Select a schematic first."));
+            return;
+        }
+        // A/MS simulations honor the visible properties form. Digital
+        // testbenches run from their stored simulation item independently.
         ice::SimulationItem sim = simIt->second;
-        sim.schematic = formSim.schematic;
-        sim.simulator = formSim.simulator;
-        sim.analysis = formSim.analysis;
-        sim.stop = formSim.stop;
-        sim.step = formSim.step;
-        sim.use_initial_conditions = formSim.use_initial_conditions;
-        sim.directives = formSim.directives;
-        sim.captureSignals = formSim.captureSignals;
+        if (!digitalSimulation) {
+            const auto formSim = currentSimulationFormItem();
+            sim.schematic = formSim.schematic;
+            sim.simulator = formSim.simulator;
+            sim.analysis = formSim.analysis;
+            sim.stop = formSim.stop;
+            sim.step = formSim.step;
+            sim.use_initial_conditions = formSim.use_initial_conditions;
+            sim.directives = formSim.directives;
+            sim.captureSignals = formSim.captureSignals;
+        }
         logMessage(ice::logging::simulation, spdlog::level::info,
                    QStringLiteral("Running simulation '%1' (%2, %3)...")
                        .arg(QString::fromStdString(sim.name), QString::fromStdString(sim.simulator),
                             QString::fromStdString(sim.analysis)));
-        documents_->setCurrentWidget(simulationPage_);
-        if (simulationTabs_ && simulationGraphsPage_)
-            simulationTabs_->setCurrentWidget(simulationGraphsPage_);
+        if (digitalSimulation) {
+            if (documents_ && simulationTestbenchPage_)
+                documents_->setCurrentWidget(simulationTestbenchPage_);
+        } else {
+            documents_->setCurrentWidget(simulationPage_);
+            if (simulationTabs_ && simulationGraphsPage_)
+                simulationTabs_->setCurrentWidget(simulationGraphsPage_);
+        }
         QApplication::processEvents();
 
         QStringList netlistNotes;
@@ -9279,11 +9696,14 @@ class DocumentWindow : public QMainWindow {
             signalsCapture_->setText(QString::fromStdString(sim.captureSignals));
             if (simulationPanel_)
                 simulationPanel_->setProject(project_->project());
-            rebuildGraphTabs(sim.graphs);
+            if (!digitalSimulation)
+                rebuildGraphTabs(sim.graphs);
         }
 
-        // Show result in the currently active graph tab.
-        if (graphTabs_) {
+        if (digitalSimulation) {
+            auto resultPtr = std::make_shared<ice::SimulationResult>(std::move(result));
+            showDigitalTestbenchResult(sim, resultPtr);
+        } else if (graphTabs_) {
             auto resultPtr = std::make_shared<ice::SimulationResult>(std::move(result));
             if (graphsUpdated)
                 applySimulationResultToGraphTabs(resultPtr);
@@ -9369,6 +9789,7 @@ class DocumentWindow : public QMainWindow {
         }
 
         ensureDrcProcess();
+        drcReportFromPhysicalPreview_ = false;
         drcLayoutId_ = cellId;
         drcTempDir_ = std::move(temporary);
         drcReportPath_ = reportPath;
@@ -9399,6 +9820,7 @@ class DocumentWindow : public QMainWindow {
         if (reportExists) {
             try {
                 const auto report = ice::parseGdsCheckLyrdb(drcReportPath_.toStdString());
+                drcReportFromPhysicalPreview_ = false;
                 if (activityPanel_)
                     activityPanel_->setDrcReport(report, drcReportPath_);
                 if (activityDock_)
@@ -9413,6 +9835,7 @@ class DocumentWindow : public QMainWindow {
             } catch (const ice::ProjectError &error) {
                 const auto message =
                     QStringLiteral("Unable to parse the gdscheck report: %1").arg(QString::fromStdString(error.what()));
+                drcReportFromPhysicalPreview_ = false;
                 if (activityPanel_)
                     activityPanel_->setDrcError(message);
                 statusBar()->showMessage(QStringLiteral("DRC report parsing failed"));
@@ -9420,6 +9843,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
 
+        drcReportFromPhysicalPreview_ = false;
         auto details = drcLog_.trimmed();
         if (details.size() > 2000)
             details = details.right(2000);
@@ -9440,6 +9864,19 @@ class DocumentWindow : public QMainWindow {
     void focusDrcViolation(const ice::DrcViolation &violation) {
         if (!project_)
             return;
+        if (drcReportFromPhysicalPreview_) {
+            if (!violation.object || !physicalDesignPage_ || !documents_)
+                return;
+            documents_->setCurrentWidget(physicalDesignPage_);
+            bool selected = false;
+            if (auto *page = physicalDesignPage_->pageForStage(physicalDesignPage_->currentStage()))
+                selected = page->selectDrcMarker(static_cast<int>(*violation.object));
+            if (activityDock_)
+                activityDock_->show();
+            statusBar()->showMessage(selected ? QStringLiteral("Selected physical preview DRC marker.")
+                                              : QStringLiteral("Physical preview DRC marker is no longer available."));
+            return;
+        }
         const auto &project = project_->project();
         auto cellId = drcLayoutId_;
         if (!project.layoutCells.contains(cellId) && !violation.cell.empty()) {
@@ -10088,8 +10525,11 @@ class DocumentWindow : public QMainWindow {
         QSignalBlocker blocker(schematicSelector_);
         schematicSelector_->clear();
         if (project_) {
-            for (const auto &[id, cell] : project_->project().schematicCells)
+            for (const auto &[id, cell] : project_->project().schematicCells) {
+                if (cell.systemVerilogSchematic)
+                    continue;
                 schematicSelector_->addItem(QString::fromStdString(cell.name), QVariant::fromValue<qulonglong>(id));
+            }
         }
         const int index = schematicSelector_->findData(QVariant::fromValue<qulonglong>(selected));
         if (index >= 0)
@@ -11017,8 +11457,8 @@ class DocumentWindow : public QMainWindow {
             proceduralEditor_->refreshSyntaxColors();
         if (textSchematicEditor_)
             textSchematicEditor_->refreshSyntaxColors();
-        if (simulationTestbenchEditor_)
-            simulationTestbenchEditor_->refreshSyntaxColors();
+        for (auto &[_, editor] : digitalTestbenchEditors_)
+            editor->refreshSyntaxColors();
         if (graphTabs_) {
             for (int index = 0; index < graphTabs_->count(); ++index)
                 if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
@@ -11290,6 +11730,16 @@ class DocumentWindow : public QMainWindow {
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
         activityPanel_->setOnDrcViolationActivated(
             [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
+        activityPanel_->setOnGenerateTimingReport([this] {
+            if (!implementationController_ || !physicalDesignPage_)
+                return;
+            QString error;
+            const auto report = implementationController_->timingReport(physicalDesignPage_->currentStage(), error);
+            if (activityPanel_)
+                activityPanel_->setTimingReport(report, error);
+            if (!error.isEmpty())
+                QMessageBox::warning(this, QStringLiteral("Timing report"), error);
+        });
         activityPanel_->setOnCancelJob([this](const QString &id) {
             if (id == implementationJobId_ && implementationController_) {
                 implementationController_->cancel();
@@ -11743,7 +12193,6 @@ class DocumentWindow : public QMainWindow {
             });
         layoutPropertiesPanel_->setOnLayoutPortChanged(
             [this](const ice::Port &port, const std::string &netName) { updateLayoutPort(port, netName); });
-        layoutPropertiesPanel_->setOnPathWidthChanged([this](int width) { setLayoutPathWidth(width); });
         layoutPropertiesPanel_->setOnGridSpacingChanged([this](int spacing) {
             if (!project_ || spacing <= 0)
                 return;
@@ -11933,14 +12382,12 @@ class DocumentWindow : public QMainWindow {
         schematicSelector_ = new QComboBox;
         simulatorSelector_ = new QComboBox;
         simulatorSelector_->addItem(QStringLiteral("ngspice"), QStringLiteral("ngspice"));
-        simulatorSelector_->addItem(QStringLiteral("Icarus Verilog (SystemVerilog)"), QStringLiteral("iverilog"));
         simulatorSelector_->addItem(QStringLiteral("Mixed-signal (ngspice + Icarus)"), QStringLiteral("mixed"));
         analysisSelector_ = new QComboBox;
         analysisSelector_->addItem(QStringLiteral("Transient"), QStringLiteral("transient"));
         analysisSelector_->addItem(QStringLiteral("DC sweep"), QStringLiteral("dc"));
         analysisSelector_->addItem(QStringLiteral("AC sweep"), QStringLiteral("ac"));
         analysisSelector_->addItem(QStringLiteral("Operating point"), QStringLiteral("op"));
-        analysisSelector_->addItem(QStringLiteral("Digital / VCD"), QStringLiteral("digital"));
         stopTime_ = new QDoubleSpinBox;
         stopTime_->setRange(1e-12, 1e9);
         stopTime_->setDecimals(9);
@@ -12072,26 +12519,176 @@ class DocumentWindow : public QMainWindow {
         auto *testbenchPage = new QWidget;
         simulationTestbenchPage_ = testbenchPage;
         auto *testbenchLayout = new QVBoxLayout(testbenchPage);
-        testbenchLayout->setContentsMargins(0, 0, 0, 0);
-        auto *testbenchToolbar = new QHBoxLayout;
-        auto *testbenchHint = new QLabel(QStringLiteral(
-            "SystemVerilog testbench source for the selected simulation. Changes are saved with the project."));
-        testbenchHint->setWordWrap(true);
-        simulationTestbenchRunButton_ = new QPushButton(QStringLiteral("Run Simulation"));
+        testbenchLayout->setContentsMargins(4, 4, 4, 4);
+        testbenchLayout->setSpacing(4);
+        auto *testbenchSplit = new QSplitter(Qt::Horizontal);
+        testbenchSplit->setChildrenCollapsible(false);
+
+        auto *testbenchExplorer = new QWidget;
+        testbenchExplorer->setMinimumWidth(180);
+        auto *explorerLayout = new QVBoxLayout(testbenchExplorer);
+        explorerLayout->setContentsMargins(4, 4, 4, 4);
+        explorerLayout->setSpacing(4);
+        auto *explorerSearchRow = new QHBoxLayout;
+        digitalTestbenchSearch_ = new QLineEdit;
+        digitalTestbenchSearch_->setPlaceholderText(QStringLiteral("Search testbenches…"));
+        digitalTestbenchSearch_->setClearButtonEnabled(true);
+        digitalTestbenchSearch_->setAccessibleName(QStringLiteral("Search SystemVerilog testbenches"));
+        auto *testbenchAddButton = new QPushButton;
+        testbenchAddButton->setFixedWidth(28);
+        setLucideIcon(testbenchAddButton, QStringLiteral("plus"), 16);
+        testbenchAddButton->setToolTip(QStringLiteral("Add SystemVerilog testbench"));
+        testbenchAddButton->setAccessibleName(QStringLiteral("Add SystemVerilog testbench"));
+        connect(testbenchAddButton, &QPushButton::clicked, this, [this] { addSystemVerilogTestbench(); });
+        simulationTestbenchRunButton_ = new QPushButton;
+        simulationTestbenchRunButton_->setFixedWidth(28);
         setLucideIcon(simulationTestbenchRunButton_, QStringLiteral("play"), 16);
-        simulationTestbenchRunButton_->setToolTip(QStringLiteral("Run the selected simulation"));
+        simulationTestbenchRunButton_->setToolTip(QStringLiteral("Run the selected testbench simulation"));
         simulationTestbenchRunButton_->setAccessibleName(QStringLiteral("Run simulation from testbench"));
         simulationTestbenchRunButton_->setEnabled(false);
         connect(simulationTestbenchRunButton_, &QPushButton::clicked, this, [this] { runSimulation(); });
-        testbenchToolbar->addWidget(testbenchHint, 1);
-        testbenchToolbar->addWidget(simulationTestbenchRunButton_);
-        testbenchLayout->addLayout(testbenchToolbar);
-        simulationTestbenchEditor_ = new TextDocumentEditor;
-        simulationTestbenchEditor_->setLanguage(TextDocumentLanguage::SystemVerilog);
-        simulationTestbenchEditor_->setOnTextEdited([this](const QString &text) { onSimulationTestbenchEdited(text); });
-        testbenchLayout->addWidget(simulationTestbenchEditor_, 1);
-        simulationTestbenchTabIndex_ = simulationTabs_->addTab(testbenchPage, QStringLiteral("Testbench"));
-        simulationTabs_->setTabVisible(simulationTestbenchTabIndex_, false);
+        explorerSearchRow->addWidget(digitalTestbenchSearch_, 1);
+        explorerSearchRow->addWidget(testbenchAddButton);
+        explorerSearchRow->addWidget(simulationTestbenchRunButton_);
+        explorerLayout->addLayout(explorerSearchRow);
+        digitalTestbenchList_ = new QListWidget;
+        digitalTestbenchList_->setAlternatingRowColors(true);
+        digitalTestbenchList_->setAccessibleName(QStringLiteral("SystemVerilog testbench files"));
+        digitalTestbenchList_->setEnabled(false);
+        explorerLayout->addWidget(digitalTestbenchList_, 1);
+        auto *testbenchLeftTabs = new QTabWidget;
+        testbenchLeftTabs->setMinimumWidth(180);
+        testbenchLeftTabs->addTab(testbenchExplorer, QStringLiteral("Explorer"));
+        testbenchSplit->addWidget(testbenchLeftTabs);
+
+        auto *testbenchEditorColumn = new QWidget;
+        auto *testbenchEditorLayout = new QVBoxLayout(testbenchEditorColumn);
+        testbenchEditorLayout->setContentsMargins(0, 0, 0, 0);
+        testbenchEditorLayout->setSpacing(4);
+        digitalTestbenchEmptyPage_ = new QWidget;
+        auto *emptyLayout = new QVBoxLayout(digitalTestbenchEmptyPage_);
+        emptyLayout->setContentsMargins(24, 24, 24, 24);
+        emptyLayout->setSpacing(12);
+        emptyLayout->addWidget(heading(QStringLiteral("Open a testbench")));
+        auto *emptyDescription = new QLabel(
+            QStringLiteral("Select a SystemVerilog testbench file in the Explorer, or create a new testbench to "
+                           "edit its source and run its simulation."));
+        emptyDescription->setWordWrap(true);
+        emptyDescription->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+        emptyLayout->addWidget(emptyDescription);
+        auto *createRow = new QHBoxLayout;
+        auto *createTestbenchButton = new QPushButton(QStringLiteral("SystemVerilog Testbench"));
+        createTestbenchButton->setMinimumHeight(72);
+        createTestbenchButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setLucideIcon(createTestbenchButton, QStringLiteral("notebook-text"), 20);
+        createTestbenchButton->setToolTip(QStringLiteral("Create a new SystemVerilog testbench"));
+        connect(createTestbenchButton, &QPushButton::clicked, this, [this] { addSystemVerilogTestbench(); });
+        createRow->addWidget(createTestbenchButton, 1);
+        emptyLayout->addLayout(createRow, 2);
+        emptyLayout->addStretch(1);
+        digitalTestbenchEditorTabs_ = new QTabWidget;
+        digitalTestbenchEditorTabs_->setDocumentMode(true);
+        digitalTestbenchEditorTabs_->setTabsClosable(true);
+        digitalTestbenchEditorTabs_->setMovable(true);
+        connect(digitalTestbenchEditorTabs_, &QTabWidget::tabCloseRequested, this,
+                [this](int index) { closeDigitalTestbenchTab(index); });
+        connect(digitalTestbenchEditorTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+            if (!project_ || !digitalTestbenchEditorTabs_ || index < 0)
+                return;
+            if (dynamic_cast<SimulationPlot *>(digitalTestbenchEditorTabs_->widget(index))) {
+                updateDigitalTestbenchRightPanel();
+                return;
+            }
+            const auto cellId =
+                static_cast<ice::ObjectId>(digitalTestbenchEditorTabs_->tabBar()->tabData(index).toULongLong());
+            if (cellId == 0)
+                return;
+            ice::ObjectId wantedSimulation = 0;
+            for (const auto &[id, simulation] : project_->project().simulations) {
+                if (simulation.schematic == cellId && simulationItemIsDigital(simulation)) {
+                    wantedSimulation = id;
+                    break;
+                }
+            }
+            if (wantedSimulation != 0 && wantedSimulation != activeSimulationId_)
+                selectDigitalTestbenchSimulation(wantedSimulation);
+            updateDigitalTestbenchRightPanel();
+        });
+        digitalTestbenchEditorStack_ = new QStackedWidget;
+        digitalTestbenchEditorStack_->addWidget(digitalTestbenchEmptyPage_);
+        digitalTestbenchEditorStack_->addWidget(digitalTestbenchEditorTabs_);
+        digitalTestbenchEditorStack_->setCurrentWidget(digitalTestbenchEmptyPage_);
+        testbenchEditorLayout->addWidget(digitalTestbenchEditorStack_, 1);
+        testbenchSplit->addWidget(testbenchEditorColumn);
+
+        digitalTestbenchRightTabs_ = new QTabWidget;
+        digitalTestbenchRightTabs_->setMinimumWidth(240);
+        auto *outlinePage = new QWidget;
+        auto *outlineLayout = new QVBoxLayout(outlinePage);
+        outlineLayout->setContentsMargins(4, 4, 4, 4);
+        outlineLayout->setSpacing(4);
+        digitalTestbenchOutline_ = new QTreeWidget;
+        digitalTestbenchOutline_->setHeaderLabels({QStringLiteral("Outline"), QStringLiteral("Line")});
+        digitalTestbenchOutline_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        digitalTestbenchOutline_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        digitalTestbenchOutline_->setRootIsDecorated(true);
+        outlineLayout->addWidget(digitalTestbenchOutline_, 1);
+        digitalTestbenchRightTabs_->addTab(outlinePage, QStringLiteral("Outline"));
+        auto *infoPage = new QWidget;
+        auto *infoLayout = new QVBoxLayout(infoPage);
+        infoLayout->setContentsMargins(4, 4, 4, 4);
+        infoLayout->setSpacing(4);
+        digitalTestbenchInfo_ = new QTreeWidget;
+        digitalTestbenchInfo_->setHeaderLabels({QStringLiteral("Property"), QStringLiteral("Value")});
+        digitalTestbenchInfo_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        digitalTestbenchInfo_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+        digitalTestbenchInfo_->setRootIsDecorated(false);
+        infoLayout->addWidget(digitalTestbenchInfo_, 1);
+        digitalTestbenchRightTabs_->addTab(infoPage, QStringLiteral("Testbench"));
+        const auto goToOutlineLine = [this](QTreeWidgetItem *item) {
+            if (!item)
+                return;
+            const auto line = item->data(0, Qt::UserRole).toInt();
+            if (line <= 0)
+                return;
+            if (auto *editor = currentDigitalTestbenchEditor())
+                editor->goToLine(line);
+        };
+        connect(digitalTestbenchOutline_, &QTreeWidget::itemActivated, this,
+                [goToOutlineLine](QTreeWidgetItem *item, int) { goToOutlineLine(item); });
+        connect(digitalTestbenchOutline_, &QTreeWidget::itemDoubleClicked, this,
+                [goToOutlineLine](QTreeWidgetItem *item, int) { goToOutlineLine(item); });
+        testbenchSplit->addWidget(digitalTestbenchRightTabs_);
+        testbenchSplit->setStretchFactor(0, 0);
+        testbenchSplit->setStretchFactor(1, 1);
+        testbenchSplit->setStretchFactor(2, 0);
+        testbenchLayout->addWidget(testbenchSplit, 1);
+        connect(digitalTestbenchSearch_, &QLineEdit::textChanged, this, [this](const QString &text) {
+            if (!digitalTestbenchList_)
+                return;
+            const auto needle = text.trimmed();
+            for (int row = 0; row < digitalTestbenchList_->count(); ++row) {
+                auto *item = digitalTestbenchList_->item(row);
+                item->setHidden(!needle.isEmpty() && !item->text().contains(needle, Qt::CaseInsensitive));
+            }
+            if (auto *current = digitalTestbenchList_->currentItem(); current && current->isHidden()) {
+                digitalTestbenchList_->clearSelection();
+                digitalTestbenchList_->setCurrentRow(-1);
+            }
+        });
+        connect(digitalTestbenchList_, &QListWidget::itemSelectionChanged, this, [this] {
+            if (!project_ || !digitalTestbenchList_)
+                return;
+            auto *item = digitalTestbenchList_->currentItem();
+            if (!item || item->isHidden())
+                return;
+            const auto id = static_cast<ice::ObjectId>(item->data(Qt::UserRole).toULongLong());
+            if (id == 0 || id == activeSimulationId_)
+                return;
+            selectDigitalTestbenchSimulation(id);
+            if (documents_)
+                documents_->setCurrentWidget(simulationTestbenchPage_);
+        });
         simEditorLayout->addWidget(simulationTabs_, 1);
 
         simulationEditorPage_ = simEditor;
@@ -12102,7 +12699,6 @@ class DocumentWindow : public QMainWindow {
 
         // ── Wire SimulationPanel ─────────────────────────────────────────
         simulationPanel_->setOnAddClicked([this] { addSimulation(); });
-        simulationPanel_->setOnAddSystemVerilogTestbench([this] { addSystemVerilogTestbench(); });
         simulationPanel_->setOnAddReport([this] { addReport(); });
         simulationPanel_->setOnOpenReport([this](ice::ObjectId reportId) { openReportFile(reportId); });
         simulationPanel_->setOnDeleteClicked([this] { deleteSimulation(); });
@@ -12197,18 +12793,37 @@ class DocumentWindow : public QMainWindow {
                 documents_->currentWidget() != schematicPage_)
                 schematicCanvas_->setSignalPickMode(false);
             if (documents_ && documents_->currentWidget() == simulationPage_) {
-                if (activeSimulationId_ == 0 && project_ && !project_->project().simulations.empty()) {
-                    if (simulationPanel_)
-                        simulationPanel_->selectSimulation(project_->project().simulations.begin()->first);
-                } else {
+                bool needAnalogSelection = activeSimulationId_ == 0;
+                if (project_ && activeSimulationId_ != 0) {
+                    const auto active = project_->project().simulations.find(activeSimulationId_);
+                    needAnalogSelection =
+                        active == project_->project().simulations.end() || simulationItemIsDigital(active->second);
+                }
+                if (needAnalogSelection && project_) {
+                    const auto first =
+                        std::find_if(project_->project().simulations.begin(), project_->project().simulations.end(),
+                                     [this](const auto &entry) { return !simulationItemIsDigital(entry.second); });
+                    if (first != project_->project().simulations.end() && simulationPanel_) {
+                        simulationPanel_->selectSimulation(first->first);
+                    } else {
+                        activeSimulationId_ = 0;
+                        rebuildGraphTabs({});
+                        updateSimulationNetlistState();
+                    }
+                } else if (!needAnalogSelection) {
                     loadCachedSimulationRun();
                 }
+            } else if (documents_ && documents_->currentWidget() == simulationTestbenchPage_) {
+                updateSimulationTestbenchTab();
             }
         });
 
         connect(runButton, &QPushButton::clicked, this, &DocumentWindow::runSimulation);
-        const auto simulationTab = documents->addTab(simulationPage_, QStringLiteral("Simulation"));
+        const auto simulationTab = documents->addTab(simulationPage_, QStringLiteral("A/MS Simulation"));
         documents->setTabIcon(simulationTab, ice::tabIcon(QStringLiteral("simulation"), 16));
+        const auto digitalTestbenchTab =
+            documents->addTab(simulationTestbenchPage_, QStringLiteral("Digital Testbenches"));
+        documents->setTabIcon(digitalTestbenchTab, ice::tabIcon(QStringLiteral("hdl-schematic"), 16));
 
         implementationController_ = new ImplementationUiController(this);
         implementationController_->addLogListener([this](ice::ImplementationStage stage, const QString &text) {
@@ -12341,6 +12956,17 @@ class DocumentWindow : public QMainWindow {
             const auto pageStage = page->stage();
             page->setApplyConfigCallback([this, pageStage](ice::ObjectId id, const ice::ImplementationConfig &config) {
                 applyStageConfig(id, config, pageStage);
+            });
+            page->setDrcReportCallback([this](const ice::VerificationReport &report, const QString &stageLabel) {
+                if (drcProcess_ && drcProcess_->state() != QProcess::NotRunning)
+                    return;
+                drcReportFromPhysicalPreview_ = true;
+                if (activityPanel_)
+                    activityPanel_->setDrcPreviewReport(report, stageLabel);
+            });
+            page->setTimingMetricsCallback([this](const std::vector<std::pair<QString, QString>> &metrics) {
+                if (activityPanel_)
+                    activityPanel_->setTimingMetrics(metrics);
             });
             implementationPages_.push_back(page);
         }
@@ -12810,11 +13436,11 @@ class DocumentWindow : public QMainWindow {
                 addLayoutPathSegment(start, end, width, layer, viaLayers);
             });
             layoutCanvas_->setPathLayerChangedCallback([this](ice::ObjectId, const std::string &name) {
-                statusBar()->showMessage(QStringLiteral("Path layer: %1 · width: %2 nm")
-                                             .arg(QString::fromStdString(name))
-                                             .arg(layoutPathWidth_));
+                const auto width = layoutCanvas_ ? std::max(1, layoutCanvas_->pathWidth()) : 200;
+                statusBar()->showMessage(
+                    QStringLiteral("Path layer: %1 · width: %2 nm").arg(QString::fromStdString(name)).arg(width));
                 if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
-                    layoutPropertiesPanel_->setPathTool(layoutCanvas_->pathWidth(), name);
+                    layoutPropertiesPanel_->setPathTool(name);
             });
             layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
@@ -13616,7 +14242,6 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeProceduralLayoutId_ = 0;
     ice::ObjectId activeLayoutPathId_ = 0;
     ice::ObjectId activeLayoutPathCellId_ = 0;
-    int activeLayoutPathWidth_ = 0;
     // Shapes captured by the layout figure context menu's Copy/Cut entries.
     std::vector<ice::Shape> layoutShapeClipboard_;
     std::set<ice::ObjectId> openSchematicTabs_;
@@ -13653,6 +14278,7 @@ class DocumentWindow : public QMainWindow {
     QString drcReportPath_;
     QString drcLog_;
     ice::ObjectId drcLayoutId_ = 0;
+    bool drcReportFromPhysicalPreview_ = false;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;
     ImplementationUiController *implementationController_ = nullptr;
@@ -13666,9 +14292,17 @@ class DocumentWindow : public QMainWindow {
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationTestbenchPage_ = nullptr;
-    TextDocumentEditor *simulationTestbenchEditor_ = nullptr;
+    QLineEdit *digitalTestbenchSearch_ = nullptr;
+    QListWidget *digitalTestbenchList_ = nullptr;
+    QStackedWidget *digitalTestbenchEditorStack_ = nullptr;
+    QWidget *digitalTestbenchEmptyPage_ = nullptr;
+    QTabWidget *digitalTestbenchEditorTabs_ = nullptr;
+    std::map<ice::ObjectId, TextDocumentEditor *> digitalTestbenchEditors_;
+    std::map<ice::ObjectId, SimulationPlot *> digitalTestbenchResultPlots_;
+    QTabWidget *digitalTestbenchRightTabs_ = nullptr;
+    QTreeWidget *digitalTestbenchOutline_ = nullptr;
+    QTreeWidget *digitalTestbenchInfo_ = nullptr;
     QPushButton *simulationTestbenchRunButton_ = nullptr;
-    int simulationTestbenchTabIndex_ = -1;
     QWidget *simulationPage_ = nullptr;
     QWidget *simulationEditorPage_ = nullptr;
     QWidget *simulationGraphsPage_ = nullptr;
@@ -13759,7 +14393,6 @@ class DocumentWindow : public QMainWindow {
     bool layoutGridVisible_ = true;
     bool layoutSnapToGrid_ = true;
     QAction *layoutDeleteTool_ = nullptr;
-    int layoutPathWidth_ = 200;
     int layoutTextHeight_ = 1000;
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;

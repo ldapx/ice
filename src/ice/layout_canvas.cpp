@@ -123,8 +123,6 @@ QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width) {
 }
 
 namespace {
-QPointF snappedPathPoint(QPointF point) { return {std::round(point.x()), std::round(point.y())}; }
-
 QPointF constrainedPathPoint(QPointF anchor, QPointF point, bool orthogonal) {
     if (!orthogonal)
         return point;
@@ -254,14 +252,18 @@ class PlannedConnectionItem : public QGraphicsItem {
 
 class LayoutPathItem : public QGraphicsItem {
   public:
-    LayoutPathItem(ice::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<QColor> segmentColors,
+    LayoutPathItem(ice::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<qreal> segmentWidths,
+                   std::vector<bool> segmentVisible, std::vector<QColor> segmentColors,
                    std::vector<std::vector<QColor>> pointViaColors, bool readOnly, bool pointEditable,
                    bool endpointHandlesOnly, LayoutPathPointMovedCallback pointMoved,
                    LayoutPathPointInsertedCallback pointInserted, LayoutPathPointDeletedCallback pointDeleted)
         : id_(id), points_(std::move(points)), width_(std::max<qreal>(1.0, width)),
+          segmentWidths_(std::move(segmentWidths)), segmentVisible_(std::move(segmentVisible)),
           segmentColors_(std::move(segmentColors)), pointViaColors_(std::move(pointViaColors)), readOnly_(readOnly),
           pointEditable_(pointEditable), endpointHandlesOnly_(endpointHandlesOnly), pointMoved_(std::move(pointMoved)),
           pointInserted_(std::move(pointInserted)), pointDeleted_(std::move(pointDeleted)) {
+        for (const auto segmentWidth : segmentWidths_)
+            width_ = std::max(width_, segmentWidth);
         setData(0, QVariant::fromValue<qulonglong>(id_));
         setFlag(QGraphicsItem::ItemIsSelectable);
         if (!readOnly_)
@@ -301,9 +303,13 @@ class LayoutPathItem : public QGraphicsItem {
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         for (std::size_t start = 0; start + 1 < points_.size();) {
+            if (!segmentIsVisible(start)) {
+                ++start;
+                continue;
+            }
             const auto color = colorForSegment(start);
             std::size_t end = start + 1;
-            while (end + 1 < points_.size() && colorForSegment(end) == color)
+            while (end + 1 < points_.size() && segmentIsVisible(end) && colorForSegment(end) == color)
                 ++end;
             const auto path = runPath(start, end);
             if (isSelected()) {
@@ -491,12 +497,23 @@ class LayoutPathItem : public QGraphicsItem {
     bool handleEditable(int index) const {
         if (readOnly_ || !pointEditable_ || index < 0 || index >= static_cast<int>(points_.size()))
             return false;
+        const auto pointIndex = static_cast<std::size_t>(index);
+        const bool adjacentVisible = (pointIndex > 0 && segmentIsVisible(pointIndex - 1)) ||
+                                     (pointIndex + 1 < points_.size() && segmentIsVisible(pointIndex));
+        if (!adjacentVisible)
+            return false;
         if (endpointHandlesOnly_ && index != 0 && index != static_cast<int>(points_.size()) - 1)
             return false;
         return true;
     }
 
     bool hasVia(std::size_t index) const { return index < pointViaColors_.size() && !pointViaColors_[index].empty(); }
+
+    qreal widthForSegment(std::size_t index) const {
+        return index < segmentWidths_.size() ? std::max<qreal>(1.0, segmentWidths_[index]) : width_;
+    }
+
+    bool segmentIsVisible(std::size_t index) const { return index >= segmentVisible_.size() || segmentVisible_[index]; }
 
     QPainterPath runPath(std::size_t start, std::size_t end) const {
         QPainterPath path;
@@ -505,23 +522,30 @@ class LayoutPathItem : public QGraphicsItem {
         // Extend runs that touch a via so the copper reaches the far edge of
         // the via square instead of stopping at its center.
         std::vector<QPointF> run;
+        std::vector<qreal> runWidths;
         run.reserve(end - start + 1);
+        runWidths.reserve(end - start);
         for (std::size_t index = start; index <= end; ++index)
             run.push_back(points_[index]);
-        const auto extension = width_ * 0.5;
+        for (std::size_t index = start; index < end; ++index)
+            runWidths.push_back(widthForSegment(index));
+        if (runWidths.empty())
+            return path;
+        const auto startExtension = runWidths.front() * 0.5;
+        const auto endExtension = runWidths.back() * 0.5;
         if (hasVia(start)) {
             const auto delta = run[1] - run[0];
             const auto length = std::hypot(delta.x(), delta.y());
             if (length > 0.0)
-                run.front() -= delta * (extension / length);
+                run.front() -= delta * (startExtension / length);
         }
         if (hasVia(end)) {
             const auto delta = run.back() - run[run.size() - 2];
             const auto length = std::hypot(delta.x(), delta.y());
             if (length > 0.0)
-                run.back() += delta * (extension / length);
+                run.back() += delta * (endExtension / length);
         }
-        const auto outline = layoutPathOutline(run, width_);
+        const auto outline = layoutPathOutline(run, runWidths);
         if (!outline.isEmpty())
             path.addPolygon(outline);
         return path;
@@ -536,9 +560,13 @@ class LayoutPathItem : public QGraphicsItem {
     QPainterPath strokedPath() const {
         QPainterPath result;
         for (std::size_t start = 0; start + 1 < points_.size();) {
+            if (!segmentIsVisible(start)) {
+                ++start;
+                continue;
+            }
             const auto color = colorForSegment(start);
             std::size_t end = start + 1;
-            while (end + 1 < points_.size() && colorForSegment(end) == color)
+            while (end + 1 < points_.size() && segmentIsVisible(end) && colorForSegment(end) == color)
                 ++end;
             result.addPath(runPath(start, end));
             start = end;
@@ -591,6 +619,8 @@ class LayoutPathItem : public QGraphicsItem {
         qreal bestDistance = std::numeric_limits<qreal>::max();
         int bestIndex = -1;
         for (std::size_t index = 1; index < points_.size(); ++index) {
+            if (!segmentIsVisible(index - 1))
+                continue;
             const auto start = points_[index - 1];
             const auto end = points_[index];
             const auto delta = end - start;
@@ -612,6 +642,8 @@ class LayoutPathItem : public QGraphicsItem {
     ice::ObjectId id_ = 0;
     std::vector<QPointF> points_;
     qreal width_ = 1.0;
+    std::vector<qreal> segmentWidths_;
+    std::vector<bool> segmentVisible_;
     std::vector<QColor> segmentColors_;
     std::vector<std::vector<QColor>> pointViaColors_;
     bool readOnly_ = false;
@@ -805,19 +837,24 @@ QPointF pathUnit(const QPointF &vector) {
 }
 
 void appendPathJoin(std::vector<QPointF> &side, const QPointF &previous, const QPointF &corner, const QPointF &next,
-                    qreal halfWidth, qreal sideSign) {
+                    qreal incomingHalfWidth, qreal outgoingHalfWidth, qreal sideSign) {
     const auto incoming = pathUnit(corner - previous);
     const auto outgoing = pathUnit(next - corner);
     if (incoming.isNull() || outgoing.isNull()) {
         side.push_back(corner);
         return;
     }
-    const QPointF incomingNormal(-incoming.y() * halfWidth * sideSign, incoming.x() * halfWidth * sideSign);
-    const QPointF outgoingNormal(-outgoing.y() * halfWidth * sideSign, outgoing.x() * halfWidth * sideSign);
+    const QPointF incomingNormal(-incoming.y() * incomingHalfWidth * sideSign,
+                                 incoming.x() * incomingHalfWidth * sideSign);
+    const QPointF outgoingNormal(-outgoing.y() * outgoingHalfWidth * sideSign,
+                                 outgoing.x() * outgoingHalfWidth * sideSign);
     const auto determinant = pathCross(incoming, outgoing);
     if (std::abs(determinant) <= 1.0e-12) {
         if (QPointF::dotProduct(incoming, outgoing) > 0.0) {
             side.push_back(corner + incomingNormal);
+            // A width change on a straight run is a step, not a taper.
+            if (std::abs(incomingHalfWidth - outgoingHalfWidth) > 1.0e-12)
+                side.push_back(corner + outgoingNormal);
         } else {
             // A 180-degree reversal has no single-side intersection.
             side.push_back(corner + incomingNormal);
@@ -832,6 +869,7 @@ void appendPathJoin(std::vector<QPointF> &side, const QPointF &previous, const Q
     const auto shift = outgoingNormal - incomingNormal;
     const auto l1 = pathCross(shift, outgoing) / determinant;
     const auto l2 = pathCross(incomingNormal - outgoingNormal, incoming) / determinant;
+    const auto halfWidth = std::max(incomingHalfWidth, outgoingHalfWidth);
     const auto l1min = -QLineF(previous, corner).length() - halfWidth;
     const auto l2min = -QLineF(corner, next).length() - halfWidth;
     constexpr qreal epsilon = 1.0e-9;
@@ -841,55 +879,58 @@ void appendPathJoin(std::vector<QPointF> &side, const QPointF &previous, const Q
         side.push_back(corner + incomingNormal);
         side.push_back(corner);
         side.push_back(corner + outgoingNormal);
-    } else if (l1 <= halfWidth + epsilon && l2 <= halfWidth + epsilon) {
+    } else if (l1 <= incomingHalfWidth + epsilon && l2 <= outgoingHalfWidth + epsilon) {
         side.push_back(corner + incomingNormal + incoming * l1);
     } else {
-        side.push_back(corner + incomingNormal + incoming * std::min(halfWidth, l1));
-        side.push_back(corner + outgoingNormal - outgoing * std::min(halfWidth, l2));
+        side.push_back(corner + incomingNormal + incoming * std::min(incomingHalfWidth, l1));
+        side.push_back(corner + outgoingNormal - outgoing * std::min(outgoingHalfWidth, l2));
     }
 }
 } // namespace
 
-QPolygonF layoutPathOutline(const std::vector<QPointF> &input, qreal width) {
-    std::vector<QPointF> points;
-    points.reserve(input.size());
-    for (const auto &point : input) {
-        if (points.empty() || point != points.back())
-            points.push_back(point);
+QPolygonF layoutPathOutline(const std::vector<QPointF> &input, const std::vector<qreal> &inputWidths) {
+    struct Segment {
+        QPointF start;
+        QPointF end;
+        qreal width = 0.0;
+    };
+    std::vector<Segment> segments;
+    segments.reserve(input.size() > 0 ? input.size() - 1 : 0);
+    for (std::size_t index = 0; index + 1 < input.size(); ++index) {
+        const auto width =
+            index < inputWidths.size() ? inputWidths[index] : (inputWidths.empty() ? 0.0 : inputWidths.back());
+        if (width <= 0.0)
+            return {};
+        if (QLineF(input[index], input[index + 1]).length() <= 1.0e-9)
+            continue;
+        segments.push_back({input[index], input[index + 1], width});
     }
-    if (points.size() < 2 || width <= 0.0)
+    if (segments.empty())
         return {};
 
-    // Match KLayout's real_points(): drop collinear interior points so the
-    // join calculation only sees actual corners.
-    std::vector<QPointF> corners;
-    corners.reserve(points.size());
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        if (index == 0 || index + 1 == points.size() ||
-            std::abs(pathCross(points[index] - points[index - 1], points[index + 1] - points[index])) > 1.0e-12)
-            corners.push_back(points[index]);
-    }
-    if (corners.size() < 2)
-        return {};
-
-    const auto halfWidth = width * 0.5;
     std::vector<QPointF> left;
     std::vector<QPointF> right;
-    left.reserve(corners.size() + 2);
-    right.reserve(corners.size() + 2);
+    left.reserve(segments.size() + 2);
+    right.reserve(segments.size() + 2);
 
-    const auto firstDirection = pathUnit(corners[1] - corners[0]);
-    const QPointF firstNormal(-firstDirection.y() * halfWidth, firstDirection.x() * halfWidth);
-    left.push_back(corners.front() + firstNormal);
-    right.push_back(corners.front() - firstNormal);
-    for (std::size_t index = 1; index + 1 < corners.size(); ++index) {
-        appendPathJoin(left, corners[index - 1], corners[index], corners[index + 1], halfWidth, 1.0);
-        appendPathJoin(right, corners[index - 1], corners[index], corners[index + 1], halfWidth, -1.0);
+    const auto firstHalfWidth = segments.front().width * 0.5;
+    const auto firstDirection = pathUnit(segments.front().end - segments.front().start);
+    const QPointF firstNormal(-firstDirection.y() * firstHalfWidth, firstDirection.x() * firstHalfWidth);
+    left.push_back(segments.front().start + firstNormal);
+    right.push_back(segments.front().start - firstNormal);
+    for (std::size_t index = 1; index < segments.size(); ++index) {
+        const auto &previous = segments[index - 1];
+        const auto &current = segments[index];
+        appendPathJoin(left, previous.start, current.start, current.end, previous.width * 0.5, current.width * 0.5,
+                       1.0);
+        appendPathJoin(right, previous.start, current.start, current.end, previous.width * 0.5, current.width * 0.5,
+                       -1.0);
     }
-    const auto lastDirection = pathUnit(corners.back() - corners[corners.size() - 2]);
-    const QPointF lastNormal(-lastDirection.y() * halfWidth, lastDirection.x() * halfWidth);
-    left.push_back(corners.back() + lastNormal);
-    right.push_back(corners.back() - lastNormal);
+    const auto lastHalfWidth = segments.back().width * 0.5;
+    const auto lastDirection = pathUnit(segments.back().end - segments.back().start);
+    const QPointF lastNormal(-lastDirection.y() * lastHalfWidth, lastDirection.x() * lastHalfWidth);
+    left.push_back(segments.back().end + lastNormal);
+    right.push_back(segments.back().end - lastNormal);
 
     QPolygonF outline;
     outline.reserve(static_cast<int>(left.size() + right.size()));
@@ -898,6 +939,13 @@ QPolygonF layoutPathOutline(const std::vector<QPointF> &input, qreal width) {
     for (auto it = right.rbegin(); it != right.rend(); ++it)
         outline << *it;
     return outline;
+}
+
+QPolygonF layoutPathOutline(const std::vector<QPointF> &input, qreal width) {
+    std::vector<qreal> widths;
+    if (input.size() > 1)
+        widths.assign(input.size() - 1, width);
+    return layoutPathOutline(input, widths);
 }
 
 QPointF layoutResizeHandlePosition(const QRectF &rect, int handle) {
@@ -1305,23 +1353,35 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         pathConfig_ = config;
         pathCell_ = config.cell;
-        pathWidth_ = std::max(1, config.width);
         if (pathConfig_.layers.empty())
             pathLayerIndex_ = 0;
         else
             pathLayerIndex_ = std::clamp(pathLayerIndex_, 0, static_cast<int>(pathConfig_.layers.size()) - 1);
         if (pathAnchorLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
             pathAnchorLayerIndex_ = pathLayerIndex_;
+        const auto minimum = currentPathMinimumWidth();
+        if (config.width > 0)
+            pathWidth_ = std::max(config.width, minimum);
+        else if (minimum > 0)
+            pathWidth_ = minimum;
+        else
+            pathWidth_ = std::max(1, pathWidth_);
         viewport()->update();
     }
 
     void setPathWidth(int width) override {
-        pathWidth_ = std::max(1, width);
+        pathWidth_ = std::max({1, width, currentPathMinimumWidth()});
         viewport()->update();
     }
 
     int pathWidth() const override { return pathWidth_; }
     bool pathAvailable() const override { return !pathConfig_.layers.empty(); }
+
+    int currentPathMinimumWidth() const {
+        if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
+            return 0;
+        return std::max(0, pathConfig_.layers[pathLayerIndex_].minimumWidth);
+    }
 
     std::string pathLayerName() const override {
         if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
@@ -1816,8 +1876,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     event->accept();
                     return;
                 }
-                const auto point = snappedPathPoint(mapToScene(event->pos()));
+                const auto point = snapPosition(mapToScene(event->pos()));
                 if (!pathActive_) {
+                    const auto minimum = currentPathMinimumWidth();
+                    pathWidth_ = minimum > 0 ? minimum : 200;
                     pathActive_ = true;
                     pathAnchor_ = point;
                     pathEnd_ = point;
@@ -2101,7 +2163,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (tool_ == Tool::path && pathActive_) {
-            pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(cursorScenePosition_),
+            pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(cursorScenePosition_),
                                             event->modifiers().testFlag(Qt::ShiftModifier));
             viewport()->update();
             event->accept();
@@ -2159,7 +2221,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
             const int next = pathLayerIndex_ + (event->angleDelta().y() > 0 ? 1 : -1);
             if (next >= 0 && next < static_cast<int>(pathConfig_.layers.size())) {
                 pathLayerIndex_ = next;
-                pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(cursorScenePosition_),
+                // Each segment keeps the minimum width of its own layer.
+                if (const auto minimum = currentPathMinimumWidth(); minimum > 0)
+                    pathWidth_ = minimum;
+                pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(cursorScenePosition_),
                                                 QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier));
                 if (pathLayerChanged_)
                     pathLayerChanged_(pathConfig_.layers[pathLayerIndex_].layer,
@@ -2249,7 +2314,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && pathDragging_) {
             pathDragging_ = false;
-            pathEnd_ = constrainedPathPoint(pathAnchor_, snappedPathPoint(mapToScene(event->pos())),
+            pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(event->pos())),
                                             event->modifiers().testFlag(Qt::ShiftModifier));
             commitPathSegment();
             viewport()->update();
@@ -3190,14 +3255,15 @@ QGraphicsItem *createLayoutPlannedConnectionItem(ice::ObjectId id, const QLineF 
 }
 
 QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF> &points, qreal width,
+                                    const std::vector<qreal> &segmentWidths, const std::vector<bool> &segmentVisible,
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
                                     bool pointEditable, bool endpointHandlesOnly,
                                     LayoutPathPointMovedCallback pointMoved,
                                     LayoutPathPointInsertedCallback pointInserted,
                                     LayoutPathPointDeletedCallback pointDeleted) {
-    return new LayoutPathItem(id, points, width, segmentColors, pointViaColors, readOnly, pointEditable,
-                              endpointHandlesOnly, std::move(pointMoved), std::move(pointInserted),
+    return new LayoutPathItem(id, points, width, segmentWidths, segmentVisible, segmentColors, pointViaColors, readOnly,
+                              pointEditable, endpointHandlesOnly, std::move(pointMoved), std::move(pointInserted),
                               std::move(pointDeleted));
 }
 

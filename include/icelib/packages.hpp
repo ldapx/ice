@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -12,6 +13,9 @@ struct PackageLayer {
     std::string name;
     int number = 0;
     int datatype = 0;
+    // Minimum drawn width in database units (nanometres). Zero means the PDK
+    // does not declare a minimum for this layer.
+    std::int64_t minimumWidth = 0;
 };
 
 struct PackagePdkOsdiSource {
