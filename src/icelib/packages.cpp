@@ -335,9 +335,12 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                     entry.name = readString(*layer, "name");
                     entry.number = static_cast<int>((*layer)["number"].value_or(-1LL));
                     entry.datatype = static_cast<int>((*layer)["datatype"].value_or(0LL));
-                    if (entry.name.empty() || entry.number < 0 || entry.datatype < 0 || entry.datatype > 65535)
+                    entry.minimumWidth = (*layer)["minimum_width"].value_or(0LL);
+                    if (entry.name.empty() || entry.number < 0 || entry.datatype < 0 || entry.datatype > 65535 ||
+                        entry.minimumWidth < 0)
                         throw ProjectError("package.manifest",
-                                           "PDK layers require a name, non-negative GDS number, and datatype");
+                                           "PDK layers require a name, non-negative GDS number, datatype, and "
+                                           "minimum width");
                     if (!layerNames.insert(entry.name).second)
                         throw ProjectError("package.manifest", "Duplicate PDK layer name: " + entry.name);
                     pdkSpec.layers.push_back(std::move(entry));

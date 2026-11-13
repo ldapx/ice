@@ -178,21 +178,28 @@ ShapeMetrics polygonMetrics(const std::vector<LayoutPoint> &points, const Databa
 
 ShapeMetrics pathMetrics(const Shape &shape, const DatabaseUnits &units) {
     ShapeMetrics metrics;
-    if (shape.centerline.size() < 2 || shape.width <= 0)
+    if (shape.centerline.size() < 2)
         return metrics;
     double length = 0.0;
-    for (std::size_t index = 1; index < shape.centerline.size(); ++index) {
-        const auto &previous = shape.centerline[index - 1];
-        const auto &current = shape.centerline[index];
-        length += std::hypot(units.toNanometers(current.x) - units.toNanometers(previous.x),
-                             units.toNanometers(current.y) - units.toNanometers(previous.y));
+    double area = 0.0;
+    double squares = 0.0;
+    double maxWidth = 0.0;
+    for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+        const auto &previous = shape.centerline[index];
+        const auto &current = shape.centerline[index + 1];
+        const auto segmentLength = std::hypot(units.toNanometers(current.x) - units.toNanometers(previous.x),
+                                              units.toNanometers(current.y) - units.toNanometers(previous.y));
+        const auto width = units.toNanometers(shape.widthForSegment(index));
+        if (segmentLength <= 0.0 || width <= 0.0)
+            return {};
+        length += segmentLength;
+        area += segmentLength * width;
+        squares += segmentLength / width;
+        maxWidth = std::max(maxWidth, width);
     }
-    const auto width = units.toNanometers(shape.width);
-    if (length <= 0.0 || width <= 0.0)
-        return metrics;
-    metrics.area = length * width / 1'000'000.0;
-    metrics.perimeter = 2.0 * (length + width) / 1000.0;
-    metrics.squares = length / width;
+    metrics.area = area / 1'000'000.0;
+    metrics.perimeter = 2.0 * (length + maxWidth) / 1000.0;
+    metrics.squares = squares;
     return metrics;
 }
 

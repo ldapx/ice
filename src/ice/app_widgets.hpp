@@ -58,12 +58,17 @@ class ActivityPanel : public QWidget {
     void setProjectChangedCallback(std::function<void()> callback);
     void setOnDrcViolationActivated(std::function<void(const ice::DrcViolation &)> callback);
     void setDrcReport(const ice::VerificationReport &report, const QString &reportPath = {});
+    void setDrcPreviewReport(const ice::VerificationReport &report, const QString &stageLabel);
     void setDrcRunning(const QString &message = {});
     void setDrcError(const QString &message);
     void showDrcTab();
     void setLvsReport(const ice::LvsReport &report);
     void setLvsError(const QString &message);
     void showLvsTab();
+    void setOnGenerateTimingReport(std::function<void()> callback) { onGenerateTimingReport_ = std::move(callback); }
+    void setTimingMetrics(const std::vector<std::pair<QString, QString>> &metrics);
+    void setTimingReport(const QString &report, const QString &error = {});
+    void showTimingTab();
     void showAgentTab();
     void appendMessage(const QString &message);
     void showMessagesTab();
@@ -136,6 +141,8 @@ class ActivityPanel : public QWidget {
     QString agentModeLabel(const AgentSession &session) const;
     QString agentModelLabel(const AgentSession &session) const;
     void installMessageSinks();
+    void populateDrcTable(const ice::VerificationReport &report);
+    void showReportPage(int index);
     void appendLogEntry(const QString &time, int level, const QString &category, const QString &message);
     void rebuildMessageView();
     bool messagePassesFilters(const QString &category, int level) const;
@@ -156,10 +163,17 @@ class ActivityPanel : public QWidget {
     QLabel *messagesCount_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
     QPlainTextEdit *lvsReport_ = nullptr;
+    QTableWidget *timingTable_ = nullptr;
+    QPlainTextEdit *timingReport_ = nullptr;
     std::vector<ice::DrcViolation> drcViolations_;
     std::function<void(const ice::DrcViolation &)> onDrcViolationActivated_;
-    int drcTabIndex_ = -1;
-    int lvsTabIndex_ = -1;
+    std::function<void()> onGenerateTimingReport_;
+    QComboBox *reportSelector_ = nullptr;
+    QStackedWidget *reportStack_ = nullptr;
+    int reportsTabIndex_ = -1;
+    int drcPageIndex_ = -1;
+    int lvsPageIndex_ = -1;
+    int timingPageIndex_ = -1;
     int agentTabIndex_ = -1;
     int messagesTabIndex_ = -1;
     struct MessageEntry {

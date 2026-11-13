@@ -35,7 +35,6 @@ class PropertiesPanel : public QWidget {
     using LayoutDeviceParameterChanged =
         std::function<void(const std::string &deviceName, const std::string &name, const std::string &value)>;
     using LayoutPortChanged = std::function<void(const ice::Port &port, const std::string &netName)>;
-    using PathWidthChanged = std::function<void(int width)>;
     using GridSpacingChanged = std::function<void(int spacing)>;
     using LayoutShapeSizeChanged = std::function<void(ice::ObjectId shapeId, int width, int height)>;
 
@@ -48,7 +47,6 @@ class PropertiesPanel : public QWidget {
     void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback);
     void setOnLayoutDeviceParameterChanged(LayoutDeviceParameterChanged callback);
     void setOnLayoutPortChanged(LayoutPortChanged callback);
-    void setOnPathWidthChanged(PathWidthChanged callback);
     void setOnGridSpacingChanged(GridSpacingChanged callback);
     void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
 
@@ -64,7 +62,7 @@ class PropertiesPanel : public QWidget {
                                 const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
     void setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model);
     void setLayoutDevice(const ice::LayoutDeviceCell *cell);
-    void setPathTool(int width, const std::string &layerName);
+    void setPathTool(const std::string &layerName);
     // The model carries only the selected figure (including the members of a
     // text polygon), so the preview never shows the rest of the cell.
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
@@ -103,7 +101,6 @@ class PropertiesPanel : public QWidget {
     ice::ObjectId layoutShapeId_ = 0;
     int layoutShapeWidth_ = 0;
     int layoutShapeHeight_ = 0;
-    int pathWidth_ = 200;
     std::string pathLayerName_;
     bool portMode_ = false;
     ice::Port layoutPort_;
@@ -119,7 +116,6 @@ class PropertiesPanel : public QWidget {
     LayoutCellParameterChanged onLayoutCellParameterChanged_;
     LayoutDeviceParameterChanged onLayoutDeviceParameterChanged_;
     LayoutPortChanged onLayoutPortChanged_;
-    PathWidthChanged onPathWidthChanged_;
     GridSpacingChanged onGridSpacingChanged_;
     LayoutShapeSizeChanged onLayoutShapeSizeChanged_;
 };

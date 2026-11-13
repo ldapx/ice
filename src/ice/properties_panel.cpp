@@ -159,8 +159,6 @@ void PropertiesPanel::setOnLayoutDeviceParameterChanged(LayoutDeviceParameterCha
 
 void PropertiesPanel::setOnLayoutPortChanged(LayoutPortChanged callback) { onLayoutPortChanged_ = std::move(callback); }
 
-void PropertiesPanel::setOnPathWidthChanged(PathWidthChanged callback) { onPathWidthChanged_ = std::move(callback); }
-
 void PropertiesPanel::setOnGridSpacingChanged(GridSpacingChanged callback) {
     onGridSpacingChanged_ = std::move(callback);
 }
@@ -293,7 +291,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     updateParameterButtons();
 }
 
-void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
+void PropertiesPanel::setPathTool(const std::string &layerName) {
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -305,7 +303,6 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     if (gridOptions_)
         gridOptions_->setVisible(false);
     setParametersVisible(true);
-    pathWidth_ = std::max(1, width);
     pathLayerName_ = layerName;
     setTitle(QStringLiteral("Path tool"));
     previewFrame_->setVisible(true);
@@ -319,15 +316,6 @@ void PropertiesPanel::setPathTool(int width, const std::string &layerName) {
     layerValue->setFlags(layerValue->flags() & ~Qt::ItemIsEditable);
     parameters_->setItem(layerRow, 0, layerNameItem);
     parameters_->setItem(layerRow, 1, layerValue);
-
-    const int widthRow = parameters_->rowCount();
-    parameters_->insertRow(widthRow);
-    auto *widthName = new QTableWidgetItem(QStringLiteral("width (nm)"));
-    widthName->setFlags(widthName->flags() & ~Qt::ItemIsEditable);
-    auto *widthValue = new QTableWidgetItem(QString::number(pathWidth_));
-    widthValue->setToolTip(QStringLiteral("Path width in database units (nanometers)"));
-    parameters_->setItem(widthRow, 0, widthName);
-    parameters_->setItem(widthRow, 1, widthValue);
     updateParameterButtons();
 }
 
@@ -612,26 +600,8 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
             onLayoutShapeSizeChanged_(layoutShapeId_, layoutShapeWidth_, layoutShapeHeight_);
         return;
     }
-    if (pathMode_) {
-        if (name->text() != QStringLiteral("width (nm)"))
-            return;
-        bool accepted = false;
-        const auto width = item->text().toInt(&accepted);
-        if (!accepted || width <= 0) {
-            QSignalBlocker blocker(parameters_);
-            item->setText(QString::number(pathWidth_));
-            return;
-        }
-        const int clamped = std::clamp(width, 1, 1000000);
-        if (clamped != width) {
-            QSignalBlocker blocker(parameters_);
-            item->setText(QString::number(clamped));
-        }
-        pathWidth_ = clamped;
-        if (onPathWidthChanged_)
-            onPathWidthChanged_(clamped);
+    if (pathMode_)
         return;
-    }
     const auto parameterId = static_cast<ice::ObjectId>(name->data(Qt::UserRole).toULongLong());
     if (instanceId_ != 0 && onParameterChanged_)
         onParameterChanged_(instanceId_, parameterId, name->text().toStdString(), item->text().toStdString());

@@ -823,15 +823,11 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
         QMenu menu(this);
         auto *simulationAction = menu.addAction(QStringLiteral("Add Simulation…"));
         setLucideIcon(simulationAction, QStringLiteral("microscope"));
-        auto *testbenchAction = menu.addAction(QStringLiteral("Add SystemVerilog Testbench…"));
-        setLucideIcon(testbenchAction, QStringLiteral("notebook-text"));
         auto *reportAction = menu.addAction(QStringLiteral("Add Simulation Script…"));
         setLucideIcon(reportAction, QStringLiteral("notebook-text"));
         const auto *chosen = menu.exec(addButton_->mapToGlobal(QPoint(0, addButton_->height())));
         if (chosen == simulationAction && onAdd_) {
             onAdd_();
-        } else if (chosen == testbenchAction && onAddSystemVerilogTestbench_) {
-            onAddSystemVerilogTestbench_();
         } else if (chosen == reportAction && onAddReport_) {
             onAddReport_();
         }
@@ -846,10 +842,6 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
 }
 
 void SimulationPanel::setOnAddClicked(std::function<void()> cb) { onAdd_ = std::move(cb); }
-
-void SimulationPanel::setOnAddSystemVerilogTestbench(std::function<void()> cb) {
-    onAddSystemVerilogTestbench_ = std::move(cb);
-}
 
 void SimulationPanel::setOnAddReport(std::function<void()> cb) { onAddReport_ = std::move(cb); }
 void SimulationPanel::setOnOpenReport(std::function<void(ice::ObjectId)> cb) { onOpenReport_ = std::move(cb); }
@@ -872,6 +864,9 @@ void SimulationPanel::setProject(const ice::Project &project) {
         QSignalBlocker blocker(tree_);
         tree_->clear();
         for (const auto &[id, sim] : project.simulations) {
+            const auto schematic = project.schematicCells.find(sim.schematic);
+            if (schematic != project.schematicCells.end() && schematic->second.systemVerilogSchematic)
+                continue;
             auto *item = new QTreeWidgetItem(tree_, {QString::fromStdString(sim.name)});
             item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
             item->setIcon(0, hierarchyIcon("microscope"));

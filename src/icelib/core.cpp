@@ -246,6 +246,13 @@ std::vector<Diagnostic> Project::validate() const {
                 if (!shape.segmentLayers.empty() && shape.segmentLayers.size() != shape.centerline.size() - 1)
                     result.push_back({Diagnostic::Severity::error, "layout.path.layers",
                                       "Path segment layer count does not match its points", shapeId});
+                if (!shape.segmentWidths.empty() && shape.segmentWidths.size() != shape.centerline.size() - 1)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.widths",
+                                      "Path segment width count does not match its points", shapeId});
+                if (std::any_of(shape.segmentWidths.begin(), shape.segmentWidths.end(),
+                                [](Coordinate width) { return width <= 0; }))
+                    result.push_back({Diagnostic::Severity::error, "layout.path.widths",
+                                      "Path segment widths must be positive", shapeId});
                 if (!shape.pointVias.empty() && shape.pointVias.size() != shape.centerline.size())
                     result.push_back({Diagnostic::Severity::error, "layout.path.vias",
                                       "Path via count does not match its points", shapeId});
@@ -461,7 +468,8 @@ std::string Project::serialize() const {
                       {"pattern", layer.pattern},
                       {"visible", layer.visible},
                       {"layout", layer.layout},
-                      {"pdk", layer.pdk}};
+                      {"pdk", layer.pdk},
+                      {"minimum_width", layer.minimumWidth}};
         if (!layer.stack.empty())
             entry["stack"] = layer.stack;
         j["layers"].push_back(std::move(entry));
@@ -521,6 +529,11 @@ std::string Project::serialize() const {
                     }
                 }
                 s["path_width"] = shape.width;
+                if (!shape.segmentWidths.empty()) {
+                    s["segment_widths"] = json::array();
+                    for (const auto width : shape.segmentWidths)
+                        s["segment_widths"].push_back(width);
+                }
             }
             if (!shape.text.empty())
                 s["text"] = shape.text;
@@ -827,6 +840,7 @@ Project Project::deserialize(const std::string &text) {
                         l.value("color", std::string{}),
                         l.value("pattern", -1)};
             layer.stack = l.value("stack", std::string{});
+            layer.minimumWidth = l.value("minimum_width", Coordinate{0});
             p.layers.emplace(layer.id, std::move(layer));
         }
         for (const auto &c : j.at("layout_cells")) {
@@ -866,6 +880,11 @@ Project Project::deserialize(const std::string &text) {
                         shape.pointVias.push_back(std::move(vias));
                     }
                 shape.width = s.value("path_width", Coordinate{0});
+                if (s.contains("segment_widths"))
+                    for (const auto &width : s.at("segment_widths"))
+                        shape.segmentWidths.push_back(width.get<Coordinate>());
+                if (shape.width <= 0 && !shape.segmentWidths.empty())
+                    shape.width = *std::max_element(shape.segmentWidths.begin(), shape.segmentWidths.end());
                 shape.text = s.value("text", std::string{});
                 shape.name = s.value("name", std::string{});
                 shape.textPolygon = s.value("text_polygon", false);

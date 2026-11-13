@@ -39,6 +39,7 @@ struct LayoutPreviewShape {
     QPolygonF polygon;
     std::vector<QPointF> centerline;
     qreal width = 0.0;
+    std::vector<qreal> segmentWidths;
     std::vector<ObjectId> segmentLayers;
     std::vector<std::vector<ObjectId>> pointVias;
     QRectF textRectangle;

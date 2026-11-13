@@ -155,9 +155,12 @@ void addPdkLayers(ice::Project &project, const ice::PackagePdk &pdk, const std::
                    existing.datatype == layer.datatype && existing.stack == stackId && existing.layout == 0 &&
                    (existing.pdk.empty() || existing.pdk == technology);
         });
-        if (exists != project.layers.end())
+        if (exists != project.layers.end()) {
+            exists->second.minimumWidth = layer.minimumWidth;
             continue;
-        const auto id = ice::addLayer(project, layer.name, layer.number, 0, technology, layer.datatype, stackId);
+        }
+        const auto id = ice::addLayer(project, layer.name, layer.number, 0, technology, layer.datatype, stackId,
+                                      layer.minimumWidth);
         if (layerHiddenByDefault(layer.name, layer.datatype))
             project.layers.at(id).visible = false;
     }

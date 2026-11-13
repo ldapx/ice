@@ -322,6 +322,7 @@ NB_MODULE(icepy, module) {
         .def_rw("name", &Layer::name)
         .def_rw("number", &Layer::number)
         .def_rw("datatype", &Layer::datatype)
+        .def_rw("minimum_width", &Layer::minimumWidth)
         .def_rw("stack", &Layer::stack)
         .def_rw("color", &Layer::color)
         .def_rw("pattern", &Layer::pattern)
@@ -344,6 +345,7 @@ NB_MODULE(icepy, module) {
         .def_rw("segment_layers", &Shape::segmentLayers)
         .def_rw("point_vias", &Shape::pointVias)
         .def_rw("width", &Shape::width)
+        .def_rw("segment_widths", &Shape::segmentWidths)
         .def_rw("text", &Shape::text)
         .def_rw("name", &Shape::name)
         .def_prop_ro("is_path", &Shape::isPath);

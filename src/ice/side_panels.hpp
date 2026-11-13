@@ -96,7 +96,6 @@ class SimulationPanel : public QWidget {
 
     explicit SimulationPanel(QWidget *parent = nullptr);
     void setOnAddClicked(std::function<void()> cb);
-    void setOnAddSystemVerilogTestbench(std::function<void()> cb);
     void setOnAddReport(std::function<void()> cb);
     void setOnOpenReport(std::function<void(ice::ObjectId)> cb);
     void setOnDeleteClicked(std::function<void()> cb);
@@ -124,7 +123,6 @@ class SimulationPanel : public QWidget {
     SelectionCallback onSelection_;
     ReportSelectionCallback onReportSelection_;
     std::function<void()> onAdd_;
-    std::function<void()> onAddSystemVerilogTestbench_;
     std::function<void()> onDelete_;
     std::function<void()> onAddReport_;
     std::function<void(ice::ObjectId)> onOpenReport_;
