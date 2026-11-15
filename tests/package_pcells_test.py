@@ -47,6 +47,15 @@ PACKAGES = {
 }
 
 
+def absolute_pythonpath() -> str:
+    entries = [
+        str(Path(entry).resolve())
+        for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if entry
+    ]
+    return os.pathsep.join(entries)
+
+
 def package_roots() -> dict[str, Path]:
     configured = os.environ.get("ICE_PACKAGE_REPOSITORIES")
     bases = (
@@ -59,7 +68,7 @@ def package_roots() -> dict[str, Path]:
     for name in PACKAGES:
         for base in bases:
             candidate = base / name
-            if (candidate / "layout" / "devices.json").is_file():
+            if (candidate / "layout" / "devices" / "index.json").is_file():
                 roots[name] = candidate
                 break
     return roots
@@ -67,7 +76,7 @@ def package_roots() -> dict[str, Path]:
 
 def check_library(name: str, root: Path) -> None:
     expected = PACKAGES[name]
-    library = json.loads((root / "layout" / "devices.json").read_text())
+    library = json.loads((root / "layout" / "devices" / "index.json").read_text())
     assert library["format"] == "ice-layout-device-library"
     assert library["schema_version"] == 2
     assert library["pdk"]
@@ -80,10 +89,17 @@ def check_library(name: str, root: Path) -> None:
     assert device["generator"]["module"] == expected["module"]
     assert device["generator"]["class"] == expected["class"]
     assert device["parameters"]
-    assert device["shapes"]
-    assert device["ports"], f"{name}: device library has no ports"
-    assert device["bounds"][2] > device["bounds"][0]
-    assert device["bounds"][3] > device["bounds"][1]
+    assert not device.get("shapes"), f"{name}: PCell index entry stores geometry"
+    assert "bounds" not in device, f"{name}: PCell index entry stores bounds"
+
+    for cell in library["cells"]:
+        layout = cell.get("layout")
+        if layout:
+            assert (root / "layout" / "devices" / layout).is_file(), (
+                f"{name}: missing fixed-device cell {layout}"
+            )
+        else:
+            assert cell.get("generator"), f"{name}: {cell['name']} has neither layout nor generator"
 
     layer_names = {
         (layer["number"], layer["datatype"]): layer["name"]
@@ -150,7 +166,7 @@ def check_library(name: str, root: Path) -> None:
             subprocess.run(
                 [
                     sys.executable,
-                    str(root / "layout" / "device_generator.py"),
+                    str(root / "layout" / "devices" / "generator.py"),
                     "--pdk-root",
                     str(root),
                     "--module",
@@ -164,6 +180,7 @@ def check_library(name: str, root: Path) -> None:
                 ],
                 check=True,
                 cwd=root,
+                env={**os.environ, "PYTHONPATH": absolute_pythonpath()},
             )
             generated = json.loads(output.read_text())
     else:

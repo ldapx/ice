@@ -104,6 +104,9 @@ struct PackagePdk {
     std::vector<std::string> aliases;
     std::string displayName;
     std::string defaultSchematic;
+    // Manufacturing grid in ICE database units (nanometres). Zero means the
+    // package does not declare one.
+    std::int64_t manufacturingGrid = 0;
     std::vector<PackageLayer> layers;
     std::string defaultStack;
     std::vector<PackagePdkStack> stacks;

@@ -32,6 +32,9 @@ struct PdkInfo {
     std::string packageVersion;
     std::string source = "ice-package";
     std::filesystem::path packageRoot;
+    // PDK manufacturing grid in database units (nanometres). Zero when the
+    // package does not declare one.
+    Coordinate manufacturingGrid = 0;
     std::filesystem::path root;
     std::filesystem::path versionRoot;
     std::string version;
@@ -100,6 +103,14 @@ std::vector<PdkInfo> discoverPdks(const std::vector<std::filesystem::path> &root
 
 // Finds a PDK by canonical id, alias, package name, or package path.
 std::vector<PdkInfo> findPdks(const std::string &idOrPath, const std::vector<std::filesystem::path> &roots = {});
+
+// Returns the declared manufacturing grid for a PDK, or zero when it is not
+// specified or the PDK is not installed.
+Coordinate pdkManufacturingGrid(const std::string &idOrPath);
+
+// Applies a PDK manufacturing grid as the default layout grid. An explicitly
+// changed project grid is preserved; the old 1 nm default is updated.
+void applyPdkDefaultGrid(Project &project, const std::string &pdkId);
 
 // Builds the package's Verilog-A sources into the local OSDI cache with
 // openvaf-r/openvaf. This is always an explicit user action.

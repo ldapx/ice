@@ -88,6 +88,7 @@ class LayoutDevicesPanel : public QWidget {
 
   private:
     void notifySelection();
+    bool ensureDeviceGeometry(std::size_t index);
     void rebuildCategories();
     void rebuildList(const QString &keepSelected = {});
 

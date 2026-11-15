@@ -316,7 +316,7 @@ status `0`.
 `pex` extracts placed device-library instances, PDK-rule polygon devices, and
 first-order per-net resistance and capacitance from layout geometry, then
 creates or updates a text SPICE schematic in the project hierarchy. Polygon
-device rules come from the installed package's `layout/extraction.json`. When no
+device rules come from the installed package's `technology/extraction.json`. When no
 layout devices are recognized it falls back to the inferred source schematic
 device netlist. The report JSON
 includes the layout and schematic ids, per-net area, perimeter, resistance,

@@ -404,7 +404,7 @@ groups GDS purpose variants under their base layer number: for example
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
 checkbox. PDK packages may supply default layer colors, patterns, and
-visibility in `layout/layer-styles.json`; these styles are applied when the
+visibility in `technology/layer-styles.json`; these styles are applied when the
 package's layers are added, and layers without an entry keep the built-in
 number-based palette. Creating a custom layer opens a form with the layer name, assigned
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
@@ -429,8 +429,10 @@ left layout tool column to open the parent layout or the selected child
 instance.
 
 With nothing selected in the layout, **Properties** shows a fitted preview of
-the layout geometry and a **Grid** section with the Layout-only snap spacing in nanometers.
-The layout toolbar keeps the grid visibility and snap toggles. The layout cell
+the layout geometry and a **Grid** section with the Layout-only snap spacing in
+nanometers. New layouts default to the PDK `manufacturing_grid` (5 nm for the
+bundled GF180MCU, SKY130, and IHP SG13G2 packages). The layout toolbar keeps the
+grid visibility and snap toggles. The layout cell
 parameter table is hidden while nothing is selected. Selecting a rectangle
 shows its name, type, layer, and editable width and height in database units;
 selected polygons, paths, and texts show read-only name, type, and layer
@@ -453,11 +455,12 @@ the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
 is used. The active PDK package's device library appears in **Devices**, with
-search, category filtering, and a geometry preview in **Properties**. Each PDK
-device is backed by a `layout/devices/*.icelay` layout cell. IHP SG13G2,
-Sky130, and GF180MCU packages ship their own libraries, and switching the
-active layout to a cell from another PDK loads that package's devices. Imported
-digital layouts appear in the same tab under **Digital**. The device list
+search, category filtering, and a geometry preview in **Properties**.
+Parameterized devices are Python PCells generated on selection; fixed devices
+are backed by `layout/devices/fixed/*.icelay` cells. IHP SG13G2, Sky130, and GF180MCU
+packages ship their own libraries, and switching the active layout to a cell
+from another PDK loads that package's devices. Imported digital layouts appear
+in the same tab under **Digital**. The device list
 starts with no selection; selecting a device switches to **Place Device** and
 shows a cursor-following preview, while activating **Select** clears the list
 selection.
@@ -477,7 +480,7 @@ through the package-local generator without changing other instances. Editing
 a device in the **Devices** tab changes the defaults used by future placements.
 
 The generator contract is
-`<pdk-root>/layout/device_generator.py --pdk-root <package> --module <module>
+`<pdk-root>/layout/devices/generator.py --pdk-root <package> --module <module>
 --class <class> --params-file <json> --output <json>`. IHP evaluates the
 vendored upstream PyCell sources (and KLayout's `pya` module) through
 `icepy.pcells`. Sky130 and GF180MCU use ICE-native PCells implemented directly
@@ -683,7 +686,7 @@ transformed into parent coordinates, matched to the parent nets they overlap,
 and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
 placed devices are recognized, PEX falls back to copying the inferred source
 schematic's device netlist. Devices drawn purely as polygons are recognized
-through the PDK package's `layout/extraction.json` rules: PEX cuts active under
+through the PDK package's `technology/extraction.json` rules: PEX cuts active under
 gates, finds source/drain terminal nets, and emits MOS devices with geometric
 W/L. The same rules can describe simple resistors and capacitors. Use LVS to
 verify the result before relying on it. The generated deck records the

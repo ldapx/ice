@@ -708,9 +708,12 @@ json doctorJson(const std::filesystem::path &executablePath) {
                 it.disable_recursion_pending();
                 continue;
             }
-            if (!it->is_regular_file() || it->path().extension() != ".lib")
+            if (!it->is_regular_file())
                 continue;
-            if (it->path().string().find("/libs.ref/") == std::string::npos)
+            const auto filename = it->path().filename().string();
+            if (!filename.ends_with(".lib") && !filename.ends_with(".lib.gz"))
+                continue;
+            if (it->path().string().find("/implementation/common/lib/") == std::string::npos)
                 continue;
             timingLibraries.push_back(it->path().string());
             if (timingLibraries.size() >= 50)
@@ -2323,6 +2326,7 @@ class IceMcpServer {
                            " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
                            "    assign out = 1'b0;\nendmodule\n";
                 session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                    ice::applyPdkDefaultGrid(project, pdk);
                     id = ice::createSystemVerilogCell(project, cellName, pdk, text);
                 });
                 return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
@@ -2331,12 +2335,15 @@ class IceMcpServer {
                 if (text.empty())
                     text = "* SPICE schematic: " + cellName + "\n.title " + cellName + "\n.end\n";
                 session.execute("mcp schematic-create-text", [&](ice::Project &project) {
+                    ice::applyPdkDefaultGrid(project, pdk);
                     id = ice::createTextSchematicCell(project, cellName, pdk, text);
                 });
                 return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "text"}, {"text", text}};
             }
-            session.execute("mcp schematic-create",
-                            [&](ice::Project &project) { id = ice::createSchematicCell(project, cellName, pdk); });
+            session.execute("mcp schematic-create", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createSchematicCell(project, cellName, pdk);
+            });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "drawn"}};
         }
         if (name == "schematic_create_systemverilog" || name == "schematic_add_systemverilog") {
@@ -2349,6 +2356,7 @@ class IceMcpServer {
                        " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
                        "    assign out = 1'b0;\nendmodule\n";
             session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createSystemVerilogCell(project, cellName, pdk, text);
             });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
@@ -2909,8 +2917,10 @@ class IceMcpServer {
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
             const auto cellName = requiredString(arguments, "name");
-            session.execute("mcp layout-create",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, cellName, pdk, stack); });
+            session.execute("mcp layout-create", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createLayoutCell(project, cellName, pdk, stack);
+            });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"stack", stack}};
         }
         if (name == "layout_create_from_schematic") {
@@ -2920,6 +2930,7 @@ class IceMcpServer {
                                                   optionalString(arguments, "stack"));
             const auto layoutName = optionalString(arguments, "name");
             session.execute("mcp layout-create-from-schematic", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, project.schematicCells.at(schematic).pdk);
                 id = ice::createLayoutFromSchematic(project, schematic, layoutName, stack);
             });
             return {{"id", id}, {"schematic", schematic}, {"stack", stack}};
@@ -4072,7 +4083,7 @@ class IceMcpServer {
                                     "Extract devices from placed layout instances (default true)", false)
                 .with_boolean_param("extract_polygon_devices", "Extract polygon devices using PDK rules (default true)",
                                     false)
-                .with_string_param("extraction_rules_path", "Optional override for layout/extraction.json", false)
+                .with_string_param("extraction_rules_path", "Optional override for technology/extraction.json", false)
                 .with_boolean_param("include_linked_schematic",
                                     "Fallback to the inferred source schematic netlist (default true)", false)
                 .build());

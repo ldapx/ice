@@ -165,7 +165,7 @@ infers it from planned-device links or matching layout/schematic names.
 `perimeter_capacitance`) and an optional `name` for the generated text cell.
 It extracts placed device-library instances by default; set
 `extract_placed_devices=false` to skip them. It also recognizes polygon devices
-through the PDK's `layout/extraction.json`; set `extract_polygon_devices=false`
+through the PDK's `technology/extraction.json`; set `extract_polygon_devices=false`
 to disable that pass, or `extraction_rules_path` to override the package file.
 If no layout devices are recognized, it copies the inferred source schematic
 netlist by default; set `include_linked_schematic=false` to emit only the
@@ -223,7 +223,7 @@ needed.
 For IHP SG13G2, the correct model entry is a top-level call such as:
 
 ```spice
-.lib "<package>/libs.tech/ngspice/models/cornerMOSlv.lib" mos_tt
+.lib "<package>/simulation/ngspice/models/cornerMOSlv.lib" mos_tt
 ```
 
 not `.include cornerMOSlv.lib`. Sky130 and GF180 use different layouts

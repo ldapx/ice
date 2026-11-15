@@ -963,9 +963,12 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
                 it.disable_recursion_pending();
                 continue;
             }
-            if (!it->is_regular_file() || it->path().extension() != ".lib")
+            if (!it->is_regular_file())
                 continue;
-            if (it->path().string().find("/libs.ref/") == std::string::npos)
+            const auto filename = it->path().filename().string();
+            if (!filename.ends_with(".lib") && !filename.ends_with(".lib.gz"))
+                continue;
+            if (it->path().string().find("/implementation/common/lib/") == std::string::npos)
                 continue;
             timingLibraries.push_back(it->path().string());
             if (timingLibraries.size() >= 50)
@@ -1416,8 +1419,10 @@ int main(int argc, char **argv) {
             ice::ProjectSession session(ice::Project::load(args[1]));
             ice::ObjectId id = 0;
             const auto pdk = args.size() == 4 ? args[3] : std::string(ice::genericPdkId);
-            session.execute("schematic-add-cell",
-                            [&](ice::Project &project) { id = ice::createSchematicCell(project, args[2], pdk); });
+            session.execute("schematic-add-cell", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createSchematicCell(project, args[2], pdk);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
             return 0;
@@ -1500,6 +1505,7 @@ int main(int argc, char **argv) {
                                     : readTextFile(sourceFile);
             ice::ObjectId id = 0;
             session.execute("schematic-add-systemverilog", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createSystemVerilogCell(project, args[2], pdk, source);
             });
             session.save(args[1]);
@@ -2104,8 +2110,10 @@ int main(int argc, char **argv) {
             ice::ObjectId id = 0;
             const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
             const auto stack = resolveLayoutStack(pdk, args.size() == 5 ? args[4] : std::string{});
-            session.execute("layout-add-cell",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, args[2], pdk, stack); });
+            session.execute("layout-add-cell", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createLayoutCell(project, args[2], pdk, stack);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}});
             return 0;
@@ -2120,6 +2128,7 @@ int main(int argc, char **argv) {
             ice::ObjectId id = 0;
             ice::ObjectId generated = 0;
             session.execute("layout-add-procedural", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createProceduralLayout(project, args[2], pdk, script, stack);
                 generated = project.proceduralLayouts.at(id).generatedCell;
             });
@@ -2136,8 +2145,10 @@ int main(int argc, char **argv) {
             const auto stack = resolveLayoutStack(project.schematicCells.at(schematic).pdk, {});
             ice::ProjectSession session(project);
             ice::ObjectId id = 0;
-            session.execute("layout-create-from-schematic",
-                            [&](ice::Project &p) { id = ice::createLayoutFromSchematic(p, schematic, name, stack); });
+            session.execute("layout-create-from-schematic", [&](ice::Project &p) {
+                ice::applyPdkDefaultGrid(p, project.schematicCells.at(schematic).pdk);
+                id = ice::createLayoutFromSchematic(p, schematic, name, stack);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"schematic", schematic}, {"stack", stack}});
             return 0;

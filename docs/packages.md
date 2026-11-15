@@ -1,8 +1,8 @@
 # ICE Packages
 
 Packages are directories containing a versioned `package.toml` manifest and
-capability-oriented content such as `pdk/`, `symbols/`, `models/`, `layout/`,
-`scripts/`, and `docs/`.
+capability-oriented content such as `symbols/`, `technology/`, `layout/`,
+`simulation/`, `implementation/`, and `vendor/`.
 
 `ice-pkg resolve <repository> <ice-version> name=constraint ...` selects the
 highest matching local package version, resolves transitive dependencies, and
@@ -36,6 +36,55 @@ The IHP, Sky130, and GF180 packages now vendor their simulation model subsets
 and declare a `[pdk.simulation]` contract; an upstream Volare/CIEL installation
 is not needed for simulation.
 
+## PDK package directory layout
+
+The bundled PDK packages use one canonical tree. Optional directories are
+omitted when a PDK does not need them.
+
+```text
+<pdk-package>/
+├── package.toml
+├── README.md
+├── LICENSE
+├── ATTRIBUTION.md
+├── .github/logo.png
+├── symbols/                       # schematic sidecars
+├── technology/
+│   ├── layer-styles.json
+│   └── extraction.json
+├── layout/
+│   ├── devices/
+│   │   ├── index.json
+│   │   ├── pcell/                 # Python PCell definitions
+│   │   ├── fixed/                 # fixed .icelay cells
+│   │   ├── generator.py
+│   │   └── build.py
+│   └── dummy_fill.py              # optional procedural-fill hook
+├── simulation/
+│   ├── ngspice/
+│   ├── verilog-a/
+│   └── osdi/                      # optional built outputs
+├── implementation/
+│   ├── common/
+│   │   ├── cells.lef
+│   │   ├── stdcells.gds
+│   │   ├── layer.map
+│   │   ├── lib/
+│   │   └── scripts/
+│   └── stacks/
+│       └── <stack>/
+│           ├── tech.lef
+│           └── rcx.rules
+└── vendor/                        # optional upstream snapshots
+```
+
+Shared implementation data lives under `implementation/common/`. Per-stack
+technology LEF and RCX rules live under `implementation/stacks/<stack>/`;
+single-stack PDKs use `implementation/stacks/default/`. Liberty files may be
+plain `.lib` or gzip-compressed `.lib.gz`. Built OSDI objects are cached outside
+the package by `ice-pkg pdk-build`; their Verilog-A sources live under
+`simulation/verilog-a/`. All manifest paths are relative to the package root.
+
 ## PDK metadata
 
 Simulation PDKs come from ICE packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
@@ -49,26 +98,32 @@ simulation contract in `package.toml`:
 id = "ihp-sg13g2"
 aliases = ["ihp.sg13g2"]
 display_name = "IHP SG13G2"
+manufacturing_grid = 5
 
 [pdk.simulation]
 engine = "ngspice"
-root = "libs.tech/ngspice"
+root = "simulation/ngspice"
 model_file = "models/cornerMOSlv.lib"
 section = "mos_tt"
 requires_osdi = true
-verilog_a = "pdk/verilog-a"
+verilog_a = "simulation/verilog-a"
 
 [pdk.simulation.devices]
 nmos = "sg13_lv_nmos"
 pmos = "sg13_lv_pmos"
 ```
 
+`manufacturing_grid` is the PDK coordinate grid in ICE database units
+(nanometres). ICE uses it as the default layout grid for new layouts while
+preserving a project grid the user has changed. It does not replace per-layer
+minimum-spacing rules or placement/routing track pitches.
+
 Package simulation paths are relative to the package root. OSDI packages
 declare each Verilog-A source and output:
 
 ```toml
 [[pdk.simulation.osdi]]
-source = "pdk/verilog-a/psp103/psp103.va"
+source = "simulation/verilog-a/psp103/psp103.va"
 output = "psp103.osdi"
 ```
 
@@ -86,6 +141,7 @@ and one or more process stack variants:
 display_name = "SkyWater SKY130"
 default_schematic = "sky130_top"
 default_stack = "5LM_1TM"
+manufacturing_grid = 5
 
 [[pdk.layer]]
 name = "nwell.drawing"
@@ -161,24 +217,24 @@ package root and are covered by the package content hash:
 ```toml
 [pdk.stack.implementation]
 site = "GF018hv5v_green_sc9"
-tech_lef = "implementation/tech.lef"
-cell_lef = "implementation/cells.lef"
-gds = "implementation/cells.gds"
-layer_map = "implementation/cells.map"
+tech_lef = "implementation/stacks/5LM_1TM/tech.lef"
+cell_lef = "implementation/common/cells.lef"
+gds = "implementation/common/stdcells.gds"
+layer_map = "implementation/common/layer.map"
 io_horizontal_layers = ["Metal3"]
 io_vertical_layers = ["Metal4"]
 routing_min_layer = "Metal1"
 routing_max_layer = "Metal5"
-tapcell_script = "implementation/tapcell.tcl"
-pdn_script = "implementation/pdn.tcl"
-rc_script = "implementation/setRC.tcl"
-rcx_rules = "implementation/extraction.rules"
+tapcell_script = "implementation/common/scripts/tapcell.tcl"
+pdn_script = "implementation/common/scripts/pdn.tcl"
+rc_script = "implementation/common/scripts/setRC.tcl"
+rcx_rules = "implementation/stacks/5LM_1TM/rcx.rules"
 fill_cells = ["FILL1", "FILL2"]
 
 [pdk.stack.implementation.liberty]
-tt = ["implementation/tt.lib.gz"]
-ff = ["implementation/ff.lib.gz"]
-ss = ["implementation/ss.lib.gz"]
+tt = ["implementation/common/lib/tt.lib.gz"]
+ff = ["implementation/common/lib/ff.lib.gz"]
+ss = ["implementation/common/lib/ss.lib.gz"]
 ```
 
 `layer_map` is a KLayout LEF/DEF layer-map file. The final GDS export uses it to
@@ -197,7 +253,7 @@ reports whether `openroad`, `yosys`, and `klayout` are available.
 ### Layer styles
 
 A PDK package can ship default colors, patterns, and visibility for its layers
-in `layout/layer-styles.json`. ICE discovers the file automatically from the
+in `technology/layer-styles.json`. ICE discovers the file automatically from the
 package root; it is not listed in `package.toml`.
 
 ```json
@@ -310,40 +366,43 @@ OASIS adapter exists.
 Each PDK package owns its layout device library:
 
 ```text
-<pdk-root>/layout/devices.json       # library index
-<pdk-root>/layout/devices/*.icelay   # one layout cell per device
-<pdk-root>/layout/extraction.json    # polygon device extraction rules
-<pdk-root>/layout/device_generator.py
-<pdk-root>/layout/pcells.py          # ICE-native packages
-<pdk-root>/layout/generate_devices.py
+<pdk-root>/layout/devices/index.json       # library index
+<pdk-root>/layout/devices/fixed/*.icelay   # fixed-device cells (optional)
+<pdk-root>/layout/devices/pcell/           # Python PCell definitions
+<pdk-root>/layout/devices/generator.py     # runtime PCell generator
+<pdk-root>/layout/devices/build.py         # index/fixed-device regeneration
+<pdk-root>/technology/extraction.json      # polygon device extraction rules
 ```
 
-Every device is a real layout cell stored as a `.icelay` file. The
-`devices.json` index carries the library layers, ordering, categories, PCell
-generator metadata (`module` and `class`), and a `cell_prefix` used for
-instance names (for example `IHP `, `SKY130 `, or `GF180 `). Devices are edited
-and regenerated through the package-local generator; no global PDK installation
-is consulted.
+Parameterized devices are Python PCells: the index carries their generator
+metadata (`module` and `class`) and parameter defaults, but no stored geometry.
+ICE generates their layout from the package Python scripts when a device is
+selected or placed, and regenerates it when a parameter changes. Fixed devices
+have no generator metadata and are stored as `layout/devices/fixed/*.icelay`
+cells.
+The `index.json` index also carries the library layers, ordering, categories,
+and a `cell_prefix` used for instance names (for example `IHP `, `SKY130 `, or
+`GF180 `). No global PDK installation is consulted.
 
 The IHP SG13G2 package ships its complete device library plus vendored IHP
-PyCell sources under `upstream/ihp`. Parametric regeneration evaluates those
+PyCell sources under `vendor/ihp`. Parametric regeneration evaluates those
 sources through `icepy.pcells` and transfers polygons into an `icepy` layout
 cell.
 
 The Sky130 and GF180MCU packages ship ICE-native replicas of their PCell
-families in `layout/pcells.py`. They use the `icepy` layout builder API directly
-and do not require KLayout, gdsfactory, Volare, CIEL, or `PDK_ROOT`. Their
-`layout/devices.json` index and `layout/devices/*.icelay` cells are generated
-from the same definitions with `layout/generate_devices.py`, so the default
-geometry shown in **Devices** and the geometry produced after a parameter edit
-share one implementation.
+families in `layout/devices/pcell/pcells.py`. They use the `icepy` layout
+builder API directly and do not require KLayout, gdsfactory, Volare, CIEL, or
+`PDK_ROOT`. Their `layout/devices/index.json` is generated from the same
+definitions with `layout/devices/build.py`. Parameterized cells are written as
+PCell index entries without geometry; only fixed cells are written as
+`layout/devices/fixed/*.icelay`.
 
 `ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
 `layout_generator`, and `layout_extraction` paths for each installed package.
 
 ### Polygon extraction rules
 
-`layout/extraction.json` declares how PEX recognizes devices drawn directly as
+`technology/extraction.json` declares how PEX recognizes devices drawn directly as
 polygons. The rule engine is intentionally declarative so every PDK package
 owns its layer names, models, and terminal layers:
 

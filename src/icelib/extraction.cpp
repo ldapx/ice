@@ -153,7 +153,7 @@ std::optional<DeviceExtractionRules> loadDeviceExtractionRulesForPdk(const std::
         return std::nullopt;
     const auto pdks = findPdks(pdkId);
     for (const auto &pdk : pdks) {
-        const auto path = pdk.packageRoot / "layout" / "extraction.json";
+        const auto path = pdk.packageRoot / "technology" / "extraction.json";
         std::error_code status;
         if (!std::filesystem::is_regular_file(path, status) || status)
             continue;

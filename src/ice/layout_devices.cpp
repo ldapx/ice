@@ -6,6 +6,7 @@
 #include "ui_helpers.hpp"
 
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
@@ -241,15 +242,9 @@ std::filesystem::path layoutDeviceLibraryPath(const std::string &pdk) {
     if (!pdk.empty() && pdk != ice::genericPdkId) {
         const auto packageRoot = pdkPackageRoot(pdk);
         if (!packageRoot.empty()) {
-            const std::vector<std::filesystem::path> packageCandidates = {
-                packageRoot / "layout" / "devices.json",
-                packageRoot / "layout" / "library.json",
-                packageRoot / "layout" / (pdk + ".json"),
-            };
-            for (const auto &candidate : packageCandidates) {
-                if (regularFile(candidate))
-                    return candidate;
-            }
+            const auto candidate = packageRoot / "layout" / "devices" / "index.json";
+            if (regularFile(candidate))
+                return candidate;
         }
     }
 
@@ -542,10 +537,10 @@ std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice:
             *error = QStringLiteral("The PDK package '%1' is not installed.").arg(QString::fromStdString(pdk));
         return std::nullopt;
     }
-    const auto script = packageRoot / "layout" / "device_generator.py";
+    const auto script = packageRoot / "layout" / "devices" / "generator.py";
     if (!regularFile(script)) {
         if (error)
-            *error = QStringLiteral("The PDK package '%1' does not provide layout/device_generator.py.")
+            *error = QStringLiteral("The PDK package '%1' does not provide layout/devices/generator.py.")
                          .arg(QString::fromStdString(pdk));
         return std::nullopt;
     }
@@ -906,7 +901,27 @@ void LayoutDevicePlacementDialog::updateSelection() {
     if (!preview_ || !parameters_)
         return;
     const auto *device = selectedDevice();
-    preview_->setCell(device);
+    if (device && device->generator && device->shapes.empty()) {
+        auto values = ::parameterValues(device->parameters);
+        for (const auto &parameter : device->parameters) {
+            const auto initial = initialValue(parameter.name);
+            if (!initial.empty())
+                values[parameter.name] = initial;
+        }
+        QString error;
+        auto geometry = generateLayoutDeviceGeometry(*device, values, &error, library_.pdk);
+        if (geometry) {
+            auto generated = *device;
+            generated.bounds = geometry->bounds;
+            generated.shapes = geometry->shapes;
+            generated.ports = geometry->ports;
+            preview_->setModel(ice::buildLayoutDevicePreviewModel(generated));
+        } else {
+            preview_->setCell(nullptr);
+        }
+    } else {
+        preview_->setCell(device);
+    }
     parameters_->setRowCount(0);
     if (auto *buttons = findChild<QDialogButtonBox *>())
         buttons->button(QDialogButtonBox::Ok)->setEnabled(device != nullptr);
@@ -1024,7 +1039,8 @@ void LayoutDevicesPanel::setPdk(const std::string &pdk) {
                 defaultGeometry_.clear();
                 for (const auto &cell : library_.cells) {
                     defaultParameters_[cell.name] = cell.parameters;
-                    defaultGeometry_[cell.name] = ice::LayoutDeviceGeometry{cell.bounds, cell.shapes};
+                    if (!cell.generator || !cell.shapes.empty())
+                        defaultGeometry_[cell.name] = ice::LayoutDeviceGeometry{cell.bounds, cell.shapes};
                 }
             } catch (const ice::ProjectError &error) {
                 loadError_ = QString::fromStdString(error.what());
@@ -1137,6 +1153,25 @@ void LayoutDevicesPanel::resetDevices() {
             cell.shapes = geometry->second.shapes;
         }
     }
+}
+
+bool LayoutDevicesPanel::ensureDeviceGeometry(std::size_t index) {
+    if (index >= library_.cells.size())
+        return false;
+    auto &cell = library_.cells[index];
+    if (!cell.generator || !cell.shapes.empty())
+        return !cell.shapes.empty();
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QString error;
+    auto geometry = generateLayoutDeviceGeometry(cell, parameterValues(cell.parameters), &error, library_.pdk);
+    QApplication::restoreOverrideCursor();
+    if (!geometry)
+        return false;
+    cell.bounds = geometry->bounds;
+    cell.shapes = geometry->shapes;
+    cell.ports = geometry->ports;
+    defaultGeometry_[cell.name] = std::move(*geometry);
+    return true;
 }
 
 void LayoutDevicesPanel::notifySelection() {

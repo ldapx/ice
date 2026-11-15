@@ -326,6 +326,9 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
             pdkSpec.aliases = readStringArray(*pdk, "aliases");
             pdkSpec.displayName = readString(*pdk, "display_name", spec.name);
             pdkSpec.defaultSchematic = readString(*pdk, "default_schematic");
+            pdkSpec.manufacturingGrid = (*pdk)["manufacturing_grid"].value_or(0LL);
+            if (pdkSpec.manufacturingGrid < 0)
+                throw ProjectError("package.manifest", "PDK manufacturing_grid must not be negative");
             if (const auto *layers = (*pdk)["layer"].as_array()) {
                 std::set<std::string> layerNames;
                 for (const auto &item : *layers) {
@@ -395,7 +398,7 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                              [&](const auto &stack) { return stack.id == pdkSpec.defaultStack; }))
                 throw ProjectError("package.manifest", "Default PDK stack is not declared: " + pdkSpec.defaultStack);
 
-            const auto stylesPath = packageRoot / "layout" / "layer-styles.json";
+            const auto stylesPath = packageRoot / "technology" / "layer-styles.json";
             if (std::filesystem::is_regular_file(stylesPath)) {
                 const auto document = [&] {
                     try {
