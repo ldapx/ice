@@ -13,6 +13,7 @@
 #include <QRectF>
 #include <QString>
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -144,13 +145,19 @@ struct LayoutPreviewModel {
     bool empty() const;
 };
 
+// Resolves a referenced GDS/OASIS child into a flattened preview model. The
+// UI supplies this because KLayout-backed reference loading is a GUI concern.
+using LayoutReferencePreviewResolver =
+    std::function<std::optional<LayoutPreviewModel>(const LayoutCell &referenceCell)>;
+
 // Builds a flattened, project-independent render model. Layer ids remain
 // project ids so the caller can apply the same LayerStyle map used by the
 // interactive canvas.
 LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const LayoutCell &cell,
                                                bool includeInstances = true, bool includePorts = true,
                                                bool includePlannedDevices = true,
-                                               const std::vector<Transform> &rootTransform = {});
+                                               const std::vector<Transform> &rootTransform = {},
+                                               const LayoutReferencePreviewResolver &referenceResolver = {});
 LayoutPreviewModel buildLayoutDevicePreviewModel(const LayoutDeviceCell &device);
 
 struct LayoutPaintOptions {

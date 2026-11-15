@@ -11,15 +11,14 @@ ice-cli project-create <folder|project.icepro> [name]
 ice-cli project-info [folder|project.icepro]
 ice-cli project-validate <folder|project.icepro>
 ice-cli project-repair <folder|project.icepro>
-ice-cli project-migrate <folder|project.icepro>
 ice-cli doctor [project] [--probe]
 ice-cli pdk-info [pdk] [--probe]
 ```
 
 `project-create` initializes `project.icepro`, `sch/`, `lay/`, `sim/`,
-`scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. `project-migrate` refreshes
-the versioned generated section of `AGENTS.md` and preserves user text outside
-the markers. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
+`scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. The generated `AGENTS.md`
+is written once when the project is created and is not rewritten on later
+saves. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
 the current directory and its parents for a single `project.icepro`.
 
 `ice-cli --version` prints the build fingerprint as JSON, including the git
@@ -245,9 +244,11 @@ only that stage and the stages after it.
 
 After `final`, ICE attempts to stream `def/6_final.def` plus the platform
 standard-cell GDS decks to `final/6_final.gds` with KLayout. Package stacks can
-declare a merged `gds` file; OpenROAD-flow-scripts platform fallbacks discover
-`gds/*.gds` automatically. If KLayout or standard-cell GDS decks are missing,
-the final stage still succeeds and records a warning. Use
+declare a merged `gds` file and a `layer_map` that maps LEF/DEF layer names to
+the PDK's real GDS numbers; OpenROAD-flow-scripts platform fallbacks discover
+`gds/*.gds` automatically. If the map is omitted, KLayout assigns sequential
+numbers to DEF layers instead of the PDK numbering. If KLayout or standard-cell
+GDS decks are missing, the final stage still succeeds and records a warning. Use
 `implementation-export-gds` to rerun or redirect the export explicitly.
 
 `--from` defaults to `synthesis`, `--to` defaults to `final`, and `--timeout`
@@ -258,11 +259,13 @@ PID recorded under `build/impl/<run>/run.pid` and sends SIGTERM after checking
 that the process is OpenROAD or Yosys.
 
 `implementation-log` prints the bounded merged log for one stage; `--tail` keeps
-only the last N lines. `implementation-import` reads the newest available DEF
-checkpoint (`6_final.def` down to `2_floorplan.def`), creates package-mapped
-layers, top-level pins and nets, standard-cell instances, and routed paths, and
-stores the new layout id on the run. `--replace` reuses the previously imported
-layout instead of creating another cell.
+only the last N lines. `implementation-import` looks for a final GDS/OASIS stream
+(`final/6_final.gds`, `.gdsii`, `.oas`, or `.oasis`) and flattens it into a
+read-only **digital device** cell. The device appears under Layout > Devices >
+Digital; create a layout and place instances of it. No top-level layout is
+created. Missing streams are an error; run `implementation-export-gds` or
+complete the final stage first. `--layout-name` names the device and `--replace`
+updates the previously imported device instead of creating another cell.
 
 `implementation-toolchain` reports the resolved `openroad`, `yosys`, and
 `klayout` executables. Set `ICE_OPENROAD`, `ICE_YOSYS`, or `ICE_KLAYOUT` to

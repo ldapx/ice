@@ -125,8 +125,4 @@ PdkSimulationSetup pdkSimulationSetupFor(const std::string &pdkId);
 // Inserts package setup before the schematic netlist and records OSDI commands.
 void applyPdkSimulationSetup(const std::string &pdkId, SimulationRequest &request);
 
-// Rewrites project PDK references to the package canonical IDs. Returns true
-// when anything changed.
-bool migrateProjectPdkIds(Project &project);
-
 } // namespace ice

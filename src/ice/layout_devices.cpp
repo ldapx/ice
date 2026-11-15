@@ -39,6 +39,8 @@
 #include <utility>
 
 namespace {
+constexpr int kProjectDeviceRole = Qt::UserRole + 1;
+
 // Defined below with the device-layer helpers. Declared here so PDK layer
 // activation can apply the same purpose/marker visibility rules.
 bool layerHiddenByDefault(const std::string &name, int datatype);
@@ -331,6 +333,8 @@ const ice::LayoutDeviceCell *findLayoutDevice(const ice::LayoutDeviceLibrary &li
 
 const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibrary &library,
                                                      const ice::LayoutCell &cell) {
+    if (cell.device.starts_with("digital:"))
+        return nullptr;
     if (!cell.device.empty()) {
         const auto it = std::find_if(library.cells.begin(), library.cells.end(),
                                      [&](const auto &candidate) { return candidate.name == cell.device; });
@@ -356,51 +360,6 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDevice
         bestLength = candidate.name.size();
     }
     return best;
-}
-
-std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName,
-                                 const std::string &prefix) {
-    const auto base = prefix + deviceName;
-    for (int index = 1;; ++index) {
-        const auto candidate = base + "_" + std::to_string(index);
-        const bool exists = std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
-                                        [&](const auto &entry) { return entry.second.name == candidate; });
-        if (!exists)
-            return candidate;
-    }
-}
-
-ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCell &source, const std::string &name) {
-    ice::LayoutCell clone = source;
-    auto nextId = project.nextId();
-    clone.id = nextId++;
-    clone.name = name;
-    clone.parameters.clear();
-    for (const auto &parameter : source.parameters)
-        clone.parameters.push_back({nextId++, parameter.name, parameter.value});
-    clone.shapes.clear();
-    for (const auto &[_, shape] : source.shapes) {
-        const auto id = nextId++;
-        auto cloned = shape;
-        cloned.id = id;
-        clone.shapes.emplace(id, std::move(cloned));
-    }
-    clone.ports.clear();
-    for (const auto &[_, port] : source.ports) {
-        const auto id = nextId++;
-        auto clonedPort = port;
-        clonedPort.id = id;
-        clone.ports.emplace(id, std::move(clonedPort));
-    }
-    clone.instances.clear();
-    for (const auto &[_, instance] : source.instances) {
-        const auto id = nextId++;
-        clone.instances.emplace(
-            id, ice::LayoutInstance{id, instance.cell, instance.name, instance.x, instance.y, instance.orientation});
-    }
-    const auto cloneId = clone.id;
-    project.layoutCells.emplace(cloneId, std::move(clone));
-    return cloneId;
 }
 
 QString pythonExecutable() {
@@ -1075,9 +1034,54 @@ void LayoutDevicesPanel::setPdk(const std::string &pdk) {
         }
     }
 
+    projectDevices_.clear();
+    projectDeviceIds_.clear();
+    projectDeviceSignature_.clear();
     clearDeviceSelection();
     rebuildCategories();
     rebuildList();
+}
+
+void LayoutDevicesPanel::setProjectDevices(const ice::Project &project, const std::string &pdk) {
+    if (activePdk_ && !layoutPdkIdsMatch(*activePdk_, pdk))
+        return;
+    std::string signature;
+    std::vector<ice::LayoutDeviceCell> devices;
+    std::vector<ice::ObjectId> ids;
+    for (const auto &[id, cell] : project.layoutCells) {
+        if (!cell.library || !cell.device.starts_with("digital:"))
+            continue;
+        if (!layoutPdkIdsMatch(cell.pdk, pdk))
+            continue;
+        ice::LayoutDeviceCell device;
+        device.name = cell.name;
+        device.category = "Digital";
+        device.source = cell.reference ? cell.reference->path : "digital device";
+        for (const auto &parameter : cell.parameters)
+            device.parameters.push_back({parameter.name, parameter.value, {}});
+        devices.push_back(std::move(device));
+        ids.push_back(id);
+        signature += std::to_string(id) + ":" + cell.name + "|" +
+                     (cell.reference ? cell.reference->path : std::string{"digital device"}) + "\n";
+    }
+    if (signature == projectDeviceSignature_)
+        return;
+    const auto previous = selectedDevice() ? selectedDevice()->name : std::string{};
+    projectDeviceSignature_ = std::move(signature);
+    projectDevices_ = std::move(devices);
+    projectDeviceIds_ = std::move(ids);
+    rebuildCategories();
+    rebuildList(QString::fromStdString(previous));
+}
+
+std::optional<ice::ObjectId> LayoutDevicesPanel::projectCellForDevice(const ice::LayoutDeviceCell *device) const {
+    if (!device)
+        return std::nullopt;
+    for (std::size_t index = 0; index < projectDevices_.size(); ++index) {
+        if (device == &projectDevices_[index])
+            return projectDeviceIds_[index];
+    }
+    return std::nullopt;
 }
 
 const ice::LayoutDeviceLibrary &LayoutDevicesPanel::library() const { return library_; }
@@ -1087,6 +1091,11 @@ const ice::LayoutDeviceCell *LayoutDevicesPanel::selectedDevice() const {
     if (!item || !item->data(Qt::UserRole).isValid())
         return nullptr;
     const auto index = item->data(Qt::UserRole).toInt();
+    if (item->data(kProjectDeviceRole).toBool()) {
+        if (index < 0 || index >= static_cast<int>(projectDevices_.size()))
+            return nullptr;
+        return &projectDevices_[index];
+    }
     if (index < 0 || index >= static_cast<int>(library_.cells.size()))
         return nullptr;
     return &library_.cells[index];
@@ -1148,6 +1157,8 @@ void LayoutDevicesPanel::rebuildCategories() {
                 categories << category;
         }
     }
+    if (!projectDevices_.empty() && !categories.contains(QStringLiteral("Digital")))
+        categories << QStringLiteral("Digital");
     for (const auto &category : categories)
         category_->addItem(category, category);
     const auto index = category_->findData(current);
@@ -1159,8 +1170,12 @@ void LayoutDevicesPanel::rebuildList(const QString &keepSelected) {
     if (selectedName.isEmpty()) {
         if (const auto *item = list_->currentItem(); item && item->data(Qt::UserRole).isValid()) {
             const auto index = item->data(Qt::UserRole).toInt();
-            if (index >= 0 && index < static_cast<int>(library_.cells.size()))
+            if (item->data(kProjectDeviceRole).toBool()) {
+                if (index >= 0 && index < static_cast<int>(projectDevices_.size()))
+                    selectedName = QString::fromStdString(projectDevices_[index].name);
+            } else if (index >= 0 && index < static_cast<int>(library_.cells.size())) {
                 selectedName = QString::fromStdString(library_.cells[index].name);
+            }
         }
     }
     const auto needle = search_->text().trimmed();
@@ -1169,11 +1184,16 @@ void LayoutDevicesPanel::rebuildList(const QString &keepSelected) {
     list_->clear();
     int selectedRow = -1;
     int row = 0;
-    if (!activePdk_ || !layoutPdkIdsMatch(*activePdk_, library_.pdk)) {
+    if (!activePdk_) {
         notifySelection();
         return;
     }
-    for (std::size_t index = 0; index < library_.cells.size(); ++index) {
+    const bool packageMatches = layoutPdkIdsMatch(*activePdk_, library_.pdk);
+    if (!packageMatches && projectDevices_.empty()) {
+        notifySelection();
+        return;
+    }
+    for (std::size_t index = 0; packageMatches && index < library_.cells.size(); ++index) {
         const auto &cell = library_.cells[index];
         const auto cellCategory = QString::fromStdString(cell.category);
         if (!category.isEmpty() && cellCategory != category)
@@ -1186,6 +1206,24 @@ void LayoutDevicesPanel::rebuildList(const QString &keepSelected) {
         auto *item = new QListWidgetItem(cellName, list_);
         item->setData(Qt::UserRole, static_cast<int>(index));
         item->setToolTip(QStringLiteral("%1 · %2 shapes · %3").arg(cellCategory).arg(cell.shapes.size()).arg(source));
+        if (cellName == selectedName)
+            selectedRow = row;
+        ++row;
+    }
+    for (std::size_t index = 0; index < projectDevices_.size(); ++index) {
+        const auto &cell = projectDevices_[index];
+        const auto cellCategory = QString::fromStdString(cell.category);
+        if (!category.isEmpty() && cellCategory != category)
+            continue;
+        const auto cellName = QString::fromStdString(cell.name);
+        const auto source = QString::fromStdString(cell.source);
+        if (!needle.isEmpty() && !cellName.contains(needle, Qt::CaseInsensitive) &&
+            !cellCategory.contains(needle, Qt::CaseInsensitive) && !source.contains(needle, Qt::CaseInsensitive))
+            continue;
+        auto *item = new QListWidgetItem(cellName, list_);
+        item->setData(Qt::UserRole, static_cast<int>(index));
+        item->setData(kProjectDeviceRole, true);
+        item->setToolTip(QStringLiteral("Digital device · %1").arg(source));
         if (cellName == selectedName)
             selectedRow = row;
         ++row;

@@ -55,6 +55,7 @@ PackagePdkStackImplementation readStackImplementation(const toml::table &table, 
     implementation.techLef = readRelativePath(table, "tech_lef", prefix + ".tech_lef");
     implementation.cellLef = readRelativePath(table, "cell_lef", prefix + ".cell_lef");
     implementation.gds = readRelativePath(table, "gds", prefix + ".gds");
+    implementation.layerMap = readRelativePath(table, "layer_map", prefix + ".layer_map");
     implementation.ioHorizontalLayers = readStringArray(table, "io_horizontal_layers");
     implementation.ioVerticalLayers = readStringArray(table, "io_vertical_layers");
     implementation.routingMinLayer = readString(table, "routing_min_layer");
@@ -363,8 +364,8 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                 }
                 auto files = readStackImplementation(*implementation, "pdk.implementation");
                 if (!files.site.empty() || !files.techLef.empty() || !files.cellLef.empty() || !files.gds.empty() ||
-                    !files.liberty.empty() || !files.tapcellScript.empty() || !files.pdnScript.empty() ||
-                    !files.rcScript.empty())
+                    !files.layerMap.empty() || !files.liberty.empty() || !files.tapcellScript.empty() ||
+                    !files.pdnScript.empty() || !files.rcScript.empty())
                     entry.files = std::move(files);
                 pdkSpec.implementation = std::move(entry);
             }

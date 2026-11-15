@@ -633,35 +633,6 @@ void applyPdkSimulationSetup(const std::string &pdkId, SimulationRequest &reques
     }
 }
 
-bool migrateProjectPdkIds(Project &project) {
-    bool changed = false;
-    const auto migrate = [&](std::string &value) {
-        if (value.empty() || value == genericPdkId)
-            return;
-        const auto pdks = findPdks(value);
-        if (pdks.empty())
-            return;
-        if (pdks.front().id != value) {
-            value = pdks.front().id;
-            changed = true;
-        }
-    };
-    for (auto &[_, cell] : project.schematicCells)
-        migrate(cell.pdk);
-    for (auto &[_, cell] : project.layoutCells)
-        migrate(cell.pdk);
-    for (auto &[_, cell] : project.proceduralLayouts)
-        migrate(cell.pdk);
-    for (auto &dependency : project.packageDependencies) {
-        const auto pdks = findPdks(dependency);
-        if (!pdks.empty() && pdks.front().packageName != dependency) {
-            dependency = pdks.front().packageName;
-            changed = true;
-        }
-    }
-    return changed;
-}
-
 nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
     json result = {{"id", info.id},
                    {"source", info.source},

@@ -1631,40 +1631,6 @@ class IceMcpServer {
             result["quarantined_files"] = report.quarantinedFiles;
             return result;
         }
-        if (name == "project_migrate") {
-            auto path = projectPath_;
-            if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null())
-                path = std::filesystem::path(requiredString(arguments, "path"));
-            if (path.empty())
-                throw ToolError("Missing required argument: path (project is not open).");
-            auto root = path;
-            std::error_code status;
-            if (!std::filesystem::is_directory(root, status) || status) {
-                if (root.extension() == ".icepro" || root.filename() == "project.icepro")
-                    root = root.parent_path();
-            }
-            const auto agentsPath = root / "AGENTS.md";
-            const auto readAgents = [&] {
-                std::ifstream input(agentsPath, std::ios::binary);
-                return std::string((std::istreambuf_iterator<char>(input)), {});
-            };
-            const auto before = readAgents();
-            auto project = ice::Project::load(path);
-            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
-            ice::ProjectSession migration(std::move(project));
-            migration.save(path);
-            const auto after = readAgents();
-            session_ = std::make_unique<ice::ProjectSession>(ice::Project::load(path));
-            projectPath_ = path;
-            projectStamp_ = projectStateStamp(projectPath_);
-            startupWarning_.clear();
-            auto result = summary();
-            result["migrated"] = true;
-            result["agents_updated"] = before != after;
-            result["pdk_ids_updated"] = pdkIdsUpdated;
-            result["guidance_version"] = 5;
-            return result;
-        }
         if (name == "project_summary")
             return summary();
         if (name == "ice_doctor")
@@ -3169,6 +3135,11 @@ class IceMcpServer {
                     {"stack", cell.stack},
                     {"device", cell.device},
                     {"library", cell.library},
+                    {"read_only", cell.readOnly},
+                    {"reference", cell.reference ? json{{"path", cell.reference->path},
+                                                        {"format", cell.reference->format},
+                                                        {"top_cell", cell.reference->topCell}}
+                                                 : json(nullptr)},
                     {"shapes", cell.shapes.size()},
                     {"ports", std::move(ports)},
                     {"nets", std::move(nets)},
@@ -3508,7 +3479,7 @@ class IceMcpServer {
             const auto layoutName = optionalString(arguments, "layout_name");
             const bool replace = optionalBoolean(arguments, "replace", false);
             ice::ObjectId layoutId = 0;
-            std::vector<ice::Diagnostic> diagnostics;
+            std::filesystem::path importedStream;
             session.execute("mcp implementation-import-layout", [&](ice::Project &project) {
                 auto found = project.implementationRuns.find(runId);
                 if (found == project.implementationRuns.end())
@@ -3516,23 +3487,17 @@ class IceMcpServer {
                 auto imported = ice::importImplementationLayout(project, found->second, *package, projectRootPath(),
                                                                 layoutName, replace);
                 layoutId = imported.layout;
-                diagnostics = std::move(imported.diagnostics);
+                importedStream = imported.referencePath;
             });
-            if (layoutId == 0) {
-                std::string message = "Unable to import the implementation layout.";
-                for (const auto &diagnostic : diagnostics) {
-                    if (diagnostic.severity == ice::Diagnostic::Severity::error) {
-                        message = diagnostic.message;
-                        break;
-                    }
-                }
-                throw ToolError(message);
-            }
             const auto &layout = session.project().layoutCells.at(layoutId);
             return {{"layout", layoutId},
                     {"name", layout.name},
                     {"pdk", layout.pdk},
                     {"stack", layout.stack},
+                    {"stream", importedStream.generic_string()},
+                    {"library", layout.library},
+                    {"device", layout.device},
+                    {"read_only", layout.readOnly},
                     {"shapes", layout.shapes.size()},
                     {"ports", layout.ports.size()},
                     {"nets", layout.nets.size()},
@@ -3663,10 +3628,6 @@ class IceMcpServer {
                             .build());
         tools.push_back(tool_builder("project_repair")
                             .with_description("Recover a project by quarantining invalid sidecar files and saving it.")
-                            .with_string_param("path", "Optional project folder or project.icepro path", false)
-                            .build());
-        tools.push_back(tool_builder("project_migrate")
-                            .with_description("Refresh the generated AGENTS.md guidance while preserving user text.")
                             .with_string_param("path", "Optional project folder or project.icepro path", false)
                             .build());
         tools.push_back(
@@ -4209,9 +4170,9 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .build());
         tools.push_back(tool_builder("implementation_import_layout")
-                            .with_description("Import the newest implementation DEF as an ICE layout cell.")
+                            .with_description("Create a reusable read-only digital device from the final GDS/OASIS.")
                             .with_string_param("run", "Implementation run name or id")
-                            .with_string_param("layout_name", "Optional imported layout name", false)
+                            .with_string_param("layout_name", "Optional imported device name", false)
                             .with_boolean_param("replace", "Replace the layout previously produced by this run", false)
                             .build());
         tools.push_back(tool_builder("implementation_export_gds")

@@ -306,6 +306,15 @@ struct PlannedConnection {
     bool routed = false;
 };
 
+struct LayoutReference {
+    // Path to the external stream, relative to the project root when possible.
+    std::string path;
+    // "gds" or "oasis".
+    std::string format;
+    // Top cell to display. Empty lets the reader choose the sole top cell.
+    std::string topCell;
+};
+
 struct LayoutCell {
     ObjectId id = 0;
     std::string name;
@@ -315,6 +324,13 @@ struct LayoutCell {
     std::string stack;
     // True for cells imported from a read-only device library.
     bool library = false;
+    // True for imported cells that should be visible in the layout tree but
+    // cannot be edited. Unlike `library`, this does not tie the cell to the
+    // device-library browser.
+    bool readOnly = false;
+    // When set, the cell is a read-only reference to an external GDS/OASIS
+    // stream instead of native geometry stored in this project.
+    std::optional<LayoutReference> reference;
     // Source device name in the bundled layout library. Empty for ordinary
     // user cells and non-device library cells.
     std::string device;

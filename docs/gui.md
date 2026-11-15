@@ -132,9 +132,13 @@ and Layout:
   are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
   contextual hint below the row shows the next prerequisite, the ready action,
   or the last failure. Below the tree, **Open in OpenROAD GUI** launches the
-  standalone viewer on the active ODB, and Final places **Import final layout**
-  next to it. The `Display` tree toggles layers, net types, instance
-  categories, special nets, ports, route guides, rows, and blockages. Fill,
+  standalone viewer on the active ODB, and Final places **Import final as
+  device** next to it. **Import final as device** flattens the final GDS/OASIS into one read-only
+  device cell shown under **Layout > Devices > Digital**. Create a layout and
+  place the device as many times as needed. Missing final streams are reported
+  as an error. The `Display`
+  tree toggles layers, net types, instance categories, special nets, ports,
+  route guides, rows, and blockages. Fill,
   endcap, tap, antenna, and cover cells are hidden by default; changing
   visibility preserves zoom and pan.
 - **Middle:** an interactive canvas. The physical stages load their stage ODB
@@ -448,18 +452,21 @@ the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
-is used. The active PDK package's layout device library (`layout/devices.json`)
-appears in **Devices**, with search, category filtering, and a geometry preview
-in **Properties**. IHP SG13G2, Sky130, and GF180MCU packages ship their own
-libraries, and switching the active layout to a cell from another PDK loads that
-package's devices. The device list starts with no selection; selecting a device
-switches to **Place Device** and shows a cursor-following preview, while
-activating **Select** clears the list selection.
-Clicking in the canvas imports the device geometry into the project and creates
-a layout instance. Every placed device gets its own read-only library cell, so
-repeated placements do not share parameters or geometry. Each instance appears
-separately under its parent layout in the hierarchy and can be selected, moved,
-and deleted directly in the canvas. Selecting a placed instance in the
+is used. The active PDK package's device library appears in **Devices**, with
+search, category filtering, and a geometry preview in **Properties**. Each PDK
+device is backed by a `layout/devices/*.icelay` layout cell. IHP SG13G2,
+Sky130, and GF180MCU packages ship their own libraries, and switching the
+active layout to a cell from another PDK loads that package's devices. Imported
+digital layouts appear in the same tab under **Digital**. The device list
+starts with no selection; selecting a device switches to **Place Device** and
+shows a cursor-following preview, while activating **Select** clears the list
+selection.
+Clicking in the canvas places a layout instance of the device cell. The first
+placement creates the read-only project `.icelay` cell; repeated placements
+reuse that cell, so instances share parameters and geometry. Each instance
+appears separately under its parent layout in the hierarchy and can be
+selected, moved, and deleted directly in the canvas. Selecting a placed
+instance in the
 hierarchy highlights it in the canvas, and selecting an instance in the canvas
 highlights its hierarchy row. PCell parameter names, values, and
 descriptions are shown in **Properties** for the device preview and for imported

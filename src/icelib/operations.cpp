@@ -1506,8 +1506,8 @@ void removeLayoutItem(Project &project, ObjectId id) {
     const auto cell = project.layoutCells.find(id);
     if (cell == project.layoutCells.end())
         throw ProjectError("layout.remove.unknown", "Unknown layout or procedural layout id: " + std::to_string(id));
-    if (cell->second.library)
-        throw ProjectError("layout.remove.library", "Library layout cells are read-only and cannot be removed");
+    if (cell->second.library || (cell->second.readOnly && !cell->second.reference))
+        throw ProjectError("layout.remove.library", "Read-only layout cells cannot be removed");
     if (cell->second.generatedBy != 0 && project.proceduralLayouts.contains(cell->second.generatedBy)) {
         const auto &procedural = project.proceduralLayouts.at(cell->second.generatedBy);
         throw ProjectError("layout.remove.generated", "Layout cell '" + cell->second.name +

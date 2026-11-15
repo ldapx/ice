@@ -506,6 +506,8 @@ void ProjectPanel::rebuildTree() {
     std::function<void(QTreeWidgetItem *, ice::ObjectId, std::vector<ice::ObjectId> &)> addContents;
     addContents = [&](QTreeWidgetItem *layoutItem, ice::ObjectId layoutId, std::vector<ice::ObjectId> &ancestors) {
         const auto layoutIt = project.layoutCells.find(layoutId);
+        if (layoutIt != project.layoutCells.end() && layoutIt->second.readOnly)
+            return;
         QTreeWidgetItem *parentItem = layoutItem;
         const auto childIt = children.find(layoutId);
         if (childIt != children.end()) {
@@ -668,8 +670,9 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         if (isCell) {
             if (id == 0 || !project_->layoutCells.contains(id))
                 return;
-            if (onRenameLayout_)
-                addRename(QStringLiteral("Rename Layout…"), QString::fromStdString(project_->layoutCells.at(id).name),
+            const auto &cell = project_->layoutCells.at(id);
+            if (!cell.library && !cell.readOnly && onRenameLayout_)
+                addRename(QStringLiteral("Rename Layout…"), QString::fromStdString(cell.name),
                           [this, id](const std::string &name) { onRenameLayout_(id, name); });
         } else {
             const auto parentId = parent->data(0, Qt::UserRole).toULongLong();
@@ -684,7 +687,7 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             flattenAction = menu.addAction(QStringLiteral("Flatten Layout for DRC"));
             flattenAction->setCheckable(true);
             flattenAction->setChecked(flattenedLayouts_->contains(id));
-            if (isCell && !project_->layoutCells.at(id).library && onRunPex_)
+            if (isCell && !project_->layoutCells.at(id).library && !project_->layoutCells.at(id).readOnly && onRunPex_)
                 pexAction = menu.addAction(QStringLiteral("Extract Parasitics (PEX)"));
         }
     } else if (kind == static_cast<int>(HierarchyItemKind::device)) {

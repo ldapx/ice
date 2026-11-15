@@ -2477,8 +2477,8 @@ bool ImplementationUiController::importLayout(ice::ObjectId runId, QString &erro
     }
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(cli,
-                  {QStringLiteral("implementation-import"), projectPath_, QString::fromStdString(found->second.name)});
+    process.start(cli, {QStringLiteral("implementation-import"), projectPath_,
+                        QString::fromStdString(found->second.name), QStringLiteral("--replace")});
     if (!process.waitForStarted(5000) || !process.waitForFinished(120000)) {
         process.kill();
         error = QStringLiteral("Implementation import did not finish.");
@@ -2826,8 +2826,9 @@ void ImplementationPage::buildUi() {
                         QMessageBox::warning(this, QStringLiteral("OpenROAD GUI"), error);
                 });
                 if (stage_ == ice::ImplementationStage::final) {
-                    auto *importButton = new QPushButton(QStringLiteral("Import final layout"));
-                    importButton->setToolTip(QStringLiteral("Import the final DEF as a layout cell"));
+                    auto *importButton = new QPushButton(QStringLiteral("Import final as device"));
+                    importButton->setToolTip(
+                        QStringLiteral("Create a reusable read-only digital device from the final GDS/OASIS stream"));
                     stageActions->addWidget(importButton, 1);
                     QObject::connect(importButton, &QPushButton::clicked, this, [this] {
                         const auto id = controller_->activeRunId();
@@ -2835,10 +2836,11 @@ void ImplementationPage::buildUi() {
                             return;
                         QString error;
                         if (!controller_->importLayout(id, error))
-                            QMessageBox::warning(this, QStringLiteral("Import layout"), error);
+                            QMessageBox::warning(this, QStringLiteral("Import device"), error);
                         else
-                            QMessageBox::information(this, QStringLiteral("Import layout"),
-                                                     QStringLiteral("The final layout was imported."));
+                            QMessageBox::information(
+                                this, QStringLiteral("Import device"),
+                                QStringLiteral("The final layout is available in Layout > Devices."));
                     });
                 }
                 runsLayout->addLayout(stageActions);

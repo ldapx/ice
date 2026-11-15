@@ -53,6 +53,8 @@ struct PackagePdkStackImplementation {
     std::filesystem::path techLef;
     std::filesystem::path cellLef;
     std::filesystem::path gds;
+    // KLayout LEF/DEF layer map used when streaming the routed DEF to GDS.
+    std::filesystem::path layerMap;
     // Timing corner id -> Liberty files, relative to the package root.
     std::map<std::string, std::vector<std::filesystem::path>> liberty;
     std::vector<std::string> ioHorizontalLayers;

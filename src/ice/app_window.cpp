@@ -19,6 +19,7 @@
 #include "icelib/verification.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
+#include "layout_reference.hpp"
 #include "properties_panel.hpp"
 #include "python_highlighter.hpp"
 #include "schematic_canvas.hpp"
@@ -1382,35 +1383,6 @@ class DocumentWindow : public QMainWindow {
                 }
             }
 
-            struct InstanceReference {
-                ice::ObjectId parent = 0;
-                ice::ObjectId instance = 0;
-            };
-            std::map<ice::ObjectId, std::vector<InstanceReference>> references;
-            for (const auto &[parentId, parent] : project.layoutCells) {
-                for (const auto &[instanceId, instance] : parent.instances) {
-                    const auto childIt = project.layoutCells.find(instance.cell);
-                    if (childIt == project.layoutCells.end() || !childIt->second.library ||
-                        childIt->second.device.empty())
-                        continue;
-                    references[instance.cell].push_back({parentId, instanceId});
-                }
-            }
-            for (const auto &[childId, childReferences] : references) {
-                if (childReferences.size() <= 1)
-                    continue;
-                const auto source = project.layoutCells.at(childId);
-                for (std::size_t index = 1; index < childReferences.size(); ++index) {
-                    const auto prefix =
-                        layoutPdkIdsMatch(source.pdk, library.pdk) ? layoutDeviceCellPrefix(library) : std::string{};
-                    const auto cloneId =
-                        cloneLibraryDeviceCell(project, source, uniqueDeviceCellName(project, source.device, prefix));
-                    project.layoutCells.at(childReferences[index].parent)
-                        .instances.at(childReferences[index].instance)
-                        .cell = cloneId;
-                }
-            }
-
             for (auto &[_, cell] : project.layoutCells) {
                 if (!cell.library)
                     continue;
@@ -2383,7 +2355,7 @@ class DocumentWindow : public QMainWindow {
                 throw ice::ProjectError("interchange.oasis", "Binary OASIS export is not supported yet");
             if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
                 throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
-            ice::LayoutInterchange::exportGds(project_->project(), cellId, path.toStdString());
+            ice::LayoutInterchange::exportFlattenedGds(project_->project(), cellId, path.toStdString());
             statusBar()->showMessage(QStringLiteral("Layout interchange saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -3486,23 +3458,56 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Layout created from schematic '%1'").arg(schematicName));
     }
 
-    ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
-                                                 const ice::LayoutDeviceLibrary &library,
-                                                 const std::map<std::string, std::string> *values = nullptr,
-                                                 const ice::LayoutDeviceGeometry *geometry = nullptr) const {
-        const auto cellId = ice::createLayoutCell(
-            project, uniqueDeviceCellName(project, device.name, layoutDeviceCellPrefix(library)), library.pdk);
+    ice::ObjectId ensureLayoutDeviceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
+                                         const ice::LayoutDeviceLibrary &library,
+                                         const std::map<std::string, std::string> *values = nullptr,
+                                         const ice::LayoutDeviceGeometry *geometry = nullptr) const {
+        const auto stack = activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_)
+                               ? project.layoutCells.at(activeLayoutId_).stack
+                               : std::string{};
+        std::map<std::string, std::string> wanted = parameterValues(device.parameters);
+        if (values) {
+            for (const auto &[name, value] : *values)
+                wanted[name] = value;
+        }
+        const auto parametersMatch = [&](const ice::LayoutCell &cell) {
+            for (const auto &[name, value] : wanted) {
+                const auto parameter =
+                    std::find_if(cell.parameters.begin(), cell.parameters.end(),
+                                 [&](const ice::Parameter &candidate) { return candidate.name == name; });
+                if (parameter == cell.parameters.end() || parameter->value != value)
+                    return false;
+            }
+            return true;
+        };
+        for (auto &[id, cell] : project.layoutCells) {
+            if (!cell.library || cell.device != device.name || !layoutPdkIdsMatch(cell.pdk, library.pdk) ||
+                cell.stack != stack || !parametersMatch(cell))
+                continue;
+            if (cell.shapes.empty()) {
+                if (geometry)
+                    applyLayoutDeviceShapes(project, cell, library, geometry->shapes, geometry->ports);
+                else
+                    applyLayoutDeviceShapes(project, cell, library, device.shapes, device.ports);
+            }
+            return id;
+        }
+        const auto baseName = layoutDeviceCellPrefix(library) + device.name;
+        const auto taken = [&](const std::string &candidate) {
+            return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                               [&](const auto &entry) { return entry.second.name == candidate; });
+        };
+        std::string name = baseName;
+        for (int suffix = 1; taken(name); ++suffix)
+            name = baseName + "_" + std::to_string(suffix);
+        const auto cellId = ice::createLayoutCell(project, name, library.pdk, stack);
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
         cell.device = device.name;
-        if (activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_))
-            cell.stack = project.layoutCells.at(activeLayoutId_).stack;
         syncLayoutDeviceParameters(project, cell, device);
-        if (values) {
-            for (auto &parameter : cell.parameters) {
-                if (const auto value = values->find(parameter.name); value != values->end())
-                    parameter.value = value->second;
-            }
+        for (auto &parameter : cell.parameters) {
+            if (const auto value = wanted.find(parameter.name); value != wanted.end())
+                parameter.value = value->second;
         }
         if (geometry)
             applyLayoutDeviceShapes(project, cell, library, geometry->shapes, geometry->ports);
@@ -3519,7 +3524,10 @@ class DocumentWindow : public QMainWindow {
             statusBar()->showMessage(QStringLiteral("Select a device in the Devices tab first"));
             return;
         }
-        if (project_->project().layoutCells.empty()) {
+        const auto editableLayout =
+            std::find_if(project_->project().layoutCells.begin(), project_->project().layoutCells.end(),
+                         [](const auto &entry) { return !entry.second.library; });
+        if (editableLayout == project_->project().layoutCells.end()) {
             QMessageBox::information(this, QStringLiteral("Place Device"),
                                      QStringLiteral("Create a layout cell before placing a device."));
             return;
@@ -3527,13 +3535,21 @@ class DocumentWindow : public QMainWindow {
         if (!layoutDevicesPanel_)
             return;
         auto activeId = activeLayoutId_;
-        if (!project_->project().layoutCells.contains(activeId))
-            activeId = project_->project().layoutCells.begin()->first;
+        if (!project_->project().layoutCells.contains(activeId) || project_->project().layoutCells.at(activeId).library)
+            activeId = editableLayout->first;
         if (project_->project().layoutCells.at(activeId).library) {
             statusBar()->showMessage(QStringLiteral("Library cells are read-only"));
             return;
         }
-        const auto bounds = selectedLayoutDevice_->bounds;
+        const auto projectDevice = layoutDevicesPanel_->projectCellForDevice(selectedLayoutDevice_);
+        auto bounds = selectedLayoutDevice_->bounds;
+        if (projectDevice && selectedProjectDevicePreview_.bounds.isValid()) {
+            const auto modelBounds = selectedProjectDevicePreview_.bounds;
+            bounds = ice::Rect{static_cast<ice::Coordinate>(std::lround(modelBounds.x())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.y())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.width())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.height()))};
+        }
         const qreal centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
         const qreal centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
         const auto x = static_cast<ice::Coordinate>(std::lround(position.x() - centerX));
@@ -3543,7 +3559,8 @@ class DocumentWindow : public QMainWindow {
         std::string placedName;
         try {
             project_->execute("place layout device", [&](ice::Project &project) {
-                const auto childId = createLayoutDeviceInstanceCell(project, *selectedLayoutDevice_, library);
+                const auto childId =
+                    projectDevice ? *projectDevice : ensureLayoutDeviceCell(project, *selectedLayoutDevice_, library);
                 if (childId == activeId)
                     return;
                 auto &cell = project.layoutCells.at(activeId);
@@ -3569,8 +3586,13 @@ class DocumentWindow : public QMainWindow {
             project_->setLastHistoryLabel("Placed layout device " + selectedLayoutDevice_->name + " " + placedName);
             activeLayoutId_ = activeId;
             refreshProject();
-            if (layoutPropertiesPanel_ && layoutLeftTabs_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_)
-                layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            if (layoutPropertiesPanel_ && layoutLeftTabs_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+                if (projectDevice && project_->project().layoutCells.contains(*projectDevice))
+                    layoutPropertiesPanel_->setLayoutCell(project_->project().layoutCells.at(*projectDevice),
+                                                          selectedProjectDevicePreview_);
+                else
+                    layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            }
             statusBar()->showMessage(
                 QStringLiteral("Placed %1").arg(QString::fromStdString(selectedLayoutDevice_->name)));
         } catch (const ice::ProjectError &error) {
@@ -3907,8 +3929,8 @@ class DocumentWindow : public QMainWindow {
                 auto cell = project.layoutCells.find(cellId);
                 if (cell == project.layoutCells.end() || cell->second.library)
                     return;
-                const auto childId = createLayoutDeviceInstanceCell(project, deviceCopy, library, &values,
-                                                                    geometry ? &*geometry : nullptr);
+                const auto childId =
+                    ensureLayoutDeviceCell(project, deviceCopy, library, &values, geometry ? &*geometry : nullptr);
                 if (childId == cellId)
                     return;
                 auto &layout = cell->second;
@@ -5845,6 +5867,57 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("%1 technology activated").arg(displayName));
     }
 
+    ice::LayoutPreviewModel projectLayoutDevicePreviewModel(const ice::LayoutCell &cell) {
+        if (!project_)
+            return {};
+        const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        if (cell.reference) {
+            auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack,
+                                                          root, root / "build" / "layout-references");
+            if (!loaded.model.empty())
+                return loaded.model;
+        }
+        return ice::buildLayoutCellPreviewModel(project_->project(), cell, true, true, false);
+    }
+
+    std::optional<ice::LayoutPreviewModel> referencePreviewForCell(const ice::LayoutCell &cell) {
+        if (!cell.reference)
+            return std::nullopt;
+        auto model = projectLayoutDevicePreviewModel(cell);
+        if (model.empty())
+            return std::nullopt;
+        return model;
+    }
+
+    void ensureReferencePreview(const ice::LayoutCell &cell) {
+        if (!cell.reference || projectPath_.isEmpty())
+            return;
+        const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        const auto source = std::filesystem::path(cell.reference->path).is_absolute()
+                                ? std::filesystem::path(cell.reference->path)
+                                : root / cell.reference->path;
+        std::error_code status;
+        const auto stamp = std::filesystem::is_regular_file(source, status) && !status
+                               ? std::filesystem::last_write_time(source, status).time_since_epoch().count()
+                               : 0;
+        std::ostringstream key;
+        key << cell.reference->path << "|" << cell.reference->format << "|" << cell.reference->topCell << "|" << stamp;
+        const auto keyText = QString::fromStdString(key.str());
+        if (referencePreviewKey_ == keyText)
+            return;
+        referencePreviewKey_ = keyText;
+        auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack, root,
+                                                      root / "build" / "layout-references");
+        if (loaded.model.empty()) {
+            referencePreviewModel_.reset();
+            referencePreviewError_ =
+                loaded.error.isEmpty() ? QStringLiteral("Unable to load the layout reference.") : loaded.error;
+        } else {
+            referencePreviewModel_ = std::move(loaded.model);
+            referencePreviewError_.clear();
+        }
+    }
+
     void refreshLayout() {
         if (!layoutCanvas_ || !project_)
             return;
@@ -5862,18 +5935,37 @@ class DocumentWindow : public QMainWindow {
                 refreshLayoutProperties();
                 return;
             }
-            cellIt = project.layoutCells.begin();
+            const auto editable = std::find_if(project.layoutCells.begin(), project.layoutCells.end(),
+                                               [](const auto &entry) { return !entry.second.library; });
+            if (editable == project.layoutCells.end()) {
+                // Imported digital devices are library cells. Do not present
+                // one as the active user layout; keep them in Devices instead.
+                const auto &deviceCell = project.layoutCells.begin()->second;
+                if (layoutDevicesPanel_) {
+                    layoutDevicesPanel_->setPdk(deviceCell.pdk);
+                    layoutDevicesPanel_->setProjectDevices(project, deviceCell.pdk);
+                }
+                if (layersPanel_)
+                    layersPanel_->setProject(project, 0);
+                activeLayoutId_ = 0;
+                if (layoutPropertiesPanel_)
+                    layoutPropertiesPanel_->clearSelection();
+                return;
+            }
+            cellIt = editable;
             activeLayoutId_ = cellIt->first;
         }
         if (activeLayoutPathCellId_ != activeLayoutId_) {
             finishActiveLayoutPath();
             activeLayoutPathCellId_ = activeLayoutId_;
         }
-        if (layoutDevicesPanel_)
+        if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
+            layoutDevicesPanel_->setProjectDevices(project, cellIt->second.pdk);
+        }
         if (layersPanel_)
             layersPanel_->setProject(project, activeLayoutId_);
-        const bool readOnly = cellIt->second.library;
+        const bool readOnly = cellIt->second.library || cellIt->second.readOnly;
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
         if (layoutMoveTool_)
@@ -5924,6 +6016,58 @@ class DocumentWindow : public QMainWindow {
             const auto layer = project.layers.find(layerId);
             return layer == project.layers.end() || layer->second.visible;
         };
+        if (cellIt->second.reference) {
+            ensureReferencePreview(cellIt->second);
+            if (referencePreviewModel_) {
+                ice::LayoutRenderer::PaintOptions options;
+                for (const auto &[id, layer] : project.layers) {
+                    if (layer.visible)
+                        continue;
+                    ice::LayoutPreviewLayer previewLayer;
+                    previewLayer.id = id;
+                    previewLayer.number = layer.number;
+                    previewLayer.datatype = layer.datatype;
+                    previewLayer.name = QString::fromStdString(layer.name);
+                    options.hiddenLayers.insert(ice::layoutPreviewLayerKey(previewLayer));
+                }
+                // Layers without a matching PDK definition cannot be toggled
+                // from the Layers panel. Keep them hidden instead of leaking
+                // stray marker/label layers into the drawing.
+                for (const auto &shape : referencePreviewModel_->shapes) {
+                    if (shape.layer.id == 0)
+                        options.hiddenLayers.insert(ice::layoutPreviewLayerKey(shape.layer));
+                }
+                for (const auto &port : referencePreviewModel_->ports) {
+                    if (port.layer.id == 0)
+                        options.hiddenLayers.insert(ice::layoutPreviewLayerKey(port.layer));
+                }
+                auto *item = createLayoutPreviewItem(*referencePreviewModel_, styles, deviceStyles, options);
+                layoutCanvas_->scene()->addItem(item);
+                layoutCanvas_->scene()->setSceneRect(layoutCanvas_->scene()->itemsBoundingRect());
+                layoutCanvas_->refreshInteractionState();
+                if (!layoutViewInitialized_) {
+                    layoutCanvas_->fitToContent();
+                    layoutViewInitialized_ = true;
+                }
+                refreshLayoutProperties();
+                return;
+            }
+            auto *text = layoutCanvas_->scene()->addText(referencePreviewError_.isEmpty()
+                                                             ? QStringLiteral("Unable to load the layout reference.")
+                                                             : referencePreviewError_);
+            auto font = text->font();
+            font.setPointSize(font.pointSize() + 1);
+            text->setFont(font);
+            text->setDefaultTextColor(palette().color(QPalette::Text));
+            layoutCanvas_->scene()->setSceneRect(
+                layoutCanvas_->scene()->itemsBoundingRect().adjusted(-40, -40, 40, 40));
+            if (!layoutViewInitialized_) {
+                layoutCanvas_->fitToContent();
+                layoutViewInitialized_ = true;
+            }
+            refreshLayoutProperties();
+            return;
+        }
         std::map<ice::ObjectId, QGraphicsItemGroup *> textPolygonItems;
         for (const auto &[id, shape] : cellIt->second.shapes) {
             if (!shape.isPath() && !layerVisible(shape.layer))
@@ -6146,8 +6290,19 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->scene()->addItem(group);
             const ice::Transform transform{instance.x, instance.y, instance.orientation};
 
-            auto childModel =
-                ice::buildLayoutCellPreviewModel(project, childIt->second, true, false, false, {transform});
+            ice::LayoutPreviewModel childModel;
+            if (childIt->second.reference) {
+                ice::LayoutCell wrapper;
+                wrapper.id = 0;
+                wrapper.instances.emplace(0, ice::LayoutInstance{0, childIt->first, instance.name, instance.x,
+                                                                 instance.y, instance.orientation});
+                childModel = ice::buildLayoutCellPreviewModel(
+                    project, wrapper, true, false, false, {},
+                    [this](const ice::LayoutCell &referenceCell) { return referencePreviewForCell(referenceCell); });
+            } else {
+                childModel =
+                    ice::buildLayoutCellPreviewModel(project, childIt->second, true, false, false, {transform});
+            }
             std::erase_if(childModel.shapes, [&](const ice::LayoutPreviewShape &shape) {
                 return shape.layer.id != 0 && !layerVisible(shape.layer.id);
             });
@@ -6256,6 +6411,8 @@ class DocumentWindow : public QMainWindow {
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->clearDeviceSelection();
         selectedLayoutDevice_ = nullptr;
+        selectedProjectDeviceCell_ = 0;
+        selectedProjectDevicePreview_ = {};
         if (layoutCanvas_)
             layoutCanvas_->setDevicePreview(nullptr);
     }
@@ -6707,8 +6864,24 @@ class DocumentWindow : public QMainWindow {
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             return;
         }
+        if (project_) {
+            const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
+            if (activeIt != project_->project().layoutCells.end() && activeIt->second.reference) {
+                ensureReferencePreview(activeIt->second);
+                if (referencePreviewModel_)
+                    layoutPropertiesPanel_->setLayoutCell(activeIt->second, *referencePreviewModel_);
+                if (bringToFront && layoutRightTabs_)
+                    layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                return;
+            }
+        }
         const auto previewModelFor = [&](const ice::LayoutCell &cell) {
-            auto model = ice::buildLayoutCellPreviewModel(project_->project(), cell);
+            auto model = cell.reference
+                             ? projectLayoutDevicePreviewModel(cell)
+                             : ice::buildLayoutCellPreviewModel(project_->project(), cell, true, true, true, {},
+                                                                [this](const ice::LayoutCell &referenceCell) {
+                                                                    return referencePreviewForCell(referenceCell);
+                                                                });
             const auto layerVisible = [&](ice::ObjectId layerId) {
                 const auto layer = project_->project().layers.find(layerId);
                 return layer == project_->project().layers.end() || layer->second.visible;
@@ -6857,7 +7030,13 @@ class DocumentWindow : public QMainWindow {
         }
         if (layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_ &&
             selectedLayoutDevice_) {
-            layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            if (selectedProjectDeviceCell_ != 0 && project_ &&
+                project_->project().layoutCells.contains(selectedProjectDeviceCell_)) {
+                layoutPropertiesPanel_->setLayoutCell(project_->project().layoutCells.at(selectedProjectDeviceCell_),
+                                                      selectedProjectDevicePreview_);
+            } else {
+                layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            }
             return;
         }
         if (!project_) {
@@ -12298,6 +12477,23 @@ class DocumentWindow : public QMainWindow {
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setOnDeviceSelected([this](const ice::LayoutDeviceCell *cell) {
                 selectedLayoutDevice_ = cell;
+                selectedProjectDeviceCell_ = 0;
+                selectedProjectDevicePreview_ = {};
+                if (const auto projectCell = layoutDevicesPanel_->projectCellForDevice(cell);
+                    projectCell && project_ && project_->project().layoutCells.contains(*projectCell)) {
+                    const auto &layoutCell = project_->project().layoutCells.at(*projectCell);
+                    selectedProjectDeviceCell_ = *projectCell;
+                    selectedProjectDevicePreview_ = projectLayoutDevicePreviewModel(layoutCell);
+                    if (layoutCanvas_)
+                        layoutCanvas_->setDevicePreviewModel(selectedProjectDevicePreview_);
+                    if (layoutPropertiesPanel_ && layoutLeftTabs_ &&
+                        layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+                        layoutPropertiesPanel_->setLayoutCell(layoutCell, selectedProjectDevicePreview_);
+                        if (layoutRightTabs_)
+                            layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                    }
+                    return;
+                }
                 if (layoutCanvas_)
                     layoutCanvas_->setDevicePreview(cell);
                 if (layoutPropertiesPanel_ && layoutLeftTabs_ &&
@@ -14290,6 +14486,11 @@ class DocumentWindow : public QMainWindow {
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
+    std::optional<ice::LayoutPreviewModel> referencePreviewModel_;
+    QString referencePreviewKey_;
+    QString referencePreviewError_;
+    ice::ObjectId selectedProjectDeviceCell_ = 0;
+    ice::LayoutPreviewModel selectedProjectDevicePreview_;
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationTestbenchPage_ = nullptr;

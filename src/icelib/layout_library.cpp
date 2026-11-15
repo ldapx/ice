@@ -36,7 +36,29 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
             layer.name = layerJson.value("name", std::string{});
             library.layers.push_back(std::move(layer));
         }
-        for (const auto &cellJson : document.at("cells")) {
+        const auto indexRoot = path.parent_path();
+        const auto cellDocument = [&](const json &indexCell) -> json {
+            if (!indexCell.contains("layout"))
+                return indexCell;
+            const auto relative = indexCell.at("layout").get<std::string>();
+            const auto cellPath = (indexRoot / relative).lexically_normal();
+            std::ifstream cellStream(cellPath, std::ios::binary);
+            if (!cellStream)
+                throw ProjectError("layout.library", "Unable to open layout device cell: " + cellPath.string());
+            const auto envelope = json::parse(cellStream);
+            if (envelope.value("format", std::string{}) != "ice-layout" || envelope.value("schema_version", 0) != 2 ||
+                !envelope.contains("device"))
+                throw ProjectError("layout.library",
+                                   "Layout device cell has an unsupported format: " + cellPath.string());
+            auto cell = envelope.at("device");
+            for (const auto *key : {"name", "category", "source"}) {
+                if (indexCell.contains(key))
+                    cell[key] = indexCell.at(key);
+            }
+            return cell;
+        };
+        for (const auto &indexCell : document.at("cells")) {
+            const auto cellJson = cellDocument(indexCell);
             LayoutDeviceCell cell;
             cell.name = cellJson.at("name").get<std::string>();
             cell.category = cellJson.value("category", std::string{});
@@ -97,8 +119,9 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
                     cell.parameters.push_back(std::move(parameter));
                 }
             }
-            if (cellJson.contains("generator")) {
-                const auto &generatorJson = cellJson.at("generator");
+            if (const auto generatorIt = cellJson.find("generator");
+                generatorIt != cellJson.end() && generatorIt->is_object()) {
+                const auto &generatorJson = *generatorIt;
                 LayoutDeviceGenerator generator;
                 generator.module = generatorJson.at("module").get<std::string>();
                 generator.class_name = generatorJson.at("class").get<std::string>();
