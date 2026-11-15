@@ -1175,6 +1175,15 @@ bool LayoutDevicesPanel::ensureDeviceGeometry(std::size_t index) {
 }
 
 void LayoutDevicesPanel::notifySelection() {
+    // PCell geometry is generated lazily. Materialize it before the selection
+    // callback builds the canvas preview, otherwise the preview model is empty
+    // even though placement can generate the device on click.
+    if (const auto *item = list_->currentItem();
+        item && item->data(Qt::UserRole).isValid() && !item->data(kProjectDeviceRole).toBool()) {
+        const auto index = item->data(Qt::UserRole).toInt();
+        if (index >= 0 && index < static_cast<int>(library_.cells.size()))
+            ensureDeviceGeometry(static_cast<std::size_t>(index));
+    }
     if (onDeviceSelected_)
         onDeviceSelected_(selectedDevice());
 }
