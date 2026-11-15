@@ -2504,6 +2504,7 @@ class DocumentWindow : public QMainWindow {
             project_->execute("create schematic", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
+                ice::applyPdkDefaultGrid(project, pdk);
                 activeSchematicId_ = ice::createSchematicCell(project, name.trimmed().toStdString(), pdk);
             });
             project_->setLastHistoryLabel("Created schematic " + name.trimmed().toStdString());
@@ -2840,6 +2841,7 @@ class DocumentWindow : public QMainWindow {
             project_->execute("create SystemVerilog cell", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
+                ice::applyPdkDefaultGrid(project, pdk);
                 createdId = ice::createSystemVerilogCell(project, trimmedName.toStdString(), pdk,
                                                          systemVerilogTemplate(trimmedName, testbench).toStdString());
             });
@@ -3009,6 +3011,7 @@ class DocumentWindow : public QMainWindow {
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
                     addPdkLayers(project, *selectedPdk, pdk, stack);
+                ice::applyPdkDefaultGrid(project, pdk);
                 activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk, stack);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
@@ -3073,6 +3076,7 @@ class DocumentWindow : public QMainWindow {
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
                     addPdkLayers(project, *selectedPdk, pdk, stack);
+                ice::applyPdkDefaultGrid(project, pdk);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
                                                            ice::defaultProceduralLayoutScript(), stack);
                 generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
@@ -3435,6 +3439,7 @@ class DocumentWindow : public QMainWindow {
         const auto schematicPdk = schematicIt->second.pdk;
         try {
             project_->execute("make layout from schematic", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, schematicPdk);
                 activeLayoutId_ =
                     ice::createLayoutFromSchematic(project, schematicId, {}, defaultStackForPdk(schematicPdk));
                 ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
@@ -3469,6 +3474,16 @@ class DocumentWindow : public QMainWindow {
         if (values) {
             for (const auto &[name, value] : *values)
                 wanted[name] = value;
+        }
+        std::optional<ice::LayoutDeviceGeometry> generated;
+        if (!geometry && device.generator && device.shapes.empty()) {
+            QString error;
+            generated = generateLayoutDeviceGeometry(device, wanted, &error, library.pdk);
+            if (!generated)
+                throw ice::ProjectError(
+                    "layout.device", "Could not generate " + device.name + ": " +
+                                         (error.isEmpty() ? QStringLiteral("generator failed") : error).toStdString());
+            geometry = &*generated;
         }
         const auto parametersMatch = [&](const ice::LayoutCell &cell) {
             for (const auto &[name, value] : wanted) {
@@ -5856,6 +5871,8 @@ class DocumentWindow : public QMainWindow {
             if (spec.pdk) {
                 const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
                 addPdkLayers(project, *spec.pdk, technology);
+                if (spec.pdk->manufacturingGrid > 0 && project.grid == 1)
+                    project.grid = spec.pdk->manufacturingGrid;
             }
             if (project.schematicCells.empty()) {
                 const auto schematic =

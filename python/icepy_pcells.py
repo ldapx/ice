@@ -8,7 +8,7 @@ copied into ICE. This module provides the ICE-side runtime:
 * transfer the resulting polygons into an ``icepy`` project/layout cell.
 
 The ``main_cli`` entry point is the command-line contract used by the IHP
-package's ``layout/device_generator.py``.
+package's ``layout/devices/generator.py``.
 """
 
 from __future__ import annotations
@@ -531,8 +531,9 @@ def parameter_specs_for(ihp_root: str | Path | None, module_name: str, class_nam
 # Package-local PCell runtime
 # ---------------------------------------------------------------------------
 #
-# PDK packages ship ``layout/pcells.py`` (or ``layout/pcells/<module>.py``)
-# modules whose classes build geometry through the ``icepy`` layout builder.
+# PDK packages ship ``layout/devices/pcell/pcells.py`` (or another module in
+# ``layout/devices/pcell/``) whose classes build geometry through the ``icepy``
+# layout builder.
 # The generator contract is intentionally small so packages stay independent
 # from KLayout, gdsfactory, or any other external PCell runtime.
 
@@ -589,19 +590,19 @@ def package_parameter_values(specs, overrides: dict[str, str] | None = None):
 
 
 def load_package_pcell_module(pdk_root: str | Path, module_name: str):
-    """Import a package PCell module by name from ``<pdk>/layout``."""
+    """Import a package PCell module by name from ``<pdk>/layout/devices/pcell``."""
     import importlib.util
 
     root = Path(pdk_root).resolve()
     candidates = [
-        root / "layout" / "pcells" / f"{module_name}.py",
-        root / "layout" / f"{module_name}.py",
-        root / "layout" / "pcells.py",
+        root / "layout" / "devices" / "pcell" / f"{module_name}.py",
+        root / "layout" / "devices" / "pcell" / "pcells.py",
     ]
     path = next((candidate for candidate in candidates if candidate.is_file()), None)
     if path is None:
         raise RuntimeError(
-            f"PCell module '{module_name}' was not found under {root / 'layout'}"
+            f"PCell module '{module_name}' was not found under "
+            f"{root / 'layout' / 'devices' / 'pcell'}"
         )
     unique_name = f"ice_package_pcells_{abs(hash(path))}_{module_name}"
     spec = importlib.util.spec_from_file_location(unique_name, path)

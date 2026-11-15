@@ -148,7 +148,7 @@ The API is new-format-only and reads runs from `build/simulations`.
 `icepy.pcells` has two package-facing paths.
 
 **ICE-native package PCells** use `PackagePcell` subclasses stored in
-`<package>/layout/pcells.py`. Each class declares its parameter metadata,
+`<package>/layout/devices/pcell/pcells.py`. Each class declares its parameter metadata,
 logical layer map, and device family. The runtime builds it through the normal
 `icepy` layout builder and returns JSON geometry:
 
@@ -161,12 +161,12 @@ geometry = pcells.generate_package_geometry(
 ```
 
 `generate_package_geometry(...)` is the contract behind
-`layout/device_generator.py` and `layout/generate_devices.py`. The Sky130 and
+`layout/devices/generator.py` and `layout/devices/build.py`. The Sky130 and
 GF180MCU packages use this path, so their PCell replicas are defined entirely
 with the ICE layout API.
 
 **IHP PyCell runtime.** The upstream IHP PyCell implementations are vendored
-inside the IHP package under `upstream/ihp`. `icepy` provides the ICE-side
+inside the IHP package under `vendor/ihp`. `icepy` provides the ICE-side
 runtime, transfers generated polygons directly into an `icepy` layout cell, and
 converts the PyCell `MkPin` terminal declarations into layout pins:
 
@@ -192,17 +192,17 @@ print(len(cell.shapes), cell.bounds)
 The IHP package uses this runtime through:
 
 ```text
-ice-pkg-ihp/layout/device_generator.py
+ice-pkg-ihp/layout/devices/generator.py
 ```
 
 ICE loads that package hook for layout-device regeneration, and the package
-passes its vendored `upstream/ihp` tree as the IHP root. Building `icepy` is
+passes its vendored `vendor/ihp` tree as the IHP root. Building `icepy` is
 therefore required for IHP PCell regeneration.
 
 The generic package generator contract is:
 
 ```text
-<pdk-root>/layout/device_generator.py --pdk-root <package> \
+<pdk-root>/layout/devices/generator.py --pdk-root <package> \
     --module <module> --class <class> \
     --params-file <params.json> --output <geometry.json>
 ```

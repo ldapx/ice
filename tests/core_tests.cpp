@@ -1815,11 +1815,11 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     auto repositoryRoot = std::filesystem::temp_directory_path() / "ice-package-test";
     std::filesystem::remove_all(repositoryRoot);
     std::filesystem::create_directories(repositoryRoot / "example-lib");
-    std::filesystem::create_directories(repositoryRoot / "example-pdk" / "layout");
+    std::filesystem::create_directories(repositoryRoot / "example-pdk" / "technology");
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
         << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n"
            "\n[pdk]\ndisplay_name = \"Example PDK\"\ndefault_schematic = \"example_top\"\n"
-           "default_stack = \"base\"\n"
+           "default_stack = \"base\"\nmanufacturing_grid = 5\n"
            "\n[pdk.implementation]\nengine = \"openroad\"\nsynthesis = \"yosys\"\nmin_openroad = \"2.0\"\n"
            "site = \"example_site\"\ntech_lef = \"implementation/tech.lef\"\n"
            "cell_lef = \"implementation/cells.lef\"\ngds = \"implementation/example.gds\"\n"
@@ -1831,7 +1831,7 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
            "layers = [\"diff.drawing\", \"metal1.drawing\"]\n"
            "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\nminimum_width = 150\n"
            "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\nminimum_width = 230\n";
-    std::ofstream(repositoryRoot / "example-pdk/layout/layer-styles.json")
+    std::ofstream(repositoryRoot / "example-pdk/technology/layer-styles.json")
         << R"({"schema_version": 1, "layers": [{"name": "diff", "color": "#123456", "pattern": "Diagonal /", "visible": true}]})";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
         << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
@@ -1846,6 +1846,7 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     if (pdk.pdk) {
         CHECK(pdk.pdk->displayName == "Example PDK");
         CHECK(pdk.pdk->defaultSchematic == "example_top");
+        CHECK(pdk.pdk->manufacturingGrid == 5);
         CHECK(pdk.pdk->layers.size() == 2);
         CHECK(pdk.pdk->layers.front().name == "diff.drawing");
         CHECK(pdk.pdk->layers.front().number == 65);
@@ -2123,7 +2124,7 @@ TEST_CASE("package layout device libraries load") {
         {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos", 34, 0, 4},
     };
     for (const auto &package : packages) {
-        const auto path = repositoryRoot / package.directory / "layout" / "devices.json";
+        const auto path = repositoryRoot / package.directory / "layout" / "devices" / "index.json";
         if (!std::filesystem::is_regular_file(path))
             continue;
         const auto library = ice::LayoutDeviceLibrary::load(path);
@@ -2140,6 +2141,7 @@ TEST_CASE("package layout device libraries load") {
         const auto manifest = ice::PackageManager::readManifest(repositoryRoot / package.directory);
         CHECK(manifest.pdk.has_value());
         if (manifest.pdk) {
+            CHECK(manifest.pdk->manufacturingGrid == 5);
             const auto drawing =
                 std::find_if(manifest.pdk->layers.begin(), manifest.pdk->layers.end(), [&](const auto &layer) {
                     return layer.number == package.drawingLayer && layer.datatype == package.drawingDatatype;
@@ -2157,8 +2159,23 @@ TEST_CASE("package layout device libraries load") {
         if (device) {
             CHECK(device->generator.has_value());
             CHECK(!device->parameters.empty());
-            CHECK(!device->shapes.empty());
-            CHECK(device->bounds.valid());
+            CHECK(device->shapes.empty());
+        }
+        for (const auto &cell : library.cells) {
+            if (cell.generator) {
+                CHECK(cell.shapes.empty());
+            } else if (!cell.shapes.empty()) {
+                CHECK(cell.bounds.valid());
+            }
+        }
+        if (std::string(package.directory) == "ice-pkg-ihp-sg13g2") {
+            const auto *fixed = findCell("nmoscl_2");
+            CHECK(fixed != nullptr);
+            if (fixed) {
+                CHECK(!fixed->generator.has_value());
+                CHECK(!fixed->shapes.empty());
+                CHECK(fixed->bounds.valid());
+            }
         }
     }
 }
@@ -2486,7 +2503,7 @@ TEST_CASE("project saves reject stale revisions") {
 TEST_CASE("PDK discovery reports missing OSDI models and a usable lib line") {
     const auto root = std::filesystem::temp_directory_path() / "ice-pdk-package-test";
     std::filesystem::remove_all(root);
-    const auto models = root / "libs.tech" / "ngspice" / "models";
+    const auto models = root / "simulation" / "ngspice" / "models";
     std::filesystem::create_directories(models);
     std::ofstream(models / "cornerMOSlv.lib") << ".LIB mos_tt\n.model sg13_lv_nmos psp103va\n.ENDL mos_tt\n";
     std::ofstream(models / "sg13g2_moslv_parm.lib") << ".model sg13g2_lv_nmos_psp psp103va\n";
@@ -2502,7 +2519,7 @@ display_name = "Test IHP"
 
 [pdk.simulation]
 engine = "ngspice"
-root = "libs.tech/ngspice"
+root = "simulation/ngspice"
 model_file = "models/cornerMOSlv.lib"
 section = "mos_tt"
 requires_osdi = true

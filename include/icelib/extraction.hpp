@@ -58,7 +58,7 @@ struct DeviceExtractionRules {
 std::optional<DeviceExtractionRules> loadDeviceExtractionRules(const std::filesystem::path &path,
                                                                std::string *error = nullptr);
 
-// Searches installed PDK packages for `layout/extraction.json`.
+// Searches installed PDK packages for `technology/extraction.json`.
 std::optional<DeviceExtractionRules> loadDeviceExtractionRulesForPdk(const std::string &pdkId,
                                                                      std::string *error = nullptr);
 

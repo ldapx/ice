@@ -244,6 +244,7 @@ PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
         info.missing.push_back("package does not declare a [pdk] section");
         return info;
     }
+    info.manufacturingGrid = spec.pdk->manufacturingGrid;
     if (!spec.pdk->simulation) {
         info.root = spec.root;
         info.missing.push_back("package does not declare [pdk.simulation]");
@@ -456,6 +457,17 @@ std::vector<PdkInfo> findPdks(const std::string &idOrPath, const std::vector<std
     return result;
 }
 
+Coordinate pdkManufacturingGrid(const std::string &idOrPath) {
+    const auto pdks = findPdks(idOrPath);
+    return pdks.empty() ? 0 : pdks.front().manufacturingGrid;
+}
+
+void applyPdkDefaultGrid(Project &project, const std::string &pdkId) {
+    const auto grid = pdkManufacturingGrid(pdkId);
+    if (grid > 0 && project.grid == 1)
+        project.grid = grid;
+}
+
 PdkBuildResult buildPdkOsdi(const PdkInfo &info, std::chrono::milliseconds timeout) {
     PdkBuildResult result;
     if (!info.packageSimulation || info.packageSimulation->osdiSources.empty()) {
@@ -639,6 +651,7 @@ nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
                    {"package", info.packageName},
                    {"package_version", info.packageVersion},
                    {"package_root", info.packageRoot.string()},
+                   {"manufacturing_grid", info.manufacturingGrid},
                    {"version_root", info.versionRoot.string()},
                    {"version", info.version},
                    {"ngspice_model_dir", info.root.empty() ? json(nullptr) : json(info.root.string())},
@@ -662,9 +675,9 @@ nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
                    {"recommended_setup", info.recommendedSetup},
                    {"init_commands", info.initCommands},
                    {"example_devices", info.exampleDevices}};
-    const auto layoutLibrary = info.packageRoot / "layout" / "devices.json";
-    const auto layoutGenerator = info.packageRoot / "layout" / "device_generator.py";
-    const auto layoutExtraction = info.packageRoot / "layout" / "extraction.json";
+    const auto layoutLibrary = info.packageRoot / "layout" / "devices" / "index.json";
+    const auto layoutGenerator = info.packageRoot / "layout" / "devices" / "generator.py";
+    const auto layoutExtraction = info.packageRoot / "technology" / "extraction.json";
     result["layout_library"] =
         std::filesystem::is_regular_file(layoutLibrary) ? json(layoutLibrary.string()) : json(nullptr);
     result["layout_generator"] =

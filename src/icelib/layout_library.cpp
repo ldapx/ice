@@ -63,15 +63,18 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
             cell.name = cellJson.at("name").get<std::string>();
             cell.category = cellJson.value("category", std::string{});
             cell.source = cellJson.value("source", std::string{});
-            const auto &bounds = cellJson.at("bounds");
-            if (!bounds.is_array() || bounds.size() != 4)
+            if (const auto boundsIt = cellJson.find("bounds");
+                boundsIt != cellJson.end() && boundsIt->is_array() && boundsIt->size() == 4) {
+                const auto minX = coordinateAt(boundsIt->at(0), "minimum X");
+                const auto minY = coordinateAt(boundsIt->at(1), "minimum Y");
+                const auto maxX = coordinateAt(boundsIt->at(2), "maximum X");
+                const auto maxY = coordinateAt(boundsIt->at(3), "maximum Y");
+                cell.bounds = Rect{minX, minY, maxX - minX, maxY - minY};
+            } else if (boundsIt != cellJson.end()) {
                 throw ProjectError("layout.library", "Layout library cell bounds are invalid: " + cell.name);
-            const auto minX = coordinateAt(bounds.at(0), "minimum X");
-            const auto minY = coordinateAt(bounds.at(1), "minimum Y");
-            const auto maxX = coordinateAt(bounds.at(2), "maximum X");
-            const auto maxY = coordinateAt(bounds.at(3), "maximum Y");
-            cell.bounds = Rect{minX, minY, maxX - minX, maxY - minY};
-            for (const auto &shapeJson : cellJson.at("shapes")) {
+            }
+            const auto shapes = cellJson.contains("shapes") ? cellJson.at("shapes") : json::array();
+            for (const auto &shapeJson : shapes) {
                 LayoutDeviceShape shape;
                 shape.layer = shapeJson.at("layer").get<int>();
                 shape.datatype = shapeJson.at("datatype").get<int>();
@@ -84,7 +87,8 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
                 if (shape.polygon.size() >= 3)
                     cell.shapes.push_back(std::move(shape));
             }
-            for (const auto &portJson : cellJson.at("ports")) {
+            const auto ports = cellJson.contains("ports") ? cellJson.at("ports") : json::array();
+            for (const auto &portJson : ports) {
                 LayoutDevicePort port;
                 port.name = portJson.at("name").get<std::string>();
                 port.layer = portJson.at("layer").get<int>();
