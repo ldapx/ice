@@ -409,6 +409,7 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
     const auto generatedCell = createLayoutCell(project, generatedName, pdk, stack);
     const auto id = project.nextId();
     project.layoutCells.at(generatedCell).generatedBy = id;
+    project.layoutCells.at(generatedCell).readOnly = true;
     project.proceduralLayouts.emplace(
         id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(stack), std::move(script), generatedCell});
     return id;

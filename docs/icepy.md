@@ -143,6 +143,31 @@ for name, run in runs.items():
 
 The API is new-format-only and reads runs from `build/simulations`.
 
+## Procedural layouts
+
+`icepy.Project` exposes procedural layouts alongside static layout cells:
+
+```python
+project = icepy.new_project("generated_demo")
+procedural = project.create_procedural_layout(
+    "generated_top",
+    "generic",
+    "",
+    'metal = layout.layer("Metal1", 1, 0)\n'
+    'metal.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))\n',
+)
+assert procedural.needs_regeneration
+procedural = project.regenerate_procedural_layout("generated_top")
+assert not procedural.needs_regeneration
+cell = project.layout_cell_by_id(procedural.generated_cell)
+```
+
+The script API includes datatype-aware layers, unit helpers, rectangles,
+polygons, paths, text, vias, rectangular arrays, ports, and instances. Generated
+children are read-only and can be inspected, exported, or instanced by other
+layout cells. `ProceduralLayout` exposes the generated script/output hashes and
+`needs_regeneration`.
+
 ## PCell runtime
 
 `icepy.pcells` has two package-facing paths.

@@ -629,6 +629,12 @@ std::string Project::serialize() const {
                       {"generated_cell", layout.generatedCell}};
         if (!layout.stack.empty())
             entry["stack"] = layout.stack;
+        if (!layout.generatedScriptHash.empty())
+            entry["generated_script_hash"] = layout.generatedScriptHash;
+        if (!layout.generatedPdkVersion.empty())
+            entry["generated_pdk_version"] = layout.generatedPdkVersion;
+        if (!layout.generatedOutputHash.empty())
+            entry["generated_output_hash"] = layout.generatedOutputHash;
         j["procedural_layouts"].push_back(std::move(entry));
     }
     j["implementation_runs"] = json::array();
@@ -989,6 +995,9 @@ Project Project::deserialize(const std::string &text) {
                 entry.stack = layout.value("stack", std::string{});
                 entry.script = layout.value("script", std::string{});
                 entry.generatedCell = layout.value("generated_cell", ObjectId{0});
+                entry.generatedScriptHash = layout.value("generated_script_hash", std::string{});
+                entry.generatedPdkVersion = layout.value("generated_pdk_version", std::string{});
+                entry.generatedOutputHash = layout.value("generated_output_hash", std::string{});
                 const auto layoutId = entry.id;
                 p.proceduralLayouts.emplace(layoutId, std::move(entry));
             }
@@ -1517,6 +1526,130 @@ void Project::save(const std::filesystem::path &path) const {
     sourceRoot_ = root;
     sourceRevision_ = projectRevision(root);
     spdlog::info("Saved project {}", (root / "project.icepro").string());
+}
+
+std::filesystem::path Project::saveCellFile(ObjectId id) const {
+    const auto diagnostics = validate();
+    if (!diagnostics.empty())
+        throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+    if (sourceRoot_.empty())
+        throw ProjectError("project.save", "Project has not been saved to disk yet");
+
+    const auto root = sourceRoot_;
+    ProjectSaveLock saveLock(root);
+    if (!sourceRevision_.empty()) {
+        const auto currentRevision = projectRevision(root);
+        if (currentRevision != sourceRevision_)
+            throw ProjectError("project.changed",
+                               "Project files changed on disk since this project was loaded (another ICE process "
+                               "may have saved). Reload the project before saving.");
+    }
+
+    const bool schematic = schematicCells.contains(id);
+    const bool layout = layoutCells.contains(id);
+    const bool procedural = proceduralLayouts.contains(id);
+    if (static_cast<int>(schematic) + static_cast<int>(layout) + static_cast<int>(procedural) != 1)
+        throw ProjectError("project.save", "Project cell not found: " + std::to_string(id));
+
+    const auto directory = root / (schematic ? "sch" : "lay");
+    const auto extension = schematic ? std::string{".icesch"} : std::string{".icelay"};
+    std::filesystem::create_directories(directory);
+
+    // Reuse the existing file when the cell already has one. This keeps a
+    // rename or move from leaving a stale duplicate in the project directory.
+    const auto matches = [&](const std::filesystem::path &path) {
+        try {
+            const auto document = readJsonFile(path);
+            const json *object = nullptr;
+            if (document.contains("cell"))
+                object = &document.at("cell");
+            else if (document.contains("layout"))
+                object = &document.at("layout");
+            else if (document.contains("procedural_layout"))
+                object = &document.at("procedural_layout");
+            return object && object->value("id", ObjectId{0}) == id;
+        } catch (...) {
+            return false;
+        }
+    };
+    std::filesystem::path path;
+    std::set<std::string> usedStems;
+    std::error_code status;
+    for (std::filesystem::directory_iterator it(directory, status), end; !status && it != end; it.increment(status)) {
+        if (!it->is_regular_file() || it->path().extension() != extension)
+            continue;
+        usedStems.insert(it->path().stem().string());
+        if (matches(it->path())) {
+            path = it->path();
+            break;
+        }
+    }
+
+    if (path.empty()) {
+        // Existing files may still use an older stem after a rename. Reserve
+        // them so a newly created cell cannot overwrite another cell's file.
+        std::set<std::string> used = usedStems;
+        if (schematic) {
+            for (const auto &[cellId, cell] : schematicCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+        } else {
+            for (const auto &[cellId, cell] : layoutCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+            if (path.empty()) {
+                for (const auto &[cellId, cell] : proceduralLayouts) {
+                    const auto stem = uniqueStem(cell.name, cellId, used);
+                    if (cellId == id) {
+                        path = directory / (stem + extension);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (path.empty())
+        throw ProjectError("project.save", "Unable to resolve the project file for cell " + std::to_string(id));
+
+    const auto full = json::parse(serialize());
+    json envelope;
+    if (schematic) {
+        for (const auto &cell : full.at("schematic_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-schematic"}, {"schema_version", 1}, {"cell", cell}};
+            break;
+        }
+    } else if (layout) {
+        for (const auto &cell : full.at("layout_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-layout"}, {"schema_version", 2}, {"layout", cell}};
+            break;
+        }
+    } else {
+        for (const auto &cell : full.at("procedural_layouts")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", cell}};
+            break;
+        }
+    }
+    if (envelope.is_null())
+        throw ProjectError("project.save", "Unable to serialize project cell " + std::to_string(id));
+
+    writeJsonFile(path, envelope);
+    sourceRoot_ = root;
+    sourceRevision_ = projectRevision(root);
+    return path;
 }
 
 Project Project::load(const std::filesystem::path &path) { return load(path, {}, nullptr); }

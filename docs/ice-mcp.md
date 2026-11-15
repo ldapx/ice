@@ -98,6 +98,10 @@ and ask the user to rebuild/restart ICE.
 | `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
 | `schematic_validate_hierarchy` | Validate HDL instances, pin/port mapping, nets, buses, and mixed-signal support. |
 | `layout_create` | Create a static layout cell; accepts optional `pdk` and `stack`. |
+| `layout_create_procedural` | Create a procedural layout and optionally generate it immediately. |
+| `layout_regenerate` | Run a procedural layout script and replace its read-only generated child. |
+| `layout_get_script` | Read a procedural layout script and its generation hashes/stale state. |
+| `layout_set_script` | Replace a procedural layout script without regenerating. |
 | `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 | `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |

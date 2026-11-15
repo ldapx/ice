@@ -1758,11 +1758,11 @@ class DocumentWindow : public QMainWindow {
         return true;
     }
 
-    void saveProject() {
+    bool prepareProjectSave() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Save Project"),
                                      QStringLiteral("Create or open a project first."));
-            return;
+            return false;
         }
         const bool hadExternalConflicts = !conflictedSchematicFiles_.empty() || !conflictedLayoutFiles_.empty() ||
                                           !conflictedProceduralFiles_.empty();
@@ -1772,7 +1772,7 @@ class DocumentWindow : public QMainWindow {
                                                      !conflictedLayoutFiles_.empty() ||
                                                      !conflictedProceduralFiles_.empty();
         if (hadExternalConflictsAfterReload && !resolveExternalFileConflicts())
-            return;
+            return false;
         if (projectDiskChangePending_) {
             const auto response =
                 QMessageBox::warning(this, QStringLiteral("Save Project"),
@@ -1783,9 +1783,15 @@ class DocumentWindow : public QMainWindow {
                 statusBar()->showMessage(
                     QStringLiteral("Save cancelled. Use File > Reload Project from Disk to load external changes."),
                     10000);
-                return;
+                return false;
             }
         }
+        return true;
+    }
+
+    void saveProject() {
+        if (!prepareProjectSave())
+            return;
 
         auto path = projectPath_;
         if (path.isEmpty())
@@ -1821,6 +1827,107 @@ class DocumentWindow : public QMainWindow {
             suppressProjectWatcher_ = false;
             configureProjectWatcher();
             QMessageBox::critical(this, QStringLiteral("Save Project"), QString::fromStdString(error.what()));
+        }
+    }
+
+    bool saveCurrentFile() {
+        if (!project_ || !documents_)
+            return false;
+
+        enum class Kind { none, schematic, layout, procedural, report };
+        Kind kind = Kind::none;
+        ice::ObjectId id = 0;
+        if (documents_->currentWidget() == schematicPage_ && activeSchematicId_ != 0 &&
+            project_->project().schematicCells.contains(activeSchematicId_)) {
+            kind = Kind::schematic;
+            id = activeSchematicId_;
+        } else if (documents_->currentWidget() == layoutPage_) {
+            if (activeProceduralLayoutId_ != 0 &&
+                project_->project().proceduralLayouts.contains(activeProceduralLayoutId_)) {
+                kind = Kind::procedural;
+                id = activeProceduralLayoutId_;
+            } else if (activeLayoutId_ != 0 && project_->project().layoutCells.contains(activeLayoutId_)) {
+                kind = Kind::layout;
+                id = activeLayoutId_;
+            }
+        } else if (documents_->currentWidget() == simulationTestbenchPage_ && digitalTestbenchEditorTabs_ &&
+                   currentDigitalTestbenchEditor()) {
+            const auto index = digitalTestbenchEditorTabs_->currentIndex();
+            if (index >= 0) {
+                const auto cellId =
+                    static_cast<ice::ObjectId>(digitalTestbenchEditorTabs_->tabBar()->tabData(index).toULongLong());
+                if (cellId != 0 && project_->project().schematicCells.contains(cellId)) {
+                    kind = Kind::schematic;
+                    id = cellId;
+                }
+            }
+        } else if (documents_->currentWidget() == simulationPage_ && simulationRightStack_ && reportsView_ &&
+                   simulationRightStack_->currentWidget() == reportsView_) {
+            kind = Kind::report;
+        }
+
+        if (kind == Kind::none) {
+            statusBar()->showMessage(
+                QStringLiteral("No file is selected. Use File > Save Whole Project to save the project."), 8000);
+            return false;
+        }
+        if (kind == Kind::report) {
+            if (!saveReportSource())
+                return false;
+            const auto *report = selectedReport();
+            statusBar()->showMessage(
+                QStringLiteral("Saved %1")
+                    .arg(report ? QString::fromStdString(report->path) : QStringLiteral("simulation script")),
+                5000);
+            return true;
+        }
+        if (!prepareProjectSave())
+            return false;
+        // A newly created project has not been loaded back from disk yet.
+        // Materialize it once before switching to per-file saves.
+        if (project_->project().sourceRevision().empty()) {
+            saveProject();
+            return !project_->project().sourceRevision().empty();
+        }
+
+        suppressProjectWatcher_ = true;
+        if (projectWatcherResumeTimer_)
+            projectWatcherResumeTimer_->stop();
+        clearProjectWatcher();
+        try {
+            const auto path = project_->project().saveCellFile(id);
+            if (kind == Kind::schematic) {
+                if (const auto cell = project_->project().schematicCells.find(id);
+                    cell != project_->project().schematicCells.end())
+                    savedSchematicSignatures_[id] = schematicFileSignature(cell->second);
+                conflictedSchematicFiles_.erase(id);
+                externalSchematicFiles_.erase(id);
+            } else if (kind == Kind::layout) {
+                if (const auto cell = project_->project().layoutCells.find(id);
+                    cell != project_->project().layoutCells.end())
+                    savedLayoutSignatures_[id] = layoutFileSignature(cell->second);
+                conflictedLayoutFiles_.erase(id);
+                externalLayoutFiles_.erase(id);
+            } else if (kind == Kind::procedural) {
+                if (const auto cell = project_->project().proceduralLayouts.find(id);
+                    cell != project_->project().proceduralLayouts.end())
+                    savedProceduralSignatures_[id] = proceduralFileSignature(cell->second);
+                conflictedProceduralFiles_.erase(id);
+                externalProceduralFiles_.erase(id);
+            }
+            updateFileTabDirtyIndicators();
+            projectDiskChangePending_ = false;
+            configureProjectWatcher();
+            if (projectWatcherResumeTimer_)
+                projectWatcherResumeTimer_->start();
+            statusBar()->showMessage(
+                QStringLiteral("Saved %1").arg(QFileInfo(QString::fromStdString(path.string())).fileName()), 5000);
+            return true;
+        } catch (const ice::ProjectError &error) {
+            suppressProjectWatcher_ = false;
+            configureProjectWatcher();
+            QMessageBox::critical(this, QStringLiteral("Save File"), QString::fromStdString(error.what()));
+            return false;
         }
     }
 
@@ -3079,7 +3186,11 @@ class DocumentWindow : public QMainWindow {
                 ice::applyPdkDefaultGrid(project, pdk);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
                                                            ice::defaultProceduralLayoutScript(), stack);
-                generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
+                const auto run = ice::regenerateProceduralLayout(project, proceduralId,
+                                                                 QCoreApplication::applicationFilePath().toStdString());
+                generated = run.ok;
+                if (!run.ok)
+                    generationError = QString::fromStdString(run.error);
             });
             project_->setLastHistoryLabel("Created procedural layout " + name.trimmed().toStdString());
             const auto &procedural = project_->project().proceduralLayouts.at(proceduralId);
@@ -3114,8 +3225,10 @@ class DocumentWindow : public QMainWindow {
         QString error;
         try {
             project_->execute("regenerate procedural layout", [&](ice::Project &project) {
-                if (!ice::regenerateProceduralLayout(project, proceduralId, &error))
-                    throw ice::ProjectError("layout.procedural.generate", error.toStdString());
+                const auto run = ice::regenerateProceduralLayout(project, proceduralId,
+                                                                 QCoreApplication::applicationFilePath().toStdString());
+                if (!run.ok)
+                    throw ice::ProjectError("layout.procedural.generate", run.error);
             });
         } catch (const ice::ProjectError &exception) {
             if (error.isEmpty())
@@ -3314,6 +3427,10 @@ class DocumentWindow : public QMainWindow {
             const auto script = QString::fromStdString(it->second.script);
             if (proceduralEditor_->script() != script)
                 proceduralEditor_->setScript(script);
+        }
+        if (ice::proceduralLayoutNeedsRegeneration(it->second)) {
+            statusBar()->showMessage(
+                QStringLiteral("Generated layout is out of date; press Regenerate layout to update it."), 8000);
         }
     }
 
@@ -10546,9 +10663,15 @@ class DocumentWindow : public QMainWindow {
                 const auto procedural = project_->project().proceduralLayouts.find(id);
                 if (procedural != project_->project().proceduralLayouts.end()) {
                     const bool conflict = conflictedProceduralFiles_.contains(id);
-                    layoutCellTabs_->setTabText(index,
-                                                fileTabLabel(QString::fromStdString(procedural->second.name),
-                                                             QStringLiteral("py"), layoutFileDirty(id), conflict));
+                    auto label = fileTabLabel(QString::fromStdString(procedural->second.name), QStringLiteral("py"),
+                                              layoutFileDirty(id), conflict);
+                    const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(procedural->second);
+                    if (needsRegeneration)
+                        label.prepend(QStringLiteral("↻ "));
+                    layoutCellTabs_->setTabText(index, label);
+                    layoutCellTabs_->setTabToolTip(
+                        index, QStringLiteral("Procedural layout (Python script)") +
+                                   (needsRegeneration ? QStringLiteral(" · regenerate needed") : QString{}));
                     continue;
                 }
                 const auto cell = project_->project().layoutCells.find(id);
@@ -10668,11 +10791,16 @@ class DocumentWindow : public QMainWindow {
                     if (!openLayoutTabs_.contains(id))
                         continue;
                     const auto index = layoutCellTabs_->count();
-                    layoutCellTabs_->addTab(new QWidget,
-                                            fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
-                                                         layoutFileDirty(id), conflictedProceduralFiles_.contains(id)));
+                    auto label = fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
+                                              layoutFileDirty(id), conflictedProceduralFiles_.contains(id));
+                    const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(procedural);
+                    if (needsRegeneration)
+                        label.prepend(QStringLiteral("↻ "));
+                    layoutCellTabs_->addTab(new QWidget, label);
                     layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
-                    layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
+                    layoutCellTabs_->setTabToolTip(
+                        index, QStringLiteral("Procedural layout (Python script)") +
+                                   (needsRegeneration ? QStringLiteral(" · regenerate needed") : QString{}));
                 }
                 for (const auto &[id, cell] : project.layoutCells) {
                     if (!openLayoutTabs_.contains(id))
@@ -11704,11 +11832,14 @@ class DocumentWindow : public QMainWindow {
         auto *newAction = addCommand(QStringLiteral("New Project"), QKeySequence::New);
         auto *openAction = addCommand(QStringLiteral("Open Project"), QKeySequence::Open);
         auto *reloadProjectAction = addCommand(QStringLiteral("Reload Project from Disk"));
-        auto *saveAction = addCommand(QStringLiteral("Save Project"), QKeySequence::Save);
+        auto *saveAction = addCommand(QStringLiteral("Save"), QKeySequence::Save);
+        auto *saveProjectAction =
+            addCommand(QStringLiteral("Save Whole Project"), QKeySequence(QStringLiteral("Ctrl+Shift+S")));
         fileMenu->addAction(newAction);
         fileMenu->addAction(openAction);
         fileMenu->addAction(reloadProjectAction);
         fileMenu->addAction(saveAction);
+        fileMenu->addAction(saveProjectAction);
         fileMenu->addSeparator();
         auto *openLayoutAction = addCommand(QStringLiteral("Open GDS/OASIS Layout"));
         auto *saveLayoutAction = addCommand(QStringLiteral("Save GDS/OASIS Layout"));
@@ -11844,7 +11975,8 @@ class DocumentWindow : public QMainWindow {
         connect(newAction, &QAction::triggered, this, &DocumentWindow::newProject);
         connect(openAction, &QAction::triggered, this, &DocumentWindow::openProject);
         connect(reloadProjectAction, &QAction::triggered, this, [this] { reloadProjectFromDisk(true); });
-        connect(saveAction, &QAction::triggered, this, &DocumentWindow::saveProject);
+        connect(saveAction, &QAction::triggered, this, &DocumentWindow::saveCurrentFile);
+        connect(saveProjectAction, &QAction::triggered, this, &DocumentWindow::saveProject);
         connect(openLayoutAction, &QAction::triggered, this, &DocumentWindow::openLayoutInterchange);
         connect(saveLayoutAction, &QAction::triggered, this, &DocumentWindow::saveLayoutInterchange);
         connect(closeAction, &QAction::triggered, this, &DocumentWindow::closeProject);
@@ -12151,10 +12283,13 @@ class DocumentWindow : public QMainWindow {
             if (!hasOpenLayouts) {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
                 if (project_) {
-                    for (const auto &[id, layout] : project_->project().proceduralLayouts)
-                        candidates.emplace_back(id, fileTabLabel(QString::fromStdString(layout.name),
-                                                                 QStringLiteral("py"), layoutFileDirty(id),
-                                                                 conflictedProceduralFiles_.contains(id)));
+                    for (const auto &[id, layout] : project_->project().proceduralLayouts) {
+                        auto label = fileTabLabel(QString::fromStdString(layout.name), QStringLiteral("py"),
+                                                  layoutFileDirty(id), conflictedProceduralFiles_.contains(id));
+                        if (ice::proceduralLayoutNeedsRegeneration(layout))
+                            label.prepend(QStringLiteral("↻ "));
+                        candidates.emplace_back(id, label);
+                    }
                     for (const auto &[id, cell] : project_->project().layoutCells)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
                                                                  QStringLiteral("icelay"), layoutFileDirty(id),

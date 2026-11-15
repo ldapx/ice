@@ -135,6 +135,10 @@ def main() -> int:
                 "ice_help",
                 "layout_add_instance",
                 "layout_add_port",
+                "layout_create_procedural",
+                "layout_regenerate",
+                "layout_get_script",
+                "layout_set_script",
                 "layout_list_ports",
                 "layout_update_port",
                 "layout_remove_port",
@@ -224,6 +228,23 @@ def main() -> int:
             mcp.tool("schematic_netlist", schematic="ring_test")
 
             mcp.tool("layout_create", name="pin_test")
+            procedural = mcp.tool("layout_create_procedural", name="proc_test")
+            assert procedural["generated"], procedural
+            assert procedural["generated_cell"], procedural
+            script = mcp.tool("layout_get_script", layout="proc_test")["script"]
+            assert "layout.layer" in script, script
+            mcp.tool(
+                "layout_set_script",
+                layout="proc_test",
+                script=script + "\nmetal1.rectangle(0, 0, 100, 100)\n",
+            )
+            procedural_info = mcp.tool("layout_info", cell="proc_test")
+            assert procedural_info["procedural"] is True, procedural_info
+            assert procedural_info["needs_regeneration"] is True, procedural_info
+            regenerated = mcp.tool("layout_regenerate", layout="proc_test")
+            assert regenerated["ok"] is True, regenerated
+            procedural_info = mcp.tool("layout_info", cell="proc_test")
+            assert procedural_info["needs_regeneration"] is False, procedural_info
             mcp.tool("layout_add_layer", name="Metal1", number=8)
             mcp.tool("layout_add_net", cell="pin_test", name="VIN")
             mcp.tool(
