@@ -801,12 +801,16 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
                    {"pdk", cell.pdk},
                    {"stack", cell.stack},
                    {"library", cell.library},
+                   {"read_only", cell.readOnly},
                    {"device", cell.device},
                    {"generated_by", cell.generatedBy},
                    {"shapes", json::array()},
                    {"ports", json::array()},
                    {"instances", json::array()},
                    {"planned_devices", json::array()}};
+    if (cell.reference)
+        result["reference"] = {
+            {"path", cell.reference->path}, {"format", cell.reference->format}, {"top_cell", cell.reference->topCell}};
     for (const auto &[id, shape] : cell.shapes) {
         const auto layer = project.layers.find(shape.layer);
         json polygon = json::array();
@@ -1061,7 +1065,6 @@ void printHelp() {
               << "  project-info [folder|project.icepro]  (ICE_PROJECT or cwd search when omitted)\n"
               << "  project-validate <folder|project.icepro>\n"
               << "  project-repair <folder|project.icepro>\n"
-              << "  project-migrate <folder|project.icepro>\n"
               << "  doctor [project] [--probe]\n"
               << "  pdk-info [pdk] [--probe]\n"
               << "  pdk-build <pdk-or-package>\n\n"
@@ -1405,27 +1408,6 @@ int main(int argc, char **argv) {
             printJson({{"repaired", true},
                        {"warnings", loadReport.warnings},
                        {"quarantined_files", loadReport.quarantinedFiles}});
-            return 0;
-        }
-
-        if (command == "project-migrate") {
-            expectArguments(args, 2, 2, "project-migrate <folder|project.icepro>");
-            const auto root = projectRootForCli(args[1]);
-            const auto agentsPath = root / "AGENTS.md";
-            const auto readAgents = [&] {
-                std::ifstream input(agentsPath, std::ios::binary);
-                return std::string((std::istreambuf_iterator<char>(input)), {});
-            };
-            const auto before = readAgents();
-            auto project = ice::Project::load(args[1]);
-            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
-            ice::ProjectSession session(std::move(project));
-            session.save(args[1]);
-            const auto after = readAgents();
-            printJson({{"migrated", true},
-                       {"agents_updated", before != after},
-                       {"pdk_ids_updated", pdkIdsUpdated},
-                       {"guidance_version", 5}});
             return 0;
         }
 
@@ -2172,11 +2154,13 @@ int main(int argc, char **argv) {
                                   {"stack", cell.stack},
                                   {"procedural", false},
                                   {"library", cell.library},
+                                  {"read_only", cell.readOnly},
                                   {"device", cell.device},
                                   {"generated_by", cell.generatedBy},
                                   {"shapes", cell.shapes.size()},
                                   {"ports", cell.ports.size()},
-                                  {"instances", cell.instances.size()}});
+                                  {"instances", cell.instances.size()},
+                                  {"reference", cell.reference ? json(cell.reference->path) : json(nullptr)}});
             }
             for (const auto &[id, procedural] : project.proceduralLayouts) {
                 result.push_back({{"id", id},
@@ -2871,8 +2855,8 @@ int main(int argc, char **argv) {
 
         if (command == "implementation-import") {
             if (args.size() < 3)
-                argumentError(
-                    "Usage: ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]");
+                argumentError("Usage: ice-cli implementation-import <project> <run> [--layout-name <name>] "
+                              "[--replace]");
             auto project = ice::Project::load(args[1]);
             const auto runId = resolveImplementationRun(project, args[2]);
             auto &run = project.implementationRuns.at(runId);
@@ -2895,27 +2879,23 @@ int main(int argc, char **argv) {
                                         "No installed PDK package provides '" + run.config.pdk + "'");
             auto imported = ice::importImplementationLayout(project, run, *package, projectRootForCli(args[1]),
                                                             layoutName, replace);
-            if (imported.layout != 0)
-                project.save(args[1]);
-            json diagnosticArray = json::array();
-            for (const auto &diagnostic : imported.diagnostics)
-                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            project.save(args[1]);
             json response = {{"layout", imported.layout},
-                             {"def", imported.defPath.generic_string()},
-                             {"run", ice::implementationRunJson(run)},
-                             {"diagnostics", std::move(diagnosticArray)}};
-            if (imported.layout != 0) {
-                const auto &layout = project.layoutCells.at(imported.layout);
-                response["name"] = layout.name;
-                response["pdk"] = layout.pdk;
-                response["stack"] = layout.stack;
-                response["shapes"] = layout.shapes.size();
-                response["ports"] = layout.ports.size();
-                response["nets"] = layout.nets.size();
-                response["instances"] = layout.instances.size();
-            }
+                             {"stream", imported.referencePath.generic_string()},
+                             {"run", ice::implementationRunJson(run)}};
+            const auto &layout = project.layoutCells.at(imported.layout);
+            response["name"] = layout.name;
+            response["pdk"] = layout.pdk;
+            response["stack"] = layout.stack;
+            response["library"] = layout.library;
+            response["device"] = layout.device;
+            response["read_only"] = layout.readOnly;
+            response["shapes"] = layout.shapes.size();
+            response["ports"] = layout.ports.size();
+            response["nets"] = layout.nets.size();
+            response["instances"] = layout.instances.size();
             printJson(response);
-            return imported.layout != 0 ? 0 : 1;
+            return 0;
         }
 
         if (command == "implementation-export-gds") {

@@ -70,6 +70,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setSnapToGrid(bool enabled) = 0;
     virtual void setGridSpacing(qreal spacing) = 0;
     virtual void setDevicePreview(const ice::LayoutDeviceCell *cell) = 0;
+    virtual void setDevicePreviewModel(const ice::LayoutPreviewModel &model) = 0;
     virtual void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) = 0;
     virtual void restoreLayoutInstanceSelection() = 0;
     virtual void selectLayoutInstance(ice::ObjectId instanceId) = 0;
@@ -116,8 +117,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setShapeActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
     // Invoked when the user picks an entry of the figure context menu. The id
     // is the selected figure the menu was opened on.
-    virtual void setFigureContextActionCallback(
-        std::function<void(ice::ObjectId, FigureContextAction)> callback) = 0;
+    virtual void setFigureContextActionCallback(std::function<void(ice::ObjectId, FigureContextAction)> callback) = 0;
     // Invoked when the user right-clicks empty canvas space. The host owns the
     // menu contents (editor tools plus clipboard entries).
     virtual void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) = 0;

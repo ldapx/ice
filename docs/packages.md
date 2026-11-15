@@ -164,6 +164,7 @@ site = "GF018hv5v_green_sc9"
 tech_lef = "implementation/tech.lef"
 cell_lef = "implementation/cells.lef"
 gds = "implementation/cells.gds"
+layer_map = "implementation/cells.map"
 io_horizontal_layers = ["Metal3"]
 io_vertical_layers = ["Metal4"]
 routing_min_layer = "Metal1"
@@ -179,6 +180,11 @@ tt = ["implementation/tt.lib.gz"]
 ff = ["implementation/ff.lib.gz"]
 ss = ["implementation/ss.lib.gz"]
 ```
+
+`layer_map` is a KLayout LEF/DEF layer-map file. The final GDS export uses it to
+stream routed DEF geometry onto the PDK's real GDS layer numbers. Without a
+map, KLayout assigns sequential numbers to LEF layers, so routes, pins, labels,
+and the die outline land on layers that do not exist in the PDK.
 
 When `[pdk.implementation.orfs]` is present, ICE may resolve missing LEF,
 Liberty, site, IO-layer, routing, OpenRCX rule, and standard-cell GDS defaults
@@ -304,15 +310,17 @@ OASIS adapter exists.
 Each PDK package owns its layout device library:
 
 ```text
-<pdk-root>/layout/devices.json
+<pdk-root>/layout/devices.json       # library index
+<pdk-root>/layout/devices/*.icelay   # one layout cell per device
 <pdk-root>/layout/extraction.json    # polygon device extraction rules
 <pdk-root>/layout/device_generator.py
 <pdk-root>/layout/pcells.py          # ICE-native packages
 <pdk-root>/layout/generate_devices.py
 ```
 
-ICE resolves this library for the active layout PDK. The library declares
-PCell generator metadata (`module` and `class`) and a `cell_prefix` used for
+Every device is a real layout cell stored as a `.icelay` file. The
+`devices.json` index carries the library layers, ordering, categories, PCell
+generator metadata (`module` and `class`), and a `cell_prefix` used for
 instance names (for example `IHP `, `SKY130 `, or `GF180 `). Devices are edited
 and regenerated through the package-local generator; no global PDK installation
 is consulted.
@@ -325,9 +333,10 @@ cell.
 The Sky130 and GF180MCU packages ship ICE-native replicas of their PCell
 families in `layout/pcells.py`. They use the `icepy` layout builder API directly
 and do not require KLayout, gdsfactory, Volare, CIEL, or `PDK_ROOT`. Their
-`layout/devices.json` files are generated from the same definitions with
-`layout/generate_devices.py`, so the default geometry shown in **Devices** and
-the geometry produced after a parameter edit share one implementation.
+`layout/devices.json` index and `layout/devices/*.icelay` cells are generated
+from the same definitions with `layout/generate_devices.py`, so the default
+geometry shown in **Devices** and the geometry produced after a parameter edit
+share one implementation.
 
 `ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
 `layout_generator`, and `layout_extraction` paths for each installed package.

@@ -182,6 +182,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
         "implementation/tech.lef",
         "implementation/cells.lef",
         "implementation/example.gds",
+        {},
         {{"tt", {"implementation/tt.lib"}}},
         {"Metal2"},
         {"Metal3"},
@@ -191,6 +192,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
         "implementation/pdn.tcl",
         {},
         {"FILL1"},
+        {},
     };
     pdk.stacks.push_back(stack);
     package.pdk = pdk;
@@ -350,11 +352,13 @@ ice::PackagePdkStackImplementation executableTestPlatformFiles() {
             "implementation/tech.lef",
             "implementation/cells.lef",
             "implementation/example.gds",
+            {},
             {{"tt", {"implementation/tt.lib"}}},
             {"Metal2"},
             {"Metal3"},
             "Metal1",
             "Metal3",
+            {},
             {},
             {},
             {},
@@ -712,6 +716,71 @@ END DESIGN
                                         [](const auto &entry) { return entry.second.width == 400; });
     CHECK(wideRoute != cell.shapes.end());
     CHECK(project.validate().empty());
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("implementation import creates a native digital device") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-reference-test";
+    std::filesystem::remove_all(root);
+    const auto runDirectory = root / "build" / "impl" / "counter-1";
+    std::filesystem::create_directories(runDirectory / "final");
+    {
+        ice::Project source;
+        source.identity = "counter-source";
+        source.name = "counter-source";
+        const auto layer = ice::addLayer(source, "metal1", 34);
+        const auto sourceCell = ice::createLayoutCell(source, "counter");
+        ice::addRectangle(source, sourceCell, layer, ice::Rect{0, 0, 1000, 1000});
+        ice::LayoutInterchange::exportGds(source, sourceCell, runDirectory / "final" / "6_final.gds");
+    }
+
+    ice::Project project;
+    project.identity = "reference-test";
+    project.name = "reference-test";
+
+    ice::PackageSpec package;
+    package.name = "example.pkg";
+    package.version = "1.0.0";
+    package.pdk = ice::PackagePdk{};
+    package.pdk->id = "example.pdk";
+
+    ice::ImplementationRun run;
+    run.name = "counter";
+    run.directory = "build/impl/counter-1";
+    run.config.top = "counter";
+    run.config.pdk = "example.pdk";
+    run.config.stack = "";
+
+    const auto imported = ice::importImplementationLayout(project, run, package, root);
+    CHECK(imported.layout != 0);
+    CHECK(imported.referencePath.filename() == "6_final.gds");
+    const auto &cell = project.layoutCells.at(imported.layout);
+    CHECK(cell.readOnly);
+    CHECK(cell.library);
+    CHECK(cell.device == "digital:counter");
+    CHECK(!cell.reference.has_value());
+    CHECK(!cell.shapes.empty());
+    CHECK(cell.instances.empty());
+    CHECK(project.validate().empty());
+
+    project.save(root);
+    const auto loaded = ice::Project::load(root);
+    const auto loadedCell = loaded.layoutCells.find(imported.layout);
+    CHECK(loadedCell != loaded.layoutCells.end());
+    if (loadedCell != loaded.layoutCells.end()) {
+        CHECK(!loadedCell->second.reference.has_value());
+        CHECK(loadedCell->second.readOnly);
+        CHECK(loadedCell->second.library);
+        CHECK(loadedCell->second.device == "digital:counter");
+        CHECK(!loadedCell->second.shapes.empty());
+    }
+
+    std::filesystem::remove(root / "build" / "impl" / "counter-1" / "final" / "6_final.gds");
+    ice::Project missing;
+    missing.identity = "reference-missing";
+    missing.name = "reference-missing";
+    CHECK_THROWS_AS(ice::importImplementationLayout(missing, run, package, root), ice::ProjectError);
 
     std::filesystem::remove_all(root);
 }
@@ -1753,7 +1822,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
            "default_stack = \"base\"\n"
            "\n[pdk.implementation]\nengine = \"openroad\"\nsynthesis = \"yosys\"\nmin_openroad = \"2.0\"\n"
            "site = \"example_site\"\ntech_lef = \"implementation/tech.lef\"\n"
-           "cell_lef = \"implementation/cells.lef\"\nrouting_min_layer = \"Metal1\"\n"
+           "cell_lef = \"implementation/cells.lef\"\ngds = \"implementation/example.gds\"\n"
+           "layer_map = \"implementation/layers.map\"\nrouting_min_layer = \"Metal1\"\n"
            "routing_max_layer = \"Metal2\"\n"
            "\n[pdk.implementation.liberty]\ntt = [\"implementation/tt.lib\"]\n"
            "\n[pdk.implementation.orfs]\nplatform = \"example\"\nmetal_option = \"base\"\n"
@@ -1805,6 +1875,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
                 CHECK(implementation.files->site == "example_site");
                 CHECK(implementation.files->techLef == "implementation/tech.lef");
                 CHECK(implementation.files->cellLef == "implementation/cells.lef");
+                CHECK(implementation.files->gds == "implementation/example.gds");
+                CHECK(implementation.files->layerMap == "implementation/layers.map");
                 CHECK(implementation.files->routingMinLayer == "Metal1");
                 CHECK(implementation.files->routingMaxLayer == "Metal2");
                 CHECK(implementation.files->liberty.at("tt").front() == "implementation/tt.lib");
@@ -2351,14 +2423,15 @@ TEST_CASE("build info exposes a feature fingerprint") {
     CHECK(std::find(info.features.begin(), info.features.end(), "pdk_status") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "implementation_runs") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "implementation_openroad_plan") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "project_migrate") == info.features.end());
 }
 
-TEST_CASE("generated AGENTS guidance is versioned and stable") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-agents-migration-test";
+TEST_CASE("generated AGENTS guidance is created once and preserved") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-agents-guidance-test";
     std::filesystem::remove_all(root);
     ice::Project project;
-    project.identity = "agents-migration";
-    project.name = "agents-migration";
+    project.identity = "agents-guidance";
+    project.name = "agents-guidance";
     project.save(root);
 
     const auto path = root / "AGENTS.md";
@@ -2367,25 +2440,29 @@ TEST_CASE("generated AGENTS guidance is versioned and stable") {
         return std::string((std::istreambuf_iterator<char>(input)), {});
     };
     const auto first = read();
-    CHECK(first.find("ICE generated guidance: begin (version 5)") != std::string::npos);
+    CHECK(first.find("ICE generated guidance: begin -->") != std::string::npos);
     CHECK(first.find("simulation_measure") != std::string::npos);
     CHECK(first.find("pdk_info") != std::string::npos);
     CHECK(first.find("ask the user which installed PDK to use") != std::string::npos);
-    CHECK(first.find("project_migrate") != std::string::npos);
+    CHECK(first.find("project_migrate") == std::string::npos);
     CHECK(first.find("zero crossings") != std::string::npos);
     CHECK(first.find("implementation_export_gds") != std::string::npos);
     CHECK(first.find("drc_run") != std::string::npos);
+    CHECK(first.find("layout_create_from_schematic") != std::string::npos);
+    CHECK(first.find("lvs_run") != std::string::npos);
+    CHECK(first.find("pex_run") != std::string::npos);
+    CHECK(first.find("mixed-signal GDS") != std::string::npos);
 
     project.save(root);
     CHECK(read() == first);
 
     std::ofstream(path) << "# Old project\n\nOld guidance.\n\nUser note.\n";
     project.save(root);
-    const auto migrated = read();
-    CHECK(migrated.find("Old guidance.") != std::string::npos);
-    CHECK(migrated.find("User note.") != std::string::npos);
-    CHECK(migrated.find("ICE generated guidance: begin") != std::string::npos);
-    CHECK(migrated.find("simulation_measure") != std::string::npos);
+    const auto preserved = read();
+    CHECK(preserved.find("Old guidance.") != std::string::npos);
+    CHECK(preserved.find("User note.") != std::string::npos);
+    CHECK(preserved.find("ICE generated guidance: begin") == std::string::npos);
+    CHECK(preserved.find("simulation_measure") == std::string::npos);
     std::filesystem::remove_all(root);
 }
 
@@ -3005,6 +3082,34 @@ TEST_CASE("layout paths persist and move as one shape") {
     CHECK(metal1ReachesVia);
     CHECK(metal2ReachesVia);
     CHECK(viaExported);
+    std::filesystem::remove(gds);
+}
+
+TEST_CASE("flattened GDS export preserves child geometry") {
+    ice::Project project;
+    project.identity = "flatten-export-test";
+    project.name = "flatten-export-test";
+    const auto layer = ice::addLayer(project, "Metal1", 34);
+    const auto child = ice::createLayoutCell(project, "child");
+    ice::addRectangle(project, child, layer, ice::Rect{0, 0, 100, 100});
+    ice::addRectangle(project, child, layer, ice::Rect{200, 0, 100, 100});
+    ice::addRectangle(project, child, layer, ice::Rect{400, 0, 100, 100});
+    const auto parent = ice::createLayoutCell(project, "parent");
+    const auto instanceId = project.nextId();
+    project.layoutCells.at(parent).instances.emplace(
+        instanceId, ice::LayoutInstance{instanceId, child, "child_1", 5000, 0, ice::Orientation::r0});
+
+    const auto gds = std::filesystem::temp_directory_path() / "ice-flatten-export-test.gds";
+    ice::LayoutInterchange::exportFlattenedGds(project, parent, gds);
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    CHECK(imported.layoutCells.size() == 1);
+    CHECK(imported.layoutCells.begin()->second.shapes.size() == 3);
+    bool shifted = false;
+    for (const auto &[_, shape] : imported.layoutCells.begin()->second.shapes) {
+        if (shape.rectangle.x == 5000)
+            shifted = true;
+    }
+    CHECK(shifted);
     std::filesystem::remove(gds);
 }
 

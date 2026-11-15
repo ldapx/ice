@@ -63,6 +63,9 @@ struct ImplementationPlatform {
     std::filesystem::path techLef;
     std::filesystem::path cellLef;
     std::filesystem::path gds;
+    // Optional KLayout LEF/DEF layer map. Without it the DEF reader assigns
+    // sequential layer numbers that do not match the PDK's GDS numbering.
+    std::filesystem::path gdsLayerMap;
     // Standard-cell GDS decks merged into the final stream. A package may
     // provide one merged file; ORFS platform fallbacks may provide one file
     // per standard-cell master.
@@ -201,7 +204,7 @@ bool cancelImplementationRun(const ImplementationRun &run, const std::filesystem
 
 struct ImplementationLayoutImport {
     ObjectId layout = 0;
-    std::filesystem::path defPath;
+    std::filesystem::path referencePath;
     std::vector<Diagnostic> diagnostics;
 };
 

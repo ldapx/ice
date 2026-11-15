@@ -121,7 +121,6 @@ def main() -> int:
                 "simulation_measure",
                 "pdk_info",
                 "pdk_build",
-                "project_migrate",
                 "schematic_create_systemverilog",
                 "schematic_hdl_ports",
                 "schematic_add_hdl_instance",
@@ -183,6 +182,8 @@ def main() -> int:
             assert "simulation_trace" in version.get("features", []), version
             assert "implementation_gds" in version.get("features", []), version
             assert "drc_gdscheck" in version.get("features", []), version
+            assert "layout_references" in version.get("features", []), version
+            assert "project_migrate" not in version.get("features", []), version
 
             mcp.tool("schematic_create", name="ring_test", pdk="sky130")
             for symbol in ("inv1", "inv2"):
@@ -692,9 +693,6 @@ def main() -> int:
 
             pdk = mcp.tool("pdk_info")
             assert "pdks" in pdk, pdk
-
-            migrated = mcp.tool("project_migrate")
-            assert migrated.get("guidance_version") == 5, migrated
 
             doctor = mcp.tool("ice_doctor")
             assert "pdk_roots" in doctor

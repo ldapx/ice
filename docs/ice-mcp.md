@@ -57,7 +57,7 @@ a long-lived server keeps the binary code it loaded at process start, even when
 `~/.local/bin/ice-mcp` has been replaced.
 
 At the start of a session, call `ice_version` and confirm features such as
-`project_repair`, `project_migrate`, `simulation_metrics`, and `pdk_status`.
+`project_repair`, `simulation_metrics`, and `pdk_status`.
 Call `ice_help(topic="overview")` or one of its topic variants to discover the
 current workflow and exact tool names. If a required feature is missing, stop
 and ask the user to rebuild/restart ICE.
@@ -75,7 +75,6 @@ and ask the user to rebuild/restart ICE.
 | `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
 | `project_validate` | Return validation diagnostics. |
 | `project_repair` | Recover a project and save it after quarantining invalid files. |
-| `project_migrate` | Refresh the generated `AGENTS.md` guidance while preserving user text. |
 | `project_undo` / `project_redo` | Move through project history. |
 | `ice_doctor` | Inspect Python, ngspice, PDK readiness, model libraries, and optional schematic/simulation model includes. |
 | `schematic_create` | Create a schematic cell; use `kind="text"` for SPICE text or `kind="systemverilog"` for a digital source cell. |
@@ -128,7 +127,7 @@ and ask the user to rebuild/restart ICE.
 | `implementation_map` | Technology-map the synthesized netlist with Yosys and Liberty files. |
 | `implementation_log` | Return the bounded log for a stage, optionally as the last N lines. |
 | `implementation_cancel` | Signal the OpenROAD/Yosys process recorded for a run. |
-| `implementation_import_layout` | Import the newest DEF checkpoint as a package-mapped layout with pins, nets, instances, and routes. |
+| `implementation_import_layout` | Create a reusable read-only digital device from the final GDS/OASIS; a missing stream is an error. |
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run gdscheck with the PDK process deck, and return normalized DRC violations. |
@@ -306,9 +305,9 @@ implementation_create(name="top_impl", top="top", pdk="sky130",
 implementation_run(run="top_impl")
 implementation_status(run="top_impl")
 implementation_log(run="top_impl", stage="routing", tail=80)
-implementation_import_layout(run="top_impl")
+implementation_import_layout(run="top_impl")  # adds "top_impl device" under Layout > Devices
 implementation_export_gds(run="top_impl")
-drc_run(layout="top_impl layout")
+# Create a layout and instance the device before running DRC.
 ```
 
 `implementation_run` defaults to `synthesis` through `final`. If the mapped
@@ -318,8 +317,10 @@ automatically; `implementation_map` remains available for an explicit export.
 metrics, including OpenROAD timing and power keys. `implementation_update`
 edits a run and invalidates the selected `from` stage and every later stage.
 The `final` stage attempts a KLayout merge of the routed DEF with the platform
-standard-cell GDS decks and records `final/6_final.gds`; missing KLayout or GDS
-decks produce a warning, and `implementation_export_gds` can rerun the export.
+standard-cell GDS decks and records `final/6_final.gds`; the package
+`layer_map` keeps DEF geometry on the PDK's real GDS layers. Missing KLayout or
+GDS decks produce a warning, and `implementation_export_gds` can rerun the
+export.
 
 `drc_run` exports the layout, invokes `gdscheck` with the process deck derived
 from its PDK, and returns normalized violations. DRC and LVS results are
@@ -352,9 +353,9 @@ the search.
 Project sidecar files are not an editing interface. Do not write
 `sch/*.icesch`, `lay/*.icelay`, or `sim/*.icesim` by hand; use the tools instead.
 If one becomes malformed, call `project_repair` or `project_open` with
-`recover: true`. The recovered file is moved under `build/recovery/`. After
-upgrading ICE, call `project_migrate` to refresh the generated `AGENTS.md`
-guidance; user text outside the generated markers is preserved.
+`recover: true`. The recovered file is moved under `build/recovery/`. The
+generated `AGENTS.md` is written when a project is created and is not rewritten
+on later saves.
 
 Project mutations are recorded in project history and saved automatically after
 each successful tool call, so the GUI and `ice-cli` see them immediately.

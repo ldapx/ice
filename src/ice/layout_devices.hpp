@@ -77,6 +77,8 @@ class LayoutDevicesPanel : public QWidget {
     void focusDeviceList();
     void clearDeviceSelection();
     void setPdk(const std::string &pdk);
+    void setProjectDevices(const ice::Project &project, const std::string &pdk);
+    std::optional<ice::ObjectId> projectCellForDevice(const ice::LayoutDeviceCell *device) const;
 
     const ice::LayoutDeviceLibrary &library() const;
     const ice::LayoutDeviceCell *selectedDevice() const;
@@ -93,6 +95,9 @@ class LayoutDevicesPanel : public QWidget {
     std::filesystem::path libraryPath_;
     std::map<std::string, std::vector<ice::LayoutDeviceParameter>> defaultParameters_;
     std::map<std::string, ice::LayoutDeviceGeometry> defaultGeometry_;
+    std::vector<ice::LayoutDeviceCell> projectDevices_;
+    std::vector<ice::ObjectId> projectDeviceIds_;
+    std::string projectDeviceSignature_;
     std::optional<std::string> activePdk_;
     QString loadError_;
     QLineEdit *search_ = nullptr;
@@ -121,9 +126,6 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCell(const ice::LayoutDeviceLibr
                                                      const ice::LayoutCell &cell);
 const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDeviceLibrary &library,
                                                          const std::string &cellName);
-std::string uniqueDeviceCellName(const ice::Project &project, const std::string &deviceName,
-                                 const std::string &prefix = {});
-ice::ObjectId cloneLibraryDeviceCell(ice::Project &project, const ice::LayoutCell &source, const std::string &name);
 
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                              const std::vector<ice::LayoutDeviceShape> &sourceShapes,
