@@ -359,6 +359,12 @@ struct ProceduralLayout {
     std::string stack;
     std::string script;
     ObjectId generatedCell = 0;
+    // Hash of the script used for the last successful generation. Empty means
+    // the generated cell has never been produced.
+    std::string generatedScriptHash;
+    // Provenance for the last successful generation.
+    std::string generatedPdkVersion;
+    std::string generatedOutputHash;
 };
 
 enum class ImplementationStage { created, elaboration, synthesis, floorplan, placement, cts, routing, final };
@@ -531,6 +537,10 @@ class Project {
     // its project.icepro file. The project file contains only project metadata;
     // schematics, layouts, and simulations are stored in sch/, lay/, and sim/.
     void save(const std::filesystem::path &path) const;
+    // Saves only the file for one schematic, layout, or procedural cell. The
+    // project must already have been saved once so its root is known. Returns
+    // the file that was written.
+    std::filesystem::path saveCellFile(ObjectId id) const;
     static Project load(const std::filesystem::path &path);
     static Project load(const std::filesystem::path &path, const ProjectLoadOptions &options,
                         ProjectLoadReport *report = nullptr);

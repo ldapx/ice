@@ -8,6 +8,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -802,6 +803,24 @@ ice::ImplementationStage implementationStageArgument(const json &arguments, cons
     return *parsed;
 }
 
+ice::ObjectId resolveProceduralLayout(const ice::Project &project, const json &value) {
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        if (project.proceduralLayouts.contains(id))
+            return id;
+        throw ToolError("Unknown procedural layout id: " + std::to_string(id));
+    }
+    if (value.is_string()) {
+        const auto name = value.get<std::string>();
+        for (const auto &[id, procedural] : project.proceduralLayouts) {
+            if (procedural.name == name)
+                return id;
+        }
+        throw ToolError("Unknown procedural layout: " + name);
+    }
+    throw ToolError("Expected a procedural layout name or id.");
+}
+
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
     if (value.is_number_integer() || value.is_number_unsigned()) {
         const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
@@ -1310,12 +1329,15 @@ class IceMcpServer {
                                          {"planned_devices", cell.plannedDevices.size()}});
         }
         for (const auto &[id, cell] : project.proceduralLayouts) {
-            result["procedural_layouts"].push_back({{"id", id},
-                                                    {"name", cell.name},
-                                                    {"pdk", cell.pdk},
-                                                    {"stack", cell.stack},
-                                                    {"generated_cell", cell.generatedCell},
-                                                    {"script_length", cell.script.size()}});
+            result["procedural_layouts"].push_back(
+                {{"id", id},
+                 {"name", cell.name},
+                 {"pdk", cell.pdk},
+                 {"stack", cell.stack},
+                 {"generated_cell", cell.generatedCell},
+                 {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(cell)},
+                 {"generated_pdk_version", cell.generatedPdkVersion},
+                 {"script_length", cell.script.size()}});
         }
         for (const auto &[id, simulation] : project.simulations) {
             result["simulations"].push_back({{"id", id},
@@ -2923,6 +2945,72 @@ class IceMcpServer {
             });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"stack", stack}};
         }
+        if (name == "layout_create_procedural") {
+            ice::ObjectId id = 0;
+            ice::ObjectId generatedCell = 0;
+            const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
+            const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
+            const auto cellName = requiredString(arguments, "name");
+            const auto script = optionalString(arguments, "script", ice::defaultProceduralLayoutScript());
+            session.execute("mcp layout-create-procedural", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createProceduralLayout(project, cellName, pdk, script, stack);
+                generatedCell = project.proceduralLayouts.at(id).generatedCell;
+            });
+            ice::ProceduralLayoutRunResult run;
+            const bool shouldRegenerate = optionalBoolean(arguments, "regenerate", true);
+            if (shouldRegenerate)
+                run = ice::regenerateProceduralLayout(session.project(), id, executablePath_);
+            return {{"id", id},
+                    {"name", cellName},
+                    {"pdk", pdk},
+                    {"stack", stack},
+                    {"generated_cell", generatedCell},
+                    {"generated", run.ok},
+                    {"generation_error", run.ok || !shouldRegenerate ? json(nullptr) : json(run.error)},
+                    {"needs_regeneration",
+                     ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}};
+        }
+        if (name == "layout_regenerate") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto timeout = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(60));
+            ice::ProceduralLayoutRunResult run;
+            session.execute("mcp layout-regenerate", [&](ice::Project &project) {
+                run = ice::regenerateProceduralLayout(project, id, executablePath_, timeout);
+                if (!run.ok)
+                    throw ToolError(run.error);
+            });
+            return {{"id", id},
+                    {"ok", true},
+                    {"script_hash", run.scriptHash},
+                    {"output_hash", run.outputHash},
+                    {"pdk_version", run.pdkVersion},
+                    {"needs_regeneration", false}};
+        }
+        if (name == "layout_get_script") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto &procedural = session.project().proceduralLayouts.at(id);
+            return {{"id", id},
+                    {"name", procedural.name},
+                    {"pdk", procedural.pdk},
+                    {"stack", procedural.stack},
+                    {"script", procedural.script},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
+                    {"generated_cell", procedural.generatedCell},
+                    {"generated_script_hash", procedural.generatedScriptHash},
+                    {"generated_pdk_version", procedural.generatedPdkVersion},
+                    {"generated_output_hash", procedural.generatedOutputHash}};
+        }
+        if (name == "layout_set_script") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto script = requiredString(arguments, "script");
+            session.execute("mcp layout-set-script",
+                            [&](ice::Project &project) { project.proceduralLayouts.at(id).script = script; });
+            const auto &procedural = session.project().proceduralLayouts.at(id);
+            return {{"id", id},
+                    {"name", procedural.name},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)}};
+        }
         if (name == "layout_create_from_schematic") {
             ice::ObjectId id = 0;
             const auto schematic = resolveSchematic(session.project(), arguments, "schematic");
@@ -3107,7 +3195,22 @@ class IceMcpServer {
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
         }
         if (name == "layout_info") {
-            const auto cellId = resolveLayoutCell(session.project(), arguments);
+            const auto itemId = resolveLayoutItem(session.project(), requiredValue(arguments, "cell"));
+            if (const auto procedural = session.project().proceduralLayouts.find(itemId);
+                procedural != session.project().proceduralLayouts.end()) {
+                return {{"id", itemId},
+                        {"name", procedural->second.name},
+                        {"pdk", procedural->second.pdk},
+                        {"stack", procedural->second.stack},
+                        {"procedural", true},
+                        {"generated_cell", procedural->second.generatedCell},
+                        {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
+                        {"generated_script_hash", procedural->second.generatedScriptHash},
+                        {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                        {"generated_output_hash", procedural->second.generatedOutputHash},
+                        {"script", procedural->second.script}};
+            }
+            const auto cellId = itemId;
             const auto &cell = session.project().layoutCells.at(cellId);
             json ports = json::array();
             for (const auto &[id, port] : cell.ports) {
@@ -3928,6 +4031,28 @@ class IceMcpServer {
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("stack", "Optional PDK stack identifier", false)
                             .build());
+        tools.push_back(tool_builder("layout_create_procedural")
+                            .with_description("Create a procedural layout and generate its static child.")
+                            .with_string_param("name", "Procedural layout name")
+                            .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("stack", "Optional PDK stack identifier", false)
+                            .with_string_param("script", "Optional Python script", false)
+                            .with_boolean_param("regenerate", "Generate the script immediately (default true)", false)
+                            .build());
+        tools.push_back(tool_builder("layout_regenerate")
+                            .with_description("Run a procedural layout script and replace its generated layout.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_integer_param("timeout_seconds", "Optional timeout in seconds", false)
+                            .build());
+        tools.push_back(tool_builder("layout_get_script")
+                            .with_description("Read a procedural layout Python script and generation state.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_set_script")
+                            .with_description("Replace a procedural layout Python script without regenerating.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_string_param("script", "New Python script")
+                            .build());
         tools.push_back(tool_builder("layout_create_from_schematic")
                             .with_description("Create a layout from a schematic.")
                             .with_string_param("schematic", "Schematic name or id")
@@ -4024,8 +4149,8 @@ class IceMcpServer {
                             .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
                             .build());
         tools.push_back(tool_builder("layout_info")
-                            .with_description("Read a layout cell's pins, nets, instances, and shape count.")
-                            .with_string_param("cell", "Layout cell name or id")
+                            .with_description("Read a layout or procedural layout's metadata and generated state.")
+                            .with_string_param("cell", "Layout or procedural layout name or id")
                             .build());
         tools.push_back(tool_builder("layout_connectivity")
                             .with_description("Extract nets from explicit layout nets and same-layer geometry.")

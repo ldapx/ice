@@ -5,7 +5,9 @@ The user script is executed with a single injected object named ``layout``.
 It builds an in-memory description of the generated static layout. ICE parses
 the resulting JSON and applies it to the project's layout database.
 
-Coordinates are integer database units (one nanometer by default).
+Coordinates are integer database units (one nanometer by default). Use
+``layout.nm(...)``, ``layout.um(...)``, ``layout.db(...)``, and
+``layout.snap(...)`` to work in physical units.
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ import math
 from pathlib import Path
 import sys
 import traceback
+
+
+SCHEMA_VERSION = 2
 
 
 def _coordinate(value, label):
@@ -36,6 +41,18 @@ def _positive(value, label):
     return number
 
 
+def _point(value, label):
+    if isinstance(value, dict):
+        x = value.get("x")
+        y = value.get("y")
+    else:
+        try:
+            x, y = value
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{label} must be (x, y)") from error
+    return _coordinate(x, f"{label} x"), _coordinate(y, f"{label} y")
+
+
 def _shape_points(shape):
     if "rectangle" in shape:
         rectangle = shape["rectangle"]
@@ -47,38 +64,99 @@ def _shape_points(shape):
     return [(point["x"], point["y"]) for point in shape.get("polygon", [])]
 
 
+def _path_segment_polygon(start, end, width):
+    x0, y0 = start
+    x1, y1 = end
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return []
+    nx = -dy * width / (2.0 * length)
+    ny = dx * width / (2.0 * length)
+    return [
+        (int(round(x0 + nx)), int(round(y0 + ny))),
+        (int(round(x1 + nx)), int(round(y1 + ny))),
+        (int(round(x1 - nx)), int(round(y1 - ny))),
+        (int(round(x0 - nx)), int(round(y0 - ny))),
+    ]
+
+
+class Shape:
+    """Handle for a shape added through the layout builder."""
+
+    def __init__(self, layout, record):
+        self._layout = layout
+        self._record = record
+
+    @property
+    def name(self):
+        return self._record.get("name", "")
+
+    @name.setter
+    def name(self, value):
+        if value is None or str(value).strip() == "":
+            self._record.pop("name", None)
+            return
+        self._record["name"] = str(value).strip()
+
+    @property
+    def net(self):
+        return self._record.get("net", "")
+
+    @net.setter
+    def net(self, value):
+        if value is None or str(value).strip() == "":
+            self._record.pop("net", None)
+            return
+        self._record["net"] = str(value).strip()
+
+
 class Layer:
     """Handle returned by Layout.layer()."""
 
-    def __init__(self, layout, name):
+    def __init__(self, layout, name, number=None, datatype=None):
         self._layout = layout
         self.name = name
+        self.number = number
+        self.datatype = datatype
 
-    def rectangle(self, x, y, width, height):
-        self._layout.rectangle(self.name, x, y, width, height)
+    def rectangle(self, x, y, width, height, name=None, net=None):
+        return self._layout.rectangle(
+            self.name, x, y, width, height, name=name, net=net
+        )
 
     rect = rectangle
 
-    def polygon(self, points):
-        self._layout.polygon(self.name, points)
+    def polygon(self, points, name=None, net=None):
+        return self._layout.polygon(self.name, points, name=name, net=net)
 
     poly = polygon
+
+    def path(self, points, width, name=None, net=None):
+        return self._layout.path(self.name, points, width, name=name, net=net)
+
+    def text(self, x, y, text, height=1000, width=None, name=None, net=None):
+        return self._layout.text(
+            self.name, x, y, text, height=height, width=width, name=name, net=net
+        )
 
 
 class Layout:
     """Builder exposed to procedural layout scripts."""
 
-    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0):
+    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1):
         self.pdk = pdk
         self.pdk_root = pdk_root
         self.db_unit_nm = float(db_unit_nm)
+        self.grid = max(1, _coordinate(grid, "grid"))
         self.layers = {}
         self.shapes = []
         self.ports = []
         self.instances = []
         self.dummy_fill_requests = []
 
-    def layer(self, name, number=None):
+    def _layer_spec(self, name, number=None, datatype=None):
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Layer name must be a non-empty string")
         name = name.strip()
@@ -86,9 +164,27 @@ class Layout:
             number = _coordinate(number, f"Layer {name} number")
             if number < 0:
                 raise ValueError(f"Layer {name} number must not be negative")
-        if name not in self.layers or number is not None:
-            self.layers[name] = number
-        return Layer(self, name)
+        if datatype is not None:
+            datatype = _coordinate(datatype, f"Layer {name} datatype")
+            if datatype < 0:
+                raise ValueError(f"Layer {name} datatype must not be negative")
+        current = self.layers.get(name, {"number": None, "datatype": None})
+        if number is not None or name not in self.layers:
+            current["number"] = number
+        if datatype is not None or name not in self.layers:
+            current["datatype"] = datatype
+        self.layers[name] = current
+        return name, current["number"], current["datatype"]
+
+    def layer(self, name, number=None, datatype=None):
+        """Register or resolve a layer.
+
+        When ``number``/``datatype`` are omitted, ICE resolves the layer from
+        the active PDK package or the project's existing layers. Explicit
+        values win when no matching PDK/project layer exists.
+        """
+        name, number, datatype = self._layer_spec(name, number, datatype)
+        return Layer(self, name, number, datatype)
 
     def _layer_name(self, layer):
         if isinstance(layer, Layer):
@@ -100,48 +196,151 @@ class Layout:
         if not name:
             raise ValueError("Layer name must be a non-empty string")
         if name not in self.layers:
-            self.layers[name] = None
+            self.layers[name] = {"number": None, "datatype": None}
         return name
 
-    def rectangle(self, layer, x, y, width, height):
-        name = self._layer_name(layer)
-        self.shapes.append(
-            {
-                "layer": name,
-                "rectangle": {
-                    "x": _coordinate(x, "rectangle x"),
-                    "y": _coordinate(y, "rectangle y"),
-                    "width": _positive(width, "rectangle width"),
-                    "height": _positive(height, "rectangle height"),
-                },
-            }
-        )
+    def _add_shape(self, record):
+        self.shapes.append(record)
+        return Shape(self, record)
+
+    def rectangle(self, layer, x, y, width, height, name=None, net=None):
+        record = {
+            "layer": self._layer_name(layer),
+            "rectangle": {
+                "x": _coordinate(x, "rectangle x"),
+                "y": _coordinate(y, "rectangle y"),
+                "width": _positive(width, "rectangle width"),
+                "height": _positive(height, "rectangle height"),
+            },
+        }
+        shape = self._add_shape(record)
+        if name is not None:
+            shape.name = name
+        if net is not None:
+            shape.net = net
+        return shape
 
     rect = rectangle
 
-    def polygon(self, layer, points):
-        name = self._layer_name(layer)
+    def polygon(self, layer, points, name=None, net=None):
+        name_value = self._layer_name(layer)
         polygon = []
         for index, point in enumerate(points):
-            if isinstance(point, dict):
-                x = point.get("x")
-                y = point.get("y")
-            else:
-                try:
-                    x, y = point
-                except (TypeError, ValueError) as error:
-                    raise ValueError(f"polygon point {index} must be (x, y)") from error
-            polygon.append(
-                {
-                    "x": _coordinate(x, f"polygon point {index} x"),
-                    "y": _coordinate(y, f"polygon point {index} y"),
-                }
-            )
+            x, y = _point(point, f"polygon point {index}")
+            polygon.append({"x": x, "y": y})
         if len(polygon) < 3:
             raise ValueError("polygon must contain at least three points")
-        self.shapes.append({"layer": name, "polygon": polygon})
+        shape = self._add_shape({"layer": name_value, "polygon": polygon})
+        if name is not None:
+            shape.name = name
+        if net is not None:
+            shape.net = net
+        return shape
 
     poly = polygon
+
+    def path(self, layer, points, width, name=None, net=None):
+        name_value = self._layer_name(layer)
+        centerline = []
+        for index, point in enumerate(points):
+            x, y = _point(point, f"path point {index}")
+            centerline.append({"x": x, "y": y})
+        if len(centerline) < 2:
+            raise ValueError("path must contain at least two points")
+        shape = self._add_shape(
+            {
+                "layer": name_value,
+                "centerline": centerline,
+                "width": _positive(width, "path width"),
+            }
+        )
+        if name is not None:
+            shape.name = name
+        if net is not None:
+            shape.net = net
+        return shape
+
+    def text(self, layer, x, y, text, height=1000, width=None, name=None, net=None):
+        if not isinstance(text, str) or not text:
+            raise ValueError("Text must be a non-empty string")
+        height = _positive(height, "text height")
+        if width is None:
+            width = max(1, int(round(len(text) * height * 0.6)))
+        else:
+            width = _positive(width, "text width")
+        record = {
+            "layer": self._layer_name(layer),
+            "rectangle": {
+                "x": _coordinate(x, "text x"),
+                "y": _coordinate(y, "text y"),
+                "width": width,
+                "height": height,
+            },
+            "text": text,
+        }
+        shape = self._add_shape(record)
+        if name is not None:
+            shape.name = name
+        if net is not None:
+            shape.net = net
+        return shape
+
+    def via(
+        self, layers, x, y, size=1000, width=None, height=None, name=None, net=None
+    ):
+        """Convenience helper for a stack of square/rectangular via shapes."""
+        if isinstance(layers, str):
+            layers = [layers]
+        elif layers is None:
+            raise ValueError("via layers must not be empty")
+        else:
+            layers = [str(layer) for layer in layers]
+        if not layers:
+            raise ValueError("via layers must not be empty")
+        width = size if width is None else width
+        height = width if height is None else height
+        shapes = []
+        for index, layer in enumerate(layers):
+            shape = self.rectangle(
+                layer,
+                x,
+                y,
+                width,
+                height,
+                name=None if name is None else f"{name}_{index}",
+                net=net,
+            )
+            shapes.append(shape)
+        return shapes
+
+    def array(self, cell, count, pitch, x=0, y=0, orientation="r0", name=None):
+        """Place a rectangular array of an existing layout cell."""
+        try:
+            columns, rows = (int(count[0]), int(count[1]))
+            pitch_x, pitch_y = (pitch[0], pitch[1])
+        except (TypeError, ValueError, IndexError) as error:
+            raise ValueError(
+                "array count and pitch must be two-element sequences"
+            ) from error
+        if columns <= 0 or rows <= 0:
+            raise ValueError("array count must be positive")
+        if name is None:
+            name = "array"
+        placed = []
+        for row in range(rows):
+            for column in range(columns):
+                instance_name = f"{name}_{column}_{row}"
+                self.instance(
+                    cell,
+                    _coordinate(x, "array x")
+                    + column * _coordinate(pitch_x, "array pitch x"),
+                    _coordinate(y, "array y")
+                    + row * _coordinate(pitch_y, "array pitch y"),
+                    orientation=orientation,
+                    name=instance_name,
+                )
+                placed.append(instance_name)
+        return placed
 
     def port(
         self,
@@ -244,6 +443,16 @@ class Layout:
         for shape in self.shapes:
             if layer is not None and shape["layer"] != layer:
                 continue
+            if "centerline" in shape:
+                points = [(point["x"], point["y"]) for point in shape["centerline"]]
+                width = shape["width"]
+                for index in range(len(points) - 1):
+                    polygon = _path_segment_polygon(
+                        points[index], points[index + 1], width
+                    )
+                    if len(polygon) >= 3:
+                        yield shape["layer"], polygon
+                continue
             points = _shape_points(shape)
             if len(points) >= 3:
                 yield shape["layer"], points
@@ -268,19 +477,78 @@ class Layout:
         """Return the GDS layer number registered for ``name``, if any."""
         if not isinstance(name, str):
             return None
-        for layer_name, number in self.layers.items():
+        for layer_name, spec in self.layers.items():
             if layer_name == name:
-                return number
+                return spec["number"]
         lowered = name.lower()
-        for layer_name, number in self.layers.items():
+        for layer_name, spec in self.layers.items():
             if layer_name.lower() == lowered:
-                return number
+                return spec["number"]
         return None
+
+    # -- unit helpers -----------------------------------------------------
+    def db(self, value):
+        """Return ``value`` as integer database units."""
+        return _coordinate(value, "database value")
+
+    def nm(self, value):
+        """Convert nanometers to integer database units."""
+        if self.db_unit_nm <= 0:
+            raise ValueError("Database unit size must be positive")
+        return _coordinate(
+            float(_coordinate(value, "nanometers")) / self.db_unit_nm, "nanometers"
+        )
+
+    def um(self, value):
+        """Convert micrometers to integer database units."""
+        return self.nm(float(value) * 1000.0)
+
+    def snap(self, value):
+        """Snap a database-unit value to the project grid."""
+        coordinate = _coordinate(value, "grid value")
+        grid = max(1, self.grid)
+        return int(round(coordinate / grid)) * grid
+
+    def length(self, value):
+        """Convert ``2.5u``/``150n``/``1mm`` or a bare DB-unit number."""
+        if isinstance(value, (int, float)):
+            return _coordinate(value, "length")
+        text = str(value).strip()
+        suffixes = (
+            ("meg", 1e6),
+            ("mil", 25400.0),
+            ("nm", 1.0),
+            ("um", 1000.0),
+            ("µm", 1000.0),
+            ("mm", 1e6),
+            ("m", 1e3),
+            ("u", 1000.0),
+            ("n", 1.0),
+            ("p", 1e-3),
+            ("f", 1e-6),
+            ("k", 1e6),
+        )
+        for suffix, nanometers in suffixes:
+            if text.endswith(suffix):
+                try:
+                    return self.nm(float(text[: -len(suffix)]) * nanometers)
+                except ValueError:
+                    break
+        return self.db(float(text))
 
     def to_dict(self):
         return {
+            "format": "ice-procedural-layout",
+            "schema_version": SCHEMA_VERSION,
+            "db_unit_nm": self.db_unit_nm,
+            "grid": self.grid,
             "layers": [
-                {"name": name, "number": number} for name, number in self.layers.items()
+                {
+                    "name": name,
+                    "number": spec["number"],
+                    "datatype": spec["datatype"],
+                }
+                for name, spec in self.layers.items()
             ],
             "shapes": self.shapes,
             "ports": self.ports,
@@ -341,9 +609,15 @@ def main():
         default=1.0,
         help="Database unit size in nanometers",
     )
+    parser.add_argument(
+        "--grid",
+        type=float,
+        default=1.0,
+        help="Project grid in database units",
+    )
     args = parser.parse_args()
 
-    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm)
+    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm, args.grid)
     with open(args.script, "r", encoding="utf-8") as handle:
         source = handle.read()
     globals_dict = {

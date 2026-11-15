@@ -8,6 +8,7 @@
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/plugins.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -1060,6 +1061,86 @@ TEST_CASE("projects save as split directory files") {
     CHECK(ignoreText.find("scripts/") == std::string::npos);
     CHECK(ignoreText.find("build/") != std::string::npos);
 
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("single-cell saves do not overwrite renamed files") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-collision-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "single-cell-collision";
+    project.name = "single-cell-collision";
+    const auto renamed = ice::createSchematicCell(project, "alpha", "example.pdk");
+    project.save(root);
+
+    const auto read = [](const std::filesystem::path &path) {
+        std::ifstream stream(path);
+        return std::string((std::istreambuf_iterator<char>(stream)), {});
+    };
+    const auto oldPath = root / "sch" / "alpha.icesch";
+    project.schematicCells.at(renamed).name = "renamed";
+    CHECK(project.saveCellFile(renamed) == oldPath);
+
+    const auto replacement = ice::createSchematicCell(project, "alpha", "example.pdk");
+    const auto replacementPath = project.saveCellFile(replacement);
+    CHECK(replacementPath != oldPath);
+    CHECK(std::filesystem::is_regular_file(replacementPath));
+    CHECK(read(oldPath).find("renamed") != std::string::npos);
+    CHECK(read(replacementPath).find("\"alpha\"") != std::string::npos);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("project saves one cell file at a time") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-save-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "single-cell-save";
+    project.name = "single-cell-save";
+    const auto schematic = ice::createSchematicCell(project, "amp", "example.pdk");
+    const auto otherSchematic = ice::createSchematicCell(project, "power", "example.pdk");
+    const auto layout = ice::createLayoutCell(project, "top", "example.pdk");
+    const auto procedural = ice::createProceduralLayout(project, "scripted", "example.pdk");
+    project.save(root);
+
+    const auto read = [](const std::filesystem::path &path) {
+        std::ifstream stream(path);
+        return std::string((std::istreambuf_iterator<char>(stream)), {});
+    };
+    const auto otherPath = root / "sch" / "power.icesch";
+    const auto layoutPath = root / "lay" / "top.icelay";
+    const auto otherBefore = read(otherPath);
+    const auto layoutBefore = read(layoutPath);
+
+    project.schematicCells.at(schematic).name = "amp2";
+    const auto schematicPath = project.saveCellFile(schematic);
+    CHECK(schematicPath == root / "sch" / "amp.icesch");
+    CHECK(read(schematicPath).find("amp2") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+    CHECK(read(layoutPath) == layoutBefore);
+
+    project.layoutCells.at(layout).name = "top2";
+    const auto savedLayout = project.saveCellFile(layout);
+    CHECK(savedLayout == layoutPath);
+    CHECK(read(savedLayout).find("top2") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+    CHECK(read(root / "sch" / "amp.icesch").find("amp2") != std::string::npos);
+
+    project.proceduralLayouts.at(procedural).script = "layout.rectangle(0, 0, 10, 10)\n";
+    const auto savedProcedural = project.saveCellFile(procedural);
+    CHECK(std::filesystem::is_regular_file(savedProcedural));
+    CHECK(read(savedProcedural).find("procedural_layout") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+
+    // A single-file save must update the revision used by the next full save.
+    project.save(root);
+    CHECK(std::filesystem::is_regular_file(root / "sch" / "amp2.icesch"));
+    CHECK(!std::filesystem::exists(root / "sch" / "amp.icesch"));
+    CHECK(std::filesystem::is_regular_file(root / "lay" / "top2.icelay"));
+    CHECK(project.schematicCells.contains(otherSchematic));
+
+    CHECK_THROWS_AS(project.saveCellFile(999999), ice::ProjectError);
     std::filesystem::remove_all(root);
 }
 
@@ -2313,6 +2394,94 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(project.proceduralLayouts.at(secondId).name == "generated_second");
     CHECK(project.proceduralLayouts.at(secondId).generatedCell != procedural.generatedCell);
     CHECK(project.validate().empty());
+}
+
+TEST_CASE("procedural layout runner generates richer geometry") {
+    ice::Project project;
+    project.identity = "procedural-runner";
+    project.name = "procedural-runner";
+    ice::createLayoutCell(project, "unit", ice::genericPdkId);
+    const auto script = R"PY(
+metal1 = layout.layer("Metal1", 1, 0)
+label = layout.layer("Metal1.label", 34, 10)
+body = metal1.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))
+body.name = "body"
+body.net = "VDD"
+poly = metal1.polygon([(0, 0), (1000, 0), (1000, 1000)])
+poly.name = "poly"
+trace = metal1.path([(0, 0), (4000, 0)], layout.um(0.5))
+trace.name = "trace"
+trace.net = "VDD"
+label.text(layout.um(0), layout.um(0), "M1", height=layout.um(0.5))
+layout.via("Via1", layout.um(1), layout.um(1), size=layout.um(0.2))
+layout.array("unit", (2, 1), (layout.um(5), 0), x=layout.um(6), y=0, name="array")
+layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um(1), net="VDD")
+)PY";
+    const auto proceduralId = ice::createProceduralLayout(project, "generated_top", ice::genericPdkId, script);
+    const auto &procedural = project.proceduralLayouts.at(proceduralId);
+    CHECK(project.layoutCells.at(procedural.generatedCell).readOnly);
+    CHECK(ice::proceduralLayoutNeedsRegeneration(procedural));
+
+    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(ice::proceduralScriptHash(procedural.script) == run.scriptHash);
+    CHECK(!project.proceduralLayouts.at(proceduralId).generatedScriptHash.empty());
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+
+    const auto &generated = project.layoutCells.at(procedural.generatedCell);
+    CHECK(generated.readOnly);
+    CHECK(generated.generatedBy == proceduralId);
+    CHECK(generated.shapes.size() == 5);
+    CHECK(generated.instances.size() == 2);
+    CHECK(generated.ports.size() == 1);
+    CHECK(generated.nets.size() == 1);
+    const auto hasLayer = [&](const std::string &name, int number, int datatype) {
+        return std::any_of(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+            return entry.second.name == name && entry.second.number == number && entry.second.datatype == datatype;
+        });
+    };
+    CHECK(hasLayer("Metal1", 1, 0));
+    CHECK(hasLayer("Metal1.label", 34, 10));
+    const auto hasNamedShape = [&](const std::string &name, bool expectNet) {
+        return std::any_of(generated.shapes.begin(), generated.shapes.end(), [&](const auto &entry) {
+            return entry.second.name == name &&
+                   (expectNet ? entry.second.net.has_value() : !entry.second.net.has_value());
+        });
+    };
+    CHECK(hasNamedShape("body", true));
+    CHECK(hasNamedShape("poly", false));
+    CHECK(hasNamedShape("trace", true));
+    CHECK(std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                      [](const auto &entry) { return entry.second.isPath() && entry.second.text.empty(); }));
+    CHECK(std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                      [](const auto &entry) { return entry.second.isText(); }));
+    CHECK(project.validate().empty());
+
+    const auto nestedId = ice::createProceduralLayout(project, "nested_top", ice::genericPdkId,
+                                                      "layout.instance(\"generated_top\", 0, 0, name=\"I1\")\n");
+    const auto nestedRun = ice::regenerateProceduralLayout(project, nestedId);
+    CHECK(nestedRun.ok);
+    if (nestedRun.ok) {
+        const auto &nested = project.layoutCells.at(project.proceduralLayouts.at(nestedId).generatedCell);
+        CHECK(nested.instances.size() == 1);
+        if (!nested.instances.empty())
+            CHECK(nested.instances.begin()->second.cell == procedural.generatedCell);
+    }
+
+    project.proceduralLayouts.at(proceduralId).script += "\nmetal1.rectangle(0, 0, 100, 100)\n";
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == 6);
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+
+    const auto shapeCount = project.layoutCells.at(procedural.generatedCell).shapes.size();
+    project.proceduralLayouts.at(proceduralId).script = "raise RuntimeError('boom')\n";
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(!run.ok);
+    CHECK(run.error.find("boom") != std::string::npos);
+    CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == shapeCount);
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
 }
 
 TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {

@@ -441,14 +441,21 @@ information.
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
 Python script editor with syntax highlighting in the middle view, and contain a
-generated static layout as their child. The canvas tool columns are hidden while a procedural layout
-tab is active. The script runs with a `layout` builder that exposes
-`layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
-procedural layout and choose **Regenerate layout** (or use the editor's
-**Regenerate layout** button) to replace the generated child's geometry from
-the current script. Scripts run with `python3`, or the interpreter selected by
-`ICE_PYTHON`. A failed run reports the Python error and leaves the previous
-generated geometry unchanged. The layout API also exposes
+read-only generated static layout as their child. The canvas tool columns are
+hidden while a procedural layout tab is active. The script runs with a `layout`
+builder that exposes layers with `number`/`datatype`, rectangles, polygons,
+paths, text, vias, rectangular arrays, ports, and instances. Coordinates can be
+written in database units or through `layout.nm()`, `layout.um()`, and
+`layout.snap()`. Generated shapes can carry a `name` and a `net`.
+
+Right-click a procedural layout and choose **Regenerate layout** (or use the
+editor's **Regenerate layout** button) to replace the generated child's geometry
+from the current script. Scripts run with `python3`, or the interpreter selected
+by `ICE_PYTHON`, with a 60-second timeout; command-line and MCP regeneration accept a timeout override. A failed run reports the Python
+error and leaves the previous generated geometry unchanged. A `↻` marker in the
+file tab means the script changed since the last successful generation. The
+generated child is read-only; edit the script and regenerate instead of drawing
+over generated geometry. The layout API also exposes
 `layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: ICE forwards
 the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal
@@ -712,6 +719,7 @@ Common defaults:
 - **Select**: Space
 - **Place device**: P
 - **Delete selection**: Del
+- **Save current file / Save whole project**: Ctrl+S / Ctrl+Shift+S
 - **Run simulation / DRC / LVS**: F6 / F7 / F8
 - **Fit to view**: F
 - **Toggle grid**: Ctrl+G
@@ -723,6 +731,11 @@ Common defaults:
 - **Layout rotate / flips**: Shift+R / H / J
 - **Layout rectangle / polygon / path / comment (text label) / text polygon / pin / ruler**: R / G / W / Shift+C / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
+
+**Ctrl+S** saves the file shown in the current schematic, layout, procedural
+layout, digital-testbench, or simulation-script tab. Other dirty tabs keep
+their unsaved markers. Use **Ctrl+Shift+S** (or **File → Save Whole Project**)
+to write every project file at once.
 
 Use **Settings → Keyboard Shortcuts…** (Ctrl+Shift+K) to reassign commands,
 clear a binding, reset one command, or reset all commands. Global commands work

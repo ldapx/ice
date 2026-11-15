@@ -182,6 +182,7 @@ target("icepy")
     set_prefixname("")
     add_files("src/icepy/module.cpp", "/usr/lib/python3.14/site-packages/nanobind/src/nb_combined.cpp")
     add_deps("icelib")
+    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_includedirs("include", "/usr/include/python3.14",
                     "/usr/lib/python3.14/site-packages/nanobind/include",
                     "/usr/lib/python3.14/site-packages/nanobind/src")

@@ -74,6 +74,32 @@ def test_layout_builder() -> None:
         assert len(loaded.layout_cells) == 1
 
 
+def test_procedural_layout() -> None:
+    project = icepy.new_project("icepy-procedural-smoke")
+    procedural = project.create_procedural_layout(
+        "generated_top",
+        "generic",
+        "",
+        'metal = layout.layer("Metal1", 1)\n'
+        'shape = metal.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))\n'
+        'shape.name = "body"\n'
+        'shape.net = "VDD"\n'
+        'metal.path([(0, 0), (4000, 0)], layout.um(0.5))\n'
+        'layout.port("VDD", "Metal1", 0, 0, 1000, 1000, net="VDD")\n',
+    )
+    assert procedural.needs_regeneration
+    assert len(project.procedural_layouts) == 1
+    generated = project.regenerate_procedural_layout("generated_top")
+    assert not generated.needs_regeneration
+    assert generated.generated_script_hash
+    cell = project.layout_cell_by_id(generated.generated_cell)
+    assert cell.read_only
+    assert len(cell.shapes) == 2
+    assert len(cell.ports) == 1
+    assert len(cell.nets) == 1
+    assert project.validate() == 0
+
+
 def test_ihp_pcell_runtime() -> None:
     root = os.environ.get("ICE_IHP_ROOT")
     if not root:
@@ -102,5 +128,6 @@ def test_ihp_pcell_runtime() -> None:
 
 if __name__ == "__main__":
     test_layout_builder()
+    test_procedural_layout()
     test_ihp_pcell_runtime()
     print("icepy smoke tests passed")

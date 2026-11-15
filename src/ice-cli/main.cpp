@@ -8,6 +8,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -155,6 +156,18 @@ ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &
             return id;
     }
     argumentError("Unknown layout or procedural layout: " + text);
+}
+
+ice::ObjectId resolveProceduralLayout(const ice::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        if (project.proceduralLayouts.contains(*id))
+            return *id;
+    }
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.name == text)
+            return id;
+    }
+    argumentError("Unknown procedural layout: " + text);
 }
 
 std::optional<ice::PackageSpec> packageForPdk(const std::string &pdk) {
@@ -1097,6 +1110,7 @@ void printHelp() {
               << "Layout:\n"
               << "  layout-add-cell <project> <name> [pdk] [stack]\n"
               << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
+              << "  layout-regenerate <project> <procedural> [timeout-seconds]\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
@@ -2123,7 +2137,7 @@ int main(int argc, char **argv) {
             expectArguments(args, 3, 6, "layout-add-procedural <project> <name> [pdk] [script-file] [stack]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
-            const auto script = args.size() >= 5 ? readTextFile(args[4]) : std::string{};
+            const auto script = args.size() >= 5 ? readTextFile(args[4]) : ice::defaultProceduralLayoutScript();
             const auto stack = resolveLayoutStack(pdk, args.size() == 6 ? args[5] : std::string{});
             ice::ObjectId id = 0;
             ice::ObjectId generated = 0;
@@ -2132,8 +2146,38 @@ int main(int argc, char **argv) {
                 id = ice::createProceduralLayout(project, args[2], pdk, script, stack);
                 generated = project.proceduralLayouts.at(id).generatedCell;
             });
+            const auto run = ice::regenerateProceduralLayout(session.project(), id, executablePath);
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}, {"generated_cell", generated}});
+            printJson({{"id", id},
+                       {"name", args[2]},
+                       {"pdk", pdk},
+                       {"stack", stack},
+                       {"generated_cell", generated},
+                       {"generated", run.ok},
+                       {"generation_error", run.ok ? json(nullptr) : json(run.error)},
+                       {"needs_regeneration",
+                        ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}});
+            return 0;
+        }
+
+        if (command == "layout-regenerate") {
+            expectArguments(args, 3, 4, "layout-regenerate <project> <procedural> [timeout-seconds]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            const auto timeout = args.size() >= 4 ? static_cast<int>(parseInteger(args[3], "timeout seconds")) : 60;
+            ice::ProceduralLayoutRunResult run;
+            session.execute("regenerate procedural layout", [&](ice::Project &project) {
+                run = ice::regenerateProceduralLayout(project, id, executablePath, timeout);
+                if (!run.ok)
+                    throw ice::ProjectError("layout.procedural.generate", run.error);
+            });
+            session.save(args[1]);
+            printJson({{"id", id},
+                       {"name", session.project().proceduralLayouts.at(id).name},
+                       {"ok", true},
+                       {"script_hash", run.scriptHash},
+                       {"output_hash", run.outputHash},
+                       {"pdk_version", run.pdkVersion}});
             return 0;
         }
 
@@ -2180,6 +2224,8 @@ int main(int argc, char **argv) {
                                   {"stack", procedural.stack},
                                   {"procedural", true},
                                   {"generated_cell", procedural.generatedCell},
+                                  {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
+                                  {"generated_pdk_version", procedural.generatedPdkVersion},
                                   {"script_length", procedural.script.size()}});
             }
             printJson(result);
@@ -2198,6 +2244,10 @@ int main(int argc, char **argv) {
                            {"stack", procedural->second.stack},
                            {"procedural", true},
                            {"generated_cell", procedural->second.generatedCell},
+                           {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
+                           {"generated_script_hash", procedural->second.generatedScriptHash},
+                           {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                           {"generated_output_hash", procedural->second.generatedOutputHash},
                            {"script", procedural->second.script}});
             } else {
                 printJson(layoutInfo(project, project.layoutCells.at(id)));
