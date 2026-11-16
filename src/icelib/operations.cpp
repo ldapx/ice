@@ -201,6 +201,74 @@ std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::stri
     return name;
 }
 
+std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell) {
+    std::vector<const SchematicInstance *> inputs;
+    std::vector<const SchematicInstance *> outputs;
+    for (const auto &[_, instance] : cell.instances) {
+        const auto symbol = cell.symbols.find(instance.symbol);
+        if (symbol == cell.symbols.end())
+            continue;
+        const auto type = lower(symbolTypeName(symbol->second.name));
+        if (type == "input")
+            inputs.push_back(&instance);
+        else if (type == "output")
+            outputs.push_back(&instance);
+    }
+    const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
+        std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
+            if (left->y != right->y)
+                return left->y > right->y;
+            return lower(left->name) < lower(right->name);
+        });
+    };
+    sortPorts(inputs);
+    sortPorts(outputs);
+    std::vector<const SchematicInstance *> ports;
+    ports.reserve(inputs.size() + outputs.size());
+    ports.insert(ports.end(), inputs.begin(), inputs.end());
+    ports.insert(ports.end(), outputs.begin(), outputs.end());
+    return ports;
+}
+
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name,
+                               std::string artwork) {
+    const auto &source = require(project.schematicCells, sourceCellId, "schematic.symbol.source",
+                                 "Source schematic cell does not exist");
+    if (source.textSchematic)
+        throw ProjectError("schematic.symbol.source", "A text SPICE cell cannot be used as a hierarchical block");
+    const auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    if (parent.isTextSource())
+        throw ProjectError("schematic.symbol.source", "Symbols can only be added to a drawn schematic");
+    if (name.empty())
+        name = source.name;
+    const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(artwork), sourceCellId);
+    auto &symbol = project.schematicCells.at(parentCellId).symbols.at(symbolId);
+    for (auto pin : hierarchicalSymbolPins(source)) {
+        pin.id = project.nextId();
+        symbol.pins.push_back(std::move(pin));
+    }
+    return symbolId;
+}
+
+std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) {
+    const auto ports = schematicPortInstances(source);
+    const auto count = static_cast<int>(ports.size());
+    const auto spacing = 40;
+    std::vector<Pin> pins;
+    pins.reserve(ports.size());
+    int inputRow = 0;
+    int outputRow = 0;
+    for (const auto *port : ports) {
+        const auto portSymbol = source.symbols.find(port->symbol);
+        const auto type = portSymbol == source.symbols.end() ? std::string{} : symbolTypeName(portSymbol->second.name);
+        const bool isOutput = lower(type) == "output";
+        const auto row = isOutput ? outputRow++ : inputRow++;
+        pins.push_back({0, port->name, isOutput ? 70 : -70, count * spacing / 2 - row * spacing,
+                        isOutput ? PinDirection::right : PinDirection::left, 1, true});
+    }
+    return pins;
+}
+
 char spiceElementForSymbol(const std::string &symbolName) {
     const auto name = lower(symbolName);
     if (name.find("nmos") != std::string::npos || name.find("pmos") != std::string::npos ||
@@ -1074,34 +1142,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
 
     // Hierarchical block pins are generated from the child schematic's Input
     // and Output instances, in the same order as generatedSchematicSymbol().
-    const auto portInstances = [&](const SchematicCell &cell) {
-        std::vector<const SchematicInstance *> inputs;
-        std::vector<const SchematicInstance *> outputs;
-        for (const auto &[_, instance] : cell.instances) {
-            const auto symbol = cell.symbols.find(instance.symbol);
-            if (symbol == cell.symbols.end())
-                continue;
-            const auto type = lower(symbolTypeName(symbol->second.name));
-            if (type == "input")
-                inputs.push_back(&instance);
-            else if (type == "output")
-                outputs.push_back(&instance);
-        }
-        const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
-            std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
-                if (left->y != right->y)
-                    return left->y > right->y;
-                return lower(left->name) < lower(right->name);
-            });
-        };
-        sortPorts(inputs);
-        sortPorts(outputs);
-        std::vector<const SchematicInstance *> ports;
-        ports.reserve(inputs.size() + outputs.size());
-        ports.insert(ports.end(), inputs.begin(), inputs.end());
-        ports.insert(ports.end(), outputs.begin(), outputs.end());
-        return ports;
-    };
+    const auto portInstances = [&](const SchematicCell &cell) { return schematicPortInstances(cell); };
 
     // A child Input/Output instance defines a port. Its connected net becomes
     // that port inside the subcircuit body.
@@ -1251,10 +1292,43 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 if (designator.empty() || std::toupper(static_cast<unsigned char>(designator.front())) != 'X')
                     designator.insert(designator.begin(), 'X');
                 body << designator << " ";
-                for (const auto &pin : symbol->second.pins) {
-                    const auto node = pinToNode.find(pin.id);
-                    body << (node != pinToNode.end() ? node->second : "0") << " ";
+                // The `.subckt` port list follows the child's port instances
+                // (inputs top-down, then outputs). A symbol may declare its own
+                // pins in any order, so map every port to the parent pin with
+                // the same name instead of trusting the declaration order;
+                // fall back to position for hand-made or renamed symbols.
+                const auto childPorts = schematicPortInstances(child->second);
+                bool matchedByName = !childPorts.empty();
+                std::size_t portIndex = 0;
+                for (const auto *port : childPorts) {
+                    const Pin *connection = nullptr;
+                    for (const auto &pin : symbol->second.pins) {
+                        if (lower(pin.name) == lower(port->name)) {
+                            connection = &pin;
+                            break;
+                        }
+                    }
+                    if (connection == nullptr && portIndex < symbol->second.pins.size()) {
+                        connection = &symbol->second.pins[portIndex];
+                        matchedByName = false;
+                    }
+                    if (connection != nullptr) {
+                        if (lower(connection->name) != lower(port->name))
+                            matchedByName = false;
+                        const auto node = pinToNode.find(connection->id);
+                        body << (node != pinToNode.end() ? node->second : "0") << " ";
+                    } else {
+                        body << "0 ";
+                    }
+                    ++portIndex;
                 }
+                if (!matchedByName)
+                    note("hierarchical symbol '" + symbol->second.name + "' pins do not match the ports of '" +
+                         child->second.name + "'; connecting by position");
+                if (symbol->second.pins.size() > childPorts.size())
+                    note("hierarchical symbol '" + symbol->second.name + "' declares " +
+                         std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name + "' has " +
+                         std::to_string(childPorts.size()) + " ports; extra pins are ignored");
                 body << spiceIdentifier(child->second.name) << "\n";
                 continue;
             }

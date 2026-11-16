@@ -811,10 +811,19 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
 
 std::string schematicBaseName(std::string name) {
     auto normalized = normalizedIdentifier(name);
-    for (const auto suffix : {"_generated", "_layout", "_dut", "_lvs"}) {
-        const std::string text(suffix);
-        if (normalized.ends_with(text))
-            return normalized.substr(0, normalized.size() - text.size());
+    // Strip decorators repeatedly: a procedural layout keeps both its own
+    // "_layout" suffix and the engine's "_generated" one
+    // ("miller_opamp_layout (generated)" -> "miller_opamp").
+    for (bool stripped = true; stripped;) {
+        stripped = false;
+        for (const auto suffix : {"_generated", "_layout", "_dut", "_lvs"}) {
+            const std::string text(suffix);
+            if (normalized.size() > text.size() && normalized.ends_with(text)) {
+                normalized.resize(normalized.size() - text.size());
+                stripped = true;
+                break;
+            }
+        }
     }
     return normalized;
 }

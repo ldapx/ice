@@ -1992,6 +1992,9 @@ int main(int argc, char **argv) {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     artwork = templ.artwork;
                     templatePins = templ.pins;
+                } else if (!sourceCell.textSchematic && !blank) {
+                    // Drawn sub-cell: one pin per port, in subcircuit port order.
+                    templatePins = ice::hierarchicalSymbolPins(sourceCell);
                 }
             } else if (!blank) {
                 try {

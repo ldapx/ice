@@ -118,8 +118,27 @@ pmos = "sg13_lv_pmos"
 preserving a project grid the user has changed. It does not replace per-layer
 minimum-spacing rules or placement/routing track pitches.
 
-Package simulation paths are relative to the package root. OSDI packages
-declare each Verilog-A source and output:
+`model_file`, `includes` and `spiceinit` are relative to `[pdk.simulation].root`.
+The `verilog_a` tree and `[[pdk.simulation.osdi]]` sources are relative to the
+package root.
+
+`spiceinit` names an ngspice start-up file such as the PDK's `spinit`. ICE
+replays its `set ...` commands before loading a circuit, so a run does not
+depend on the user's `~/.spiceinit`. Packages whose models are binned
+`.subckt` wrappers (SKY130, GF180MCU) need it to select the BSIM
+compatibility mode:
+
+```toml
+[pdk.simulation]
+engine = "ngspice"
+root = "simulation/ngspice"
+model_file = "sky130.lib.spice"
+section = "tt"
+spiceinit = "spinit"
+options = [".option scale=1u"]
+```
+
+OSDI packages declare each Verilog-A source and output:
 
 ```toml
 [[pdk.simulation.osdi]]

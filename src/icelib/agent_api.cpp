@@ -263,6 +263,65 @@ ComponentPlacement addSchematicComponent(Project &project, ObjectId cellId, cons
     auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     if (cell.isTextSource())
         throw ProjectError("schematic.component.source", "Components can only be added to a drawn schematic");
+
+    const auto requestedName = trimCopy(request.symbol.empty() ? request.type : request.symbol);
+
+    // Places one more instance of a symbol that already exists in the cell
+    // (hierarchical block, custom artwork) and returns its pins.
+    const auto placeExistingSymbol = [&](ObjectId symbolId) -> ComponentPlacement {
+        auto &target = project.schematicCells.at(cellId);
+        const auto &symbol = target.symbols.at(symbolId);
+        const auto instanceName = nextInstanceName(target, symbol.name, request.name);
+        const auto instanceId = addSchematicInstance(project, cellId, symbolId, instanceName, request.x, request.y);
+        for (const auto &parameter : request.parameters)
+            setSchematicParameter(project, cellId, instanceId, parameter.name, parameter.value);
+        auto &placed = project.schematicCells.at(cellId);
+        const auto instance = placed.instances.at(instanceId);
+        const auto &placedSymbol = placed.symbols.at(instance.symbol);
+        return {instanceId, instance.symbol, placedSymbol.name, instanceName, placedSymbol.pins};
+    };
+
+    if (!requestedName.empty()) {
+        // 1. A symbol that already lives in this cell.
+        for (const auto &[symbolId, symbol] : cell.symbols) {
+            if (lowerCopy(symbol.name) == lowerCopy(requestedName))
+                return placeExistingSymbol(symbolId);
+        }
+
+        const auto symbols = availableSymbols(cell.pdk);
+        const auto exact = std::find_if(symbols.begin(), symbols.end(), [&](const FileSymbol &symbol) {
+            return lowerCopy(symbol.name) == lowerCopy(requestedName);
+        });
+        // 2. A PDK symbol with exactly this name.
+        if (exact != symbols.end()) {
+            const auto *fileSymbol = &*exact;
+            const auto symbolName = uniqueSchematicSymbolName(cell, fileSymbol->name);
+            auto symbol = makeSymbolFromFile(project, *fileSymbol, symbolName);
+            const auto symbolId = symbol.id;
+            const auto pins = symbol.pins;
+            cell.symbols.emplace(symbolId, std::move(symbol));
+            const auto instanceName = nextInstanceName(cell, fileSymbol->name, request.name);
+            const auto instanceId = project.nextId();
+            cell.instances.emplace(instanceId,
+                                   SchematicInstance{instanceId, symbolId, instanceName, request.x, request.y});
+            auto &instance = cell.instances.at(instanceId);
+            seedDefaultParameters(project, instance, fileSymbol->defaultParameters);
+            for (const auto &parameter : request.parameters)
+                setSchematicParameter(project, cellId, instanceId, parameter.name, parameter.value);
+            return {instanceId, symbolId, symbolName, instanceName, pins};
+        }
+
+        // 3. Another drawn schematic: generate its hierarchical symbol on the fly.
+        for (const auto &[candidateId, candidate] : project.schematicCells) {
+            if (candidateId == cellId || candidate.isTextSource() || candidate.systemVerilogSchematic)
+                continue;
+            if (lowerCopy(candidate.name) != lowerCopy(requestedName))
+                continue;
+            return placeExistingSymbol(addHierarchicalSymbol(project, cellId, candidateId));
+        }
+    }
+
+    // 4. Fuzzy/alias resolution through the PDK symbol library.
     const auto symbols = availableSymbols(cell.pdk);
     const auto *fileSymbol = findComponentSymbol(symbols, request);
     const auto symbolName = uniqueSchematicSymbolName(cell, fileSymbol->name);

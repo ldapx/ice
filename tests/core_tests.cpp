@@ -1843,6 +1843,97 @@ TEST_CASE("hierarchical schematic instances become subcircuits") {
     CHECK(notes.empty());
 }
 
+TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
+    ice::Project project;
+    project.identity = "hierarchy-order";
+    project.name = "hierarchy-order";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    // Child ports in subcircuit order: A (y=100) then B (y=0).
+    const auto childId = ice::createSchematicCell(project, "block");
+    const auto inputA = addSymbol(childId, "Input", {"IN"});
+    const auto inputB = addSymbol(childId, "Input 2", {"IN"});
+    const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
+    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    project.schematicCells.at(childId)
+        .instances.at(childResistor)
+        .parameters.push_back({project.nextId(), "resistance", "1k"});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputA, 0), pinIdOf(childId, resistorId, 0)});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputB, 0), pinIdOf(childId, resistorId, 1)});
+
+    // The parent symbol declares its pins in the opposite order (B, A).
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockId = addSymbol(parentId, "block", {"B", "A"});
+    project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
+    const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
+    ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    project.schematicCells.at(parentId)
+        .instances.at(source)
+        .parameters.push_back({project.nextId(), "voltage", "1"});
+    ice::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
+    ice::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find(".subckt block A B") != std::string::npos);
+    CHECK(joined.find("R1 A B 1k") != std::string::npos);
+    // Port A is wired to "na" and port B to "nb" even though the symbol lists B first.
+    CHECK(joined.find("X1 na nb block") != std::string::npos);
+    CHECK(joined.find("X1 nb na block") == std::string::npos);
+    CHECK(notes.empty());
+}
+
+TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
+    ice::Project project;
+    project.identity = "hierarchy-pins";
+    project.name = "hierarchy-pins";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name, std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto childId = ice::createSchematicCell(project, "cell");
+    const auto inputB = addSymbol(childId, "Input", {"IN"});
+    const auto inputA = addSymbol(childId, "Input 2", {"IN"});
+    const auto outputId = addSymbol(childId, "Output", {"OUT"});
+    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    ice::addSchematicInstance(project, childId, outputId, "Y", 0, 50);
+
+    const auto pins = ice::hierarchicalSymbolPins(project.schematicCells.at(childId));
+    CHECK(pins.size() == 3);
+    if (pins.size() != 3)
+        return;
+    CHECK(pins[0].name == "A");
+    CHECK(pins[1].name == "B");
+    CHECK(pins[2].name == "Y");
+    CHECK(pins[0].direction == ice::PinDirection::left);
+    CHECK(pins[1].direction == ice::PinDirection::left);
+    CHECK(pins[2].direction == ice::PinDirection::right);
+    CHECK(pins[0].x < pins[2].x);
+}
+
 TEST_CASE("layout pins and nets round-trip with required metadata") {
     ice::Project project;
     project.identity = "pins";
