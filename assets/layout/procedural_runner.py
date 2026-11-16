@@ -115,6 +115,41 @@ class Shape:
         self._record["net"] = str(value).strip()
 
 
+class DevicePlacement:
+    """Handle returned by :meth:`Layout.device`.
+
+    The device geometry is flattened into the generated layout, but this
+    object keeps the absolute pin rectangles and the device metadata so a
+    script can route to the device and LVS can recognize it.
+    """
+
+    def __init__(self, name, device, model, parameters, shapes, ports, bounds):
+        self.name = name
+        self.device = device
+        self.model = model
+        self.parameters = parameters
+        self.shapes = shapes
+        self.ports = ports
+        self.bounds = bounds
+
+    def __iter__(self):
+        return iter(self.shapes)
+
+    def __len__(self):
+        return len(self.shapes)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self.ports[key]
+        return self.shapes[key]
+
+    def __getattr__(self, name):
+        ports = self.__dict__.get("ports", {})
+        if name in ports:
+            return ports[name]
+        raise AttributeError(name)
+
+
 class Layer:
     """Handle returned by Layout.layer()."""
 
@@ -162,6 +197,7 @@ class Layout:
         self.shapes = []
         self.ports = []
         self.instances = []
+        self.devices = []
         self.dummy_fill_requests = []
         self._device_library = None
         self._device_layers = {}
@@ -665,11 +701,23 @@ class Layout:
             return {"left": "right", "right": "left"}.get(side, side)
         return side
 
-    def device(self, device_name, x=0, y=0, orientation="r0", name=None, **parameters):
+    def device(
+        self,
+        device_name,
+        x=0,
+        y=0,
+        orientation="r0",
+        name=None,
+        nets=None,
+        **parameters,
+    ):
         """Place a package layout device (PCell or fixed cell) into this layout.
 
-        The device geometry is flattened into the generated layout. Ports are
-        prefixed with the instance name so multiple copies can coexist.
+        The device geometry is flattened into the generated layout, while a
+        device record preserves its model, parameters, and terminal nets for
+        LVS and extraction. Ports are prefixed with the instance name so
+        multiple copies can coexist. ``nets`` maps device pin names to layout
+        net names, for example ``nets={"G": "GATE", "S": "VSS"}``.
         """
         cell = self._device_cell(device_name)
         orientation = str(orientation)
@@ -689,7 +737,13 @@ class Layout:
             raise ValueError("Device instance name must not be empty")
         origin_x = _coordinate(x, "device x")
         origin_y = _coordinate(y, "device y")
+        net_map = {}
+        for pin, net in (nets or {}).items():
+            if net is None or str(net).strip() == "":
+                continue
+            net_map[str(pin)] = str(net).strip()
         shapes = []
+        shape_points = []
         for source in geometry.get("shapes", []):
             points = []
             for point in source.get("points", []):
@@ -715,7 +769,10 @@ class Layout:
                 record["name"] = f"{instance_name}.{source_name}"
             if source.get("net"):
                 record["net"] = str(source["net"])
+            shape_points.extend(points)
             shapes.append(self._add_shape(record))
+        port_rectangles = {}
+        port_records = []
         for source in geometry.get("ports", []):
             rect = source.get("rectangle", {})
             corners = []
@@ -733,26 +790,78 @@ class Layout:
             min_y = min(point[1] for point in corners)
             max_x = max(point[0] for point in corners)
             max_y = max(point[1] for point in corners)
-            port_name = f"{instance_name}.{source.get('name', 'P')}"
+            pin = str(source.get("name", "P"))
+            port_name = f"{instance_name}.{pin}"
+            rectangle = {
+                "x": min_x + origin_x,
+                "y": min_y + origin_y,
+                "width": max(max_x - min_x, 1),
+                "height": max(max_y - min_y, 1),
+            }
+            net = net_map.get(pin)
             self.ports.append(
                 {
                     "name": port_name,
                     "layer": self._device_layer_name(source.get("layer", 0), source.get("datatype", 0)),
-                    "rectangle": {
-                        "x": min_x + origin_x,
-                        "y": min_y + origin_y,
-                        "width": max(max_x - min_x, 1),
-                        "height": max(max_y - min_y, 1),
-                    },
+                    "rectangle": rectangle,
                     "direction": str(source.get("direction", "inout")),
                     "side": self._device_side(str(source.get("side", "left")), orientation),
-                    "net": None,
+                    "net": net,
                     "label": port_name,
                     "visible": bool(source.get("visible", True)),
                     "locked": bool(source.get("locked", False)),
+                    "internal": True,
                 }
             )
-        return shapes
+            port_rectangles[pin] = (
+                rectangle["x"],
+                rectangle["y"],
+                rectangle["width"],
+                rectangle["height"],
+            )
+            port_records.append(
+                {
+                    "name": pin,
+                    "net": net,
+                    "rectangle": rectangle,
+                }
+            )
+        if shape_points:
+            min_x = min(point["x"] for point in shape_points)
+            min_y = min(point["y"] for point in shape_points)
+            max_x = max(point["x"] for point in shape_points)
+            max_y = max(point["y"] for point in shape_points)
+            bounds = {
+                "x": min_x,
+                "y": min_y,
+                "width": max(max_x - min_x, 1),
+                "height": max(max_y - min_y, 1),
+            }
+        else:
+            bounds = {"x": origin_x, "y": origin_y, "width": 1, "height": 1}
+        model = str(values.get("model", "") or cell.get("model", ""))
+        device_record = {
+            "name": instance_name,
+            "device": str(cell.get("name", device_name)),
+            "model": model,
+            "type": model or str(cell.get("name", device_name)),
+            "parameters": [
+                {"name": str(key), "value": str(value)}
+                for key, value in values.items()
+            ],
+            "bounds": bounds,
+            "ports": port_records,
+        }
+        self.devices.append(device_record)
+        return DevicePlacement(
+            instance_name,
+            str(cell.get("name", device_name)),
+            model,
+            dict(values),
+            shapes,
+            port_rectangles,
+            bounds,
+        )
 
     def add_dummy_fill(
         self, layers=None, density=None, deviation=None, area=None, **options
@@ -897,6 +1006,7 @@ class Layout:
             "shapes": self.shapes,
             "ports": self.ports,
             "instances": self.instances,
+            "devices": self.devices,
         }
 
 

@@ -381,6 +381,7 @@ NB_MODULE(icepy, module) {
         .def_rw("label", &Port::label)
         .def_rw("visible", &Port::visible)
         .def_rw("locked", &Port::locked)
+        .def_rw("internal", &Port::internal)
         .def_rw("source_instance", &Port::sourceInstance)
         .def_rw("source_port", &Port::sourcePort);
 

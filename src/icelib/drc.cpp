@@ -1,6 +1,9 @@
 #include "icelib/drc.hpp"
 
 #include "icelib/interchange.hpp"
+#include "icelib/pdk.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -10,6 +13,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -269,7 +273,220 @@ Coordinate toNanometers(double micrometers) {
     return static_cast<Coordinate>(std::llround(micrometers * nanometersPerMicrometer));
 }
 
+std::string replaceAll(std::string text, const std::string &from, const std::string &to) {
+    if (from.empty())
+        return text;
+    std::size_t position = 0;
+    while ((position = text.find(from, position)) != std::string::npos) {
+        text.replace(position, from.size(), to);
+        position += to.size();
+    }
+    return text;
+}
+
+std::string expandEnvironment(std::string text) {
+    if (text == "~" || text.starts_with("~/")) {
+        if (const char *home = std::getenv("HOME"); home && *home)
+            text = std::string(home) + text.substr(1);
+    }
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t index = 0; index < text.size();) {
+        if (text[index] != '$') {
+            result.push_back(text[index++]);
+            continue;
+        }
+        std::size_t start = index + 1;
+        std::size_t end = start;
+        if (end < text.size() && text[end] == '{') {
+            start = end + 1;
+            end = text.find('}', start);
+            if (end == std::string::npos) {
+                result.push_back(text[index++]);
+                continue;
+            }
+            const auto name = text.substr(start, end - start);
+            if (const char *value = std::getenv(name.c_str()); value && *value)
+                result += value;
+            index = end + 1;
+            continue;
+        }
+        while (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) != 0 || text[end] == '_'))
+            ++end;
+        if (end == start) {
+            result.push_back(text[index++]);
+            continue;
+        }
+        const auto name = text.substr(start, end - start);
+        if (const char *value = std::getenv(name.c_str()); value && *value)
+            result += value;
+        index = end;
+    }
+    return result;
+}
+
+std::vector<std::filesystem::path> expandGlob(const std::filesystem::path &pattern) {
+    const auto text = pattern.string();
+    if (text.find('*') == std::string::npos)
+        return {pattern};
+    auto root = pattern.root_path();
+    if (root.empty())
+        root = std::filesystem::current_path();
+    std::vector<std::filesystem::path> current{root};
+    for (const auto &part : pattern.relative_path()) {
+        std::vector<std::filesystem::path> next;
+        if (part.string() == "*") {
+            for (const auto &base : current) {
+                std::error_code status;
+                for (std::filesystem::directory_iterator it(base, status), end; !status && it != end;
+                     it.increment(status)) {
+                    if (it->is_directory())
+                        next.push_back(it->path());
+                }
+            }
+        } else {
+            for (const auto &base : current)
+                next.push_back(base / part);
+        }
+        current = std::move(next);
+    }
+    return current;
+}
+
+std::filesystem::path resolveDrcDeckPath(const std::filesystem::path &packageRoot, const std::string &deckName,
+                                         const std::vector<std::string> &searchPaths) {
+    if (deckName.empty())
+        return {};
+    const auto deck = std::filesystem::path(deckName);
+    std::vector<std::filesystem::path> candidates;
+    if (deck.is_absolute()) {
+        candidates.push_back(deck);
+    } else {
+        candidates.push_back(packageRoot / "technology" / deck);
+        candidates.push_back(packageRoot / deck);
+    }
+    for (const auto &raw : searchPaths) {
+        const auto expanded = expandEnvironment(raw);
+        if (expanded.empty())
+            continue;
+        for (const auto &base : expandGlob(expanded)) {
+            std::error_code status;
+            if (std::filesystem::is_directory(base, status) && !status) {
+                candidates.push_back(base / deck.filename());
+                candidates.push_back(base / deck);
+            } else {
+                candidates.push_back(base);
+            }
+        }
+    }
+    for (const auto &candidate : candidates) {
+        std::error_code status;
+        if (std::filesystem::is_regular_file(candidate, status) && !status)
+            return candidate;
+    }
+    return {};
+}
+
+std::vector<std::string> stringArray(const nlohmann::json &value) {
+    std::vector<std::string> result;
+    if (!value.is_array())
+        return result;
+    for (const auto &entry : value) {
+        if (entry.is_string())
+            result.push_back(entry.get<std::string>());
+    }
+    return result;
+}
+
 } // namespace
+
+std::optional<DrcDeck> drcDeckForPdk(const std::string &pdk, const std::string &suite, std::string *error) {
+    if (error)
+        error->clear();
+    if (pdk.empty() || pdk == genericPdkId)
+        return std::nullopt;
+    std::string lastError;
+    for (const auto &info : findPdks(pdk)) {
+        const auto configPath = info.packageRoot / "technology" / "drc.json";
+        std::error_code status;
+        if (!std::filesystem::is_regular_file(configPath, status) || status)
+            continue;
+        std::ifstream stream(configPath);
+        if (!stream) {
+            lastError = "Unable to read DRC deck configuration: " + configPath.string();
+            continue;
+        }
+        nlohmann::json config;
+        try {
+            stream >> config;
+        } catch (const std::exception &exception) {
+            lastError = "Invalid DRC deck configuration " + configPath.string() + ": " + exception.what();
+            continue;
+        }
+        DrcDeck deck;
+        deck.name = config.value("name", std::string{});
+        deck.engine = config.value("engine", std::string{});
+        deck.process = config.value("process", std::string{});
+        deck.pdkPath = config.value("pdk_path", std::string{});
+        std::string deckName = config.value("deck", std::string{});
+        auto arguments = stringArray(config.value("arguments", nlohmann::json::array()));
+        auto searchPaths = stringArray(config.value("search_paths", nlohmann::json::array()));
+        if (!suite.empty()) {
+            const auto suites = config.find("suites");
+            if (suites != config.end() && suites->is_object() && suites->contains(suite)) {
+                const auto &entry = suites->at(suite);
+                if (entry.contains("engine"))
+                    deck.engine = entry.value("engine", deck.engine);
+                if (entry.contains("process"))
+                    deck.process = entry.value("process", deck.process);
+                if (entry.contains("pdk_path"))
+                    deck.pdkPath = entry.value("pdk_path", deck.pdkPath);
+                if (entry.contains("deck"))
+                    deckName = entry.value("deck", deckName);
+                if (entry.contains("arguments"))
+                    arguments = stringArray(entry.at("arguments"));
+            }
+        }
+        std::string key;
+        for (const auto character : pdk) {
+            if (std::isalnum(static_cast<unsigned char>(character)) != 0)
+                key.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(character))));
+        }
+        if (!key.empty()) {
+            if (const char *specific = std::getenv(("ICE_DRC_DECK_" + key).c_str()); specific && *specific)
+                deckName = specific;
+        }
+        if (deckName.empty()) {
+            if (const char *generic = std::getenv("ICE_DRC_DECK"); generic && *generic)
+                deckName = generic;
+        }
+        if (deck.engine.empty()) {
+            const auto extension = std::filesystem::path(deckName).extension().string();
+            deck.engine = (extension == ".lydrc" || extension == ".drc" || extension == ".rb") ? "klayout" : "gdscheck";
+        }
+        deck.arguments = std::move(arguments);
+        if (deck.engine == "klayout") {
+            deck.path = resolveDrcDeckPath(info.packageRoot, deckName, searchPaths);
+            if (deck.path.empty()) {
+                if (error)
+                    *error = "No KLayout DRC deck found for '" + pdk + "'" +
+                             (deckName.empty() ? std::string{} : " (expected " + deckName + ")");
+            }
+        } else {
+            if (deck.process.empty())
+                deck.process = gdsCheckProcessForPdk(pdk);
+            if (deck.pdkPath.empty())
+                deck.pdkPath = deckName;
+            std::error_code pathStatus;
+            if (!deck.pdkPath.empty() && !std::filesystem::is_directory(deck.pdkPath, pathStatus))
+                deck.pdkPath.clear();
+        }
+        return deck;
+    }
+    if (error)
+        *error = std::move(lastError);
+    return std::nullopt;
+}
 
 std::string gdsCheckProcessForPdk(const std::string &pdk) {
     std::string compact;
@@ -317,10 +534,43 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
         return result;
     }
     result.layoutName = cell->second.name;
-    const auto process = gdsCheckProcessForPdk(cell->second.pdk);
-    if (process.empty()) {
-        result.error = "The layout PDK has no gdscheck process deck";
-        return result;
+
+    std::optional<DrcDeck> configured;
+    std::string deckError;
+    if (!options.deck.empty()) {
+        DrcDeck deck;
+        deck.engine = options.engine.empty() ? "klayout" : options.engine;
+        deck.path = options.deck;
+        deck.name = options.deck.filename().string();
+        configured = std::move(deck);
+    } else {
+        configured = drcDeckForPdk(cell->second.pdk, options.suite, &deckError);
+    }
+    std::string processName;
+    if (configured) {
+        if (!options.engine.empty())
+            configured->engine = options.engine;
+        result.engine = configured->engine;
+        result.deckPath = configured->path;
+        if (configured->engine == "klayout" && configured->path.empty()) {
+            result.error = deckError.empty() ? "The layout PDK has no KLayout DRC deck" : deckError;
+            return result;
+        }
+        if (configured->engine != "klayout") {
+            result.engine = "gdscheck";
+            processName = configured->process.empty() ? gdsCheckProcessForPdk(cell->second.pdk) : configured->process;
+            if (processName.empty()) {
+                result.error = "The layout PDK has no gdscheck process deck";
+                return result;
+            }
+        }
+    } else {
+        processName = gdsCheckProcessForPdk(cell->second.pdk);
+        if (processName.empty()) {
+            result.error = deckError.empty() ? "The layout PDK has no DRC deck" : deckError;
+            return result;
+        }
+        result.engine = "gdscheck";
     }
 
     const auto workDirectory =
@@ -351,25 +601,69 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
     }
 
     std::filesystem::remove(result.reportPath, status);
-    GdsCheckOptions check;
-    check.input = result.gdsPath;
-    check.report = result.reportPath;
-    check.process = process;
-    check.topCell = options.topCell.empty() ? "TOP" : options.topCell;
-    check.suite = options.suite;
-
+    const auto topCell = options.topCell.empty() ? "TOP" : options.topCell;
     ProcessOptions processOptions;
-    processOptions.arguments.push_back("gdscheck");
-    for (const auto &argument : gdsCheckArguments(check))
-        processOptions.arguments.push_back(argument);
     processOptions.workingDirectory = workDirectory;
     processOptions.logPath = result.logPath;
     processOptions.timeoutSeconds = options.timeoutSeconds;
+
+    if (result.engine == "klayout") {
+        auto arguments = configured->arguments;
+        if (arguments.empty()) {
+            arguments = {
+                "-b", "-r", "{deck}", "-rd", "input={input}", "-rd", "report={report}", "-rd", "top_cell={top_cell}"};
+        }
+        bool hasDeck = false;
+        bool hasInput = false;
+        bool hasReport = false;
+        for (const auto &argument : arguments) {
+            hasDeck = hasDeck || argument.find("{deck}") != std::string::npos;
+            hasInput = hasInput || argument.find("{input}") != std::string::npos;
+            hasReport = hasReport || argument.find("{report}") != std::string::npos;
+        }
+        processOptions.arguments.push_back("klayout");
+        if (!hasDeck) {
+            processOptions.arguments.push_back("-b");
+            processOptions.arguments.push_back("-r");
+            processOptions.arguments.push_back(configured->path.string());
+        }
+        for (const auto &argument : arguments) {
+            auto value = replaceAll(argument, "{deck}", configured->path.string());
+            value = replaceAll(value, "{input}", result.gdsPath.string());
+            value = replaceAll(value, "{report}", result.reportPath.string());
+            value = replaceAll(value, "{top_cell}", topCell);
+            value = replaceAll(value, "{suite}", options.suite);
+            value = replaceAll(value, "{workdir}", workDirectory.string());
+            processOptions.arguments.push_back(std::move(value));
+        }
+        if (!hasInput) {
+            processOptions.arguments.push_back("-rd");
+            processOptions.arguments.push_back("input=" + result.gdsPath.string());
+        }
+        if (!hasReport) {
+            processOptions.arguments.push_back("-rd");
+            processOptions.arguments.push_back("report=" + result.reportPath.string());
+        }
+    } else {
+        GdsCheckOptions check;
+        check.input = result.gdsPath;
+        check.report = result.reportPath;
+        check.process = processName;
+        check.topCell = topCell;
+        check.suite = options.suite;
+        processOptions.arguments.push_back("gdscheck");
+        if (configured && !configured->pdkPath.empty()) {
+            processOptions.arguments.push_back("--pdk-path");
+            processOptions.arguments.push_back(configured->pdkPath);
+        }
+        for (const auto &argument : gdsCheckArguments(check))
+            processOptions.arguments.push_back(argument);
+    }
     result.process = runProcess(processOptions, cancellation, onOutput);
 
     if (!std::filesystem::is_regular_file(result.reportPath, status) || status) {
         std::ostringstream message;
-        message << "gdscheck did not produce a report";
+        message << (result.engine == "klayout" ? "klayout" : "gdscheck") << " did not produce a report";
         if (result.process.timedOut)
             message << " (timeout)";
         else if (result.process.exitCode >= 0)

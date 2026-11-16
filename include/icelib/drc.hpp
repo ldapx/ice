@@ -4,6 +4,7 @@
 #include "icelib/verification.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,22 @@ std::string gdsCheckProcessForPdk(const std::string &pdk);
 // {"run", "--input", ..., "--process", ..., ...}.
 std::vector<std::string> gdsCheckArguments(const GdsCheckOptions &options);
 
+// A package-provided DRC deck. KLayout decks are .lydrc/.drc scripts that
+// write a KLayout report database; gdscheck decks use a process name.
+struct DrcDeck {
+    std::string engine = "gdscheck";
+    std::string name;
+    std::filesystem::path path;
+    std::string process;
+    std::string pdkPath;
+    std::vector<std::string> arguments;
+};
+
+// Reads <package>/technology/drc.json for the given PDK. Returns nullopt when
+// the package provides no external deck, so callers can fall back to gdscheck.
+std::optional<DrcDeck> drcDeckForPdk(const std::string &pdk, const std::string &suite = "main",
+                                     std::string *error = nullptr);
+
 struct LayoutDrcOptions {
     // Directory used for layout.gds, drc.lyrdb, and drc.log. Created when
     // missing. Prefer a project build directory so the report is inspectable.
@@ -39,12 +56,17 @@ struct LayoutDrcOptions {
     std::string topCell;
     std::string suite = "main";
     int timeoutSeconds = 0;
+    // Optional overrides. Empty engine uses the package deck or gdscheck.
+    std::string engine;
+    std::filesystem::path deck;
 };
 
 struct LayoutDrcResult {
     bool ok = false;
     ObjectId layout = 0;
     std::string layoutName;
+    std::string engine;
+    std::filesystem::path deckPath;
     std::filesystem::path gdsPath;
     std::filesystem::path reportPath;
     std::filesystem::path logPath;

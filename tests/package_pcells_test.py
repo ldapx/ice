@@ -13,6 +13,7 @@ ICE_PACKAGE_REPOSITORIES to a colon-separated list to override the search path.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from pathlib import Path
@@ -245,6 +246,59 @@ def check_library(name: str, root: Path) -> None:
     print(f"{name}: {len(library['cells'])} cells, {len(cells)} named, generators OK")
 
 
+def check_mos_geometry(name: str, root: Path) -> None:
+    """Check the package MOS PCell has real cuts, taps, and separate fingers."""
+    if name == "ice-pkg-sky130":
+        device, diff, gate, required = "nfet", (65, 20), (66, 20), {
+            (66, 20), (66, 44), (67, 44), (68, 20), (65, 44),
+            (93, 44), (94, 20), (95, 20),
+        }
+        pmos_required = {(64, 20)}
+    elif name == "ice-pkg-gf180mcu":
+        device, diff, gate, required = "nmos", (22, 0), (30, 0), {
+            (30, 0), (33, 0), (34, 0), (32, 0), (31, 0), (204, 0),
+        }
+        pmos_required = {(21, 0)}
+    else:
+        return
+
+    geometry = icepy.pcells.generate_package_geometry(
+        root, "pcells", device, {"w": "4u", "l": "1u", "nf": "2", "m": "1"}
+    )
+    streams = {(shape["layer"], shape["datatype"]) for shape in geometry["shapes"]}
+    missing = required - streams
+    assert not missing, f"{name}: MOS geometry is missing layers {sorted(missing)}"
+
+    def bounds(shape):
+        xs = [point[0] for point in shape["points"]]
+        ys = [point[1] for point in shape["points"]]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    islands = [bounds(shape) for shape in geometry["shapes"]
+               if (shape["layer"], shape["datatype"]) == diff]
+    gates = [bounds(shape) for shape in geometry["shapes"]
+             if (shape["layer"], shape["datatype"]) == gate]
+    def intersects(left, right):
+        return not (left[2] <= right[0] or right[2] <= left[0] or
+                    left[3] <= right[1] or right[3] <= left[1])
+    channel_islands = [island for island in islands
+                       if any(intersects(island, gate_bounds) for gate_bounds in gates)]
+    assert len(channel_islands) == 2, (
+        f"{name}: nf=2 produced {len(channel_islands)} channel diff islands"
+    )
+    for left, right in itertools.combinations(islands, 2):
+        separated = (left[2] <= right[0] or right[2] <= left[0] or
+                     left[3] <= right[1] or right[3] <= left[1])
+        assert separated, f"{name}: multifinger diff islands overlap: {left} {right}"
+
+    if device == "nfet" and pmos_required:
+        pgeometry = icepy.pcells.generate_package_geometry(
+            root, "pcells", "pfet", {"w": "4u", "l": "1u", "nf": "2", "m": "1"}
+        )
+        pstreams = {(shape["layer"], shape["datatype"]) for shape in pgeometry["shapes"]}
+        assert pmos_required <= pstreams, f"{name}: PMOS geometry is missing a well"
+
+
 def main() -> int:
     roots = package_roots()
     missing = sorted(set(PACKAGES) - set(roots))
@@ -255,6 +309,7 @@ def main() -> int:
         return 0
     for name, root in sorted(roots.items()):
         check_library(name, root)
+        check_mos_geometry(name, root)
     print("package PCell tests passed")
     return 0
 

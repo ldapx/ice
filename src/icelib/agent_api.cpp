@@ -197,17 +197,6 @@ Symbol makeSymbolFromFile(Project &project, const FileSymbol &fileSymbol, std::s
     return symbol;
 }
 
-std::string uniqueSymbolName(const SchematicCell &cell, const std::string &base) {
-    auto name = base;
-    const auto taken = [&](const std::string &candidate) {
-        return std::any_of(cell.symbols.begin(), cell.symbols.end(),
-                           [&](const auto &entry) { return entry.second.name == candidate; });
-    };
-    for (int suffix = 2; taken(name); ++suffix)
-        name = base + " " + std::to_string(suffix);
-    return name;
-}
-
 void addDiagnostic(std::vector<Diagnostic> &diagnostics, Diagnostic::Severity severity, std::string code,
                    std::string message, std::optional<ObjectId> object = std::nullopt) {
     diagnostics.push_back({severity, std::move(code), std::move(message), object});
@@ -276,7 +265,7 @@ ComponentPlacement addSchematicComponent(Project &project, ObjectId cellId, cons
         throw ProjectError("schematic.component.source", "Components can only be added to a drawn schematic");
     const auto symbols = availableSymbols(cell.pdk);
     const auto *fileSymbol = findComponentSymbol(symbols, request);
-    const auto symbolName = uniqueSymbolName(cell, fileSymbol->name);
+    const auto symbolName = uniqueSchematicSymbolName(cell, fileSymbol->name);
     auto symbol = makeSymbolFromFile(project, *fileSymbol, symbolName);
     const auto symbolId = symbol.id;
     const auto pins = symbol.pins;

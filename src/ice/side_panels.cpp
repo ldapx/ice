@@ -533,6 +533,8 @@ void ProjectPanel::rebuildTree() {
         if (layoutIt == project.layoutCells.end())
             return;
         for (const auto &[deviceId, device] : layoutIt->second.plannedDevices) {
+            if (!device.placeholder)
+                continue;
             auto *deviceItem = new QTreeWidgetItem(parentItem, {QString::fromStdString(device.name)});
             deviceItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(deviceId));
             deviceItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::plannedDevice));

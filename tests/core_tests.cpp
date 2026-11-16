@@ -1659,7 +1659,131 @@ TEST_CASE("PDK transistor netlist uses subcircuit calls") {
         joined += line + "\n";
 
     CHECK(joined.find("XM1 d g s b sg13_lv_nmos W=0.2u L=0.13u") != std::string::npos);
-    CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
+    // The IHP NPN subcircuit has three nodes, so no substrate node is appended
+    // for a symbol that does not declare one.
+    CHECK(joined.find("XQ1 c base e") != std::string::npos);
+    // npn13G2 is declared as ".subckt npn13G2 c b e bn" when the IHP package is
+    // installed, so the declared bulk node is emitted and grounded.
+    if (const auto nodes = ice::pdkSubcircuitNodes("ihp-sg13g2", "npn13G2")) {
+        CHECK(nodes->size() == 4);
+        CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
+    }
+}
+
+TEST_CASE("PDK bipolar subcircuits keep a declared substrate node") {
+    ice::Project project;
+    project.identity = "bjt-substrate";
+    project.name = "bjt-substrate";
+    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto addBjt = [&](const std::string &name, const std::string &symbolName,
+                            std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, symbolName);
+        for (const auto *pinName : pins)
+            cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+        const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, name, 0, 0);
+        for (const auto &pin : cell.symbols.at(symbolId).pins) {
+            const auto netId = project.nextId();
+            cell.nets.emplace(netId, ice::Net{netId, name + "_" + pin.name, {pin.id}});
+        }
+        cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_bjt_model"});
+    };
+
+    addBjt("Q1", "SKY130 NPN 5.5V", {"B", "C", "E", "S"});
+    addBjt("Q2", "SKY130 PNP 5.5V", {"B", "C", "E"});
+
+    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+    CHECK(joined.find("XQ1 Q1_C Q1_B Q1_E Q1_S sky130_bjt_model") != std::string::npos);
+    CHECK(joined.find("XQ2 Q2_C Q2_B Q2_E sky130_bjt_model") != std::string::npos);
+}
+
+TEST_CASE("MOS geometry follows the PDK scale option") {
+    ice::Project project;
+    project.identity = "mos-scale";
+    project.name = "mos-scale";
+    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto symbolId = ice::addSymbol(project, cellId, "SKY130 NMOS 1.8V");
+    for (const auto *pinName : {"D", "G", "S", "B"})
+        cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "M1", 0, 0);
+    for (const auto &pin : cell.symbols.at(symbolId).pins) {
+        const auto netId = project.nextId();
+        cell.nets.emplace(netId, ice::Net{netId, "n_" + pin.name, {pin.id}});
+    }
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_fd_pr__nfet_01v8"});
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "w", "10u"});
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "l", "0.5u"});
+
+    const auto join = [](const std::vector<std::string> &lines) {
+        std::string joined;
+        for (const auto &line : lines)
+            joined += line + "\n";
+        return joined;
+    };
+    const auto netlist = [&](double scale) {
+        return join(ice::buildSchematicNetlist(project, cellId, nullptr, ice::SchematicNetlistMode::analog, scale));
+    };
+    // Without a scale option the value is emitted verbatim.
+    CHECK(netlist(1.0).find("W=10u L=0.5u") != std::string::npos);
+    // SKY130 model bins are selected with `.option scale=1u`, so the simulation
+    // netlist converts SI suffixes to bare micron numbers.
+    CHECK(netlist(1e-6).find("W=10 L=0.5") != std::string::npos);
+    // A bare number is already in netlist units (SKY130 writes "60" for 60 um)
+    // and must never be rescaled.
+    auto &parameters = cell.instances.at(instanceId).parameters;
+    parameters.at(1).value = "10";
+    parameters.at(2).value = "0.5";
+    CHECK(netlist(1e-6).find("W=10 L=0.5") != std::string::npos);
+}
+
+TEST_CASE("numbered port symbols still netlist as ports") {
+    ice::Project project;
+    project.identity = "numbered-ports";
+    project.name = "numbered-ports";
+    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto inputId = ice::addSymbol(project, cellId, "Input");
+    cell.symbols.at(inputId).pins.push_back({project.nextId(), "IN", 0, 0});
+    const auto secondId = ice::addSymbol(project, cellId, "Input 2");
+    cell.symbols.at(secondId).pins.push_back({project.nextId(), "IN", 0, 0});
+    const auto supplyPort = ice::addSchematicInstance(project, cellId, inputId, "VDD", 0, 0);
+    const auto groundPort = ice::addSchematicInstance(project, cellId, secondId, "VSS", 0, 0);
+    CHECK(supplyPort != 0);
+    CHECK(groundPort != 0);
+    const auto pinOf = [&](ice::ObjectId symbolId) { return cell.symbols.at(symbolId).pins.front().id; };
+    CHECK(cell.symbols.at(inputId).pins.front().id != cell.symbols.at(secondId).pins.front().id);
+    ice::addNet(project, cellId, "VDD", {pinOf(inputId), pinOf(secondId)});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    for (const auto &note : notes)
+        CHECK(note.find("unsupported symbol") == std::string::npos);
+}
+
+TEST_CASE("placing a symbol twice gives each instance its own pins") {
+    ice::Project project;
+    project.identity = "symbol-clone";
+    project.name = "symbol-clone";
+    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto symbolId = ice::addSymbol(project, cellId, "Resistor");
+    cell.symbols.at(symbolId).pins.push_back({project.nextId(), "1", 0, 0});
+    cell.symbols.at(symbolId).pins.push_back({project.nextId(), "2", 0, 0});
+    const auto first = ice::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
+    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "R2", 0, 100);
+    const auto firstSymbol = cell.instances.at(first).symbol;
+    const auto secondSymbol = cell.instances.at(second).symbol;
+    CHECK(firstSymbol != secondSymbol);
+    CHECK(cell.symbols.at(firstSymbol).pins.front().id != cell.symbols.at(secondSymbol).pins.front().id);
+    CHECK(cell.symbols.at(secondSymbol).name == "Resistor 2");
 }
 
 TEST_CASE("hierarchical schematic instances become subcircuits") {

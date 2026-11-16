@@ -94,13 +94,19 @@ ObjectId Project::nextId() {
             update(netId);
         for (const auto &[instanceId, instance] : cell.instances)
             update(instanceId);
-        for (const auto &[deviceId, device] : cell.plannedDevices)
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
             update(deviceId);
+            for (const auto &parameter : device.parameters)
+                update(parameter.id);
+        }
         for (const auto &[connectionId, connection] : cell.plannedConnections)
             update(connectionId);
     }
-    for (const auto &[id, _] : proceduralLayouts)
+    for (const auto &[id, layout] : proceduralLayouts) {
         update(id);
+        for (const auto &parameter : layout.parameters)
+            update(parameter.id);
+    }
     for (const auto &[id, _] : implementationRuns)
         update(id);
     for (const auto &[id, sim] : simulations) {
@@ -299,6 +305,11 @@ std::vector<Diagnostic> Project::validate() const {
             if (device.width <= 0 || device.height <= 0)
                 result.push_back({Diagnostic::Severity::error, "layout.planned_device.geometry",
                                   "Planned device must have positive dimensions", deviceId});
+            for (const auto &[_, netId] : device.terminals) {
+                if (netId != 0 && !cell.nets.contains(netId))
+                    result.push_back({Diagnostic::Severity::error, "layout.planned_device.terminal",
+                                      "Planned device terminal references a missing layout net", deviceId});
+            }
         }
         const auto endpointExists = [&](ObjectId endpoint, ObjectId port) {
             if (cell.plannedDevices.contains(endpoint) || cell.ports.contains(endpoint))
@@ -577,6 +588,8 @@ std::string Project::serialize() const {
                       {"locked", port.locked},
                       {"source_instance", port.sourceInstance},
                       {"source_port", port.sourcePort}};
+            if (port.internal)
+                p["internal"] = true;
             if (port.schematicInstance != 0)
                 p["schematic_instance"] = port.schematicInstance;
             put(p["rectangle"], port.rectangle);
@@ -598,6 +611,25 @@ std::string Project::serialize() const {
                       {"y", device.y}, {"width", device.width}, {"height", device.height}};
             if (device.schematicInstance != 0)
                 d["schematic_instance"] = device.schematicInstance;
+            if (!device.device.empty())
+                d["device"] = device.device;
+            if (!device.model.empty())
+                d["model"] = device.model;
+            if (!device.parameters.empty()) {
+                d["parameters"] = json::array();
+                for (const auto &parameter : device.parameters) {
+                    json entry;
+                    put(entry, parameter);
+                    d["parameters"].push_back(std::move(entry));
+                }
+            }
+            if (!device.terminals.empty()) {
+                d["terminals"] = json::object();
+                for (const auto &[terminal, netId] : device.terminals)
+                    d["terminals"][terminal] = netId;
+            }
+            if (!device.placeholder)
+                d["placeholder"] = false;
             c["planned_devices"].push_back(std::move(d));
         }
         for (const auto &[cid, connection] : cell.plannedConnections) {
@@ -947,6 +979,7 @@ Project Project::deserialize(const std::string &text) {
                 value.label = port.at("label").get<std::string>();
                 value.visible = port.at("visible").get<bool>();
                 value.locked = port.at("locked").get<bool>();
+                value.internal = port.value("internal", false);
                 value.sourceInstance = port.at("source_instance").get<ObjectId>();
                 value.sourcePort = port.at("source_port").get<ObjectId>();
                 value.schematicInstance = port.value("schematic_instance", ObjectId{0});
@@ -968,6 +1001,23 @@ Project Project::deserialize(const std::string &text) {
                     device.y = d.value("y", Coordinate{0});
                     device.width = d.value("width", Coordinate{0});
                     device.height = d.value("height", Coordinate{0});
+                    device.device = d.value("device", std::string{});
+                    device.model = d.value("model", std::string{});
+                    if (const auto parameters = d.find("parameters"); parameters != d.end() && parameters->is_array()) {
+                        for (const auto &parameter : *parameters) {
+                            Parameter value;
+                            value.id = parameter.value("id", ObjectId{0});
+                            value.name = parameter.value("name", std::string{});
+                            value.value = parameter.value("value", std::string{});
+                            if (!value.name.empty())
+                                device.parameters.push_back(std::move(value));
+                        }
+                    }
+                    if (const auto terminals = d.find("terminals"); terminals != d.end() && terminals->is_object()) {
+                        for (const auto &[terminal, netId] : terminals->items())
+                            device.terminals[terminal] = netId.get<ObjectId>();
+                    }
+                    device.placeholder = d.value("placeholder", true);
                     const auto deviceId = device.id;
                     cell.plannedDevices.emplace(deviceId, std::move(device));
                 }

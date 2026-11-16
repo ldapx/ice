@@ -11,8 +11,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
+#include <map>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -37,6 +40,69 @@ std::string trimCopy(std::string text) {
     text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
     text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
     return text;
+}
+
+// Parses the numeric part of a SPICE quantity such as "1u", "1e-6" or "0.5meg"
+// into a plain double. Returns nullopt for expressions the simple parser cannot
+// evaluate (for example `{scale_param}`).
+std::optional<double> parseSpiceQuantity(const std::string &text) {
+    std::string trimmed = trimCopy(text);
+    if (trimmed.empty())
+        return std::nullopt;
+    char *end = nullptr;
+    const auto number = std::strtod(trimmed.c_str(), &end);
+    if (end == trimmed.c_str())
+        return std::nullopt;
+    std::string suffix = lowerCopy(trimCopy(std::string(end)));
+    double multiplier = 1.0;
+    if (suffix.empty())
+        multiplier = 1.0;
+    else if (suffix == "t")
+        multiplier = 1e12;
+    else if (suffix == "g")
+        multiplier = 1e9;
+    else if (suffix == "meg")
+        multiplier = 1e6;
+    else if (suffix == "k")
+        multiplier = 1e3;
+    else if (suffix == "m")
+        multiplier = 1e-3;
+    else if (suffix == "u")
+        multiplier = 1e-6;
+    else if (suffix == "n")
+        multiplier = 1e-9;
+    else if (suffix == "p")
+        multiplier = 1e-12;
+    else if (suffix == "f")
+        multiplier = 1e-15;
+    else
+        return std::nullopt;
+    return number * multiplier;
+}
+
+// Extracts the geometry scale from a set of netlist preamble lines, accepting
+// ".option scale=1u", ".options scale = 1u" and several comma separated options.
+std::optional<double> geometryScaleFromLines(const std::vector<std::string> &lines) {
+    for (const auto &line : lines) {
+        const auto trimmed = lowerCopy(trimCopy(line));
+        if (!trimmed.starts_with(".option"))
+            continue;
+        auto body = trimmed.substr(trimmed.find_first_of(" \t") == std::string::npos
+                                       ? trimmed.size()
+                                       : trimmed.find_first_of(" \t"));
+        std::size_t position = 0;
+        while ((position = body.find("scale", position)) != std::string::npos) {
+            const auto equals = body.find('=', position);
+            if (equals == std::string::npos)
+                break;
+            const auto following = body.find_first_of(", \t", equals + 1);
+            const auto value = parseSpiceQuantity(body.substr(equals + 1, following - equals - 1));
+            if (value && *value > 0.0)
+                return value;
+            position = equals + 1;
+        }
+    }
+    return std::nullopt;
 }
 
 std::string normalizeId(std::string value) {
@@ -626,7 +692,117 @@ PdkSimulationSetup pdkSimulationSetupFor(const std::string &pdkId) {
     }
     setup.netlistLines = selected->recommendedSetup;
     setup.initCommands = selected->initCommands;
+    if (const auto scale = geometryScaleFromLines(setup.netlistLines))
+        setup.geometryScale = *scale;
     return setup;
+}
+
+double pdkNetlistGeometryScale(const std::string &pdkId) {
+    try {
+        return pdkSimulationSetupFor(pdkId).geometryScale;
+    } catch (const std::exception &) {
+        return 1.0;
+    }
+}
+
+namespace {
+
+struct SubcircuitIndex {
+    std::map<std::string, std::vector<std::string>> nodes;
+    std::once_flag loaded;
+};
+
+std::mutex subcircuitIndexMutex;
+std::map<std::string, SubcircuitIndex> subcircuitIndexes;
+
+// Reads `.subckt <name> <nodes...>` definitions (with `+` continuations) from
+// every SPICE file in a directory tree.
+void loadSubcircuits(const std::filesystem::path &directory, SubcircuitIndex &index) {
+    std::error_code status;
+    if (!std::filesystem::is_directory(directory, status) || status)
+        return;
+    for (std::filesystem::recursive_directory_iterator it(directory, status), end; it != end; it.increment(status)) {
+        if (status)
+            break;
+        if (!it->is_regular_file(status) || status)
+            continue;
+        const auto extension = lowerCopy(it->path().extension().string());
+        if (extension != ".spice" && extension != ".lib" && extension != ".cir" && extension != ".mod")
+            continue;
+        std::ifstream input(it->path());
+        if (!input)
+            continue;
+        std::string line;
+        while (std::getline(input, line)) {
+            const auto trimmed = trimCopy(line);
+            if (trimmed.empty() || trimmed.front() == '*')
+                continue;
+            if (lowerCopy(trimmed).starts_with(".subckt")) {
+                std::istringstream stream(trimmed);
+                std::string token;
+                stream >> token; // .subckt
+                std::string name;
+                if (!(stream >> name))
+                    continue;
+                std::vector<std::string> nodes;
+                while (stream >> token) {
+                    if (token.front() == '+' || token.front() == '(')
+                        break;
+                    nodes.push_back(token);
+                }
+                // Continuation lines for long node lists.
+                std::streampos position = input.tellg();
+                while (std::getline(input, line)) {
+                    const auto more = trimCopy(line);
+                    if (more.empty() || more.front() != '+') {
+                        input.seekg(position);
+                        break;
+                    }
+                    std::istringstream extra(more.substr(1));
+                    while (extra >> token)
+                        nodes.push_back(token);
+                    position = input.tellg();
+                }
+                index.nodes.emplace(lowerCopy(name), std::move(nodes));
+            }
+        }
+    }
+}
+
+} // namespace
+
+std::optional<std::vector<std::string>> pdkSubcircuitNodes(const std::string &pdkId, const std::string &model) {
+    if (pdkId.empty() || model.empty() || pdkId == genericPdkId)
+        return std::nullopt;
+    std::filesystem::path modelDirectory;
+    try {
+        const auto pdks = findPdks(pdkId);
+        if (pdks.empty())
+            return std::nullopt;
+        const auto *selected = &pdks.front();
+        for (const auto &pdk : pdks) {
+            if (pdk.simulationReady) {
+                selected = &pdk;
+                break;
+            }
+        }
+        modelDirectory = selected->ngspiceModelDir;
+        if (modelDirectory.empty())
+            modelDirectory = selected->root;
+    } catch (const std::exception &) {
+        return std::nullopt;
+    }
+    const auto key = pdkId + "|" + modelDirectory.string();
+    SubcircuitIndex *index = nullptr;
+    {
+        std::lock_guard lock(subcircuitIndexMutex);
+        index = &subcircuitIndexes[key];
+    }
+    std::call_once(index->loaded, [&] { loadSubcircuits(modelDirectory, *index); });
+    const auto entry = index->nodes.find(lowerCopy(model));
+    if (entry == index->nodes.end() || entry->second.empty())
+        return std::nullopt;
+    return entry->second;
 }
 
 void applyPdkSimulationSetup(const std::string &pdkId, SimulationRequest &request) {

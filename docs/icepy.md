@@ -167,14 +167,22 @@ cell = project.layout_cell_by_id(procedural.generated_cell)
 The script API includes datatype-aware layers, unit helpers, rectangles,
 polygons (including holes), boolean operations, paths, text, vias, rectangular
 arrays, ports, instances, and package device placement through
-`layout.device(...)` with an installed PDK package. Generated
-children are read-only and can be inspected, exported, or instanced by other
-layout cells. `ProceduralLayout` exposes the generated script/output hashes and
-`needs_regeneration`.
+`layout.device(...)` with an installed PDK package. A placement returns a
+`DevicePlacement` with absolute pin rectangles and `device`/`model` metadata;
+pass `nets={"G": "GATE", ...}` to bind pins. The generated cell also stores
+planned-device metadata, so LVS can match flattened PCells by model, W/L/M, and
+terminal nets. Generated children are read-only and can be inspected, exported,
+or instanced by other layout cells. `ProceduralLayout` exposes the generated
+script/output hashes and `needs_regeneration`.
 
 ## PCell runtime
 
-`icepy.pcells` has two package-facing paths.
+`icepy.pcells` has two package-facing paths. The shared `PackagePcell` MOS
+template builds isolated fingers (one diff island per finger), licon/mcon
+contact arrays, body taps, and well/implant layers. Packages can override
+`contact_size`, `contact_spacing`, and `contact_margin`; SKY130 uses 0.17/0.19
+µm and GF180MCU uses 0.22/0.25 µm. Device width is the channel width per finger,
+and `nf` produces parallel fingers instead of overlapping diffusion.
 
 **ICE-native package PCells** use `PackagePcell` subclasses stored in
 `<package>/layout/devices/pcell/pcells.py`. Each class declares its parameter metadata,

@@ -256,6 +256,6 @@ them and cleans the removed HDL symbol pins from parent nets. Use
 | `simulation.result` | No stored run is available. | Run `simulation_run` without an external-only output path, then retry. |
 | `implementation.stage` | A Yosys/OpenROAD stage failed or a required artifact is missing. | Call `implementation_log` for that stage, fix the first actionable error, then rerun from the stage. |
 | `implementation.gds` | KLayout, standard-cell GDS decks, or the PDK DEF-to-GDS layer map are unavailable. | Run `implementation_toolchain`; install KLayout or fix the PDK/ORFS GDS and `layer_map` paths, then call `implementation_export_gds`. |
-| `drc.lyrdb` | The gdscheck report could not be parsed. | Check `drc_run` `log` and rerun with a valid PDK process deck. |
+| `drc.lyrdb` | The DRC report could not be parsed. | Check `drc_run` `log` and rerun with the package `technology/drc.json` deck or a valid gdscheck process deck. |
 | `mixed-signal digital input node ... not returned` | ngspice did not probe the input net. | Check the net is connected and not named only as ground. |
 | `v(U1.port)` hint | You requested analog syntax for a digital trace. | Use `U1.port` in graph/trace calls. |

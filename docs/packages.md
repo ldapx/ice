@@ -335,6 +335,27 @@ package's `symbols/` library. Activating a PDK package adds its declared
 technology layers to the Layout editor and records the package as a project
 dependency.
 
+### Symbol pins and SPICE nodes
+
+Bipolar and MOS device models are SPICE subcircuits, so a symbol must declare
+one pin per subcircuit node, in the order the model expects. ICE reads the node
+list from the package model files, therefore a bipolar symbol with a substrate
+pin (for example the SKY130 NPN, declared as `.subckt ... c b e s`) is
+instantiated with four nodes, while a three terminal substrate PNP keeps three.
+When a symbol omits the substrate pin and the model declares one, the netlist
+grounds that node and reports a note so a stale symbol can be corrected. A
+symbol that is placed more than once is copied per instance (see
+`schematic_add_instance`), which keeps pins and net connectivity unambiguous.
+
+### Device geometry units
+
+The package simulation options are applied before the schematic netlist, so a
+`.option scale=...` line (SKY130 declares `.option scale=1u`) sets the length
+unit of every MOS width and length. ICE converts sizes written with an SI
+suffix (`1u`, `150n`) into those units and emits bare values unchanged, so a
+symbol default of `w = 1u` becomes `W=1` and a hand written `W=60` stays 60
+microns. Without a scale option, sizes are emitted verbatim.
+
 ## PDK-provided procedural layout operations
 
 Procedural layout scripts can request process-specific geometry through the
@@ -372,6 +393,7 @@ Each PDK package owns its layout device library:
 <pdk-root>/layout/devices/generator.py     # runtime PCell generator
 <pdk-root>/layout/devices/build.py         # index/fixed-device regeneration
 <pdk-root>/technology/extraction.json      # polygon device extraction rules
+<pdk-root>/technology/drc.json             # external DRC deck selection (optional)
 ```
 
 Parameterized devices are Python PCells: the index carries their generator
@@ -396,6 +418,15 @@ builder API directly and do not require KLayout, gdsfactory, Volare, CIEL, or
 definitions with `layout/devices/build.py`. Parameterized cells are written as
 PCell index entries without geometry; only fixed cells are written as
 `layout/devices/fixed/*.icelay`.
+
+`technology/drc.json` declares how ICE runs DRC for the package. It can point
+at a KLayout `.lydrc`/`.drc` deck (with `{deck}`, `{input}`, `{report}`,
+`{top_cell}`, `{suite}`, and `{workdir}` placeholders) or a gdscheck process,
+and may list search paths for an externally installed PDK. The SKY130 package
+uses this to run the SkyWater KLayout signoff deck from `$PDK_ROOT` or Volare.
+Named `suites` can select alternate decks or rule groups. `ICE_DRC_DECK`
+overrides the deck path for every PDK, and `ICE_DRC_DECK_<PDK>` (for example
+`ICE_DRC_DECK_SKY130A`) overrides it for one PDK.
 
 `ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
 `layout_generator`, and `layout_extraction` paths for each installed package.
