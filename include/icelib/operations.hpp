@@ -116,7 +116,8 @@ bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
 // Symbols backed by another schematic (Symbol::sourceCell) are hierarchical:
 // each referenced drawn schematic is emitted once as a .subckt whose ports
 // come from its Input and Output instances, and the parent instance becomes
-// X<name> <connected nodes...> <subckt name>. Subcircuits are emitted before
+// X<name> <connected nodes...> <subckt name>. Instances are wired by port
+// name, so a symbol may declare its pins in any order. Subcircuits are emitted before
 // the parent body and recursively for nested hierarchy.
 // A raw "value" parameter is emitted verbatim. Otherwise voltage/current
 // sources support structured waveform parameters: pulse sources produce
@@ -153,6 +154,21 @@ std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId
 // several symbols of one kind live in the same cell. Type tests use the base
 // name so those copies still netlist and verify as ports or primitives.
 std::string symbolTypeName(std::string name);
+
+// Port instances (Input/Output symbols) of a drawn cell in subcircuit port
+// order: inputs top-to-bottom, then outputs. This is the order used for the
+// `.subckt` port list, so hierarchical instance node lists must follow it too.
+std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell);
+
+// Creates a symbol in `parentCellId` for the drawn sub-cell `sourceCellId`, with
+// one pin per port in subcircuit port order (inputs on the left, outputs on the
+// right). Returns the new symbol id.
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
+                               std::string name = {}, std::string artwork = {});
+
+// Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
+// them from the project. Useful for tools that build their own symbol.
+std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source);
 
 // Returns a name for a new symbol that is not used by any symbol in `cell`.
 std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::string &base);

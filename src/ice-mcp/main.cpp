@@ -2700,6 +2700,34 @@ class IceMcpServer {
                         artwork = templ.artwork;
                     for (const auto &pin : templ.pins)
                         pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
+                } else if (!sourceCellRef.textSchematic) {
+                    // Drawn sub-cell: build the symbol from its ports in the
+                    // same order the netlister emits the .subckt port list
+                    // (inputs top-down, then outputs), inputs on the left and
+                    // outputs on the right.
+                    const auto ports = ice::schematicPortInstances(sourceCellRef);
+                    if (!ports.empty()) {
+                        const auto lowerType = [](std::string text) {
+                            for (auto &character : text)
+                                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                            return text;
+                        };
+                        const auto spacing = 40;
+                        int inputCount = 0;
+                        int outputCount = 0;
+                        for (const auto *port : ports) {
+                            const auto symbol = sourceCellRef.symbols.find(port->symbol);
+                            const auto type = symbol == sourceCellRef.symbols.end()
+                                                  ? std::string{}
+                                                  : ice::symbolTypeName(symbol->second.name);
+                            const bool isOutput = lowerType(type) == "output";
+                            const auto row = isOutput ? outputCount++ : inputCount++;
+                            const auto span = static_cast<int>(ports.size()) * spacing;
+                            pinInputs.push_back({port->name, isOutput ? 70 : -70, span / 2 - row * spacing,
+                                                 isOutput ? ice::PinDirection::right : ice::PinDirection::left, 1,
+                                                 true});
+                        }
+                    }
                 }
             }
             if (sourceCell == 0) {
@@ -2723,6 +2751,41 @@ class IceMcpServer {
                 throw ToolError("Symbol '" + symbolName +
                                 "' would have no pins. Use schematic_add_component, schematic_add_hdl_instance, "
                                 "or provide a non-empty pins array.");
+            std::vector<std::string> symbolWarnings;
+            if (sourceCell != 0) {
+                const auto &sourceCellRef = session.project().schematicCells.at(sourceCell);
+                if (!sourceCellRef.textSchematic && !sourceCellRef.systemVerilogSchematic) {
+                    std::vector<std::string> portNames;
+                    for (const auto *port : ice::schematicPortInstances(sourceCellRef))
+                        portNames.push_back(lowerCopy(port->name));
+                    std::vector<std::string> pinNames;
+                    for (const auto &pin : pinInputs)
+                        pinNames.push_back(lowerCopy(pin.name));
+                    std::vector<std::string> missing;
+                    std::vector<std::string> extra;
+                    for (const auto &port : portNames)
+                        if (std::find(pinNames.begin(), pinNames.end(), port) == pinNames.end())
+                            missing.push_back(port);
+                    for (const auto &pin : pinNames)
+                        if (std::find(portNames.begin(), portNames.end(), pin) == portNames.end())
+                            extra.push_back(pin);
+                    if (!missing.empty() || !extra.empty()) {
+                        std::string message = "Symbol pins do not match the ports of '" + sourceCellRef.name + "'";
+                        if (!missing.empty()) {
+                            message += "; ports without a pin: ";
+                            for (std::size_t index = 0; index < missing.size(); ++index)
+                                message += (index ? ", " : "") + missing[index];
+                        }
+                        if (!extra.empty()) {
+                            message += "; pins with no port: ";
+                            for (std::size_t index = 0; index < extra.size(); ++index)
+                                message += (index ? ", " : "") + extra[index];
+                        }
+                        message += ". The netlist wires ports by pin name and falls back to pin position.";
+                        symbolWarnings.push_back(std::move(message));
+                    }
+                }
+            }
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
                 id = ice::addSymbol(project, cell, symbolName, artwork, sourceCell);
                 auto &symbol = project.schematicCells.at(cell).symbols.at(id);
@@ -2734,6 +2797,8 @@ class IceMcpServer {
             });
             auto result = symbolJson(session.project().schematicCells.at(cell).symbols.at(id));
             result["cell"] = cell;
+            if (!symbolWarnings.empty())
+                result["warnings"] = symbolWarnings;
             return result;
         }
         if (name == "schematic_add_pin") {
@@ -4006,8 +4071,8 @@ class IceMcpServer {
         agentsdk::mcp::tool symbolTool;
         symbolTool.name = "schematic_add_symbol";
         symbolTool.description =
-            "Add a symbol definition; known library names auto-load artwork and pins. Custom symbols may "
-            "provide explicit pins and artwork.";
+            "Add a symbol definition; known library names auto-load artwork and pins, and a drawn source_cell "
+            "generates one pin per port in subcircuit order. Custom symbols may provide explicit pins and artwork.";
         symbolTool.input_schema =
             R"({"type":"object","properties":{"cell":{"type":"string","description":"Schematic name or id"},)"
             R"("name":{"type":"string","description":"Symbol name"},"artwork":{"type":"string"},)"

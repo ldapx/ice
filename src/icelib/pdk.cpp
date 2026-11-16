@@ -327,7 +327,9 @@ PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
     info.osdiSources = sim.osdiSources;
     info.needsOsdi = sim.requiresOsdi;
     info.exampleDevices = sim.devices;
-    info.spiceInitPath = sim.spiceinit.empty() ? std::filesystem::path{} : spec.root / sim.spiceinit;
+    // Like model_file/includes/verilog_a, spiceinit is relative to the model
+    // root ([pdk.simulation].root), not to the package root.
+    info.spiceInitPath = sim.spiceinit.empty() ? std::filesystem::path{} : info.root / sim.spiceinit;
     info.hasSpiceInit = !info.spiceInitPath.empty() && std::filesystem::is_regular_file(info.spiceInitPath);
 
     const auto cache = cacheRoot() / (safeName(spec.name) + "-" + safeName(spec.version));
@@ -362,6 +364,24 @@ PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
     }
     for (const auto &osdi : info.osdiFiles)
         info.initCommands.push_back("osdi '" + setupLine(osdi) + "'");
+
+    // ngspice reads its start-up commands from ~/.spiceinit, which is not
+    // guaranteed to exist (or to belong to the selected PDK). Packages that
+    // ship one - SKY130's `spinit` sets `ngbehavior=hsa`, required for the
+    // binned subcircuit models - get their commands replayed before the circuit
+    // is loaded, so a run does not depend on the user's home directory.
+    if (info.hasSpiceInit) {
+        std::ifstream initFile(info.spiceInitPath);
+        std::string initLine;
+        while (std::getline(initFile, initLine)) {
+            const auto command = trimCopy(initLine);
+            if (command.empty() || command.front() == '*' || command.front() == ';' || command.front() == '.')
+                continue;
+            if (std::find(info.initCommands.begin(), info.initCommands.end(), command) == info.initCommands.end())
+                info.initCommands.push_back(command);
+        }
+        info.notes.push_back("ngspice init: " + info.spiceInitPath.string());
+    }
 
     info.notes.push_back("ICE package: " + spec.name + " " + spec.version);
     if (!info.osdiDir.empty())
