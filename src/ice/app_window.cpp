@@ -8561,6 +8561,8 @@ class DocumentWindow : public QMainWindow {
             simulationPanel_->selectReport(id);
         if (simulationRightStack_ && reportsView_)
             simulationRightStack_->setCurrentWidget(reportsView_);
+        if (scriptTabs_)
+            scriptTabs_->setCurrentIndex(0);
         if (documents_ && simulationPage_)
             documents_->setCurrentWidget(simulationPage_);
         selectingReport_ = false;
@@ -8595,10 +8597,11 @@ class DocumentWindow : public QMainWindow {
             scriptGraphTabs_->removeTab(0);
             delete widget;
         }
-        scriptGraphTabs_->hide();
+        if (scriptGraphViewStack_)
+            scriptGraphViewStack_->setCurrentIndex(0);
     }
 
-    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs) {
+    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false) {
         if (!scriptGraphTabs_)
             return;
         clearScriptGraphs();
@@ -8628,10 +8631,13 @@ class DocumentWindow : public QMainWindow {
             scriptGraphTabs_->addTab(plot, QString::fromStdString(graph.name));
         }
         if (scriptGraphTabs_->count() > 0) {
-            scriptGraphTabs_->show();
             scriptGraphTabs_->setCurrentIndex(0);
-            if (scriptViewSplitter_)
-                scriptViewSplitter_->setSizes({600, 300});
+            if (scriptGraphViewStack_)
+                scriptGraphViewStack_->setCurrentIndex(1);
+            if (reveal && scriptTabs_ && scriptGraphsPage_)
+                scriptTabs_->setCurrentWidget(scriptGraphsPage_);
+        } else if (scriptGraphViewStack_) {
+            scriptGraphViewStack_->setCurrentIndex(0);
         }
     }
 
@@ -8738,7 +8744,7 @@ class DocumentWindow : public QMainWindow {
                 const auto graphs =
                     ice::parseSimulationScriptGraphs(QString::fromUtf8(graphFile.readAll()).toStdString());
                 if (!graphs.empty())
-                    displayScriptGraphs(graphs);
+                    displayScriptGraphs(graphs, true);
             } catch (const ice::ProjectError &error) {
                 appendReportMessage(QStringLiteral("[Simulation script] %1: unable to read graphs: %2")
                                         .arg(reportName, QString::fromStdString(error.what())));
@@ -13392,15 +13398,38 @@ class DocumentWindow : public QMainWindow {
         reportCodeEditor_->setTabStopDistance(reportCodeEditor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
         reportCodeEditor_->setPlaceholderText(QStringLiteral("Select a simulation script to edit its Python source."));
         reportHighlighter_ = new PythonSyntaxHighlighter(reportCodeEditor_->document());
-        scriptViewSplitter_ = new QSplitter(Qt::Vertical);
-        scriptViewSplitter_->addWidget(reportCodeEditor_);
+
+        scriptTabs_ = new QTabWidget;
+        scriptTabs_->setDocumentMode(true);
+
+        auto *filePage = new QWidget;
+        auto *fileLayout = new QVBoxLayout(filePage);
+        fileLayout->setContentsMargins(0, 0, 0, 0);
+        fileLayout->addWidget(reportCodeEditor_, 1);
+        scriptTabs_->addTab(filePage, QStringLiteral("File"));
+
+        scriptGraphsPage_ = new QWidget;
+        auto *scriptGraphsLayout = new QVBoxLayout(scriptGraphsPage_);
+        scriptGraphsLayout->setContentsMargins(0, 0, 0, 0);
+        scriptGraphViewStack_ = new QStackedWidget;
+
+        auto *graphPlaceholder = new QWidget;
+        auto *graphPlaceholderLayout = new QVBoxLayout(graphPlaceholder);
+        graphPlaceholderLayout->setContentsMargins(12, 12, 12, 12);
+        auto *graphPlaceholderLabel = new QLabel(QStringLiteral("Run the simulation script to generate graphs."));
+        graphPlaceholderLabel->setAlignment(Qt::AlignCenter);
+        graphPlaceholderLabel->setWordWrap(true);
+        graphPlaceholderLabel->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        graphPlaceholderLayout->addWidget(graphPlaceholderLabel, 1);
+
         scriptGraphTabs_ = new QTabWidget;
         scriptGraphTabs_->setDocumentMode(true);
-        scriptGraphTabs_->hide();
-        scriptViewSplitter_->addWidget(scriptGraphTabs_);
-        scriptViewSplitter_->setStretchFactor(0, 3);
-        scriptViewSplitter_->setStretchFactor(1, 2);
-        reportsLayout->addWidget(scriptViewSplitter_, 1);
+        scriptGraphViewStack_->addWidget(graphPlaceholder);
+        scriptGraphViewStack_->addWidget(scriptGraphTabs_);
+        scriptGraphViewStack_->setCurrentWidget(graphPlaceholder);
+        scriptGraphsLayout->addWidget(scriptGraphViewStack_, 1);
+        scriptTabs_->addTab(scriptGraphsPage_, QStringLiteral("Graphs"));
+        reportsLayout->addWidget(scriptTabs_, 1);
         simulationRightStack_->addWidget(reportsView_);
 
         reportSaveTimer_ = new QTimer(this);
@@ -14698,7 +14727,9 @@ class DocumentWindow : public QMainWindow {
     QWidget *simulationGraphsPage_ = nullptr;
     QStackedWidget *simulationRightStack_ = nullptr;
     QWidget *reportsView_ = nullptr;
-    QSplitter *scriptViewSplitter_ = nullptr;
+    QTabWidget *scriptTabs_ = nullptr;
+    QWidget *scriptGraphsPage_ = nullptr;
+    QStackedWidget *scriptGraphViewStack_ = nullptr;
     QTabWidget *scriptGraphTabs_ = nullptr;
     QLabel *reportTitleLabel_ = nullptr;
     QPlainTextEdit *reportCodeEditor_ = nullptr;
