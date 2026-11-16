@@ -51,7 +51,8 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = 
 // made unique across static and procedural layouts. Returns the procedural
 // layout id, not the generated cell id.
 ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk = genericPdkId,
-                                std::string script = {}, std::string stack = {});
+                                std::string script = {}, std::string stack = {},
+                                std::vector<Parameter> parameters = {});
 // Creates a layout cell using the schematic's technology and projects every
 // schematic instance into a movable planned-device box. Nets are projected as
 // straight connections between those boxes. The layout name defaults to the

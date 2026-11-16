@@ -3240,6 +3240,11 @@ class DocumentWindow : public QMainWindow {
         }
         project_->setLastHistoryLabel("Regenerated layout " + name);
         refreshProject();
+        if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_) {
+            const auto current = project_->project().proceduralLayouts.find(proceduralId);
+            if (current != project_->project().proceduralLayouts.end())
+                proceduralEditor_->setParameters(current->second.parameters);
+        }
         statusBar()->showMessage(
             QStringLiteral("Procedural layout '%1' regenerated").arg(QString::fromStdString(name)));
     }
@@ -3273,6 +3278,30 @@ class DocumentWindow : public QMainWindow {
         source = value;
         project_->markDirty();
         updateFileTabDirtyIndicators();
+    }
+
+    void onProceduralParameterChanged(const QString &name, const QString &value) {
+        if (!project_ || activeProceduralLayoutId_ == 0)
+            return;
+        auto &procedural = project_->project().proceduralLayouts;
+        const auto it = procedural.find(activeProceduralLayoutId_);
+        if (it == procedural.end() || name.isEmpty())
+            return;
+        const auto parameterName = name.toStdString();
+        auto parameter = std::find_if(it->second.parameters.begin(), it->second.parameters.end(),
+                                      [&](const auto &entry) { return entry.name == parameterName; });
+        const auto parameterValue = value.toStdString();
+        if (parameter == it->second.parameters.end()) {
+            it->second.parameters.push_back({project_->project().nextId(), parameterName, parameterValue});
+        } else {
+            if (parameter->value == parameterValue)
+                return;
+            parameter->value = parameterValue;
+        }
+        project_->markDirty();
+        updateFileTabDirtyIndicators();
+        statusBar()->showMessage(
+            QStringLiteral("Parameter updated; press Regenerate layout to update the generated cell."), 8000);
     }
 
     void showTextSchematicEditor(ice::ObjectId schematicId) {
@@ -3427,6 +3456,7 @@ class DocumentWindow : public QMainWindow {
             const auto script = QString::fromStdString(it->second.script);
             if (proceduralEditor_->script() != script)
                 proceduralEditor_->setScript(script);
+            proceduralEditor_->setParameters(it->second.parameters);
         }
         if (ice::proceduralLayoutNeedsRegeneration(it->second)) {
             statusBar()->showMessage(
@@ -12477,6 +12507,8 @@ class DocumentWindow : public QMainWindow {
         layoutCanvasPage_ = makeEditor(QStringLiteral("Layout editor"), true);
         proceduralEditor_ = new ProceduralLayoutEditor;
         proceduralEditor_->setOnScriptEdited([this](const QString &script) { onProceduralScriptEdited(script); });
+        proceduralEditor_->setOnParameterChanged(
+            [this](const QString &name, const QString &value) { onProceduralParameterChanged(name, value); });
         proceduralEditor_->setOnRegenerate([this] {
             if (activeProceduralLayoutId_ != 0)
                 regenerateProceduralLayout(activeProceduralLayoutId_);

@@ -2484,6 +2484,81 @@ layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um
     CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
 }
 
+TEST_CASE("procedural layout parameters drive regeneration") {
+    ice::Project project;
+    project.identity = "procedural-parameters";
+    project.name = "procedural-parameters";
+    const auto proceduralId = ice::createProceduralLayout(project, "parameter_top", ice::genericPdkId,
+                                                          "width = layout.um(layout.parameter(\"width\", \"2\"))\n"
+                                                          "metal = layout.layer(\"Metal1\", 1, 0)\n"
+                                                          "metal.rectangle(0, 0, width, 1000)\n");
+    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    const auto &procedural = project.proceduralLayouts.at(proceduralId);
+    CHECK(procedural.parameters.size() == 1);
+    if (!procedural.parameters.empty()) {
+        CHECK(procedural.parameters.front().name == "width");
+        CHECK(procedural.parameters.front().value == "2");
+    }
+    CHECK(!procedural.generatedParameterHash.empty());
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(procedural));
+    auto &generated = project.layoutCells.at(procedural.generatedCell);
+    CHECK(generated.shapes.size() == 1);
+    if (!generated.shapes.empty())
+        CHECK(generated.shapes.begin()->second.rectangle.width == 2000);
+
+    project.proceduralLayouts.at(proceduralId).parameters.front().value = "3";
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
+    CHECK(generated.shapes.size() == 1);
+    if (!generated.shapes.empty())
+        CHECK(generated.shapes.begin()->second.rectangle.width == 3000);
+}
+
+TEST_CASE("procedural layout boolean operations and holes") {
+    ice::Project project;
+    project.identity = "procedural-boolean";
+    project.name = "procedural-boolean";
+    const auto script = R"PY(
+metal = layout.layer("Metal1", 1, 0)
+a = metal.rectangle(0, 0, 1000, 1000)
+b = metal.rectangle(500, 500, 1000, 1000)
+layout.union("Metal1", a, b, name="union")
+metal.polygon(
+    [(0, 0), (4000, 0), (4000, 4000), (0, 4000)],
+    holes=[[(1000, 1000), (3000, 1000), (3000, 3000), (1000, 3000)]],
+    name="ring",
+)
+)PY";
+    const auto proceduralId = ice::createProceduralLayout(project, "boolean_top", ice::genericPdkId, script);
+    const auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
+    CHECK(!generated.shapes.empty());
+    const auto area = [](const std::vector<ice::LayoutPoint> &points) {
+        ice::Polygon polygon;
+        polygon.reserve(points.size());
+        for (const auto &point : points)
+            polygon.push_back({point.x, point.y});
+        return std::abs(static_cast<double>(polygonArea(polygon)));
+    };
+    double unionArea = 0.0;
+    double ringArea = 0.0;
+    for (const auto &[_, shape] : generated.shapes) {
+        CHECK(shape.rectangle.valid());
+        if (shape.name.starts_with("union"))
+            unionArea += area(shape.polygon);
+        if (shape.name.starts_with("ring"))
+            ringArea += area(shape.polygon);
+    }
+    CHECK(std::abs(unionArea - 1750000.0) < 1.0);
+    CHECK(std::abs(ringArea - 12000000.0) < 1.0);
+    CHECK(project.validate().empty());
+}
+
 TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {
     ice::GeometryKernel kernel;
     const ice::MultiPolygon contours = {

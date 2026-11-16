@@ -446,7 +446,12 @@ hidden while a procedural layout tab is active. The script runs with a `layout`
 builder that exposes layers with `number`/`datatype`, rectangles, polygons,
 paths, text, vias, rectangular arrays, ports, and instances. Coordinates can be
 written in database units or through `layout.nm()`, `layout.um()`, and
-`layout.snap()`. Generated shapes can carry a `name` and a `net`.
+`layout.snap()`. Generated shapes can carry a `name` and a `net`, and scripts
+can declare user-editable parameters with `layout.parameter(name, default)`.
+Parameters appear in a form above the script editor; edit a value and press
+**Regenerate layout** to apply it. `layout.device("nmos", ...)` places a device
+from the active package's device library, including generated PCells and fixed
+`.icelay` devices, with flattened geometry and prefixed ports.
 
 Right-click a procedural layout and choose **Regenerate layout** (or use the
 editor's **Regenerate layout** button) to replace the generated child's geometry
@@ -454,8 +459,10 @@ from the current script. Scripts run with `python3`, or the interpreter selected
 by `ICE_PYTHON`, with a 60-second timeout; command-line and MCP regeneration accept a timeout override. A failed run reports the Python
 error and leaves the previous generated geometry unchanged. A `↻` marker in the
 file tab means the script changed since the last successful generation. The
-generated child is read-only; edit the script and regenerate instead of drawing
-over generated geometry. The layout API also exposes
+generated child is read-only; edit the script or parameter form and regenerate
+instead of drawing over generated geometry. Boolean `union`, `intersection`,
+`subtract`, and `xor` operations are available, and polygons accept hole
+contours. The layout API also exposes
 `layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: ICE forwards
 the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal

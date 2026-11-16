@@ -102,6 +102,7 @@ and ask the user to rebuild/restart ICE.
 | `layout_regenerate` | Run a procedural layout script and replace its read-only generated child. |
 | `layout_get_script` | Read a procedural layout script and its generation hashes/stale state. |
 | `layout_set_script` | Replace a procedural layout script without regenerating. |
+| `layout_set_parameter` | Set a procedural layout parameter value without regenerating. |
 | `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 | `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |

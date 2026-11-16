@@ -13,11 +13,14 @@ Coordinates are integer database units (one nanometer by default). Use
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import math
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import traceback
 
 
@@ -128,8 +131,8 @@ class Layer:
 
     rect = rectangle
 
-    def polygon(self, points, name=None, net=None):
-        return self._layout.polygon(self.name, points, name=name, net=net)
+    def polygon(self, points, holes=None, name=None, net=None):
+        return self._layout.polygon(self.name, points, holes=holes, name=name, net=net)
 
     poly = polygon
 
@@ -145,16 +148,25 @@ class Layer:
 class Layout:
     """Builder exposed to procedural layout scripts."""
 
-    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1):
+    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1, parameters=None):
         self.pdk = pdk
         self.pdk_root = pdk_root
         self.db_unit_nm = float(db_unit_nm)
         self.grid = max(1, _coordinate(grid, "grid"))
+        self.params = {
+            str(name): "" if value is None else str(value)
+            for name, value in (parameters or {}).items()
+        }
+        self.parameter_specs = {}
         self.layers = {}
         self.shapes = []
         self.ports = []
         self.instances = []
         self.dummy_fill_requests = []
+        self._device_library = None
+        self._device_layers = {}
+        self._device_geometry_cache = {}
+        self._device_count = 0
 
     def _layer_spec(self, name, number=None, datatype=None):
         if not isinstance(name, str) or not name.strip():
@@ -222,7 +234,7 @@ class Layout:
 
     rect = rectangle
 
-    def polygon(self, layer, points, name=None, net=None):
+    def polygon(self, layer, points, holes=None, name=None, net=None):
         name_value = self._layer_name(layer)
         polygon = []
         for index, point in enumerate(points):
@@ -230,7 +242,18 @@ class Layout:
             polygon.append({"x": x, "y": y})
         if len(polygon) < 3:
             raise ValueError("polygon must contain at least three points")
-        shape = self._add_shape({"layer": name_value, "polygon": polygon})
+        record = {"layer": name_value, "polygon": polygon}
+        if holes:
+            record["holes"] = []
+            for hole_index, hole in enumerate(holes):
+                contour = []
+                for point_index, point in enumerate(hole):
+                    x, y = _point(point, f"hole {hole_index} point {point_index}")
+                    contour.append({"x": x, "y": y})
+                if len(contour) < 3:
+                    raise ValueError("polygon holes must contain at least three points")
+                record["holes"].append(contour)
+        shape = self._add_shape(record)
         if name is not None:
             shape.name = name
         if net is not None:
@@ -238,6 +261,85 @@ class Layout:
         return shape
 
     poly = polygon
+
+    def _boolean_operand(self, operand, layer):
+        if isinstance(operand, Shape):
+            record = copy.deepcopy(operand._record)
+            if "centerline" in record or "text" in record:
+                raise ValueError("Boolean operands must be rectangles or polygons")
+            if "boolean" not in record and "polygon" not in record and "rectangle" not in record:
+                raise ValueError("Boolean operand has no filled geometry")
+            operand._record["boolean_operand"] = True
+            record["boolean_operand"] = True
+            return record
+        if not isinstance(operand, (list, tuple)):
+            raise ValueError("Boolean operands must be shapes or point lists")
+        if len(operand) == 4 and all(isinstance(value, (int, float)) for value in operand):
+            x, y, width, height = operand
+            return {
+                "layer": layer,
+                "rectangle": {
+                    "x": _coordinate(x, "boolean rectangle x"),
+                    "y": _coordinate(y, "boolean rectangle y"),
+                    "width": _positive(width, "boolean rectangle width"),
+                    "height": _positive(height, "boolean rectangle height"),
+                },
+            }
+        polygon = []
+        for index, point in enumerate(operand):
+            x, y = _point(point, f"boolean point {index}")
+            polygon.append({"x": x, "y": y})
+        if len(polygon) < 3:
+            raise ValueError("Boolean polygon operands need at least three points")
+        return {"layer": layer, "polygon": polygon}
+
+    def boolean(self, operation, layer, *operands, name=None, net=None):
+        """Combine two or more rectangles/polygons with a boolean operation.
+
+        Supported operations are ``union``, ``intersection``, ``difference``
+        and ``xor``. Operands are consumed by the operation.
+        """
+        operation = str(operation).strip().lower()
+        aliases = {
+            "union": "union",
+            "or": "union",
+            "intersection": "intersection",
+            "and": "intersection",
+            "difference": "difference",
+            "subtract": "difference",
+            "minus": "difference",
+            "xor": "xor",
+        }
+        if operation not in aliases:
+            raise ValueError("Boolean operation must be union, intersection, difference, or xor")
+        operation = aliases[operation]
+        if len(operands) < 2:
+            raise ValueError("Boolean operations need at least two operands")
+        layer_name = self._layer_name(layer)
+        records = [self._boolean_operand(operand, layer_name) for operand in operands]
+        shape = self._add_shape(
+            {
+                "layer": layer_name,
+                "boolean": {"operation": operation, "operands": records},
+            }
+        )
+        if name is not None:
+            shape.name = name
+        if net is not None:
+            shape.net = net
+        return shape
+
+    def union(self, layer, *operands, name=None, net=None):
+        return self.boolean("union", layer, *operands, name=name, net=net)
+
+    def intersection(self, layer, *operands, name=None, net=None):
+        return self.boolean("intersection", layer, *operands, name=name, net=net)
+
+    def subtract(self, layer, *operands, name=None, net=None):
+        return self.boolean("difference", layer, *operands, name=name, net=net)
+
+    def xor(self, layer, *operands, name=None, net=None):
+        return self.boolean("xor", layer, *operands, name=name, net=net)
 
     def path(self, layer, points, width, name=None, net=None):
         name_value = self._layer_name(layer)
@@ -411,6 +513,247 @@ class Layout:
             }
         )
 
+    def parameter(self, name, default="", description=""):
+        """Declare a user-editable parameter and return its current value."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Parameter name must be a non-empty string")
+        name = name.strip()
+        value = self.params.get(name, "" if default is None else str(default))
+        self.parameter_specs[name] = {
+            "name": name,
+            "value": value,
+            "description": str(description or name),
+        }
+        return value
+
+    def _load_device_library(self):
+        if self._device_library is not None:
+            return self._device_library
+        if not self.pdk_root:
+            raise RuntimeError("Device placement requires an installed PDK package root")
+        root = Path(self.pdk_root)
+        index_path = root / "layout" / "devices" / "index.json"
+        if not index_path.is_file():
+            pdk = self.pdk or "unknown"
+            raise RuntimeError(f"PDK '{pdk}' does not provide {index_path}")
+        try:
+            library = json.loads(index_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Unable to read device library {index_path}: {error}") from error
+        self._device_layers = {}
+        for layer in library.get("layers", []):
+            try:
+                number = int(layer["number"])
+                datatype = int(layer.get("datatype", 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self._device_layers[(number, datatype)] = str(layer.get("name", f"Layer {number}"))
+        self._device_library = library
+        return library
+
+    def _device_layer_name(self, number, datatype):
+        self._load_device_library()
+        key = (int(number), int(datatype))
+        name = self._device_layers.get(key)
+        if name is None:
+            raise RuntimeError(
+                f"Device geometry uses stream {number}/{datatype}, which is not declared by the package device library"
+            )
+        return name
+
+    def _device_cell(self, device_name):
+        library = self._load_device_library()
+        cells = library.get("cells", [])
+        for cell in cells:
+            if str(cell.get("name", "")).lower() == str(device_name).lower():
+                return cell
+        for cell in cells:
+            if str(device_name).lower() in str(cell.get("name", "")).lower():
+                return cell
+        raise RuntimeError(f"Unknown layout device '{device_name}'")
+
+    def _device_geometry(self, cell, parameters):
+        generator = cell.get("generator")
+        if not generator:
+            layout_path = cell.get("layout")
+            if not layout_path:
+                raise RuntimeError(f"Device '{cell.get('name', '')}' has no generator or layout file")
+            path = Path(self.pdk_root) / "layout" / "devices" / str(layout_path)
+            try:
+                document = json.loads(path.read_text())
+                return document["device"]
+            except (OSError, KeyError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"Unable to read device geometry {path}: {error}") from error
+
+        key = (str(generator.get("module", "")), str(generator.get("class", "")),
+               tuple(sorted((str(k), str(v)) for k, v in parameters.items())))
+        cached = self._device_geometry_cache.get(key)
+        if cached is not None:
+            return cached
+        generator_path = Path(self.pdk_root) / "layout" / "devices" / "generator.py"
+        if not generator_path.is_file():
+            raise RuntimeError(f"Device generator is missing: {generator_path}")
+        with tempfile.TemporaryDirectory(prefix="ice-device-") as directory:
+            params_path = Path(directory) / "params.json"
+            output_path = Path(directory) / "geometry.json"
+            params_path.write_text(json.dumps(parameters))
+            command = [
+                sys.executable,
+                str(generator_path),
+                "--pdk-root",
+                str(self.pdk_root),
+                "--module",
+                str(generator.get("module", "")),
+                "--class",
+                str(generator.get("class", "")),
+                "--params-file",
+                str(params_path),
+                "--output",
+                str(output_path),
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=self.pdk_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError as error:
+                raise RuntimeError(f"Unable to run device generator: {error}") from error
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout or "").strip()
+                raise RuntimeError(
+                    f"Device generator for '{cell.get('name', '')}' failed: {details or completed.returncode}"
+                )
+            try:
+                geometry = json.loads(output_path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"Unable to read generated device geometry: {error}") from error
+        self._device_geometry_cache[key] = geometry
+        return geometry
+
+    @staticmethod
+    def _device_transform(x, y, orientation):
+        if orientation == "r0":
+            return x, y
+        if orientation == "r90":
+            return -y, x
+        if orientation == "r180":
+            return -x, -y
+        if orientation == "r270":
+            return y, -x
+        if orientation == "mx":
+            return x, -y
+        if orientation == "my":
+            return -x, y
+        raise ValueError(f"Unsupported device orientation: {orientation}")
+
+    @staticmethod
+    def _device_side(side, orientation):
+        if orientation == "r0":
+            return side
+        if orientation == "r90":
+            return {"left": "bottom", "right": "top", "top": "left", "bottom": "right"}.get(side, side)
+        if orientation == "r180":
+            return {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}.get(side, side)
+        if orientation == "r270":
+            return {"left": "top", "right": "bottom", "top": "right", "bottom": "left"}.get(side, side)
+        if orientation == "mx":
+            return {"top": "bottom", "bottom": "top"}.get(side, side)
+        if orientation == "my":
+            return {"left": "right", "right": "left"}.get(side, side)
+        return side
+
+    def device(self, device_name, x=0, y=0, orientation="r0", name=None, **parameters):
+        """Place a package layout device (PCell or fixed cell) into this layout.
+
+        The device geometry is flattened into the generated layout. Ports are
+        prefixed with the instance name so multiple copies can coexist.
+        """
+        cell = self._device_cell(device_name)
+        orientation = str(orientation)
+        if orientation not in {"r0", "r90", "r180", "r270", "mx", "my"}:
+            raise ValueError("Device orientation must be r0, r90, r180, r270, mx, or my")
+        defaults = {
+            str(parameter.get("name", "")): str(parameter.get("value", ""))
+            for parameter in cell.get("parameters", [])
+        }
+        values = dict(defaults)
+        for key, value in parameters.items():
+            values[str(key)] = "" if value is None else str(value)
+        geometry = self._device_geometry(cell, values)
+        self._device_count += 1
+        instance_name = str(name).strip() if name is not None else f"device_{self._device_count}"
+        if not instance_name:
+            raise ValueError("Device instance name must not be empty")
+        origin_x = _coordinate(x, "device x")
+        origin_y = _coordinate(y, "device y")
+        shapes = []
+        for source in geometry.get("shapes", []):
+            points = []
+            for point in source.get("points", []):
+                if isinstance(point, dict):
+                    px, py = point.get("x", 0), point.get("y", 0)
+                else:
+                    try:
+                        px, py = point
+                    except (TypeError, ValueError) as error:
+                        raise RuntimeError("Device shape point must be (x, y)") from error
+                tx, ty = self._device_transform(
+                    _coordinate(px, "device point x"),
+                    _coordinate(py, "device point y"),
+                    orientation,
+                )
+                points.append({"x": tx + origin_x, "y": ty + origin_y})
+            if len(points) < 3:
+                continue
+            layer_name = self._device_layer_name(source.get("layer", 0), source.get("datatype", 0))
+            record = {"layer": layer_name, "polygon": points}
+            source_name = source.get("name", "")
+            if source_name:
+                record["name"] = f"{instance_name}.{source_name}"
+            if source.get("net"):
+                record["net"] = str(source["net"])
+            shapes.append(self._add_shape(record))
+        for source in geometry.get("ports", []):
+            rect = source.get("rectangle", {})
+            corners = []
+            for px, py in (
+                (rect.get("x", 0), rect.get("y", 0)),
+                (rect.get("x", 0) + rect.get("width", 0), rect.get("y", 0)),
+                (rect.get("x", 0) + rect.get("width", 0), rect.get("y", 0) + rect.get("height", 0)),
+                (rect.get("x", 0), rect.get("y", 0) + rect.get("height", 0)),
+            ):
+                tx, ty = self._device_transform(
+                    _coordinate(px, "device port x"), _coordinate(py, "device port y"), orientation
+                )
+                corners.append((tx, ty))
+            min_x = min(point[0] for point in corners)
+            min_y = min(point[1] for point in corners)
+            max_x = max(point[0] for point in corners)
+            max_y = max(point[1] for point in corners)
+            port_name = f"{instance_name}.{source.get('name', 'P')}"
+            self.ports.append(
+                {
+                    "name": port_name,
+                    "layer": self._device_layer_name(source.get("layer", 0), source.get("datatype", 0)),
+                    "rectangle": {
+                        "x": min_x + origin_x,
+                        "y": min_y + origin_y,
+                        "width": max(max_x - min_x, 1),
+                        "height": max(max_y - min_y, 1),
+                    },
+                    "direction": str(source.get("direction", "inout")),
+                    "side": self._device_side(str(source.get("side", "left")), orientation),
+                    "net": None,
+                    "label": port_name,
+                    "visible": bool(source.get("visible", True)),
+                    "locked": bool(source.get("locked", False)),
+                }
+            )
+        return shapes
+
     def add_dummy_fill(
         self, layers=None, density=None, deviation=None, area=None, **options
     ):
@@ -550,6 +893,7 @@ class Layout:
                 }
                 for name, spec in self.layers.items()
             ],
+            "parameters": list(self.parameter_specs.values()),
             "shapes": self.shapes,
             "ports": self.ports,
             "instances": self.instances,
@@ -601,6 +945,7 @@ def main():
         "--script", required=True, help="Procedural layout Python script"
     )
     parser.add_argument("--output", required=True, help="Generated geometry JSON path")
+    parser.add_argument("--params-file", help="Optional procedural parameter values (JSON object)")
     parser.add_argument("--pdk", default=None, help="Active PDK identifier")
     parser.add_argument("--pdk-root", default=None, help="Installed PDK package root")
     parser.add_argument(
@@ -617,7 +962,15 @@ def main():
     )
     args = parser.parse_args()
 
-    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm, args.grid)
+    parameters = {}
+    if args.params_file:
+        try:
+            parameters = json.loads(Path(args.params_file).read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Unable to read procedural parameters: {error}") from error
+        if not isinstance(parameters, dict):
+            raise RuntimeError("Procedural parameters must be a JSON object")
+    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm, args.grid, parameters)
     with open(args.script, "r", encoding="utf-8") as handle:
         source = handle.read()
     globals_dict = {

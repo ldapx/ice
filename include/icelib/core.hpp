@@ -359,9 +359,13 @@ struct ProceduralLayout {
     std::string stack;
     std::string script;
     ObjectId generatedCell = 0;
+    // User-editable parameters exposed to the script through layout.parameter().
+    std::vector<Parameter> parameters;
     // Hash of the script used for the last successful generation. Empty means
     // the generated cell has never been produced.
     std::string generatedScriptHash;
+    // Hash of the parameter values used for the last successful generation.
+    std::string generatedParameterHash;
     // Provenance for the last successful generation.
     std::string generatedPdkVersion;
     std::string generatedOutputHash;

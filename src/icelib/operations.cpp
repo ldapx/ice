@@ -386,7 +386,7 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk, s
 }
 
 ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script,
-                                std::string stack) {
+                                std::string stack, std::vector<Parameter> parameters) {
     if (name.empty())
         throw ProjectError("layout.procedural.name", "Procedural layout name must not be empty");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
@@ -410,8 +410,19 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
     const auto id = project.nextId();
     project.layoutCells.at(generatedCell).generatedBy = id;
     project.layoutCells.at(generatedCell).readOnly = true;
-    project.proceduralLayouts.emplace(
-        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(stack), std::move(script), generatedCell});
+    for (auto &parameter : parameters) {
+        if (parameter.id == 0)
+            parameter.id = project.nextId();
+    }
+    ProceduralLayout layout;
+    layout.id = id;
+    layout.name = std::move(name);
+    layout.pdk = std::move(pdk);
+    layout.stack = std::move(stack);
+    layout.script = std::move(script);
+    layout.generatedCell = generatedCell;
+    layout.parameters = std::move(parameters);
+    project.proceduralLayouts.emplace(id, std::move(layout));
     return id;
 }
 
