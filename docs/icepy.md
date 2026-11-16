@@ -153,8 +153,10 @@ procedural = project.create_procedural_layout(
     "generated_top",
     "generic",
     "",
+    'width = layout.um(layout.parameter("width", "4"))\n'
     'metal = layout.layer("Metal1", 1, 0)\n'
-    'metal.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))\n',
+    'metal.rectangle(layout.um(0), layout.um(0), width, layout.um(1))\n',
+    {"width": "4"},
 )
 assert procedural.needs_regeneration
 procedural = project.regenerate_procedural_layout("generated_top")
@@ -163,7 +165,9 @@ cell = project.layout_cell_by_id(procedural.generated_cell)
 ```
 
 The script API includes datatype-aware layers, unit helpers, rectangles,
-polygons, paths, text, vias, rectangular arrays, ports, and instances. Generated
+polygons (including holes), boolean operations, paths, text, vias, rectangular
+arrays, ports, instances, and package device placement through
+`layout.device(...)` with an installed PDK package. Generated
 children are read-only and can be inspected, exported, or instanced by other
 layout cells. `ProceduralLayout` exposes the generated script/output hashes and
 `needs_regeneration`.

@@ -80,15 +80,22 @@ def test_procedural_layout() -> None:
         "generated_top",
         "generic",
         "",
+        'width = layout.um(layout.parameter("width", "4"))\n'
         'metal = layout.layer("Metal1", 1)\n'
-        'shape = metal.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))\n'
+        'shape = metal.rectangle(layout.um(0), layout.um(0), width, layout.um(1))\n'
         'shape.name = "body"\n'
         'shape.net = "VDD"\n'
         'metal.path([(0, 0), (4000, 0)], layout.um(0.5))\n'
         'layout.port("VDD", "Metal1", 0, 0, 1000, 1000, net="VDD")\n',
+        {"width": "4"},
     )
     assert procedural.needs_regeneration
     assert len(project.procedural_layouts) == 1
+    generated = project.regenerate_procedural_layout("generated_top")
+    assert not generated.needs_regeneration
+    assert generated.parameters and generated.parameters[0].name == "width"
+    changed = project.set_procedural_parameter("generated_top", "width", "6")
+    assert changed.needs_regeneration
     generated = project.regenerate_procedural_layout("generated_top")
     assert not generated.needs_regeneration
     assert generated.generated_script_hash

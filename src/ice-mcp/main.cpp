@@ -2990,6 +2990,9 @@ class IceMcpServer {
         if (name == "layout_get_script") {
             const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
             const auto &procedural = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : procedural.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
             return {{"id", id},
                     {"name", procedural.name},
                     {"pdk", procedural.pdk},
@@ -2998,8 +3001,32 @@ class IceMcpServer {
                     {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
                     {"generated_cell", procedural.generatedCell},
                     {"generated_script_hash", procedural.generatedScriptHash},
+                    {"generated_parameter_hash", procedural.generatedParameterHash},
                     {"generated_pdk_version", procedural.generatedPdkVersion},
-                    {"generated_output_hash", procedural.generatedOutputHash}};
+                    {"generated_output_hash", procedural.generatedOutputHash},
+                    {"parameters", std::move(parameters)}};
+        }
+        if (name == "layout_set_parameter") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto parameterName = requiredString(arguments, "name");
+            const auto parameterValue = requiredString(arguments, "value");
+            session.execute("mcp layout-set-parameter", [&](ice::Project &project) {
+                auto &layout = project.proceduralLayouts.at(id);
+                const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                    [&](const auto &entry) { return entry.name == parameterName; });
+                if (parameter == layout.parameters.end())
+                    layout.parameters.push_back({project.nextId(), parameterName, parameterValue});
+                else
+                    parameter->value = parameterValue;
+            });
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            return {{"id", id},
+                    {"name", layout.name},
+                    {"parameters", std::move(parameters)},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)}};
         }
         if (name == "layout_set_script") {
             const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
@@ -3207,7 +3234,16 @@ class IceMcpServer {
                         {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
                         {"generated_script_hash", procedural->second.generatedScriptHash},
                         {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                        {"generated_parameter_hash", procedural->second.generatedParameterHash},
                         {"generated_output_hash", procedural->second.generatedOutputHash},
+                        {"parameters",
+                         [&] {
+                             json parameters = json::array();
+                             for (const auto &parameter : procedural->second.parameters)
+                                 parameters.push_back(
+                                     {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                             return parameters;
+                         }()},
                         {"script", procedural->second.script}};
             }
             const auto cellId = itemId;
@@ -4047,6 +4083,12 @@ class IceMcpServer {
         tools.push_back(tool_builder("layout_get_script")
                             .with_description("Read a procedural layout Python script and generation state.")
                             .with_string_param("layout", "Procedural layout name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_set_parameter")
+                            .with_description("Set a procedural layout parameter value without regenerating.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_string_param("name", "Parameter name")
+                            .with_string_param("value", "Parameter value")
                             .build());
         tools.push_back(tool_builder("layout_set_script")
                             .with_description("Replace a procedural layout Python script without regenerating.")

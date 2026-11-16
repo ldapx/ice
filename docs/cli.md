@@ -122,6 +122,7 @@ rejected.
 ice-cli layout-add-cell <project> <name> [pdk] [stack]
 ice-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]
 ice-cli layout-regenerate <project> <procedural> [timeout-seconds]
+ice-cli layout-set-parameter <project> <procedural> <name> <value>
 ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>
@@ -156,9 +157,9 @@ removing a procedural layout also removes its generated static child. Removal
 is blocked when instances reference the layout, and library cells cannot be
 removed. `layout-add-procedural` generates the default script or the supplied
 script immediately and reports `generated`, `generation_error`, and
-`needs_regeneration`. `layout-regenerate` reruns an existing script; the
-generated child is read-only and `layout-info` reports its generation hashes and
-stale state. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
+`needs_regeneration`. `layout-regenerate` reruns an existing script; the generated child is read-only
+and `layout-info` reports its generation hashes, parameter values, and stale
+state. `layout-set-parameter` edits a declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
 TEXT label. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
 layers also connect overlapping layers. `layout-export-lef` and

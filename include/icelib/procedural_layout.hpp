@@ -14,10 +14,12 @@ std::string defaultProceduralLayoutScript();
 // executable (or an empty path when the caller has no executable context).
 std::filesystem::path proceduralRunnerScriptPath(const std::filesystem::path &executablePath = {});
 
-// Stable content hash used to detect whether generated geometry is stale.
+// Stable content hashes used to detect whether generated geometry is stale.
 std::string proceduralScriptHash(const std::string &script);
+std::string proceduralParametersHash(const std::vector<Parameter> &parameters);
 
-// True when the script changed since the last successful generation.
+// True when the script or parameter values changed since the last successful
+// generation.
 bool proceduralLayoutNeedsRegeneration(const ProceduralLayout &layout);
 
 struct ProceduralLayoutRunResult {
@@ -25,6 +27,7 @@ struct ProceduralLayoutRunResult {
     std::string error;
     std::string log;
     std::string scriptHash;
+    std::string parameterHash;
     std::string outputHash;
     std::string pdkVersion;
 };

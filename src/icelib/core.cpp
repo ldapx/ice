@@ -629,8 +629,18 @@ std::string Project::serialize() const {
                       {"generated_cell", layout.generatedCell}};
         if (!layout.stack.empty())
             entry["stack"] = layout.stack;
+        if (!layout.parameters.empty()) {
+            entry["parameters"] = json::array();
+            for (const auto &parameter : layout.parameters) {
+                json item;
+                put(item, parameter);
+                entry["parameters"].push_back(std::move(item));
+            }
+        }
         if (!layout.generatedScriptHash.empty())
             entry["generated_script_hash"] = layout.generatedScriptHash;
+        if (!layout.generatedParameterHash.empty())
+            entry["generated_parameter_hash"] = layout.generatedParameterHash;
         if (!layout.generatedPdkVersion.empty())
             entry["generated_pdk_version"] = layout.generatedPdkVersion;
         if (!layout.generatedOutputHash.empty())
@@ -995,7 +1005,19 @@ Project Project::deserialize(const std::string &text) {
                 entry.stack = layout.value("stack", std::string{});
                 entry.script = layout.value("script", std::string{});
                 entry.generatedCell = layout.value("generated_cell", ObjectId{0});
+                if (const auto parameters = layout.find("parameters");
+                    parameters != layout.end() && parameters->is_array()) {
+                    for (const auto &parameter : *parameters) {
+                        Parameter value;
+                        value.id = parameter.value("id", ObjectId{0});
+                        value.name = parameter.value("name", std::string{});
+                        value.value = parameter.value("value", std::string{});
+                        if (value.id != 0 && !value.name.empty())
+                            entry.parameters.push_back(std::move(value));
+                    }
+                }
                 entry.generatedScriptHash = layout.value("generated_script_hash", std::string{});
+                entry.generatedParameterHash = layout.value("generated_parameter_hash", std::string{});
                 entry.generatedPdkVersion = layout.value("generated_pdk_version", std::string{});
                 entry.generatedOutputHash = layout.value("generated_output_hash", std::string{});
                 const auto layoutId = entry.id;

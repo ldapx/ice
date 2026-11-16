@@ -139,6 +139,7 @@ def main() -> int:
                 "layout_regenerate",
                 "layout_get_script",
                 "layout_set_script",
+                "layout_set_parameter",
                 "layout_list_ports",
                 "layout_update_port",
                 "layout_remove_port",
@@ -231,7 +232,20 @@ def main() -> int:
             procedural = mcp.tool("layout_create_procedural", name="proc_test")
             assert procedural["generated"], procedural
             assert procedural["generated_cell"], procedural
-            script = mcp.tool("layout_get_script", layout="proc_test")["script"]
+            script_info = mcp.tool("layout_get_script", layout="proc_test")
+            assert script_info["parameters"], script_info
+            parameter_name = script_info["parameters"][0]["name"]
+            parameter = mcp.tool(
+                "layout_set_parameter",
+                layout="proc_test",
+                name=parameter_name,
+                value="6",
+            )
+            assert parameter["needs_regeneration"] is True, parameter
+            mcp.tool("layout_regenerate", layout="proc_test")
+            script_info = mcp.tool("layout_get_script", layout="proc_test")
+            assert script_info["needs_regeneration"] is False, script_info
+            script = script_info["script"]
             assert "layout.layer" in script, script
             mcp.tool(
                 "layout_set_script",

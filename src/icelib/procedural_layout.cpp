@@ -1,15 +1,18 @@
 #include "icelib/procedural_layout.hpp"
 
+#include "icelib/geometry.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/process.hpp"
+#include "icelib/simulation_report.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -35,11 +38,15 @@ struct ParsedShape {
     std::string layer;
     std::optional<Rect> rectangle;
     std::vector<LayoutPoint> polygon;
+    std::vector<std::vector<LayoutPoint>> holes;
     std::vector<LayoutPoint> centerline;
     Coordinate width = 0;
     std::string text;
     std::string name;
     std::string net;
+    std::string booleanOperation;
+    std::vector<ParsedShape> operands;
+    bool booleanOperand = false;
 };
 
 struct ParsedPort {
@@ -62,11 +69,17 @@ struct ParsedInstance {
     Orientation orientation = Orientation::r0;
 };
 
+struct ParsedParameter {
+    std::string name;
+    std::string value;
+};
+
 struct ParsedLayout {
     std::vector<ParsedLayer> layers;
     std::vector<ParsedShape> shapes;
     std::vector<ParsedPort> ports;
     std::vector<ParsedInstance> instances;
+    std::vector<ParsedParameter> parameters;
 };
 
 struct LayerDefaults {
@@ -194,6 +207,152 @@ bool parseOrientation(const std::string &value, Orientation &orientation, std::s
     return true;
 }
 
+bool parseShape(const json &entry, ParsedShape &shape, std::string *error) {
+    if (!entry.is_object()) {
+        if (error)
+            *error = "A procedural layout shape is not an object.";
+        return false;
+    }
+    shape.layer = stringField(entry, "layer", {}, error);
+    if (shape.layer.empty()) {
+        if (error)
+            *error = "A procedural layout shape has no layer.";
+        return false;
+    }
+    shape.name = stringField(entry, "name", {}, error);
+    shape.net = stringField(entry, "net", {}, error);
+    shape.booleanOperand = entry.value("boolean_operand", false);
+    if (entry.contains("boolean")) {
+        const auto boolean = entry.at("boolean");
+        if (!boolean.is_object()) {
+            if (error)
+                *error = "A procedural layout boolean operation is not an object.";
+            return false;
+        }
+        shape.booleanOperation = stringField(boolean, "operation", {}, error);
+        if (shape.booleanOperation != "union" && shape.booleanOperation != "intersection" &&
+            shape.booleanOperation != "difference" && shape.booleanOperation != "xor") {
+            if (error)
+                *error = "Unsupported procedural layout boolean operation: " + shape.booleanOperation;
+            return false;
+        }
+        const auto operands = boolean.value("operands", json::array());
+        if (!operands.is_array() || operands.size() < 2) {
+            if (error)
+                *error = "A procedural layout boolean operation needs at least two operands.";
+            return false;
+        }
+        for (const auto &operand : operands) {
+            ParsedShape child;
+            if (!parseShape(operand, child, error))
+                return false;
+            shape.operands.push_back(std::move(child));
+        }
+        return true;
+    }
+    if (entry.contains("centerline")) {
+        const auto points = entry.at("centerline");
+        if (!points.is_array() || points.size() < 2) {
+            if (error)
+                *error = "A procedural layout path needs at least two points.";
+            return false;
+        }
+        for (const auto &pointValue : points) {
+            LayoutPoint point;
+            if (!parsePoint(pointValue, "Path point", point, error))
+                return false;
+            shape.centerline.push_back(point);
+        }
+        if (!parseCoordinate(entry.at("width"), "Path width", shape.width, error))
+            return false;
+        if (shape.width <= 0) {
+            if (error)
+                *error = "A procedural layout path width must be positive.";
+            return false;
+        }
+        Coordinate minX = std::numeric_limits<Coordinate>::max();
+        Coordinate minY = std::numeric_limits<Coordinate>::max();
+        Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+        Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+        for (const auto &point : shape.centerline) {
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        const auto halfWidth = (shape.width + 1) / 2;
+        shape.rectangle =
+            Rect{minX - halfWidth, minY - halfWidth, maxX - minX + 2 * halfWidth, maxY - minY + 2 * halfWidth};
+        return true;
+    }
+    if (entry.contains("text") && entry.contains("rectangle")) {
+        if (!parseRect(entry.at("rectangle"), "Text rectangle", shape.rectangle.emplace(), error))
+            return false;
+        shape.text = stringField(entry, "text", {}, error);
+        if (shape.text.empty()) {
+            if (error)
+                *error = "A procedural layout text shape needs non-empty text.";
+            return false;
+        }
+        return true;
+    }
+    if (entry.contains("rectangle")) {
+        return parseRect(entry.at("rectangle"), "Shape rectangle", shape.rectangle.emplace(), error);
+    }
+    if (entry.contains("polygon")) {
+        const auto points = entry.at("polygon");
+        if (!points.is_array() || points.size() < 3) {
+            if (error)
+                *error = "A procedural layout polygon needs at least three points.";
+            return false;
+        }
+        for (const auto &pointValue : points) {
+            LayoutPoint point;
+            if (!parsePoint(pointValue, "Polygon point", point, error))
+                return false;
+            shape.polygon.push_back(point);
+        }
+        Coordinate minX = std::numeric_limits<Coordinate>::max();
+        Coordinate minY = std::numeric_limits<Coordinate>::max();
+        Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+        Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+        for (const auto &point : shape.polygon) {
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        shape.rectangle = Rect{minX, minY, maxX - minX, maxY - minY};
+        if (entry.contains("holes")) {
+            const auto holes = entry.at("holes");
+            if (!holes.is_array()) {
+                if (error)
+                    *error = "A procedural layout polygon holes entry is not an array.";
+                return false;
+            }
+            for (const auto &holeValue : holes) {
+                if (!holeValue.is_array() || holeValue.size() < 3) {
+                    if (error)
+                        *error = "A procedural layout polygon hole needs at least three points.";
+                    return false;
+                }
+                std::vector<LayoutPoint> hole;
+                for (const auto &pointValue : holeValue) {
+                    LayoutPoint point;
+                    if (!parsePoint(pointValue, "Hole point", point, error))
+                        return false;
+                    hole.push_back(point);
+                }
+                shape.holes.push_back(std::move(hole));
+            }
+        }
+        return true;
+    }
+    if (error)
+        *error = "A procedural layout shape has no rectangle, polygon, path, text, or boolean operation.";
+    return false;
+}
+
 bool parseGeneratedLayout(const json &root, ParsedLayout &layout, std::string *error) {
     if (!root.is_object()) {
         if (error)
@@ -262,95 +421,36 @@ bool parseGeneratedLayout(const json &root, ParsedLayout &layout, std::string *e
         return false;
     }
     for (const auto &entry : shapes) {
-        if (!entry.is_object()) {
-            if (error)
-                *error = "A procedural layout shape is not an object.";
-            return false;
-        }
         ParsedShape shape;
-        shape.layer = stringField(entry, "layer", {}, error);
-        if (shape.layer.empty()) {
+        if (!parseShape(entry, shape, error))
+            return false;
+        if (!shape.booleanOperand)
+            layout.shapes.push_back(std::move(shape));
+    }
+
+    const auto parameters = root.value("parameters", json::array());
+    if (!parameters.is_null()) {
+        if (!parameters.is_array()) {
             if (error)
-                *error = "A procedural layout shape has no layer.";
+                *error = "The procedural layout parameters entry is not an array.";
             return false;
         }
-        shape.name = stringField(entry, "name", {}, error);
-        shape.net = stringField(entry, "net", {}, error);
-        if (entry.contains("centerline")) {
-            const auto points = entry.at("centerline");
-            if (!points.is_array() || points.size() < 2) {
+        for (const auto &entry : parameters) {
+            if (!entry.is_object()) {
                 if (error)
-                    *error = "A procedural layout path needs at least two points.";
+                    *error = "A procedural layout parameter is not an object.";
                 return false;
             }
-            for (const auto &pointValue : points) {
-                LayoutPoint point;
-                if (!parsePoint(pointValue, "Path point", point, error))
-                    return false;
-                shape.centerline.push_back(point);
-            }
-            if (!parseCoordinate(entry.at("width"), "Path width", shape.width, error))
-                return false;
-            if (shape.width <= 0) {
+            ParsedParameter parameter;
+            parameter.name = stringField(entry, "name", {}, error);
+            parameter.value = stringField(entry, "value", {}, error);
+            if (parameter.name.empty()) {
                 if (error)
-                    *error = "A procedural layout path width must be positive.";
+                    *error = "A procedural layout parameter needs a name.";
                 return false;
             }
-            Coordinate minX = std::numeric_limits<Coordinate>::max();
-            Coordinate minY = std::numeric_limits<Coordinate>::max();
-            Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
-            Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
-            for (const auto &point : shape.centerline) {
-                minX = std::min(minX, point.x);
-                minY = std::min(minY, point.y);
-                maxX = std::max(maxX, point.x);
-                maxY = std::max(maxY, point.y);
-            }
-            const auto halfWidth = (shape.width + 1) / 2;
-            shape.rectangle =
-                Rect{minX - halfWidth, minY - halfWidth, maxX - minX + 2 * halfWidth, maxY - minY + 2 * halfWidth};
-        } else if (entry.contains("text") && entry.contains("rectangle")) {
-            if (!parseRect(entry.at("rectangle"), "Text rectangle", shape.rectangle.emplace(), error))
-                return false;
-            shape.text = stringField(entry, "text", {}, error);
-            if (shape.text.empty()) {
-                if (error)
-                    *error = "A procedural layout text shape needs non-empty text.";
-                return false;
-            }
-        } else if (entry.contains("rectangle")) {
-            if (!parseRect(entry.at("rectangle"), "Shape rectangle", shape.rectangle.emplace(), error))
-                return false;
-        } else if (entry.contains("polygon")) {
-            const auto points = entry.at("polygon");
-            if (!points.is_array() || points.size() < 3) {
-                if (error)
-                    *error = "A procedural layout polygon needs at least three points.";
-                return false;
-            }
-            for (const auto &pointValue : points) {
-                LayoutPoint point;
-                if (!parsePoint(pointValue, "Polygon point", point, error))
-                    return false;
-                shape.polygon.push_back(point);
-            }
-            Coordinate minX = std::numeric_limits<Coordinate>::max();
-            Coordinate minY = std::numeric_limits<Coordinate>::max();
-            Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
-            Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
-            for (const auto &point : shape.polygon) {
-                minX = std::min(minX, point.x);
-                minY = std::min(minY, point.y);
-                maxX = std::max(maxX, point.x);
-                maxY = std::max(maxY, point.y);
-            }
-            shape.rectangle = Rect{minX, minY, maxX - minX, maxY - minY};
-        } else {
-            if (error)
-                *error = "A procedural layout shape has no rectangle, polygon, path, or text.";
-            return false;
+            layout.parameters.push_back(std::move(parameter));
         }
-        layout.shapes.push_back(std::move(shape));
     }
 
     const auto ports = root.value("ports", json::array());
@@ -571,7 +671,116 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
             return createLayoutNet(project, procedural.generatedCell, name);
         };
 
+        GeometryKernel kernel;
+        const auto toKernelPolygon = [](const std::vector<LayoutPoint> &points) {
+            Polygon polygon;
+            polygon.reserve(points.size());
+            for (const auto &point : points)
+                polygon.push_back({point.x, point.y});
+            return polygon;
+        };
+        const auto toLayoutPolygon = [](const Polygon &polygon) {
+            std::vector<LayoutPoint> points;
+            points.reserve(polygon.size());
+            for (const auto &point : polygon)
+                points.push_back({point.x, point.y});
+            return points;
+        };
+        const auto rectanglePolygon = [](const Rect &rect) {
+            return Polygon{{rect.x, rect.y},
+                           {rect.x + rect.width, rect.y},
+                           {rect.x + rect.width, rect.y + rect.height},
+                           {rect.x, rect.y + rect.height}};
+        };
+        std::function<bool(const ParsedShape &, MultiPolygon &)> evaluateShape;
+        evaluateShape = [&](const ParsedShape &parsed, MultiPolygon &out) -> bool {
+            if (!parsed.booleanOperation.empty()) {
+                std::vector<MultiPolygon> operands;
+                operands.reserve(parsed.operands.size());
+                for (const auto &operand : parsed.operands) {
+                    MultiPolygon geometry;
+                    if (!evaluateShape(operand, geometry))
+                        return false;
+                    operands.push_back(std::move(geometry));
+                }
+                if (operands.size() < 2) {
+                    if (error)
+                        *error = "A procedural layout boolean operation needs at least two operands.";
+                    return false;
+                }
+                if (parsed.booleanOperation == "union") {
+                    MultiPolygon all;
+                    for (const auto &operand : operands)
+                        all.insert(all.end(), operand.begin(), operand.end());
+                    out = kernel.booleanOp(all, {}, BooleanOperation::union_);
+                } else if (parsed.booleanOperation == "intersection") {
+                    out = operands.front();
+                    for (std::size_t index = 1; index < operands.size() && !out.empty(); ++index)
+                        out = kernel.booleanOp(out, operands[index], BooleanOperation::intersection);
+                } else if (parsed.booleanOperation == "difference") {
+                    MultiPolygon clips;
+                    for (std::size_t index = 1; index < operands.size(); ++index)
+                        clips.insert(clips.end(), operands[index].begin(), operands[index].end());
+                    if (clips.size() > 1)
+                        clips = kernel.booleanOp(clips, {}, BooleanOperation::union_);
+                    out = kernel.booleanOp(operands.front(), clips, BooleanOperation::difference);
+                } else {
+                    out = operands.front();
+                    for (std::size_t index = 1; index < operands.size() && !out.empty(); ++index)
+                        out = kernel.booleanOp(out, operands[index], BooleanOperation::xor_);
+                }
+                if (out.empty()) {
+                    if (error)
+                        *error = "The procedural layout boolean operation produced no geometry.";
+                    return false;
+                }
+                return true;
+            }
+            if (!parsed.holes.empty()) {
+                MultiPolygon contours;
+                contours.push_back(toKernelPolygon(parsed.polygon));
+                for (const auto &hole : parsed.holes)
+                    contours.push_back(toKernelPolygon(hole));
+                out = kernel.fillEvenOdd(contours);
+                if (out.empty()) {
+                    if (error)
+                        *error = "The procedural layout polygon holes produced no geometry.";
+                    return false;
+                }
+                return true;
+            }
+            if (!parsed.polygon.empty()) {
+                out = {toKernelPolygon(parsed.polygon)};
+                return true;
+            }
+            if (parsed.rectangle) {
+                out = {rectanglePolygon(*parsed.rectangle)};
+                return true;
+            }
+            if (error)
+                *error = "Boolean operands and polygon holes require rectangles or polygons.";
+            return false;
+        };
+
         for (const auto &parsed : generated.shapes) {
+            if (!parsed.booleanOperation.empty() || !parsed.holes.empty()) {
+                MultiPolygon polygons;
+                if (!evaluateShape(parsed, polygons))
+                    return false;
+                const auto layerId = layerIdFor(parsed.layer);
+                const auto net =
+                    parsed.net.empty() ? std::optional<ObjectId>{} : std::optional<ObjectId>{netIdFor(parsed.net)};
+                for (std::size_t index = 0; index < polygons.size(); ++index) {
+                    const auto id = project.nextId();
+                    Shape shape{id, layerId, net, GeometryKernel::bounds(polygons[index]),
+                                toLayoutPolygon(polygons[index])};
+                    shape.name = parsed.name;
+                    if (!shape.name.empty() && polygons.size() > 1)
+                        shape.name += "_" + std::to_string(index + 1);
+                    cell.shapes.emplace(id, std::move(shape));
+                }
+                continue;
+            }
             const auto id = project.nextId();
             const auto net =
                 parsed.net.empty() ? std::optional<ObjectId>{} : std::optional<ObjectId>{netIdFor(parsed.net)};
@@ -612,10 +821,25 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
 
 std::string proceduralScriptHash(const std::string &script) { return hashText(script); }
 
+std::string proceduralParametersHash(const std::vector<Parameter> &parameters) {
+    std::map<std::string, std::string> values;
+    for (const auto &parameter : parameters)
+        values[parameter.name] = parameter.value;
+    std::string text;
+    for (const auto &[name, value] : values) {
+        text += name;
+        text.push_back('\0');
+        text += value;
+        text.push_back('\0');
+    }
+    return hashText(text);
+}
+
 bool proceduralLayoutNeedsRegeneration(const ProceduralLayout &layout) {
-    if (layout.generatedScriptHash.empty())
+    if (layout.generatedScriptHash.empty() || layout.generatedParameterHash.empty())
         return true;
-    return layout.generatedScriptHash != proceduralScriptHash(layout.script);
+    return layout.generatedScriptHash != proceduralScriptHash(layout.script) ||
+           layout.generatedParameterHash != proceduralParametersHash(layout.parameters);
 }
 
 std::filesystem::path proceduralRunnerScriptPath(const std::filesystem::path &executablePath) {
@@ -665,6 +889,9 @@ std::string defaultProceduralLayoutScript() {
 # layer.path([(0, 0), (4000, 0)], width=400)
 # layer.text(0, 0, "M1", height=500)
 # layout.port("P1", "Metal1", 0, 0, 1000, 1000)
+# layout.union("Metal1", shape_a, shape_b)
+# layout.polygon(points, holes=[hole_points])
+# layout.device("nmos", name="M1", x=0, y=0, w="1u", l="0.15u")
 # layout.instance("other_layout_cell", 0, 0, name="I1", orientation="r0")
 # layout.array("unit_cell", (2, 2), (2000, 2000))
 # layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)
@@ -672,9 +899,10 @@ std::string defaultProceduralLayoutScript() {
 metal1 = layout.layer("Metal1", 1)
 metal2 = layout.layer("Metal2", 2)
 
-metal1.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(0.6))
-metal1.rectangle(layout.um(0), layout.um(2.4), layout.um(4), layout.um(0.6))
-metal2.rectangle(layout.um(1), layout.um(1.5), layout.um(2), layout.um(0.6))
+width = layout.um(layout.parameter("width", "4", "Horizontal metal width in micrometers"))
+metal1.rectangle(layout.um(0), layout.um(0), width, layout.um(0.6))
+metal1.rectangle(layout.um(0), layout.um(2.4), width, layout.um(0.6))
+metal2.rectangle(layout.um(1), layout.um(1.5), width / 2, layout.um(0.6))
 )";
 }
 
@@ -688,6 +916,7 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     }
     auto &procedural = proceduralIt->second;
     result.scriptHash = proceduralScriptHash(procedural.script);
+    result.parameterHash = proceduralParametersHash(procedural.parameters);
 
     const auto runner = proceduralRunnerScriptPath(executablePath);
     if (runner.empty()) {
@@ -716,6 +945,7 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         std::filesystem::remove_all(directory, ignored);
     };
     const auto scriptPath = directory / "layout.py";
+    const auto paramsPath = directory / "params.json";
     const auto outputPath = directory / "layout.json";
     const auto logPath = directory / "runner.log";
     {
@@ -726,6 +956,16 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
             return result;
         }
         scriptFile << procedural.script;
+        json params = json::object();
+        for (const auto &parameter : procedural.parameters)
+            params[parameter.name] = parameter.value;
+        std::ofstream paramsFile(paramsPath, std::ios::binary | std::ios::trunc);
+        if (!paramsFile) {
+            result.error = "Unable to write the procedural layout parameters.";
+            cleanup();
+            return result;
+        }
+        paramsFile << params.dump(2);
     }
 
     std::filesystem::path pdkRoot;
@@ -743,12 +983,13 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
 
     ProcessOptions options;
     options.arguments = {
-        python,         runner.string(),
-        "--script",     scriptPath.string(),
-        "--output",     outputPath.string(),
-        "--pdk",        procedural.pdk,
-        "--db-unit-nm", std::to_string(nanometersPerUnit),
-        "--grid",       std::to_string(std::max<Coordinate>(1, project.grid)),
+        python,          runner.string(),
+        "--script",      scriptPath.string(),
+        "--params-file", paramsPath.string(),
+        "--output",      outputPath.string(),
+        "--pdk",         procedural.pdk,
+        "--db-unit-nm",  std::to_string(nanometersPerUnit),
+        "--grid",        std::to_string(std::max<Coordinate>(1, project.grid)),
     };
     if (!pdkRoot.empty()) {
         options.arguments.push_back("--pdk-root");
@@ -757,6 +998,9 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     options.workingDirectory = directory;
     options.logPath = logPath;
     options.timeoutSeconds = std::max(0, timeoutSeconds);
+    const auto pythonPath = reportPythonPath(executablePath);
+    if (!pythonPath.empty())
+        options.environment["PYTHONPATH"] = pythonPath;
     const auto process = runProcess(options);
     result.log = process.logTail;
     if (!process.succeeded()) {
@@ -804,7 +1048,19 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         cleanup();
         return result;
     }
+    std::vector<Parameter> parameters;
+    for (const auto &parsed : generated.parameters) {
+        auto existing = std::find_if(procedural.parameters.begin(), procedural.parameters.end(),
+                                     [&](const auto &parameter) { return parameter.name == parsed.name; });
+        Parameter parameter;
+        parameter.id = existing != procedural.parameters.end() ? existing->id : project.nextId();
+        parameter.name = parsed.name;
+        parameter.value = parsed.value;
+        parameters.push_back(std::move(parameter));
+    }
+    procedural.parameters = std::move(parameters);
     procedural.generatedScriptHash = result.scriptHash;
+    procedural.generatedParameterHash = proceduralParametersHash(procedural.parameters);
     procedural.generatedPdkVersion = result.pdkVersion;
     procedural.generatedOutputHash = result.outputHash;
     result.ok = true;

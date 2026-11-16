@@ -1111,6 +1111,7 @@ void printHelp() {
               << "  layout-add-cell <project> <name> [pdk] [stack]\n"
               << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
               << "  layout-regenerate <project> <procedural> [timeout-seconds]\n"
+              << "  layout-set-parameter <project> <procedural> <name> <value>\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
@@ -2156,7 +2157,39 @@ int main(int argc, char **argv) {
                        {"generated", run.ok},
                        {"generation_error", run.ok ? json(nullptr) : json(run.error)},
                        {"needs_regeneration",
-                        ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}});
+                        ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))},
+                       {"parameters", [&] {
+                            json parameters = json::array();
+                            for (const auto &parameter : session.project().proceduralLayouts.at(id).parameters)
+                                parameters.push_back(
+                                    {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                            return parameters;
+                        }()}});
+            return 0;
+        }
+
+        if (command == "layout-set-parameter") {
+            expectArguments(args, 5, 5, "layout-set-parameter <project> <procedural> <name> <value>");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            session.execute("set procedural parameter", [&](ice::Project &project) {
+                auto &layout = project.proceduralLayouts.at(id);
+                const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                    [&](const auto &entry) { return entry.name == args[3]; });
+                if (parameter == layout.parameters.end())
+                    layout.parameters.push_back({project.nextId(), args[3], args[4]});
+                else
+                    parameter->value = args[4];
+            });
+            session.save(args[1]);
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"parameters", std::move(parameters)},
+                       {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)}});
             return 0;
         }
 
@@ -2226,6 +2259,7 @@ int main(int argc, char **argv) {
                                   {"generated_cell", procedural.generatedCell},
                                   {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
                                   {"generated_pdk_version", procedural.generatedPdkVersion},
+                                  {"parameters", procedural.parameters.size()},
                                   {"script_length", procedural.script.size()}});
             }
             printJson(result);
@@ -2246,8 +2280,17 @@ int main(int argc, char **argv) {
                            {"generated_cell", procedural->second.generatedCell},
                            {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
                            {"generated_script_hash", procedural->second.generatedScriptHash},
+                           {"generated_parameter_hash", procedural->second.generatedParameterHash},
                            {"generated_pdk_version", procedural->second.generatedPdkVersion},
                            {"generated_output_hash", procedural->second.generatedOutputHash},
+                           {"parameters",
+                            [&] {
+                                json parameters = json::array();
+                                for (const auto &parameter : procedural->second.parameters)
+                                    parameters.push_back(
+                                        {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                                return parameters;
+                            }()},
                            {"script", procedural->second.script}});
             } else {
                 printJson(layoutInfo(project, project.layoutCells.at(id)));
