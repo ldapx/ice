@@ -135,7 +135,7 @@ and ask the user to rebuild/restart ICE.
 | `implementation_import_layout` | Create a reusable read-only digital device from the final GDS/OASIS; a missing stream is an error. |
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
-| `drc_run` | Export a layout, run gdscheck with the PDK process deck, and return normalized DRC violations. |
+| `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports `template="tran"`, `"mixed"`, `"pwm_dac"`, or `"digital"`. |
@@ -327,8 +327,11 @@ standard-cell GDS decks and records `final/6_final.gds`; the package
 GDS decks produce a warning, and `implementation_export_gds` can rerun the
 export.
 
-`drc_run` exports the layout, invokes `gdscheck` with the process deck derived
-from its PDK, and returns normalized violations. DRC and LVS results are
+`drc_run` exports the layout, invokes the deck declared by
+`<package>/technology/drc.json` (or the gdscheck process derived from its PDK),
+and returns normalized violations. Optional `engine` and `deck` arguments
+override the package deck, and `suite` selects a named variant. The response
+includes `engine`, `deck`, and `suite`. DRC and LVS results are
 separate from physical-flow route DRC metrics in `implementation_status`.
 
 ## Agent authoring shortcuts

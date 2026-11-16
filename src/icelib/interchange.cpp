@@ -441,6 +441,17 @@ std::string layerNameFor(const Project &project, ObjectId layerId) {
         name.erase(datatype);
     return name;
 }
+std::string interchangeIdentifier(std::string name) {
+    for (auto &character : name) {
+        if (std::isalnum(static_cast<unsigned char>(character)) == 0 && character != '_')
+            character = '_';
+    }
+    if (name.empty())
+        name = "cell";
+    if (std::isdigit(static_cast<unsigned char>(name.front())) != 0)
+        name = "_" + name;
+    return name;
+}
 } // namespace
 
 void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
@@ -451,16 +462,17 @@ void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const
     std::ofstream output(path);
     if (!output)
         throw ProjectError("interchange.export", "Unable to open LEF output");
+    const auto macroName = interchangeIdentifier(cell->second.name);
     output << "VERSION 5.8 ;\n"
            << "UNITS\n  DATABASE MICRONS 1000 ;\nEND UNITS\n"
-           << "MACRO " << cell->second.name << "\n"
+           << "MACRO " << macroName << "\n"
            << "  CLASS BLOCK ;\n"
            << "  ORIGIN " << bounds.x / 1000.0 << " " << bounds.y / 1000.0 << " ;\n"
            << "  SIZE " << bounds.width / 1000.0 << " BY " << bounds.height / 1000.0 << " ;\n";
     for (const auto &[_, port] : cell->second.ports) {
-        if (!port.visible)
+        if (!port.visible || port.internal)
             continue;
-        output << "  PIN " << port.name << "\n"
+        output << "  PIN " << interchangeIdentifier(port.name) << "\n"
                << "    DIRECTION " << lefDirection(port.direction) << " ;\n"
                << "    USE " << lefUse(port.direction) << " ;\n"
                << "    PORT\n"
@@ -469,9 +481,9 @@ void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const
                << (port.rectangle.x + port.rectangle.width) / 1000.0 << " "
                << (port.rectangle.y + port.rectangle.height) / 1000.0 << " ;\n"
                << "    END\n"
-               << "  END " << port.name << "\n";
+               << "  END " << interchangeIdentifier(port.name) << "\n";
     }
-    output << "END " << cell->second.name << "\nEND LIBRARY\n";
+    output << "END " << macroName << "\nEND LIBRARY\n";
 }
 
 void LayoutInterchange::exportDef(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
@@ -482,18 +494,19 @@ void LayoutInterchange::exportDef(const Project &project, ObjectId cellId, const
     std::ofstream output(path);
     if (!output)
         throw ProjectError("interchange.export", "Unable to open DEF output");
+    const auto designName = interchangeIdentifier(cell->second.name);
     output << "VERSION 5.8 ;\nDIVIDERCHAR \"/\" ;\nBUSBITCHARS \"[]\" ;\n"
-           << "DESIGN " << cell->second.name << " ;\n"
+           << "DESIGN " << designName << " ;\n"
            << "UNITS DISTANCE MICRONS 1000 ;\n"
            << "DIEAREA ( " << bounds.x << " " << bounds.y << " ) ( " << bounds.x + bounds.width << " "
            << bounds.y + bounds.height << " ) ;\n";
     int count = 0;
     for (const auto &[_, port] : cell->second.ports)
-        if (port.visible)
+        if (port.visible && !port.internal)
             ++count;
     output << "PINS " << count << " ;\n";
     for (const auto &[_, port] : cell->second.ports) {
-        if (!port.visible)
+        if (!port.visible || port.internal)
             continue;
         std::string netName = port.name;
         if (port.net != 0) {

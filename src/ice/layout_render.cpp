@@ -553,6 +553,8 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
 
         if (root && includePlannedDevices) {
             for (const auto &[_, device] : current.plannedDevices) {
+                if (!device.placeholder)
+                    continue;
                 LayoutPreviewPlannedDevice preview;
                 preview.rectangle = QRectF(device.x, device.y, device.width, device.height);
                 preview.name = QString::fromStdString(device.name);

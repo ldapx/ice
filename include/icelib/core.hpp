@@ -251,6 +251,9 @@ struct Port {
     std::string label;
     bool visible = true;
     bool locked = false;
+    // True for automatically promoted device terminals. Internal pins are
+    // useful for routing and connectivity but are not top-level LVS ports.
+    bool internal = false;
     // Set when this pin is promoted from a child layout instance.
     ObjectId sourceInstance = 0;
     ObjectId sourcePort = 0;
@@ -282,6 +285,17 @@ struct PlannedDevice {
     Coordinate y = 0;
     Coordinate width = 0;
     Coordinate height = 0;
+    // Optional device identity. Procedural layout scripts use this to keep
+    // the model, parameters, and terminal nets of a placed PCell even when its
+    // geometry is flattened into the generated cell.
+    std::string device;
+    std::string model;
+    std::vector<Parameter> parameters;
+    // Device terminal name (for example "G") to layout net id.
+    std::map<std::string, ObjectId> terminals;
+    // False when this entry only preserves device identity for LVS while the
+    // real geometry is already stored in the cell.
+    bool placeholder = true;
 };
 
 // A straight logical connection between two planned devices, placed layout

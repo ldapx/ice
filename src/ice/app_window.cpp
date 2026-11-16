@@ -5118,6 +5118,8 @@ class DocumentWindow : public QMainWindow {
 
         std::set<ice::ObjectId> touchedDevices;
         for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (!device.placeholder)
+                continue;
             QPainterPath box;
             box.addRect(layoutPlannedDeviceSceneRect(device));
             if (touches(box))
@@ -6555,6 +6557,8 @@ class DocumentWindow : public QMainWindow {
                 item->setToolTip(QString::fromStdString(net->second.name));
         }
         for (const auto &[deviceId, device] : cellIt->second.plannedDevices) {
+            if (!device.placeholder)
+                continue;
             layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
                                                                           plannedRect(device), readOnly));
         }

@@ -451,7 +451,10 @@ can declare user-editable parameters with `layout.parameter(name, default)`.
 Parameters appear in a form above the script editor; edit a value and press
 **Regenerate layout** to apply it. `layout.device("nmos", ...)` places a device
 from the active package's device library, including generated PCells and fixed
-`.icelay` devices, with flattened geometry and prefixed ports.
+`.icelay` devices, with flattened geometry, prefixed ports, and device metadata
+for LVS. The call returns a placement object with absolute pin rectangles
+(`placement.G`, `placement.ports["G"]`). Pass `nets={"G": "GATE", ...}` to bind
+device terminals to layout nets and keep them through extraction.
 
 Right-click a procedural layout and choose **Regenerate layout** (or use the
 editor's **Regenerate layout** button) to replace the generated child's geometry
@@ -501,6 +504,11 @@ vendored upstream PyCell sources (and KLayout's `pya` module) through
 with the `icepy` layout builder. ICE uses `python3` unless `ICE_PYTHON` points
 to another interpreter. If the package generator or Python module is
 unavailable, ICE reports the error and leaves the existing geometry unchanged.
+
+The Sky130 and GF180MCU MOS PCells draw isolated fingers, licon/mcon cuts,
+body taps, and well/implant layers. Device width is the channel width of each
+finger, and `nf` creates electrically parallel fingers instead of overlapping
+diffusion rectangles.
 
 Device placement ghosts and the Properties layout preview use the same layer
 color resolution and flattened geometry renderer as the canvas, including
@@ -660,8 +668,10 @@ Manual connection removes the logical planned connection and switches to the
 path tool.
 
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
-runs `gdscheck` with the process deck derived from the cell's PDK, and parses
-the generated `.lyrdb` report. Violations appear in the **Reports** tab of the
+runs the deck declared by the cell's PDK package, and parses the generated
+`.lyrdb` report. Packages can provide `technology/drc.json`; SKY130 uses the
+SkyWater KLayout signoff deck from Volare or `PDK_ROOT` and enables FEOL, BEOL,
+and off-grid checks. Violations appear in the **Reports** tab of the
 activity dock with **DRC** selected, showing severity, rule, message, cell, and
 location columns. Clicking a violation row opens the checked layout and centers
 the canvas on the reported location with a temporary highlight. The DRC view

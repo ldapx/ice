@@ -70,6 +70,14 @@ TEST_CASE("LVS matches a layout created from its schematic") {
     CHECK(ice::serializeLvsReport(report).find("\"matched\": true") != std::string::npos);
 }
 
+TEST_CASE("LVS schematic inference prefers a DUT view") {
+    auto fixture = makeFixture();
+    const auto layout = ice::createLayoutCell(fixture.project, "block");
+    const auto dut = ice::createSchematicCell(fixture.project, "block_lvs");
+    ice::createSchematicCell(fixture.project, "block");
+    CHECK(ice::schematicForLayout(fixture.project, layout) == dut);
+}
+
 TEST_CASE("LVS reports missing and extra devices") {
     auto fixture = makeFixture();
     auto &layout = fixture.project.layoutCells.at(fixture.layout);
@@ -134,6 +142,32 @@ TEST_CASE("LVS warns when layout connectivity metadata is missing") {
     CHECK(!report.matched());
     CHECK(hasCategory(report, "layout-netlist"));
     CHECK(!hasCategory(report, "missing-device"));
+}
+
+TEST_CASE("LVS uses planned device model and terminal metadata") {
+    auto fixture = makeFixture();
+    auto &layout = fixture.project.layoutCells.at(fixture.layout);
+    layout.plannedConnections.clear();
+    ice::ObjectId inNet = 0;
+    ice::ObjectId outNet = 0;
+    for (const auto &[id, net] : layout.nets) {
+        if (net.name == "in")
+            inNet = id;
+        if (net.name == "out")
+            outNet = id;
+    }
+    CHECK(inNet != 0);
+    CHECK(outNet != 0);
+    if (inNet == 0 || outNet == 0)
+        return;
+    for (auto &[_, device] : layout.plannedDevices) {
+        device.model = device.name == "R1" ? "resistor" : "capacitor";
+        device.terminals["A"] = inNet;
+        device.terminals["B"] = outNet;
+    }
+    const auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(report.matched());
+    CHECK(report.mismatches.empty());
 }
 
 TEST_CASE("LVS rejects text SPICE schematics and read-only layout cells") {
@@ -244,4 +278,39 @@ TEST_CASE("LVS matches top-level schematic ports to layout pins") {
     report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
     CHECK(hasCategory(report, "missing-port"));
     CHECK(hasCategory(report, "extra-port"));
+}
+
+TEST_CASE("LVS reports port nets that cannot be attributed") {
+    auto fixture = makeFixture();
+
+    // Two ports that share one symbol cannot be told apart: their nets reference
+    // the same symbol pin id.
+    const auto shared = ice::addSymbol(fixture.project, fixture.schematic, "Input");
+    auto &cell = fixture.project.schematicCells.at(fixture.schematic);
+    auto &symbol = cell.symbols.at(shared);
+    const auto pin = fixture.project.nextId();
+    symbol.pins.push_back({pin, "P", 0, 0});
+    // Projects written before instances cloned their symbols on placement can
+    // still contain two instances of one symbol; build that state directly.
+    for (const auto *name : {"A", "B"}) {
+        const auto instanceId = fixture.project.nextId();
+        cell.instances.emplace(instanceId, ice::SchematicInstance{instanceId, shared, name, 0, 0});
+    }
+    for (auto &[_, net] : cell.nets)
+        net.pins.push_back(pin);
+
+    auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(hasCategory(report, "port-net-ambiguous"));
+
+    // Distinct symbols per port resolve cleanly.
+    auto second = makeFixture();
+    const auto firstSymbol = ice::addSymbol(second.project, second.schematic, "Input");
+    auto &firstEntry = second.project.schematicCells.at(second.schematic).symbols.at(firstSymbol);
+    const auto firstPin = second.project.nextId();
+    firstEntry.pins.push_back({firstPin, "P", 0, 0});
+    ice::addSchematicInstance(second.project, second.schematic, firstSymbol, "A", 0, 0);
+    if (!second.project.schematicCells.at(second.schematic).nets.empty())
+        second.project.schematicCells.at(second.schematic).nets.begin()->second.pins.push_back(firstPin);
+    report = ice::runLvs(second.project, second.schematic, second.layout);
+    CHECK(!hasCategory(report, "port-net-ambiguous"));
 }

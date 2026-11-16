@@ -304,20 +304,27 @@ degraded state so `project_repair` and `project_open(recover=true)` remain
 callable.
 
 `lvs` compares a schematic against a layout and prints the LVS report as JSON.
-`lvs-auto` infers the schematic from planned-device links or matching names.
+`lvs-auto` infers the schematic from planned-device links, then prefers a
+`<layout>_lvs`, `<layout>_dut`, or `<layout>_layout` cell before a plain name
+match, so a testbench named after the block does not hide its DUT view.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
-device types, shared device parameters, net topology from planned connections,
-and top-level pins matched by name, direction, and bound net. The JSON report
+device types, shared device parameters, net topology from planned connections
+or procedural device terminal metadata, and top-level pins matched by name,
+direction, and bound net. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.
 
-`drc` exports the layout to a temporary GDS, runs `gdscheck` with the process
-deck derived from the layout PDK, and prints normalized violations. The work
-directory defaults to `build/drc/<layout>/` and contains `layout.gds`,
-`drc.lyrdb`, and `drc.log`. The command exits with status `1` when the report
-cannot be produced or contains error-severity violations; warnings alone keep
-status `0`.
+`drc` exports the layout to a temporary GDS and runs the DRC deck declared by
+the layout's PDK package. A package `technology/drc.json` can select a KLayout
+deck or a gdscheck process; SKY130 resolves the SkyWater KLayout deck from
+`$PDK_ROOT`, `$SKY130_ROOT`, or Volare. `--engine klayout|gdscheck` and
+`--deck <path>` override the package deck, and `--suite` selects a named deck
+variant when the package declares one. The work directory defaults to
+`build/drc/<layout>/` and contains `layout.gds`, `drc.lyrdb`, and `drc.log`.
+The JSON result reports `engine`, `deck`, `suite`, and normalized violations.
+The command exits with status `1` when the report cannot be produced or
+contains error-severity violations; warnings alone keep status `0`.
 
 `pex` extracts placed device-library instances, PDK-rule polygon devices, and
 first-order per-net resistance and capacitance from layout geometry, then

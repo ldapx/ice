@@ -59,6 +59,7 @@ struct ParsedPort {
     std::string label;
     bool visible = true;
     bool locked = false;
+    bool internal = false;
 };
 
 struct ParsedInstance {
@@ -74,12 +75,29 @@ struct ParsedParameter {
     std::string value;
 };
 
+struct ParsedDevicePort {
+    std::string name;
+    std::string net;
+    Rect rectangle;
+};
+
+struct ParsedDevice {
+    std::string name;
+    std::string device;
+    std::string model;
+    std::string type;
+    Rect bounds;
+    std::vector<ParsedParameter> parameters;
+    std::vector<ParsedDevicePort> ports;
+};
+
 struct ParsedLayout {
     std::vector<ParsedLayer> layers;
     std::vector<ParsedShape> shapes;
     std::vector<ParsedPort> ports;
     std::vector<ParsedInstance> instances;
     std::vector<ParsedParameter> parameters;
+    std::vector<ParsedDevice> devices;
 };
 
 struct LayerDefaults {
@@ -489,6 +507,7 @@ bool parseGeneratedLayout(const json &root, ParsedLayout &layout, std::string *e
             port.label = stringField(entry, "label", port.name, error);
             port.visible = entry.value("visible", true);
             port.locked = entry.value("locked", false);
+            port.internal = entry.value("internal", false);
             layout.ports.push_back(std::move(port));
         }
     }
@@ -519,6 +538,84 @@ bool parseGeneratedLayout(const json &root, ParsedLayout &layout, std::string *e
                 !parseOrientation(stringField(entry, "orientation", "r0", error), instance.orientation, error))
                 return false;
             layout.instances.push_back(std::move(instance));
+        }
+    }
+
+    const auto devices = root.value("devices", json::array());
+    if (!devices.is_null()) {
+        if (!devices.is_array()) {
+            if (error)
+                *error = "The procedural layout devices entry is not an array.";
+            return false;
+        }
+        for (const auto &entry : devices) {
+            if (!entry.is_object()) {
+                if (error)
+                    *error = "A procedural layout device is not an object.";
+                return false;
+            }
+            ParsedDevice device;
+            device.name = stringField(entry, "name", {}, error);
+            if (device.name.empty()) {
+                if (error)
+                    *error = "A procedural layout device needs a name.";
+                return false;
+            }
+            device.device = stringField(entry, "device", {}, error);
+            device.model = stringField(entry, "model", {}, error);
+            device.type = stringField(entry, "type", {}, error);
+            if (entry.contains("bounds")) {
+                if (!parseRect(entry.at("bounds"), "Device bounds", device.bounds, error))
+                    return false;
+            }
+            const auto parameters = entry.value("parameters", json::array());
+            if (!parameters.is_null()) {
+                if (!parameters.is_array()) {
+                    if (error)
+                        *error = "The procedural layout device parameters entry is not an array.";
+                    return false;
+                }
+                for (const auto &parameterEntry : parameters) {
+                    if (!parameterEntry.is_object()) {
+                        if (error)
+                            *error = "A procedural layout device parameter is not an object.";
+                        return false;
+                    }
+                    ParsedParameter parameter;
+                    parameter.name = stringField(parameterEntry, "name", {}, error);
+                    parameter.value = stringField(parameterEntry, "value", {}, error);
+                    if (!parameter.name.empty())
+                        device.parameters.push_back(std::move(parameter));
+                }
+            }
+            const auto devicePorts = entry.value("ports", json::array());
+            if (!devicePorts.is_null()) {
+                if (!devicePorts.is_array()) {
+                    if (error)
+                        *error = "The procedural layout device ports entry is not an array.";
+                    return false;
+                }
+                for (const auto &portEntry : devicePorts) {
+                    if (!portEntry.is_object()) {
+                        if (error)
+                            *error = "A procedural layout device port is not an object.";
+                        return false;
+                    }
+                    ParsedDevicePort port;
+                    port.name = stringField(portEntry, "name", {}, error);
+                    port.net = stringField(portEntry, "net", {}, error);
+                    if (port.name.empty()) {
+                        if (error)
+                            *error = "A procedural layout device port needs a name.";
+                        return false;
+                    }
+                    if (portEntry.contains("rectangle") &&
+                        !parseRect(portEntry.at("rectangle"), "Device port rectangle", port.rectangle, error))
+                        return false;
+                    device.ports.push_back(std::move(port));
+                }
+            }
+            layout.devices.push_back(std::move(device));
         }
     }
     return true;
@@ -801,12 +898,34 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
             value.label = port.label;
             value.visible = port.visible;
             value.locked = port.locked;
+            value.internal = port.internal;
             cell.ports.emplace(id, std::move(value));
         }
         for (const auto &instance : generated.instances) {
             const auto id = project.nextId();
             cell.instances.emplace(id, LayoutInstance{id, cellsByName.at(instance.cell), instance.name, instance.x,
                                                       instance.y, instance.orientation});
+        }
+        for (const auto &device : generated.devices) {
+            const auto id = project.nextId();
+            PlannedDevice planned;
+            planned.id = id;
+            planned.name = device.name;
+            planned.x = device.bounds.x;
+            planned.y = device.bounds.y;
+            planned.width = device.bounds.width;
+            planned.height = device.bounds.height;
+            planned.device = device.device;
+            planned.model = device.model.empty() ? device.type : device.model;
+            planned.placeholder = false;
+            for (const auto &parameter : device.parameters)
+                planned.parameters.push_back({project.nextId(), parameter.name, parameter.value});
+            for (const auto &port : device.ports) {
+                if (port.net.empty())
+                    continue;
+                planned.terminals[port.name] = netIdFor(port.net);
+            }
+            cell.plannedDevices.emplace(id, std::move(planned));
         }
     } catch (const std::exception &exception) {
         project = std::move(backup);
@@ -1049,11 +1168,12 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         return result;
     }
     std::vector<Parameter> parameters;
+    auto nextParameterId = project.nextId();
     for (const auto &parsed : generated.parameters) {
         auto existing = std::find_if(procedural.parameters.begin(), procedural.parameters.end(),
                                      [&](const auto &parameter) { return parameter.name == parsed.name; });
         Parameter parameter;
-        parameter.id = existing != procedural.parameters.end() ? existing->id : project.nextId();
+        parameter.id = existing != procedural.parameters.end() ? existing->id : nextParameterId++;
         parameter.name = parsed.name;
         parameter.value = parsed.value;
         parameters.push_back(std::move(parameter));

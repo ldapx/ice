@@ -2869,11 +2869,14 @@ class IceMcpServer {
             session.execute("mcp schematic-add-instance", [&](ice::Project &project) {
                 id = ice::addSchematicInstance(project, cellId, symbolId, instanceName, x, y);
             });
+            // addSchematicInstance clones the symbol when it is already used, so
+            // report the symbol the new instance really references.
+            const auto usedSymbol = session.project().schematicCells.at(cellId).instances.at(id).symbol;
             return {{"id", id},
                     {"cell", cellId},
                     {"name", instanceName},
-                    {"symbol", symbolId},
-                    {"symbol_name", cell.symbols.at(symbolId).name}};
+                    {"symbol", usedSymbol},
+                    {"symbol_name", session.project().schematicCells.at(cellId).symbols.at(usedSymbol).name}};
         }
         if (name == "schematic_set_parameter") {
             const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
@@ -3717,6 +3720,10 @@ class IceMcpServer {
             options.suite = optionalString(arguments, "suite", "main");
             options.topCell = optionalString(arguments, "top_cell");
             options.timeoutSeconds = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(0));
+            options.engine = optionalString(arguments, "engine");
+            const auto deck = optionalString(arguments, "deck");
+            if (!deck.empty())
+                options.deck = deck;
             const auto output = optionalString(arguments, "output");
             options.workDirectory =
                 output.empty() ? (projectRootPath() / "build" / "drc" / cell.name) : std::filesystem::path(output);
@@ -3726,6 +3733,9 @@ class IceMcpServer {
                              {"layout", result.layout},
                              {"name", result.layoutName},
                              {"pdk", cell.pdk},
+                             {"engine", result.engine},
+                             {"deck", result.deckPath.generic_string()},
+                             {"suite", options.suite},
                              {"process", ice::gdsCheckProcessForPdk(cell.pdk)},
                              {"gds", result.gdsPath.generic_string()},
                              {"report", result.reportPath.generic_string()},
@@ -4364,16 +4374,19 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .with_boolean_param("purge", "Remove build/impl/<run> as well", false)
                             .build());
-        tools.push_back(tool_builder("drc_run")
-                            .with_description("Export a layout, run gdscheck with the PDK process deck, and return DRC "
-                                              "violations.")
-                            .with_string_param("layout", "Layout cell name or id")
-                            .with_boolean_param("flatten", "Flatten hierarchy before checking (default true)", false)
-                            .with_string_param("suite", "Optional gdscheck suite (default main)", false)
-                            .with_string_param("top_cell", "Optional top-cell override for gdscheck", false)
-                            .with_string_param("output", "Optional DRC work directory", false)
-                            .with_integer_param("timeout_seconds", "Optional gdscheck timeout", false)
-                            .build());
+        tools.push_back(
+            tool_builder("drc_run")
+                .with_description("Export a layout, run the package DRC deck (KLayout or gdscheck), and return DRC "
+                                  "violations.")
+                .with_string_param("layout", "Layout cell name or id")
+                .with_boolean_param("flatten", "Flatten hierarchy before checking (default true)", false)
+                .with_string_param("suite", "Optional gdscheck suite (default main)", false)
+                .with_string_param("top_cell", "Optional top-cell override for gdscheck", false)
+                .with_string_param("output", "Optional DRC work directory", false)
+                .with_integer_param("timeout_seconds", "Optional DRC timeout", false)
+                .with_string_param("engine", "Optional engine override: klayout or gdscheck", false)
+                .with_string_param("deck", "Optional DRC deck path override", false)
+                .build());
         return tools;
     }
 

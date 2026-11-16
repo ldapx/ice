@@ -1,6 +1,7 @@
 #include "icelib/hdl.hpp"
 
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/simulation.hpp"
 
 #include <algorithm>
@@ -291,7 +292,10 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
 
     std::vector<std::string> notes;
     try {
-        plan.analogNetlist = buildSchematicNetlist(project, cellId, &notes, SchematicNetlistMode::mixed);
+        const auto cell = project.schematicCells.find(cellId);
+        plan.analogNetlist = buildSchematicNetlist(
+            project, cellId, &notes, SchematicNetlistMode::mixed,
+            pdkNetlistGeometryScale(cell == project.schematicCells.end() ? std::string{} : cell->second.pdk));
     } catch (const ProjectError &error) {
         plan.error = error.what();
         return plan;

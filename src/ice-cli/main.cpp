@@ -1366,7 +1366,8 @@ int main(int argc, char **argv) {
         if (command == "drc") {
             if (args.size() < 3)
                 argumentError("Usage: ice-cli drc <project> <layout> [--no-flatten] [--output <dir>] "
-                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>]");
+                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>] "
+                              "[--engine klayout|gdscheck] [--deck <path>]");
             const auto project = ice::Project::load(args[1]);
             const auto layout = resolveLayout(project, args[2]);
             const auto &layoutCell = project.layoutCells.at(layout);
@@ -1389,6 +1390,10 @@ int main(int argc, char **argv) {
                     options.topCell = value();
                 } else if (option == "--timeout") {
                     options.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else if (option == "--engine") {
+                    options.engine = value();
+                } else if (option == "--deck") {
+                    options.deck = value();
                 } else {
                     argumentError("Unknown drc option: " + option);
                 }
@@ -1399,6 +1404,9 @@ int main(int argc, char **argv) {
                        {"layout", result.layout},
                        {"name", result.layoutName},
                        {"pdk", layoutCell.pdk},
+                       {"engine", result.engine},
+                       {"deck", result.deckPath.generic_string()},
+                       {"suite", options.suite},
                        {"gds", result.gdsPath.generic_string()},
                        {"report", result.reportPath.generic_string()},
                        {"log", result.logPath.generic_string()},
