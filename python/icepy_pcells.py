@@ -257,6 +257,15 @@ class PackagePcell:
     contact_size = 170
     contact_spacing = 200
     contact_margin = 100
+    # met1 -> met2 cut for stacked passives. Packages whose upper-metal via
+    # rules differ override it (GF180MCU via1 is 0.26 um).
+    via_size = 150
+    # Per cut layer (size, enclosure) overrides for stacked vias. SKY130 sizes
+    # grow with the metal level and via4 needs a 0.31 um enclosure.
+    via_rules = {}
+    # Smallest legal top-metal pad/plate (width and height). SKY130 met5 needs
+    # 1.6 um width and 4 um^2 area, so a smaller stack must widen its top pad.
+    top_metal_min_size = 0
 
     def __init__(self, values: dict[str, str] | None = None):
         self.values = package_parameter_values(self.parameters, values or {})
@@ -389,6 +398,12 @@ class PackagePcell:
         margin = max(margin, 0)
         usable_w = int(width) - 2 * margin
         usable_h = int(height) - 2 * margin
+        if usable_w < size or usable_h < size:
+            # Pad too small for the margin: drop the margin instead of silently
+            # emitting no cut, which would leave the terminal floating.
+            margin = 0
+            usable_w = int(width)
+            usable_h = int(height)
         if usable_w < size or usable_h < size:
             return
         columns = max(1, (usable_w + spacing) // (size + spacing))
@@ -621,12 +636,13 @@ class PackagePcell:
             or self.boolean("guard_ring")
             or self.text("bulk").lower() in {"guard ring", "gaurd ring"}
         ):
+            guard_gap = max(bus_gap, 600)
             self.build_guard_ring(
                 builder,
-                source_bus_x - bus_gap,
-                -enclosure - gate_extension - bus_gap,
-                tap_right - source_bus_x + 2 * bus_gap,
-                poly_top + enclosure + gate_extension + 2 * bus_gap,
+                source_bus_x - guard_gap,
+                -enclosure - gate_extension - guard_gap,
+                tap_right - source_bus_x + 2 * guard_gap,
+                poly_top + enclosure + gate_extension + 2 * guard_gap,
                 max(bus_width, 300),
             )
 
@@ -681,23 +697,27 @@ class PackagePcell:
         width = max(self.um("w", 0.5), 100)
         body = self.body_layer
         head = max(length // 4, 200)
-        contact = max(min(width // 2, 200), 100)
+        reach = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(length // 2, 100),
+        )
         self.rect(builder, body, 0, 0, length, width)
-        self.rect(builder, "li1", -head, 0, head, width)
-        self.rect(builder, "li1", length, 0, head, width)
-        self.rect(builder, "met1", -head, -100, head + 100, width + 200)
-        self.rect(builder, "met1", length - 100, -100, head + 100, width + 200)
-        self.rect(
-            builder, "li1", -head + 100, width // 2 - contact // 2, contact, contact
-        )
-        self.rect(
-            builder,
-            "li1",
-            length + head - 100 - contact,
-            width // 2 - contact // 2,
-            contact,
-            contact,
-        )
+        # Both terminals are contacted on the body itself; the pad, the contact
+        # stack, and the body must all overlap or the pin metal floats.
+        if body in ("nwell", "pwell"):
+            # A well resistor is tapped through an ohmic diffusion tap; the well
+            # itself cannot take a contact.
+            tap = "nplus" if self.doping == "n" else "pplus"
+            for start in (0, length - reach):
+                self.rect(builder, "diff", start, 0, reach, width)
+                if tap in self.layers:
+                    self.rect(builder, tap, start - 100, -100, reach + 200, width + 200)
+                self.contact_stack(builder, start, 0, reach, width)
+        elif body != "met1":
+            self.contact_stack(builder, 0, 0, reach, width)
+            self.contact_stack(builder, length - reach, 0, reach, width)
+        self.rect(builder, "met1", -head, -100, head + reach, width + 200)
+        self.rect(builder, "met1", length - reach, -100, head + reach, width + 200)
         if self.res_layer in self.layers:
             self.rect(builder, self.res_layer, -200, -200, length + 400, width + 400)
         if self.doping == "n" and "nwell" in self.layers:
@@ -705,15 +725,23 @@ class PackagePcell:
         elif self.doping == "p" and "pwell" in self.layers:
             self.rect(builder, "pwell", -head, -300, length + 2 * head, width + 600)
         self.port(
-            builder, "1", "met1", -head, -100, head + 100, width + 200, "inout", "left"
+            builder,
+            "1",
+            "met1",
+            -head,
+            -100,
+            head + reach,
+            width + 200,
+            "inout",
+            "left",
         )
         self.port(
             builder,
             "2",
             "met1",
-            length - 100,
+            length - reach,
             -100,
-            head + 100,
+            head + reach,
             width + 200,
             "inout",
             "right",
@@ -742,22 +770,35 @@ class PackagePcell:
             max(length - 400, 100),
             max(width - 400, 100),
         )
-        self.rect(builder, bottom, -200, width // 2 - 100, 200, 200)
-        self.rect(builder, top, length, width // 2 - 100, 200, 200)
+        # Terminal tabs must overlap their plate. A tab placed flush against an
+        # inset plate leaves a sub-rule gap that only shows up once metal is
+        # routed to the pin (metal spacing / notch violations).
+        self.rect(builder, bottom, -200, width // 2 - 100, 300, 200)
+        self.rect(builder, top, max(length - 300, 0), width // 2 - 100, 300, 200)
         self.port(
-            builder, "1", bottom, -200, width // 2 - 100, 200, 200, "inout", "left"
+            builder, "1", bottom, -200, width // 2 - 100, 300, 200, "inout", "left"
         )
         self.port(
-            builder, "2", top, length, width // 2 - 100, 200, 200, "inout", "right"
+            builder,
+            "2",
+            top,
+            max(length - 300, 0),
+            width // 2 - 100,
+            300,
+            200,
+            "inout",
+            "right",
         )
 
     def build_vpp_cap(self, builder):
         length = max(self.um("l", self.number("w", 4.0)), 800)
         width = max(self.um("h", self.number("w", 4.0)), 800)
+        plates = []
+        max_inset = max(0, (min(length, width) - self.top_metal_min_size) // 2)
         for index, layer in enumerate(("met1", "met2", "met3", "met4", "met5")):
             if layer not in self.layers or index > 4:
                 continue
-            inset = index * 100
+            inset = min(index * 100, max_inset)
             self.rect(
                 builder,
                 layer,
@@ -766,73 +807,141 @@ class PackagePcell:
                 max(length - 2 * inset, 100),
                 max(width - 2 * inset, 100),
             )
-        self.rect(builder, "met1", -200, width // 2 - 100, 200, 200)
-        top_layer = "met5" if "met5" in self.layers else "met4"
+            plates.append((layer, inset))
+        # Both terminal tabs overlap their plate; a tab flush with the inset top
+        # plate would leave a metal gap at the pin.
+        top_layer, top_inset = plates[-1] if plates else ("met1", 0)
+        self.rect(builder, "met1", -200, width // 2 - 100, 300, 200)
         self.rect(
             builder,
             top_layer,
-            length,
+            max(length - top_inset - 300, 0),
             width // 2 - 100,
-            200,
+            300,
             200,
         )
         self.port(
-            builder, "1", "met1", -200, width // 2 - 100, 200, 200, "inout", "left"
+            builder, "1", "met1", -200, width // 2 - 100, 300, 200, "inout", "left"
         )
         self.port(
             builder,
             "2",
             top_layer,
-            length,
+            max(length - top_inset - 300, 0),
             width // 2 - 100,
-            200,
+            300,
             200,
             "inout",
             "right",
         )
 
     def build_var_cap(self, builder):
-        length = max(self.um("l", 1.0), 100)
-        width = max(self.um("w", 2.0), 200)
-        self.rect(builder, "nwell", -300, -300, length + 600, width + 600)
+        """MOS varactor: poly gate plate over an n-well diffusion.
+
+        The gate is contacted on the poly finger, the body on the diffusion; the
+        body terminal is raised to met2 over a via array.
+        """
+        length = max(self.um("l", 1.0), 400)
+        width = max(self.um("w", 2.0), 400)
+        tap = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(length // 2, 100),
+        )
+        pad = min(max(self.contact_size + 2 * self.contact_margin, 300), width)
+        via = "via" if "via" in self.layers else "via1"
+        middle = width // 2 - pad // 2
+        self.rect(
+            builder, "nwell", -length // 2 - 300, -300, length + 600, width + 600
+        )
         self.rect(builder, "diff", 0, 0, length, width)
-        self.rect(builder, "poly", -length // 2, -200, length, width + 400)
-        self.rect(builder, "li1", 100, width // 2 - 100, max(length - 200, 100), 200)
-        self.rect(builder, "met1", -length // 2 - 100, -300, 100, width + 600)
-        self.rect(builder, "met2", length // 2, -300, 100, width + 600)
+        self.rect(builder, "poly", -length // 2 - tap, -200, length + tap, width + 400)
+        # Gate terminal on the poly finger.
+        self.contact_stack(builder, -length // 2 - tap, middle, tap, pad)
+        self.rect(
+            builder, "met1", -length // 2 - tap, middle - 50, tap + 100, pad + 100
+        )
         self.port(
             builder,
             "1",
             "met1",
-            -length // 2 - 100,
-            -300,
-            100,
-            width + 600,
+            -length // 2 - tap,
+            middle - 50,
+            tap + 100,
+            pad + 100,
             "inout",
             "left",
         )
+        # Body terminal on the diffusion, raised to met2.
+        self.contact_stack(builder, length - tap, middle, tap, pad)
+        self.rect(builder, "met1", length - tap, middle - 50, tap + 300, pad + 100)
+        via_size = self.via_cut_size(via)
+        self.rect(
+            builder,
+            via,
+            length - tap + (tap - via_size) // 2,
+            middle + (pad - via_size) // 2,
+            via_size,
+            via_size,
+        )
+        self.rect(builder, "met2", length - tap, middle - 50, tap + 300, pad + 100)
         self.port(
-            builder, "2", "met2", length // 2, -300, 100, width + 600, "inout", "right"
+            builder,
+            "2",
+            "met2",
+            length - tap,
+            middle - 50,
+            tap + 300,
+            pad + 100,
+            "inout",
+            "right",
         )
 
     def build_diode(self, builder):
+        """Two-terminal diode: both terminals are contacted on the diffusion."""
         width = max(self.um("w", 2.0), 300)
         height = max(self.um("h", self.number("w", 2.0)), 300)
+        tap = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(width // 3, 100),
+        )
+        pad = min(max(self.contact_size + 2 * self.contact_margin, 300), height)
         well = "nwell" if self.doping == "n" else "pwell"
         self.rect(builder, well, -300, -300, width + 600, height + 600)
         self.rect(builder, "diff", 0, 0, width, height)
-        self.rect(builder, "li1", 100, height // 2 - 100, width - 200, 200)
-        self.rect(builder, "met1", -300, height // 2 - 150, 300, 300)
-        self.rect(builder, "met1", width, height // 2 - 150, 300, 300)
+        middle = height // 2 - pad // 2
+        # Anode: contacts on the left end of the diffusion, pad overhanging left.
+        self.contact_stack(builder, 0, middle, tap, pad)
+        self.rect(builder, "met1", -300, middle - 50, 300 + tap + 50, pad + 100)
+        # Cathode: contacts on the right end of the diffusion.
+        self.contact_stack(builder, width - tap, middle, tap, pad)
+        self.rect(
+            builder, "met1", width - tap - 50, middle - 50, tap + 350, pad + 100
+        )
         if "nplus" in self.layers:
             self.rect(builder, "nplus", 0, 0, width // 2, height)
         if "pplus" in self.layers:
             self.rect(builder, "pplus", width // 2, 0, width // 2, height)
         self.port(
-            builder, "A", "met1", -300, height // 2 - 150, 300, 300, "inout", "left"
+            builder,
+            "A",
+            "met1",
+            -300,
+            middle - 50,
+            300 + tap + 50,
+            pad + 100,
+            "inout",
+            "left",
         )
         self.port(
-            builder, "K", "met1", width, height // 2 - 150, 300, 300, "inout", "right"
+            builder,
+            "K",
+            "met1",
+            width - tap - 50,
+            middle - 50,
+            tap + 350,
+            pad + 100,
+            "inout",
+            "right",
         )
 
     def build_bjt(self, builder):
@@ -900,7 +1009,9 @@ class PackagePcell:
             # li1 -> met1 contact plus the terminal pad
             pad_x = x + tap_width // 2 - pad // 2
             pad_y = size // 2 - pad // 2
-            self.rect(builder, "mcon", pad_x + pad // 2 - cut // 2, pad_y + pad // 2 - cut // 2, cut, cut)
+            # Contact stack from the tap up to the terminal pad. Packages
+            # without li1 (GF180MCU) cut straight to metal1.
+            self.contact_stack(builder, pad_x, pad_y, pad, pad, cut)
             self.rect(builder, "met1", pad_x, pad_y, pad, pad)
 
         # Terminals are ordered base, collector, emitter so a diode connected
@@ -910,15 +1021,64 @@ class PackagePcell:
         self.port(builder, "C", "met1", pads[1][0], pads[1][1], pad, pad, "inout", "top")
         self.port(builder, "E", "met1", pads[2][0], pads[2][1], pad, pad, "inout", "right")
 
+    def via_cut_for(self, index: int) -> str:
+        """Cut layer joining stack metal ``index`` to ``index + 1``.
+
+        SKY130 names its first cut ``via`` and the rest ``via2``.., GF180MCU
+        uses ``via1``.., so both spellings are probed.
+        """
+        for candidate in (f"via{index}", "via"):
+            if candidate in self.layers:
+                return candidate
+        return ""
+
+    def via_cut_size(self, layer: str) -> int:
+        rule = self.via_rules.get(layer)
+        return int(rule[0]) if rule else int(self.via_size)
+
+    def via_cut_enclosure(self, layer: str) -> int:
+        rule = self.via_rules.get(layer)
+        return int(rule[1]) if rule else int(self.contact_margin)
+
     def build_via_stack(self, builder):
         width = max(self.um("w", 1.0), 200)
         height = max(self.um("h", 1.0), 200)
-        for layer in self.stack_layers:
-            if layer in self.layers:
-                self.rect(builder, layer, 0, 0, width, height)
-        for layer in ("met1", "met2", "met3", "met4"):
-            if layer in self.layers:
-                self.rect(builder, layer, width // 2 - 100, height // 2 - 100, 200, 200)
+        layers = [layer for layer in self.stack_layers if layer in self.layers]
+        cuts = [self.via_cut_for(index) for index in range(len(layers))]
+        # A landing pad must enclose every cut it hosts, and the top metal also
+        # has to respect the package minimum feature size.
+        spans = []
+        for index in range(len(layers)):
+            span_w, span_h = width, height
+            for cut_index in (index, index + 1):
+                cut = cuts[cut_index] if cut_index < len(cuts) else ""
+                if not cut:
+                    continue
+                need = self.via_cut_size(cut) + 2 * self.via_cut_enclosure(cut)
+                span_w = max(span_w, need)
+                span_h = max(span_h, need)
+            if index == len(layers) - 1:
+                span_w = max(span_w, self.top_metal_min_size)
+                span_h = max(span_h, self.top_metal_min_size)
+            spans.append((span_w, span_h))
+        for (span_w, span_h), layer in zip(spans, layers):
+            self.rect(builder, layer, 0, 0, span_w, span_h)
+        for index, cut in enumerate(cuts[:-1]):
+            if not cut:
+                continue
+            # One centred cut per level, centred inside the smaller of the two
+            # pads: no spacing rule applies and both enclosures are met.
+            size = self.via_cut_size(cut)
+            inner_w = min(spans[index][0], spans[index + 1][0])
+            inner_h = min(spans[index][1], spans[index + 1][1])
+            self.rect(
+                builder,
+                cut,
+                (inner_w - size) // 2,
+                (inner_h - size) // 2,
+                size,
+                size,
+            )
 
     def build_guard_ring(
         self, builder, x=0, y=0, width=2000, height=2000, thickness=300
@@ -941,14 +1101,20 @@ class PackagePcell:
         self.build_guard_ring(builder, 0, 0, width, height, max(width // 40, 300))
 
     def build_spiral(self, builder):
+        """Stylised square spiral: one trace-width ring per turn.
+
+        Every piece is at least one trace wide so the coil stays inside the
+        metal width and area rules of the package.
+        """
         turns = max(self.integer("turns", self.turns), 1)
         pitch = max(self.um("pitch", 2.0), 500)
         width = max(self.um("w", 1.0), 100)
+        radius = max(pitch - width, width)
         for turn in range(turns):
             offset = turn * pitch
-            self.rect(builder, "met1", offset, offset, width, width)
-            self.rect(builder, "met1", offset, offset, width, 100)
-            self.rect(builder, "met2", offset + width, offset + width // 2, 100, 100)
+            self.rect(builder, "met1", offset, offset, radius, width)
+            self.rect(builder, "met1", offset, offset, width, radius)
+            self.rect(builder, "met2", offset + width, offset + width, width, width)
 
 
 def package_main_cli(argv: list[str] | None = None) -> int:
