@@ -2126,7 +2126,10 @@ int main(int argc, char **argv) {
             const auto cell = resolveSchematic(project, args[2]);
             std::vector<std::string> notes;
             const auto lines = ice::buildSimulationNetlist(project, cell, &notes);
-            printJson({{"cell", cell}, {"netlist", lines}, {"notes", notes}});
+            json ports = json::array();
+            for (const auto *port : ice::schematicPortInstances(project.schematicCells.at(cell)))
+                ports.push_back(port->name);
+            printJson({{"cell", cell}, {"netlist", lines}, {"ports", std::move(ports)}, {"notes", notes}});
             return 0;
         }
 
@@ -2652,6 +2655,7 @@ int main(int argc, char **argv) {
             for (const auto &group : ice::extractLayoutNets(project, cell)) {
                 groups.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
                                   {"name", group.name},
+                                  {"aliases", group.aliases},
                                   {"shapes", group.shapes},
                                   {"ports", group.ports},
                                   {"connections", group.connections}});

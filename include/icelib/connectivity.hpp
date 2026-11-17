@@ -18,6 +18,11 @@ namespace ice {
 struct LayoutNetGroup {
     ObjectId net = 0;
     std::string name;
+    // Explicit nets that this geometric component also touches through
+    // unlabeled geometry (for example a resistor body between two nets). The
+    // group keeps `net`/`name` for the first one and lists the rest here so a
+    // merged component is visible instead of silently dropping a net name.
+    std::vector<std::string> aliases;
     std::vector<ObjectId> shapes;
     std::vector<ObjectId> ports;
     std::vector<ObjectId> connections;

@@ -6,6 +6,7 @@ Run after building ice-mcp and ice-cli:
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,13 @@ class MCP:
             raise RuntimeError(
                 f"Invalid JSON from {tool_name}: {error}: {text[:500]!r}"
             ) from error
+
+    def tool_error(self, tool_name: str, **arguments) -> str:
+        """Call a tool that is expected to fail and return its error text."""
+        result = self.call("tools/call", {"name": tool_name, "arguments": arguments})
+        if not result.get("isError"):
+            raise RuntimeError(f"{tool_name} unexpectedly succeeded")
+        return result["content"][0]["text"]
 
     def close(self):
         self.process.terminate()
@@ -782,6 +790,33 @@ def main() -> int:
             bad_doctor = mcp.tool("ice_doctor", simulation="bad_sim")
             assert bad_doctor["model_paths_ok"] is False, bad_doctor
             assert any(not check["exists"] for check in bad_doctor["model_checks"])
+
+            # A drawn cell netlist must expose its subcircuit port order.
+            mcp.tool("schematic_create", name="ports_test")
+            mcp.tool("schematic_add_component", cell="ports_test", symbol="Input", name="A", x=0, y=0)
+            mcp.tool("schematic_add_component", cell="ports_test", symbol="Output", name="Y", x=200, y=0)
+            netlist = mcp.tool("schematic_netlist", schematic="ports_test")
+            assert netlist["ports"] == ["A", "Y"], netlist
+
+            # A mutation whose automatic save fails must be reported and rolled
+            # back instead of leaving the server unable to save anything.
+            locked = [project, project / "sch", project / "lay", project / "sim", project / "impl"]
+            try:
+                for path in locked:
+                    if path.is_dir():
+                        os.chmod(path, 0o555)
+                error = mcp.tool_error(
+                    "schematic_add_component", cell="ring_test", symbol="Output", name="LOCKED"
+                )
+                assert "discarded" in error, error
+                summary = mcp.tool("project_summary")
+                assert summary.get("schematics") is not None, summary
+            finally:
+                for path in locked:
+                    if path.is_dir():
+                        os.chmod(path, 0o755)
+            reloaded = mcp.tool("project_reload", discard=True)
+            assert reloaded.get("schematics") is not None, reloaded
 
             # A server started without --project can discover and open the
             # project in its working directory.

@@ -569,6 +569,10 @@ class Project {
     // Revision of the split files as they existed when this project was loaded
     // or last saved. Empty for a project that has never been loaded or saved.
     const std::string &sourceRevision() const noexcept { return sourceRevision_; }
+    // Adopt the disk fingerprint (root + revision) of another project. Used when
+    // a session restores an in-memory history entry (undo/redo) so that the next
+    // save is still compared against the revision that is actually on disk.
+    void adoptSourceRevisionFrom(const Project &other);
 
   private:
     mutable std::filesystem::path sourceRoot_;
@@ -601,7 +605,10 @@ class ProjectSession {
     const std::vector<std::string> &history() const noexcept;
     std::size_t historyPosition() const noexcept;
     void setLastHistoryLabel(std::string label);
-    void replaceProject(Project project);
+    // Replace the session contents. Pass markDirty=false when the project was
+    // just read from disk (reload/recover), so the session is not left with a
+    // pending save that would rewrite files nobody changed.
+    void replaceProject(Project project, bool markDirty = true);
     void markDirty();
     void subscribe(Observer observer);
     void beginTransaction(std::string label);

@@ -414,8 +414,11 @@ def _route_choose_side(rectangle, preferred, other_center, distance, inflated):
         if _route_segment_blocked(center, escape, inflated):
             continue
         return side, center, escape
+    x, y, width, height = rectangle
     raise RuntimeError(
-        "no clear escape from the pin; move the device or pass an explicit side"
+        "no clear escape from the pin at ({}, {}) size {}x{}: every side is blocked by "
+        "metal within the route clearance. Reduce the route width/clearance, move the "
+        "device, or escape from a different pin.".format(x, y, width, height)
     )
 
 
@@ -1668,7 +1671,9 @@ class Layout:
         if clearance is None:
             clearance = max(width, self.um(0.2))
         else:
-            clearance = max(width, _coordinate(clearance, "route clearance"))
+            # An explicit clearance is edge-to-edge spacing and may be smaller
+            # than the trace width; only clamp it to something non-negative.
+            clearance = max(0, _coordinate(clearance, "route clearance"))
         if escape is None:
             escape = max(width * 2, self.um(0.5))
         else:
