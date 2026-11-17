@@ -520,12 +520,87 @@ LayoutPreviewModel buildLayoutDevicePreviewModel(const LayoutDeviceCell &device)
 
 LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const LayoutCell &cell, bool includeInstances,
                                                bool includePorts, bool includePlannedDevices,
-                                               const std::vector<Transform> &rootTransform, bool includeInstanceDevices,
-                                               bool includeNets) {
+                                               const std::vector<Transform> &rootTransform,
+                                               const LayoutReferencePreviewResolver &referenceResolver,
+                                               bool includeInstanceDevices, bool includeNets) {
     LayoutPreviewModel model;
     QRectF bounds;
     bool valid = false;
     std::set<ObjectId> ancestors{cell.id};
+
+    const auto appendReferenceModel = [&](const LayoutPreviewModel &source, const std::vector<Transform> &chain) {
+        for (const auto &shape : source.shapes) {
+            auto preview = shape;
+            if (preview.kind == LayoutPreviewShape::Kind::text) {
+                const auto first =
+                    applyTransformChain({static_cast<Coordinate>(std::llround(preview.textRectangle.left())),
+                                         static_cast<Coordinate>(std::llround(preview.textRectangle.top()))},
+                                        chain);
+                const auto second =
+                    applyTransformChain({static_cast<Coordinate>(std::llround(preview.textRectangle.right())),
+                                         static_cast<Coordinate>(std::llround(preview.textRectangle.bottom()))},
+                                        chain);
+                preview.textRectangle = QRectF(QPointF(std::min(first.x, second.x), std::min(first.y, second.y)),
+                                               QPointF(std::max(first.x, second.x), std::max(first.y, second.y)))
+                                            .normalized();
+                includeRect(bounds, valid, preview.textRectangle);
+            } else if (preview.kind == LayoutPreviewShape::Kind::path) {
+                for (auto &point : preview.centerline) {
+                    const auto mapped = applyTransformChain({static_cast<Coordinate>(std::llround(point.x())),
+                                                             static_cast<Coordinate>(std::llround(point.y()))},
+                                                            chain);
+                    point = QPointF(mapped.x, mapped.y);
+                }
+                if (!preview.centerline.empty()) {
+                    auto minX = preview.centerline.front().x();
+                    auto minY = preview.centerline.front().y();
+                    auto maxX = minX;
+                    auto maxY = minY;
+                    for (const auto &point : preview.centerline) {
+                        minX = std::min(minX, point.x());
+                        minY = std::min(minY, point.y());
+                        maxX = std::max(maxX, point.x());
+                        maxY = std::max(maxY, point.y());
+                    }
+                    const auto margin = std::max<qreal>(0.0, preview.width * 0.5);
+                    includeRect(
+                        bounds, valid,
+                        QRectF(minX - margin, minY - margin, maxX - minX + 2.0 * margin, maxY - minY + 2.0 * margin));
+                }
+            } else {
+                for (auto &point : preview.polygon) {
+                    const auto mapped = applyTransformChain({static_cast<Coordinate>(std::llround(point.x())),
+                                                             static_cast<Coordinate>(std::llround(point.y()))},
+                                                            chain);
+                    point = QPointF(mapped.x, mapped.y);
+                }
+                includeRect(bounds, valid, preview.polygon.boundingRect());
+            }
+            model.shapes.push_back(std::move(preview));
+        }
+        for (const auto &port : source.ports) {
+            auto preview = port;
+            const auto &rectangle = port.rectangle;
+            const std::array<Point, 4> corners = {
+                Point{static_cast<Coordinate>(std::llround(rectangle.left())),
+                      static_cast<Coordinate>(std::llround(rectangle.top()))},
+                Point{static_cast<Coordinate>(std::llround(rectangle.right())),
+                      static_cast<Coordinate>(std::llround(rectangle.top()))},
+                Point{static_cast<Coordinate>(std::llround(rectangle.right())),
+                      static_cast<Coordinate>(std::llround(rectangle.bottom()))},
+                Point{static_cast<Coordinate>(std::llround(rectangle.left())),
+                      static_cast<Coordinate>(std::llround(rectangle.bottom()))},
+            };
+            QPolygonF polygon;
+            for (const auto &corner : corners) {
+                const auto mapped = applyTransformChain(corner, chain);
+                polygon << QPointF(mapped.x, mapped.y);
+            }
+            preview.rectangle = polygon.boundingRect();
+            includeRect(bounds, valid, preview.rectangle);
+            model.ports.push_back(std::move(preview));
+        }
+    };
 
     std::function<void(const LayoutCell &, const std::vector<Transform> &, bool)> collect;
     collect = [&](const LayoutCell &current, const std::vector<Transform> &chain, bool root) {
@@ -652,6 +727,8 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
 
         if (root && includePlannedDevices) {
             for (const auto &[_, device] : current.plannedDevices) {
+                if (!device.placeholder)
+                    continue;
                 LayoutPreviewPlannedDevice preview;
                 preview.rectangle = QRectF(device.x, device.y, device.width, device.height);
                 preview.name = QString::fromStdString(device.name);
@@ -745,6 +822,12 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 continue;
             auto childChain = chain;
             childChain.push_back(Transform{instance.x, instance.y, instance.orientation});
+            if (child->second.reference && referenceResolver) {
+                if (const auto resolved = referenceResolver(child->second)) {
+                    appendReferenceModel(*resolved, childChain);
+                    continue;
+                }
+            }
             ancestors.insert(instance.cell);
             collect(child->second, childChain, false);
             ancestors.erase(instance.cell);
@@ -763,7 +846,8 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 continue;
             auto found = masterBounds.find(instance.cell);
             if (found == masterBounds.end()) {
-                const auto childModel = buildLayoutCellPreviewModel(project, child->second, true, true, false);
+                const auto childModel =
+                    buildLayoutCellPreviewModel(project, child->second, true, true, false, {}, referenceResolver);
                 found = masterBounds.emplace(instance.cell, childModel.bounds).first;
             }
             if (!found->second.isValid())

@@ -55,6 +55,7 @@ PackagePdkStackImplementation readStackImplementation(const toml::table &table, 
     implementation.techLef = readRelativePath(table, "tech_lef", prefix + ".tech_lef");
     implementation.cellLef = readRelativePath(table, "cell_lef", prefix + ".cell_lef");
     implementation.gds = readRelativePath(table, "gds", prefix + ".gds");
+    implementation.layerMap = readRelativePath(table, "layer_map", prefix + ".layer_map");
     implementation.ioHorizontalLayers = readStringArray(table, "io_horizontal_layers");
     implementation.ioVerticalLayers = readStringArray(table, "io_vertical_layers");
     implementation.routingMinLayer = readString(table, "routing_min_layer");
@@ -325,6 +326,9 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
             pdkSpec.aliases = readStringArray(*pdk, "aliases");
             pdkSpec.displayName = readString(*pdk, "display_name", spec.name);
             pdkSpec.defaultSchematic = readString(*pdk, "default_schematic");
+            pdkSpec.manufacturingGrid = (*pdk)["manufacturing_grid"].value_or(0LL);
+            if (pdkSpec.manufacturingGrid < 0)
+                throw ProjectError("package.manifest", "PDK manufacturing_grid must not be negative");
             if (const auto *layers = (*pdk)["layer"].as_array()) {
                 std::set<std::string> layerNames;
                 for (const auto &item : *layers) {
@@ -363,8 +367,8 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                 }
                 auto files = readStackImplementation(*implementation, "pdk.implementation");
                 if (!files.site.empty() || !files.techLef.empty() || !files.cellLef.empty() || !files.gds.empty() ||
-                    !files.liberty.empty() || !files.tapcellScript.empty() || !files.pdnScript.empty() ||
-                    !files.rcScript.empty())
+                    !files.layerMap.empty() || !files.liberty.empty() || !files.tapcellScript.empty() ||
+                    !files.pdnScript.empty() || !files.rcScript.empty())
                     entry.files = std::move(files);
                 pdkSpec.implementation = std::move(entry);
             }
@@ -394,7 +398,7 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                              [&](const auto &stack) { return stack.id == pdkSpec.defaultStack; }))
                 throw ProjectError("package.manifest", "Default PDK stack is not declared: " + pdkSpec.defaultStack);
 
-            const auto stylesPath = packageRoot / "layout" / "layer-styles.json";
+            const auto stylesPath = packageRoot / "technology" / "layer-styles.json";
             if (std::filesystem::is_regular_file(stylesPath)) {
                 const auto document = [&] {
                     try {

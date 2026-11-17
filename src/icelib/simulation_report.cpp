@@ -375,10 +375,13 @@ std::string reportPythonPath(const std::filesystem::path &executablePath) {
     for (int level = 0; level < 6 && !directory.empty(); ++level) {
         appendIfDirectory(directory);
         appendIfDirectory(directory / "python");
+        appendIfDirectory(directory / "lib");
         directory = directory.parent_path();
     }
-    if (!executable.empty())
+    if (!executable.empty()) {
+        appendIfDirectory(executable.parent_path() / ".." / "lib");
         appendIfDirectory(executable.parent_path() / ".." / "share" / "ice" / "python");
+    }
     auto current = std::filesystem::current_path();
     for (int level = 0; level < 5 && !current.empty(); ++level) {
         appendIfDirectory(current / "python");
@@ -386,8 +389,10 @@ std::string reportPythonPath(const std::filesystem::path &executablePath) {
     }
     appendIfDirectory("/usr/share/ice/python");
     appendIfDirectory("/usr/local/share/ice/python");
-    if (const char *home = std::getenv("HOME"); home && *home)
+    if (const char *home = std::getenv("HOME"); home && *home) {
         appendIfDirectory(std::filesystem::path(home) / ".local" / "share" / "ice" / "python");
+        appendIfDirectory(std::filesystem::path(home) / ".local" / "lib");
+    }
 
     if (const char *inherited = std::getenv("PYTHONPATH"); inherited && *inherited) {
 #ifdef _WIN32

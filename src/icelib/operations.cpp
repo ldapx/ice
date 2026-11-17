@@ -1,12 +1,14 @@
 #include "icelib/operations.hpp"
 
 #include "icelib/hdl.hpp"
+#include "icelib/pdk.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <functional>
 #include <initializer_list>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <set>
@@ -34,6 +36,48 @@ std::string trimLine(const std::string &text) {
         return {};
     const auto last = text.find_last_not_of(" \t\r\n");
     return text.substr(first, last - first + 1);
+}
+
+// Converts a length parameter to the units the netlist expects when a PDK
+// declares `.option scale=...`. Values with an SI suffix ("1u") are converted;
+// a bare number is already written in the netlist's own units (SKY130 writes
+// "60" meaning 60 um) and must be left untouched. Returns nullopt when the text
+// is not a plain length, so the caller can emit it verbatim.
+std::optional<double> scaledNetlistLength(const std::string &text, double geometryScale) {
+    const auto trimmed = trimLine(text);
+    if (trimmed.empty())
+        return std::nullopt;
+    char *end = nullptr;
+    const auto number = std::strtod(trimmed.c_str(), &end);
+    if (end == trimmed.c_str())
+        return std::nullopt;
+    const auto suffix = lower(trimLine(std::string(end)));
+    if (suffix.empty())
+        return std::nullopt;
+    double multiplier = 1.0;
+    if (suffix == "t")
+        multiplier = 1e12;
+    else if (suffix == "g")
+        multiplier = 1e9;
+    else if (suffix == "meg")
+        multiplier = 1e6;
+    else if (suffix == "k")
+        multiplier = 1e3;
+    else if (suffix == "m")
+        multiplier = 1e-3;
+    else if (suffix == "u")
+        multiplier = 1e-6;
+    else if (suffix == "n")
+        multiplier = 1e-9;
+    else if (suffix == "p")
+        multiplier = 1e-12;
+    else if (suffix == "f")
+        multiplier = 1e-15;
+    else
+        return std::nullopt;
+    if (!(geometryScale > 0.0))
+        return std::nullopt;
+    return number * multiplier / geometryScale;
 }
 
 bool isOwnedAnalysisDirective(const std::string &line) {
@@ -133,6 +177,97 @@ std::string sourceExpression(const SchematicInstance &instance, const std::strin
     return parameterValue(instance, {"voltage", "value"});
 }
 } // namespace
+
+std::string symbolTypeName(std::string name) {
+    // A trailing numeric disambiguator ("Input 2", "Resistor 3") is added when a
+    // cell needs several symbols of the same kind. It is not part of the type.
+    const auto trimmed = trimLine(name);
+    const auto separator = trimmed.find_last_of(" _-");
+    if (separator != std::string::npos && separator + 1 < trimmed.size() &&
+        std::all_of(trimmed.begin() + static_cast<std::ptrdiff_t>(separator + 1), trimmed.end(),
+                    [](char character) { return std::isdigit(static_cast<unsigned char>(character)) != 0; }))
+        return trimmed.substr(0, separator);
+    return trimmed;
+}
+
+std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::string &base) {
+    const auto taken = [&](const std::string &candidate) {
+        return std::any_of(cell.symbols.begin(), cell.symbols.end(),
+                           [&](const auto &entry) { return entry.second.name == candidate; });
+    };
+    auto name = base;
+    for (int suffix = 2; taken(name); ++suffix)
+        name = base + " " + std::to_string(suffix);
+    return name;
+}
+
+std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell) {
+    std::vector<const SchematicInstance *> inputs;
+    std::vector<const SchematicInstance *> outputs;
+    for (const auto &[_, instance] : cell.instances) {
+        const auto symbol = cell.symbols.find(instance.symbol);
+        if (symbol == cell.symbols.end())
+            continue;
+        const auto type = lower(symbolTypeName(symbol->second.name));
+        if (type == "input")
+            inputs.push_back(&instance);
+        else if (type == "output")
+            outputs.push_back(&instance);
+    }
+    const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
+        std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
+            if (left->y != right->y)
+                return left->y > right->y;
+            return lower(left->name) < lower(right->name);
+        });
+    };
+    sortPorts(inputs);
+    sortPorts(outputs);
+    std::vector<const SchematicInstance *> ports;
+    ports.reserve(inputs.size() + outputs.size());
+    ports.insert(ports.end(), inputs.begin(), inputs.end());
+    ports.insert(ports.end(), outputs.begin(), outputs.end());
+    return ports;
+}
+
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name,
+                               std::string artwork) {
+    const auto &source = require(project.schematicCells, sourceCellId, "schematic.symbol.source",
+                                 "Source schematic cell does not exist");
+    if (source.textSchematic)
+        throw ProjectError("schematic.symbol.source", "A text SPICE cell cannot be used as a hierarchical block");
+    const auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    if (parent.isTextSource())
+        throw ProjectError("schematic.symbol.source", "Symbols can only be added to a drawn schematic");
+    if (name.empty())
+        name = source.name;
+    const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(artwork), sourceCellId);
+    auto &symbol = project.schematicCells.at(parentCellId).symbols.at(symbolId);
+    for (auto pin : hierarchicalSymbolPins(source)) {
+        pin.id = project.nextId();
+        symbol.pins.push_back(std::move(pin));
+    }
+    return symbolId;
+}
+
+std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) {
+    const auto ports = schematicPortInstances(source);
+    const auto count = static_cast<int>(ports.size());
+    const auto spacing = 40;
+    std::vector<Pin> pins;
+    pins.reserve(ports.size());
+    int inputRow = 0;
+    int outputRow = 0;
+    for (const auto *port : ports) {
+        const auto portSymbol = source.symbols.find(port->symbol);
+        const auto type = portSymbol == source.symbols.end() ? std::string{} : symbolTypeName(portSymbol->second.name);
+        const bool isOutput = lower(type) == "output";
+        const auto row = isOutput ? outputRow++ : inputRow++;
+        pins.push_back({0, port->name, isOutput ? 70 : -70, count * spacing / 2 - row * spacing,
+                        isOutput ? PinDirection::right : PinDirection::left, 1, true});
+    }
+    return pins;
+}
 
 char spiceElementForSymbol(const std::string &symbolName) {
     const auto name = lower(symbolName);
@@ -234,10 +369,30 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
     if (name.empty())
         throw ProjectError("schematic.instance", "Instance name must not be empty");
     auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
-    if (!cell.symbols.contains(symbolId))
+    const auto existing = cell.symbols.find(symbolId);
+    if (existing == cell.symbols.end())
         throw ProjectError("schematic.symbol", "Symbol does not exist");
+
+    // Nets reference symbol pins, so two instances of one symbol would share
+    // pin ids and their connectivity could not be told apart (a netlist would
+    // wire both copies to the same nodes, and LVS could not attribute port
+    // nets). Give every instance its own copy of the symbol instead; the copy
+    // keeps the artwork, parameters and pin names.
+    const bool symbolInUse = std::any_of(cell.instances.begin(), cell.instances.end(),
+                                         [&](const auto &entry) { return entry.second.symbol == symbolId; });
+    auto instanceSymbol = symbolId;
+    if (symbolInUse) {
+        Symbol copy = existing->second;
+        copy.id = project.nextId();
+        copy.name = uniqueSchematicSymbolName(cell, existing->second.name);
+        for (auto &pin : copy.pins)
+            pin.id = project.nextId();
+        instanceSymbol = copy.id;
+        cell.symbols.emplace(copy.id, std::move(copy));
+    }
+
     ObjectId id = project.nextId();
-    cell.instances.emplace(id, SchematicInstance{id, symbolId, std::move(name), x, y});
+    cell.instances.emplace(id, SchematicInstance{id, instanceSymbol, std::move(name), x, y});
     return id;
 }
 void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name,
@@ -386,7 +541,7 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk, s
 }
 
 ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk, std::string script,
-                                std::string stack) {
+                                std::string stack, std::vector<Parameter> parameters) {
     if (name.empty())
         throw ProjectError("layout.procedural.name", "Procedural layout name must not be empty");
     if (pdk.empty() || pdk.find_first_of("/\\") != std::string::npos)
@@ -409,8 +564,21 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
     const auto generatedCell = createLayoutCell(project, generatedName, pdk, stack);
     const auto id = project.nextId();
     project.layoutCells.at(generatedCell).generatedBy = id;
-    project.proceduralLayouts.emplace(
-        id, ProceduralLayout{id, std::move(name), std::move(pdk), std::move(stack), std::move(script), generatedCell});
+    project.layoutCells.at(generatedCell).readOnly = true;
+    auto nextParameterId = project.nextId();
+    for (auto &parameter : parameters) {
+        if (parameter.id == 0)
+            parameter.id = nextParameterId++;
+    }
+    ProceduralLayout layout;
+    layout.id = id;
+    layout.name = std::move(name);
+    layout.pdk = std::move(pdk);
+    layout.stack = std::move(stack);
+    layout.script = std::move(script);
+    layout.generatedCell = generatedCell;
+    layout.parameters = std::move(parameters);
+    project.proceduralLayouts.emplace(id, std::move(layout));
     return id;
 }
 
@@ -946,7 +1114,7 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
 }
 
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId, std::vector<std::string> *notes,
-                                               SchematicNetlistMode mode) {
+                                               SchematicNetlistMode mode, double geometryScale) {
     const auto &topCell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     if (topCell.textSchematic || topCell.systemVerilogSchematic)
         throw ProjectError("schematic.netlist", "SPICE netlisting requires a drawn schematic");
@@ -974,34 +1142,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
 
     // Hierarchical block pins are generated from the child schematic's Input
     // and Output instances, in the same order as generatedSchematicSymbol().
-    const auto portInstances = [&](const SchematicCell &cell) {
-        std::vector<const SchematicInstance *> inputs;
-        std::vector<const SchematicInstance *> outputs;
-        for (const auto &[_, instance] : cell.instances) {
-            const auto symbol = cell.symbols.find(instance.symbol);
-            if (symbol == cell.symbols.end())
-                continue;
-            const auto type = lower(symbol->second.name);
-            if (type == "input")
-                inputs.push_back(&instance);
-            else if (type == "output")
-                outputs.push_back(&instance);
-        }
-        const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
-            std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
-                if (left->y != right->y)
-                    return left->y > right->y;
-                return lower(left->name) < lower(right->name);
-            });
-        };
-        sortPorts(inputs);
-        sortPorts(outputs);
-        std::vector<const SchematicInstance *> ports;
-        ports.reserve(inputs.size() + outputs.size());
-        ports.insert(ports.end(), inputs.begin(), inputs.end());
-        ports.insert(ports.end(), outputs.begin(), outputs.end());
-        return ports;
-    };
+    const auto portInstances = [&](const SchematicCell &cell) { return schematicPortInstances(cell); };
 
     // A child Input/Output instance defines a port. Its connected net becomes
     // that port inside the subcircuit body.
@@ -1084,7 +1225,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             const auto symbol = cell.symbols.find(instance.symbol);
             if (symbol == cell.symbols.end())
                 continue;
-            const auto type = lower(symbol->second.name);
+            const auto type = lower(symbolTypeName(symbol->second.name));
             if (type == "input" || type == "output")
                 continue; // hierarchical port markers, not devices
             const char element = spiceElementForSymbol(symbol->second.name);
@@ -1151,10 +1292,43 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 if (designator.empty() || std::toupper(static_cast<unsigned char>(designator.front())) != 'X')
                     designator.insert(designator.begin(), 'X');
                 body << designator << " ";
-                for (const auto &pin : symbol->second.pins) {
-                    const auto node = pinToNode.find(pin.id);
-                    body << (node != pinToNode.end() ? node->second : "0") << " ";
+                // The `.subckt` port list follows the child's port instances
+                // (inputs top-down, then outputs). A symbol may declare its own
+                // pins in any order, so map every port to the parent pin with
+                // the same name instead of trusting the declaration order;
+                // fall back to position for hand-made or renamed symbols.
+                const auto childPorts = schematicPortInstances(child->second);
+                bool matchedByName = !childPorts.empty();
+                std::size_t portIndex = 0;
+                for (const auto *port : childPorts) {
+                    const Pin *connection = nullptr;
+                    for (const auto &pin : symbol->second.pins) {
+                        if (lower(pin.name) == lower(port->name)) {
+                            connection = &pin;
+                            break;
+                        }
+                    }
+                    if (connection == nullptr && portIndex < symbol->second.pins.size()) {
+                        connection = &symbol->second.pins[portIndex];
+                        matchedByName = false;
+                    }
+                    if (connection != nullptr) {
+                        if (lower(connection->name) != lower(port->name))
+                            matchedByName = false;
+                        const auto node = pinToNode.find(connection->id);
+                        body << (node != pinToNode.end() ? node->second : "0") << " ";
+                    } else {
+                        body << "0 ";
+                    }
+                    ++portIndex;
                 }
+                if (!matchedByName)
+                    note("hierarchical symbol '" + symbol->second.name + "' pins do not match the ports of '" +
+                         child->second.name + "'; connecting by position");
+                if (symbol->second.pins.size() > childPorts.size())
+                    note("hierarchical symbol '" + symbol->second.name + "' declares " +
+                         std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name + "' has " +
+                         std::to_string(childPorts.size()) + " ports; extra pins are ignored");
                 body << spiceIdentifier(child->second.name) << "\n";
                 continue;
             }
@@ -1202,6 +1376,16 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 }
                 return result;
             };
+            // First connected pin out of several aliases ("S", "SUB", ...).
+            const auto firstConnectedNode =
+                [&](std::initializer_list<std::string_view> names) -> std::optional<std::string> {
+                for (const auto name : names) {
+                    if (const auto node = pinNameToNode.find(lower(std::string(name)));
+                        node != pinNameToNode.end())
+                        return node->second;
+                }
+                return std::nullopt;
+            };
             const auto symbolNodes = [&] {
                 std::vector<std::string> result;
                 result.reserve(symbol->second.pins.size());
@@ -1240,8 +1424,29 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 }
                 nodes = *ordered;
                 if (lineElement == 'X') {
-                    const auto substrate = nodesForNames({"S", "SUB", "BN"});
-                    nodes.push_back(substrate ? substrate->front() : "0");
+                    // PDK bipolar subcircuits differ in whether they expose the
+                    // substrate as a fourth node (sky130's NPN does, its
+                    // substrate PNP does not). Read the node list from the
+                    // package model file and match it exactly.
+                    const auto declared = pdkSubcircuitNodes(cell.pdk, configuredModel);
+                    const auto expected = declared ? declared->size() : 0;
+                    const auto substrate = firstConnectedNode({"S", "SUB", "BN", "SUBSTRATE"});
+                    if (expected == 4) {
+                        nodes.push_back(substrate ? *substrate : "0");
+                        if (!substrate)
+                            note("BJT symbol '" + symbol->second.name + "' has no substrate pin; '" +
+                                 configuredModel + "' expects one, so the substrate is grounded");
+                    } else if (expected == 3) {
+                        if (substrate)
+                            note("BJT symbol '" + symbol->second.name + "' declares a substrate pin but '" +
+                                 configuredModel + "' has three nodes; the pin is left unconnected");
+                    } else if (substrate) {
+                        nodes.push_back(*substrate);
+                    } else {
+                        note("BJT symbol '" + symbol->second.name +
+                             "' has no substrate pin; instantiating '" + configuredModel +
+                             "' with collector/base/emitter only");
+                    }
                 }
             } else if (element == 'X') {
                 const auto ordered = nodesForNames({"+", "-", "OUT"});
@@ -1270,6 +1475,28 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                 if (!value.empty())
                     body << " " << label << "=" << value;
             };
+            // Device geometry is emitted in the units the PDK preamble selects
+            // with `.option scale=...`. Values written with an SI suffix ("1u")
+            // are converted to those units; bare numbers are already expressed in
+            // them (SKY130 writes "60" for 60 um) and stay unchanged.
+            const auto appendLengthAttribute = [&](std::string_view label,
+                                                   std::initializer_list<std::string_view> names) {
+                const auto value = parameterNamed(instance, names);
+                if (value.empty())
+                    return;
+                if (!(geometryScale > 0.0) || geometryScale == 1.0) {
+                    body << " " << label << "=" << value;
+                    return;
+                }
+                const auto scaled = scaledNetlistLength(value, geometryScale);
+                if (!scaled) {
+                    body << " " << label << "=" << value;
+                    return;
+                }
+                std::ostringstream formatted;
+                formatted << std::setprecision(12) << *scaled;
+                body << " " << label << "=" << formatted.str();
+            };
 
             if (element == 'M' || element == 'Q' || element == 'X' || element == 'D') {
                 const auto defaultModel = [&] {
@@ -1295,8 +1522,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     body << node << " ";
                 body << spiceIdentifier(model);
                 if (element == 'M') {
-                    appendAttribute("W", {"w", "width"});
-                    appendAttribute("L", {"l", "length"});
+                    appendLengthAttribute("W", {"w", "width"});
+                    appendLengthAttribute("L", {"l", "length"});
                     appendAttribute("M", {"m", "multiplier"});
                 } else if (element == 'Q' && lineElement == 'Q') {
                     appendAttribute("M", {"m", "multiplier"});
@@ -1391,7 +1618,8 @@ std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId
     if (cell.systemVerilogSchematic)
         throw ProjectError("simulation.hdl", "SystemVerilog cells must be simulated with the iverilog simulator");
     if (!cell.textSchematic)
-        return buildSchematicNetlist(project, cellId, notes);
+        return buildSchematicNetlist(project, cellId, notes, SchematicNetlistMode::analog,
+                                     pdkNetlistGeometryScale(cell.pdk));
 
     std::vector<std::string> lines;
     std::istringstream stream(cell.spiceText);
@@ -1506,8 +1734,8 @@ void removeLayoutItem(Project &project, ObjectId id) {
     const auto cell = project.layoutCells.find(id);
     if (cell == project.layoutCells.end())
         throw ProjectError("layout.remove.unknown", "Unknown layout or procedural layout id: " + std::to_string(id));
-    if (cell->second.library)
-        throw ProjectError("layout.remove.library", "Library layout cells are read-only and cannot be removed");
+    if (cell->second.library || (cell->second.readOnly && !cell->second.reference))
+        throw ProjectError("layout.remove.library", "Read-only layout cells cannot be removed");
     if (cell->second.generatedBy != 0 && project.proceduralLayouts.contains(cell->second.generatedBy)) {
         const auto &procedural = project.proceduralLayouts.at(cell->second.generatedBy);
         throw ProjectError("layout.remove.generated", "Layout cell '" + cell->second.name +

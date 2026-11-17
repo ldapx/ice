@@ -94,13 +94,19 @@ ObjectId Project::nextId() {
             update(netId);
         for (const auto &[instanceId, instance] : cell.instances)
             update(instanceId);
-        for (const auto &[deviceId, device] : cell.plannedDevices)
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
             update(deviceId);
+            for (const auto &parameter : device.parameters)
+                update(parameter.id);
+        }
         for (const auto &[connectionId, connection] : cell.plannedConnections)
             update(connectionId);
     }
-    for (const auto &[id, _] : proceduralLayouts)
+    for (const auto &[id, layout] : proceduralLayouts) {
         update(id);
+        for (const auto &parameter : layout.parameters)
+            update(parameter.id);
+    }
     for (const auto &[id, _] : implementationRuns)
         update(id);
     for (const auto &[id, sim] : simulations) {
@@ -188,6 +194,14 @@ std::vector<Diagnostic> Project::validate() const {
         return value;
     };
     for (const auto &[cellId, cell] : layoutCells) {
+        if (cell.reference) {
+            if (cell.reference->path.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.reference.path",
+                                  "Layout reference path is required", cellId});
+            if (cell.reference->format != "gds" && cell.reference->format != "oasis")
+                result.push_back({Diagnostic::Severity::error, "layout.reference.format",
+                                  "Layout reference format must be gds or oasis", cellId});
+        }
         std::set<std::string> layoutNetNames;
         for (const auto &[netId, net] : cell.nets) {
             if (net.name.empty())
@@ -291,6 +305,11 @@ std::vector<Diagnostic> Project::validate() const {
             if (device.width <= 0 || device.height <= 0)
                 result.push_back({Diagnostic::Severity::error, "layout.planned_device.geometry",
                                   "Planned device must have positive dimensions", deviceId});
+            for (const auto &[_, netId] : device.terminals) {
+                if (netId != 0 && !cell.nets.contains(netId))
+                    result.push_back({Diagnostic::Severity::error, "layout.planned_device.terminal",
+                                      "Planned device terminal references a missing layout net", deviceId});
+            }
         }
         const auto endpointExists = [&](ObjectId endpoint, ObjectId port) {
             if (cell.plannedDevices.contains(endpoint) || cell.ports.contains(endpoint))
@@ -488,6 +507,13 @@ std::string Project::serialize() const {
             c["stack"] = cell.stack;
         if (cell.library)
             c["library"] = true;
+        if (cell.readOnly)
+            c["read_only"] = true;
+        if (cell.reference) {
+            c["reference"] = {{"path", cell.reference->path},
+                              {"format", cell.reference->format},
+                              {"top_cell", cell.reference->topCell}};
+        }
         if (!cell.device.empty())
             c["device"] = cell.device;
         if (cell.generatedBy != 0)
@@ -562,6 +588,8 @@ std::string Project::serialize() const {
                       {"locked", port.locked},
                       {"source_instance", port.sourceInstance},
                       {"source_port", port.sourcePort}};
+            if (port.internal)
+                p["internal"] = true;
             if (port.schematicInstance != 0)
                 p["schematic_instance"] = port.schematicInstance;
             put(p["rectangle"], port.rectangle);
@@ -583,6 +611,25 @@ std::string Project::serialize() const {
                       {"y", device.y}, {"width", device.width}, {"height", device.height}};
             if (device.schematicInstance != 0)
                 d["schematic_instance"] = device.schematicInstance;
+            if (!device.device.empty())
+                d["device"] = device.device;
+            if (!device.model.empty())
+                d["model"] = device.model;
+            if (!device.parameters.empty()) {
+                d["parameters"] = json::array();
+                for (const auto &parameter : device.parameters) {
+                    json entry;
+                    put(entry, parameter);
+                    d["parameters"].push_back(std::move(entry));
+                }
+            }
+            if (!device.terminals.empty()) {
+                d["terminals"] = json::object();
+                for (const auto &[terminal, netId] : device.terminals)
+                    d["terminals"][terminal] = netId;
+            }
+            if (!device.placeholder)
+                d["placeholder"] = false;
             c["planned_devices"].push_back(std::move(d));
         }
         for (const auto &[cid, connection] : cell.plannedConnections) {
@@ -614,6 +661,22 @@ std::string Project::serialize() const {
                       {"generated_cell", layout.generatedCell}};
         if (!layout.stack.empty())
             entry["stack"] = layout.stack;
+        if (!layout.parameters.empty()) {
+            entry["parameters"] = json::array();
+            for (const auto &parameter : layout.parameters) {
+                json item;
+                put(item, parameter);
+                entry["parameters"].push_back(std::move(item));
+            }
+        }
+        if (!layout.generatedScriptHash.empty())
+            entry["generated_script_hash"] = layout.generatedScriptHash;
+        if (!layout.generatedParameterHash.empty())
+            entry["generated_parameter_hash"] = layout.generatedParameterHash;
+        if (!layout.generatedPdkVersion.empty())
+            entry["generated_pdk_version"] = layout.generatedPdkVersion;
+        if (!layout.generatedOutputHash.empty())
+            entry["generated_output_hash"] = layout.generatedOutputHash;
         j["procedural_layouts"].push_back(std::move(entry));
     }
     j["implementation_runs"] = json::array();
@@ -850,6 +913,13 @@ Project Project::deserialize(const std::string &text) {
                 cell.pdk = genericPdkId;
             cell.stack = c.value("stack", std::string{});
             cell.library = c.value("library", false);
+            cell.readOnly = c.value("read_only", false);
+            if (c.contains("reference")) {
+                const auto &reference = c.at("reference");
+                cell.reference =
+                    LayoutReference{reference.value("path", std::string{}), reference.value("format", std::string{}),
+                                    reference.value("top_cell", std::string{})};
+            }
             cell.device = c.value("device", std::string{});
             cell.generatedBy = c.value("generated_by", ObjectId{0});
             if (c.contains("parameters")) {
@@ -909,6 +979,7 @@ Project Project::deserialize(const std::string &text) {
                 value.label = port.at("label").get<std::string>();
                 value.visible = port.at("visible").get<bool>();
                 value.locked = port.at("locked").get<bool>();
+                value.internal = port.value("internal", false);
                 value.sourceInstance = port.at("source_instance").get<ObjectId>();
                 value.sourcePort = port.at("source_port").get<ObjectId>();
                 value.schematicInstance = port.value("schematic_instance", ObjectId{0});
@@ -930,6 +1001,23 @@ Project Project::deserialize(const std::string &text) {
                     device.y = d.value("y", Coordinate{0});
                     device.width = d.value("width", Coordinate{0});
                     device.height = d.value("height", Coordinate{0});
+                    device.device = d.value("device", std::string{});
+                    device.model = d.value("model", std::string{});
+                    if (const auto parameters = d.find("parameters"); parameters != d.end() && parameters->is_array()) {
+                        for (const auto &parameter : *parameters) {
+                            Parameter value;
+                            value.id = parameter.value("id", ObjectId{0});
+                            value.name = parameter.value("name", std::string{});
+                            value.value = parameter.value("value", std::string{});
+                            if (!value.name.empty())
+                                device.parameters.push_back(std::move(value));
+                        }
+                    }
+                    if (const auto terminals = d.find("terminals"); terminals != d.end() && terminals->is_object()) {
+                        for (const auto &[terminal, netId] : terminals->items())
+                            device.terminals[terminal] = netId.get<ObjectId>();
+                    }
+                    device.placeholder = d.value("placeholder", true);
                     const auto deviceId = device.id;
                     cell.plannedDevices.emplace(deviceId, std::move(device));
                 }
@@ -967,6 +1055,21 @@ Project Project::deserialize(const std::string &text) {
                 entry.stack = layout.value("stack", std::string{});
                 entry.script = layout.value("script", std::string{});
                 entry.generatedCell = layout.value("generated_cell", ObjectId{0});
+                if (const auto parameters = layout.find("parameters");
+                    parameters != layout.end() && parameters->is_array()) {
+                    for (const auto &parameter : *parameters) {
+                        Parameter value;
+                        value.id = parameter.value("id", ObjectId{0});
+                        value.name = parameter.value("name", std::string{});
+                        value.value = parameter.value("value", std::string{});
+                        if (value.id != 0 && !value.name.empty())
+                            entry.parameters.push_back(std::move(value));
+                    }
+                }
+                entry.generatedScriptHash = layout.value("generated_script_hash", std::string{});
+                entry.generatedParameterHash = layout.value("generated_parameter_hash", std::string{});
+                entry.generatedPdkVersion = layout.value("generated_pdk_version", std::string{});
+                entry.generatedOutputHash = layout.value("generated_output_hash", std::string{});
                 const auto layoutId = entry.id;
                 p.proceduralLayouts.emplace(layoutId, std::move(entry));
             }
@@ -1241,7 +1344,7 @@ void ensureGitignore(const std::filesystem::path &root) {
 
 std::string generatedAgentsGuidance() {
     std::ostringstream output;
-    output << "<!-- ICE generated guidance: begin (version 5) -->\n"
+    output << "<!-- ICE generated guidance: begin -->\n"
            << "This directory is an ICE project.\n\n"
            << "- `project.icepro` contains project metadata.\n"
            << "- `sch/*.icesch` contains schematic cells.\n"
@@ -1255,8 +1358,9 @@ std::string generatedAgentsGuidance() {
               "load, use `project_repair` or `project_open` with recovery instead of deleting files "
               "with the shell.\n\n"
            << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
-              "that the features you need are present. If `project_repair`, `project_migrate`, "
-              "`simulation_measure`, or text-schematic support is missing, stop and ask the user to "
+              "that the features you need are present. If `project_repair`, `simulation_measure`, "
+              "text-schematic support, `digital_hdl`, `mixed_signal`, or "
+              "`implementation_runs` is missing, stop and ask the user to "
               "rebuild and restart ICE instead of working around the missing tools. Restart a "
               "long-lived MCP server after installing a new build.\n\n"
            << "When the user asks you to make a schematic or circuit, use this typical workflow:\n\n"
@@ -1306,8 +1410,11 @@ std::string generatedAgentsGuidance() {
               "The run generates VCD traces; graph the traces or import an external VCD file in the "
               "GUI with Load VCD. A drawn schematic containing SystemVerilog instances uses the "
               "`mixed` simulator automatically; its result contains analog node traces and "
-              "`<instance>.<port>` digital traces. Mixed mode supports top-level scalar input/output "
-              "ports; resolve validation errors before claiming success.\n"
+              "`<instance>.<port>` digital traces. Mixed mode requires top-level HDL instances. "
+              "Logic ports are thresholded, real ports are bridged directly, and buses must be "
+              "flattened with `bus_mode=\"flatten\"` before simulation. "
+              "`schematic_validate_hierarchy` reports `inout` ports, unflattened buses, missing "
+              "nets, and duplicate output drivers; resolve those errors before claiming success.\n"
            << "5. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
               "response, transfer curves, settling, or other views needed to judge the expectations.\n"
            << "6. Choose the simplest simulation style that fits the task:\n"
@@ -1329,28 +1436,45 @@ std::string generatedAgentsGuidance() {
               "so explicitly and ask whether that is acceptable. A successful transient run is not proof "
               "of oscillation: use `simulation_measure` and report zero crossings, frequency or period, "
               "amplitude, and startup behavior before claiming the circuit works.\n\n"
-           << "Digital and mixed-signal chips use the same project model plus RTL-to-GDS implementation runs. "
-              "For digital logic, create SystemVerilog source cells with `schematic_create_systemverilog` (or "
-              "`schematic_create` with `kind=\"systemverilog\"`). A source cell may contain both a design and its "
-              "testbench; the module containing `$dumpfile`/`$dumpvars` is preferred as the simulation top. "
-              "A testbench cell may also instantiate modules defined in other project SystemVerilog cells; ICE "
-              "compiles the referenced sources automatically. "
-              "Create a simulation for a testbench cell and run it with Icarus Verilog, then inspect VCD-derived "
-              "traces with `simulation_result`, `simulation_trace`, and `simulation_measure`. For mixed signal, "
-              "place a SystemVerilog cell in a drawn schematic with `schematic_add_hdl_instance`, connect its pins "
-              "with `schematic_add_net`, and let `simulation_create` select the `mixed` simulator; use "
-              "`bus_mode=\"flatten\"` for buses and validate the hierarchy first. To build a digital chip, create "
-              "an implementation run with `implementation_create` (top module, PDK, source cells/files, optional "
-              "SDC), run the stages with `implementation_run`, inspect `implementation_status`, `implementation_log`, "
-              "and metrics before changing the design, import the final DEF with `implementation_import_layout`, and "
-              "export the merged GDS with `implementation_export_gds`. `implementation_update` edits run settings and "
-              "invalidates downstream checkpoints. Run `lvs_run` and `drc_run` on the imported layout for signoff. "
-              "If a stage fails, read the bounded stage log and fix the first actionable error instead of rerunning "
-              "blindly. Do not claim timing closure, DRC cleanliness, or a manufacturable GDS unless the relevant "
-              "metrics, report, or file was actually produced; report missing tools (Yosys, OpenROAD, KLayout, "
-              "gdscheck) or PDK data explicitly.\n\n"
-           << "Use `project_migrate` after upgrading ICE to refresh this generated guidance. Existing "
-              "user text outside the generated markers is preserved.\n\n"
+           << "Analog, mixed-signal, and digital designs share the project model but use different "
+              "implementation paths. For analog physical design, create a layout from the drawn "
+              "schematic with `layout_create_from_schematic` (CLI `layout-create-from-schematic`), "
+              "place and route the devices, then run `lvs`/`lvs-auto` (`lvs_run` in MCP) and `pex` "
+              "(`pex_run` in MCP). PEX writes or updates a text SPICE schematic named `<layout> PEX`; "
+              "simulate that cell for post-layout checks. For mixed signal, place SystemVerilog cells "
+              "in a drawn schematic with `schematic_add_hdl_instance`, connect their pins, validate "
+              "the hierarchy, and use the mixed simulator as described above. The digital block can "
+              "also be implemented through RTL-to-GDS and imported as a layout, but analog/digital "
+              "physical integration and merge are not automatic, so do not claim a complete "
+              "mixed-signal GDS unless it was actually produced.\n\n"
+           << "For digital logic, create SystemVerilog design and testbench cells with "
+              "`schematic_create_systemverilog` (or `schematic_create` with `kind=\"systemverilog\"`). "
+              "A source cell may contain both a design and its testbench; the module containing "
+              "`$dumpfile`/`$dumpvars` is preferred as the simulation top. A testbench cell may also "
+              "instantiate modules defined in other project SystemVerilog cells; ICE compiles the "
+              "referenced sources automatically. Create a simulation for a testbench cell and run it "
+              "with Icarus Verilog, then inspect VCD-derived traces with `simulation_result`, "
+              "`simulation_trace`, and `simulation_measure`. To build a digital chip, first confirm "
+              "that the PDK reports implementation data with `pdk_info` and that "
+              "`implementation_toolchain` finds Yosys, OpenROAD, and KLayout. Then create a run with "
+              "`implementation_create` (top module, PDK, source cells/files, optional SDC), inspect "
+              "the generated scripts with `implementation_prepare` if needed, and run the stages with "
+              "`implementation_run`. ICE maps the synthesized netlist automatically before floorplan "
+              "when `2_tech_map.v` is missing; `implementation_map` remains available for an explicit "
+              "export. Inspect `implementation_status`, `implementation_log`, and the recorded timing, "
+              "power, route-DRC, and antenna metrics before changing the design. `implementation_update` "
+              "edits run settings and invalidates the selected and later checkpoints. Import the final "
+              "DEF with `implementation_import_layout`, and export the merged GDS with "
+              "`implementation_export_gds`; the final stage may also write `final/6_final.gds` "
+              "automatically. Run `lvs_run` and `drc_run` on the imported layout for signoff. If a "
+              "stage fails, read the bounded stage log and fix the first actionable error instead of "
+              "rerunning blindly. Use `ice_help(topic=\"digital\")`, "
+              "`ice_help(topic=\"implementation\")`, and `ice_help(topic=\"verification\")` for the "
+              "current tool lists. Do not claim timing closure, DRC cleanliness, or a manufacturable "
+              "GDS unless the relevant metrics, report, or file was actually produced; report missing "
+              "tools (Yosys, OpenROAD, KLayout, gdscheck) or PDK implementation data explicitly.\n\n"
+           << "This `AGENTS.md` was generated when the project was created and is not rewritten "
+              "automatically. Edit or replace it if the project's workflow or tool names change.\n\n"
            << "For scripted work, use `ice-cli` or `ice-mcp`. Successful `ice-mcp` project mutations "
               "are saved to disk automatically.\n"
            << "Run stored simulations with `ice-cli simulation-run <project> <simulation>`; "
@@ -1362,45 +1486,14 @@ std::string generatedAgentsGuidance() {
 
 bool ensureAgentsFile(const std::filesystem::path &root, const std::string &projectName) {
     const auto path = root / "AGENTS.md";
-    const auto guidance = generatedAgentsGuidance();
-    const std::string beginMarker = "<!-- ICE generated guidance: begin";
-    const std::string endMarker = "<!-- ICE generated guidance: end -->";
-
-    std::string text;
     std::error_code status;
-    if (std::filesystem::exists(path, status) && !status) {
-        std::ifstream input(path, std::ios::binary);
-        if (!input)
-            throw ProjectError("project.save", "Unable to read AGENTS.md");
-        text.assign(std::istreambuf_iterator<char>(input), {});
-    } else {
-        text = "# " + projectName + "\n\n";
-    }
-
-    const auto begin = text.find(beginMarker);
-    const auto end = text.find(endMarker);
-    if (begin != std::string::npos && end != std::string::npos && end > begin) {
-        auto replaceEnd = end + endMarker.size();
-        if (replaceEnd < text.size() && text[replaceEnd] == '\n')
-            ++replaceEnd;
-        text.replace(begin, replaceEnd - begin, guidance);
-    } else {
-        if (!text.empty() && text.back() != '\n')
-            text.push_back('\n');
-        if (!text.empty())
-            text.push_back('\n');
-        text += guidance;
-    }
-
-    std::ifstream existing(path, std::ios::binary);
-    const std::string previous((std::istreambuf_iterator<char>(existing)), {});
-    if (existing && previous == text)
+    if (std::filesystem::exists(path, status) && !status)
         return false;
 
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output)
         throw ProjectError("project.save", "Unable to write AGENTS.md");
-    output << text;
+    output << "# " << projectName << "\n\n" << generatedAgentsGuidance();
     return true;
 }
 
@@ -1505,6 +1598,130 @@ void Project::save(const std::filesystem::path &path) const {
     sourceRoot_ = root;
     sourceRevision_ = projectRevision(root);
     spdlog::info("Saved project {}", (root / "project.icepro").string());
+}
+
+std::filesystem::path Project::saveCellFile(ObjectId id) const {
+    const auto diagnostics = validate();
+    if (!diagnostics.empty())
+        throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+    if (sourceRoot_.empty())
+        throw ProjectError("project.save", "Project has not been saved to disk yet");
+
+    const auto root = sourceRoot_;
+    ProjectSaveLock saveLock(root);
+    if (!sourceRevision_.empty()) {
+        const auto currentRevision = projectRevision(root);
+        if (currentRevision != sourceRevision_)
+            throw ProjectError("project.changed",
+                               "Project files changed on disk since this project was loaded (another ICE process "
+                               "may have saved). Reload the project before saving.");
+    }
+
+    const bool schematic = schematicCells.contains(id);
+    const bool layout = layoutCells.contains(id);
+    const bool procedural = proceduralLayouts.contains(id);
+    if (static_cast<int>(schematic) + static_cast<int>(layout) + static_cast<int>(procedural) != 1)
+        throw ProjectError("project.save", "Project cell not found: " + std::to_string(id));
+
+    const auto directory = root / (schematic ? "sch" : "lay");
+    const auto extension = schematic ? std::string{".icesch"} : std::string{".icelay"};
+    std::filesystem::create_directories(directory);
+
+    // Reuse the existing file when the cell already has one. This keeps a
+    // rename or move from leaving a stale duplicate in the project directory.
+    const auto matches = [&](const std::filesystem::path &path) {
+        try {
+            const auto document = readJsonFile(path);
+            const json *object = nullptr;
+            if (document.contains("cell"))
+                object = &document.at("cell");
+            else if (document.contains("layout"))
+                object = &document.at("layout");
+            else if (document.contains("procedural_layout"))
+                object = &document.at("procedural_layout");
+            return object && object->value("id", ObjectId{0}) == id;
+        } catch (...) {
+            return false;
+        }
+    };
+    std::filesystem::path path;
+    std::set<std::string> usedStems;
+    std::error_code status;
+    for (std::filesystem::directory_iterator it(directory, status), end; !status && it != end; it.increment(status)) {
+        if (!it->is_regular_file() || it->path().extension() != extension)
+            continue;
+        usedStems.insert(it->path().stem().string());
+        if (matches(it->path())) {
+            path = it->path();
+            break;
+        }
+    }
+
+    if (path.empty()) {
+        // Existing files may still use an older stem after a rename. Reserve
+        // them so a newly created cell cannot overwrite another cell's file.
+        std::set<std::string> used = usedStems;
+        if (schematic) {
+            for (const auto &[cellId, cell] : schematicCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+        } else {
+            for (const auto &[cellId, cell] : layoutCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+            if (path.empty()) {
+                for (const auto &[cellId, cell] : proceduralLayouts) {
+                    const auto stem = uniqueStem(cell.name, cellId, used);
+                    if (cellId == id) {
+                        path = directory / (stem + extension);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (path.empty())
+        throw ProjectError("project.save", "Unable to resolve the project file for cell " + std::to_string(id));
+
+    const auto full = json::parse(serialize());
+    json envelope;
+    if (schematic) {
+        for (const auto &cell : full.at("schematic_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-schematic"}, {"schema_version", 1}, {"cell", cell}};
+            break;
+        }
+    } else if (layout) {
+        for (const auto &cell : full.at("layout_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-layout"}, {"schema_version", 2}, {"layout", cell}};
+            break;
+        }
+    } else {
+        for (const auto &cell : full.at("procedural_layouts")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", cell}};
+            break;
+        }
+    }
+    if (envelope.is_null())
+        throw ProjectError("project.save", "Unable to serialize project cell " + std::to_string(id));
+
+    writeJsonFile(path, envelope);
+    sourceRoot_ = root;
+    sourceRevision_ = projectRevision(root);
+    return path;
 }
 
 Project Project::load(const std::filesystem::path &path) { return load(path, {}, nullptr); }
@@ -1742,7 +1959,6 @@ BuildInfo buildInfo() {
 #endif
     info.features = {"project_repair",
                      "project_recovery",
-                     "project_migrate",
                      "schematic_add_pin",
                      "text_schematic",
                      "ngspice_log_capture",
@@ -1755,6 +1971,7 @@ BuildInfo buildInfo() {
                      "layout_connectivity",
                      "layout_lef_def",
                      "layout_pin_drc",
+                     "layout_references",
                      "layout_pex",
                      "pex_device_extraction",
                      "polygon_device_extraction",

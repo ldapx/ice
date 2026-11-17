@@ -1582,7 +1582,7 @@ are recognized, the extractor falls back to copying the inferred source
 schematic's device netlist before the parasitics.
 
 Polygon devices are recognized through per-PDK rules in
-`layout/extraction.json`. The rule engine intersects active/gate layers, cuts
+`technology/extraction.json`. The rule engine intersects active/gate layers, cuts
 active under gates so source and drain are not shorted, matches terminal layers
 to the resulting regions, and emits MOS devices with geometric W/L. The same
 rule file can declare two-terminal resistors and plate-overlap capacitors. This

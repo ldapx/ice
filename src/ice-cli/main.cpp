@@ -8,6 +8,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -155,6 +156,18 @@ ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &
             return id;
     }
     argumentError("Unknown layout or procedural layout: " + text);
+}
+
+ice::ObjectId resolveProceduralLayout(const ice::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        if (project.proceduralLayouts.contains(*id))
+            return *id;
+    }
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.name == text)
+            return id;
+    }
+    argumentError("Unknown procedural layout: " + text);
 }
 
 std::optional<ice::PackageSpec> packageForPdk(const std::string &pdk) {
@@ -801,12 +814,16 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
                    {"pdk", cell.pdk},
                    {"stack", cell.stack},
                    {"library", cell.library},
+                   {"read_only", cell.readOnly},
                    {"device", cell.device},
                    {"generated_by", cell.generatedBy},
                    {"shapes", json::array()},
                    {"ports", json::array()},
                    {"instances", json::array()},
                    {"planned_devices", json::array()}};
+    if (cell.reference)
+        result["reference"] = {
+            {"path", cell.reference->path}, {"format", cell.reference->format}, {"top_cell", cell.reference->topCell}};
     for (const auto &[id, shape] : cell.shapes) {
         const auto layer = project.layers.find(shape.layer);
         json polygon = json::array();
@@ -959,9 +976,12 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
                 it.disable_recursion_pending();
                 continue;
             }
-            if (!it->is_regular_file() || it->path().extension() != ".lib")
+            if (!it->is_regular_file())
                 continue;
-            if (it->path().string().find("/libs.ref/") == std::string::npos)
+            const auto filename = it->path().filename().string();
+            if (!filename.ends_with(".lib") && !filename.ends_with(".lib.gz"))
+                continue;
+            if (it->path().string().find("/implementation/common/lib/") == std::string::npos)
                 continue;
             timingLibraries.push_back(it->path().string());
             if (timingLibraries.size() >= 50)
@@ -1061,7 +1081,6 @@ void printHelp() {
               << "  project-info [folder|project.icepro]  (ICE_PROJECT or cwd search when omitted)\n"
               << "  project-validate <folder|project.icepro>\n"
               << "  project-repair <folder|project.icepro>\n"
-              << "  project-migrate <folder|project.icepro>\n"
               << "  doctor [project] [--probe]\n"
               << "  pdk-info [pdk] [--probe]\n"
               << "  pdk-build <pdk-or-package>\n\n"
@@ -1091,6 +1110,8 @@ void printHelp() {
               << "Layout:\n"
               << "  layout-add-cell <project> <name> [pdk] [stack]\n"
               << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
+              << "  layout-regenerate <project> <procedural> [timeout-seconds]\n"
+              << "  layout-set-parameter <project> <procedural> <name> <value>\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
@@ -1345,7 +1366,8 @@ int main(int argc, char **argv) {
         if (command == "drc") {
             if (args.size() < 3)
                 argumentError("Usage: ice-cli drc <project> <layout> [--no-flatten] [--output <dir>] "
-                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>]");
+                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>] "
+                              "[--engine klayout|gdscheck] [--deck <path>]");
             const auto project = ice::Project::load(args[1]);
             const auto layout = resolveLayout(project, args[2]);
             const auto &layoutCell = project.layoutCells.at(layout);
@@ -1368,6 +1390,10 @@ int main(int argc, char **argv) {
                     options.topCell = value();
                 } else if (option == "--timeout") {
                     options.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else if (option == "--engine") {
+                    options.engine = value();
+                } else if (option == "--deck") {
+                    options.deck = value();
                 } else {
                     argumentError("Unknown drc option: " + option);
                 }
@@ -1378,6 +1404,9 @@ int main(int argc, char **argv) {
                        {"layout", result.layout},
                        {"name", result.layoutName},
                        {"pdk", layoutCell.pdk},
+                       {"engine", result.engine},
+                       {"deck", result.deckPath.generic_string()},
+                       {"suite", options.suite},
                        {"gds", result.gdsPath.generic_string()},
                        {"report", result.reportPath.generic_string()},
                        {"log", result.logPath.generic_string()},
@@ -1408,34 +1437,15 @@ int main(int argc, char **argv) {
             return 0;
         }
 
-        if (command == "project-migrate") {
-            expectArguments(args, 2, 2, "project-migrate <folder|project.icepro>");
-            const auto root = projectRootForCli(args[1]);
-            const auto agentsPath = root / "AGENTS.md";
-            const auto readAgents = [&] {
-                std::ifstream input(agentsPath, std::ios::binary);
-                return std::string((std::istreambuf_iterator<char>(input)), {});
-            };
-            const auto before = readAgents();
-            auto project = ice::Project::load(args[1]);
-            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
-            ice::ProjectSession session(std::move(project));
-            session.save(args[1]);
-            const auto after = readAgents();
-            printJson({{"migrated", true},
-                       {"agents_updated", before != after},
-                       {"pdk_ids_updated", pdkIdsUpdated},
-                       {"guidance_version", 5}});
-            return 0;
-        }
-
         if (command == "schematic-add-cell") {
             expectArguments(args, 3, 4, "schematic-add-cell <project> <name> [pdk]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             ice::ObjectId id = 0;
             const auto pdk = args.size() == 4 ? args[3] : std::string(ice::genericPdkId);
-            session.execute("schematic-add-cell",
-                            [&](ice::Project &project) { id = ice::createSchematicCell(project, args[2], pdk); });
+            session.execute("schematic-add-cell", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createSchematicCell(project, args[2], pdk);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
             return 0;
@@ -1518,6 +1528,7 @@ int main(int argc, char **argv) {
                                     : readTextFile(sourceFile);
             ice::ObjectId id = 0;
             session.execute("schematic-add-systemverilog", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createSystemVerilogCell(project, args[2], pdk, source);
             });
             session.save(args[1]);
@@ -1981,6 +1992,9 @@ int main(int argc, char **argv) {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     artwork = templ.artwork;
                     templatePins = templ.pins;
+                } else if (!sourceCell.textSchematic && !blank) {
+                    // Drawn sub-cell: one pin per port, in subcircuit port order.
+                    templatePins = ice::hierarchicalSymbolPins(sourceCell);
                 }
             } else if (!blank) {
                 try {
@@ -2122,8 +2136,10 @@ int main(int argc, char **argv) {
             ice::ObjectId id = 0;
             const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
             const auto stack = resolveLayoutStack(pdk, args.size() == 5 ? args[4] : std::string{});
-            session.execute("layout-add-cell",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, args[2], pdk, stack); });
+            session.execute("layout-add-cell", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createLayoutCell(project, args[2], pdk, stack);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}});
             return 0;
@@ -2133,16 +2149,79 @@ int main(int argc, char **argv) {
             expectArguments(args, 3, 6, "layout-add-procedural <project> <name> [pdk] [script-file] [stack]");
             ice::ProjectSession session(ice::Project::load(args[1]));
             const auto pdk = args.size() >= 4 ? args[3] : std::string(ice::genericPdkId);
-            const auto script = args.size() >= 5 ? readTextFile(args[4]) : std::string{};
+            const auto script = args.size() >= 5 ? readTextFile(args[4]) : ice::defaultProceduralLayoutScript();
             const auto stack = resolveLayoutStack(pdk, args.size() == 6 ? args[5] : std::string{});
             ice::ObjectId id = 0;
             ice::ObjectId generated = 0;
             session.execute("layout-add-procedural", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createProceduralLayout(project, args[2], pdk, script, stack);
                 generated = project.proceduralLayouts.at(id).generatedCell;
             });
+            const auto run = ice::regenerateProceduralLayout(session.project(), id, executablePath);
             session.save(args[1]);
-            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}, {"generated_cell", generated}});
+            printJson({{"id", id},
+                       {"name", args[2]},
+                       {"pdk", pdk},
+                       {"stack", stack},
+                       {"generated_cell", generated},
+                       {"generated", run.ok},
+                       {"generation_error", run.ok ? json(nullptr) : json(run.error)},
+                       {"needs_regeneration",
+                        ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))},
+                       {"parameters", [&] {
+                            json parameters = json::array();
+                            for (const auto &parameter : session.project().proceduralLayouts.at(id).parameters)
+                                parameters.push_back(
+                                    {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                            return parameters;
+                        }()}});
+            return 0;
+        }
+
+        if (command == "layout-set-parameter") {
+            expectArguments(args, 5, 5, "layout-set-parameter <project> <procedural> <name> <value>");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            session.execute("set procedural parameter", [&](ice::Project &project) {
+                auto &layout = project.proceduralLayouts.at(id);
+                const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                    [&](const auto &entry) { return entry.name == args[3]; });
+                if (parameter == layout.parameters.end())
+                    layout.parameters.push_back({project.nextId(), args[3], args[4]});
+                else
+                    parameter->value = args[4];
+            });
+            session.save(args[1]);
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"parameters", std::move(parameters)},
+                       {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)}});
+            return 0;
+        }
+
+        if (command == "layout-regenerate") {
+            expectArguments(args, 3, 4, "layout-regenerate <project> <procedural> [timeout-seconds]");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            const auto timeout = args.size() >= 4 ? static_cast<int>(parseInteger(args[3], "timeout seconds")) : 60;
+            ice::ProceduralLayoutRunResult run;
+            session.execute("regenerate procedural layout", [&](ice::Project &project) {
+                run = ice::regenerateProceduralLayout(project, id, executablePath, timeout);
+                if (!run.ok)
+                    throw ice::ProjectError("layout.procedural.generate", run.error);
+            });
+            session.save(args[1]);
+            printJson({{"id", id},
+                       {"name", session.project().proceduralLayouts.at(id).name},
+                       {"ok", true},
+                       {"script_hash", run.scriptHash},
+                       {"output_hash", run.outputHash},
+                       {"pdk_version", run.pdkVersion}});
             return 0;
         }
 
@@ -2154,8 +2233,10 @@ int main(int argc, char **argv) {
             const auto stack = resolveLayoutStack(project.schematicCells.at(schematic).pdk, {});
             ice::ProjectSession session(project);
             ice::ObjectId id = 0;
-            session.execute("layout-create-from-schematic",
-                            [&](ice::Project &p) { id = ice::createLayoutFromSchematic(p, schematic, name, stack); });
+            session.execute("layout-create-from-schematic", [&](ice::Project &p) {
+                ice::applyPdkDefaultGrid(p, project.schematicCells.at(schematic).pdk);
+                id = ice::createLayoutFromSchematic(p, schematic, name, stack);
+            });
             session.save(args[1]);
             printJson({{"id", id}, {"schematic", schematic}, {"stack", stack}});
             return 0;
@@ -2172,11 +2253,13 @@ int main(int argc, char **argv) {
                                   {"stack", cell.stack},
                                   {"procedural", false},
                                   {"library", cell.library},
+                                  {"read_only", cell.readOnly},
                                   {"device", cell.device},
                                   {"generated_by", cell.generatedBy},
                                   {"shapes", cell.shapes.size()},
                                   {"ports", cell.ports.size()},
-                                  {"instances", cell.instances.size()}});
+                                  {"instances", cell.instances.size()},
+                                  {"reference", cell.reference ? json(cell.reference->path) : json(nullptr)}});
             }
             for (const auto &[id, procedural] : project.proceduralLayouts) {
                 result.push_back({{"id", id},
@@ -2185,6 +2268,9 @@ int main(int argc, char **argv) {
                                   {"stack", procedural.stack},
                                   {"procedural", true},
                                   {"generated_cell", procedural.generatedCell},
+                                  {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
+                                  {"generated_pdk_version", procedural.generatedPdkVersion},
+                                  {"parameters", procedural.parameters.size()},
                                   {"script_length", procedural.script.size()}});
             }
             printJson(result);
@@ -2203,6 +2289,19 @@ int main(int argc, char **argv) {
                            {"stack", procedural->second.stack},
                            {"procedural", true},
                            {"generated_cell", procedural->second.generatedCell},
+                           {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
+                           {"generated_script_hash", procedural->second.generatedScriptHash},
+                           {"generated_parameter_hash", procedural->second.generatedParameterHash},
+                           {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                           {"generated_output_hash", procedural->second.generatedOutputHash},
+                           {"parameters",
+                            [&] {
+                                json parameters = json::array();
+                                for (const auto &parameter : procedural->second.parameters)
+                                    parameters.push_back(
+                                        {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                                return parameters;
+                            }()},
                            {"script", procedural->second.script}});
             } else {
                 printJson(layoutInfo(project, project.layoutCells.at(id)));
@@ -2871,8 +2970,8 @@ int main(int argc, char **argv) {
 
         if (command == "implementation-import") {
             if (args.size() < 3)
-                argumentError(
-                    "Usage: ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]");
+                argumentError("Usage: ice-cli implementation-import <project> <run> [--layout-name <name>] "
+                              "[--replace]");
             auto project = ice::Project::load(args[1]);
             const auto runId = resolveImplementationRun(project, args[2]);
             auto &run = project.implementationRuns.at(runId);
@@ -2895,27 +2994,23 @@ int main(int argc, char **argv) {
                                         "No installed PDK package provides '" + run.config.pdk + "'");
             auto imported = ice::importImplementationLayout(project, run, *package, projectRootForCli(args[1]),
                                                             layoutName, replace);
-            if (imported.layout != 0)
-                project.save(args[1]);
-            json diagnosticArray = json::array();
-            for (const auto &diagnostic : imported.diagnostics)
-                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            project.save(args[1]);
             json response = {{"layout", imported.layout},
-                             {"def", imported.defPath.generic_string()},
-                             {"run", ice::implementationRunJson(run)},
-                             {"diagnostics", std::move(diagnosticArray)}};
-            if (imported.layout != 0) {
-                const auto &layout = project.layoutCells.at(imported.layout);
-                response["name"] = layout.name;
-                response["pdk"] = layout.pdk;
-                response["stack"] = layout.stack;
-                response["shapes"] = layout.shapes.size();
-                response["ports"] = layout.ports.size();
-                response["nets"] = layout.nets.size();
-                response["instances"] = layout.instances.size();
-            }
+                             {"stream", imported.referencePath.generic_string()},
+                             {"run", ice::implementationRunJson(run)}};
+            const auto &layout = project.layoutCells.at(imported.layout);
+            response["name"] = layout.name;
+            response["pdk"] = layout.pdk;
+            response["stack"] = layout.stack;
+            response["library"] = layout.library;
+            response["device"] = layout.device;
+            response["read_only"] = layout.readOnly;
+            response["shapes"] = layout.shapes.size();
+            response["ports"] = layout.ports.size();
+            response["nets"] = layout.nets.size();
+            response["instances"] = layout.instances.size();
             printJson(response);
-            return imported.layout != 0 ? 0 : 1;
+            return 0;
         }
 
         if (command == "implementation-export-gds") {

@@ -19,6 +19,7 @@
 #include "icelib/verification.hpp"
 #include "layout_canvas.hpp"
 #include "layout_devices.hpp"
+#include "layout_reference.hpp"
 #include "properties_panel.hpp"
 #include "python_highlighter.hpp"
 #include "schematic_canvas.hpp"
@@ -1382,35 +1383,6 @@ class DocumentWindow : public QMainWindow {
                 }
             }
 
-            struct InstanceReference {
-                ice::ObjectId parent = 0;
-                ice::ObjectId instance = 0;
-            };
-            std::map<ice::ObjectId, std::vector<InstanceReference>> references;
-            for (const auto &[parentId, parent] : project.layoutCells) {
-                for (const auto &[instanceId, instance] : parent.instances) {
-                    const auto childIt = project.layoutCells.find(instance.cell);
-                    if (childIt == project.layoutCells.end() || !childIt->second.library ||
-                        childIt->second.device.empty())
-                        continue;
-                    references[instance.cell].push_back({parentId, instanceId});
-                }
-            }
-            for (const auto &[childId, childReferences] : references) {
-                if (childReferences.size() <= 1)
-                    continue;
-                const auto source = project.layoutCells.at(childId);
-                for (std::size_t index = 1; index < childReferences.size(); ++index) {
-                    const auto prefix =
-                        layoutPdkIdsMatch(source.pdk, library.pdk) ? layoutDeviceCellPrefix(library) : std::string{};
-                    const auto cloneId =
-                        cloneLibraryDeviceCell(project, source, uniqueDeviceCellName(project, source.device, prefix));
-                    project.layoutCells.at(childReferences[index].parent)
-                        .instances.at(childReferences[index].instance)
-                        .cell = cloneId;
-                }
-            }
-
             for (auto &[_, cell] : project.layoutCells) {
                 if (!cell.library)
                     continue;
@@ -1786,11 +1758,11 @@ class DocumentWindow : public QMainWindow {
         return true;
     }
 
-    void saveProject() {
+    bool prepareProjectSave() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Save Project"),
                                      QStringLiteral("Create or open a project first."));
-            return;
+            return false;
         }
         const bool hadExternalConflicts = !conflictedSchematicFiles_.empty() || !conflictedLayoutFiles_.empty() ||
                                           !conflictedProceduralFiles_.empty();
@@ -1800,7 +1772,7 @@ class DocumentWindow : public QMainWindow {
                                                      !conflictedLayoutFiles_.empty() ||
                                                      !conflictedProceduralFiles_.empty();
         if (hadExternalConflictsAfterReload && !resolveExternalFileConflicts())
-            return;
+            return false;
         if (projectDiskChangePending_) {
             const auto response =
                 QMessageBox::warning(this, QStringLiteral("Save Project"),
@@ -1811,9 +1783,15 @@ class DocumentWindow : public QMainWindow {
                 statusBar()->showMessage(
                     QStringLiteral("Save cancelled. Use File > Reload Project from Disk to load external changes."),
                     10000);
-                return;
+                return false;
             }
         }
+        return true;
+    }
+
+    void saveProject() {
+        if (!prepareProjectSave())
+            return;
 
         auto path = projectPath_;
         if (path.isEmpty())
@@ -1849,6 +1827,107 @@ class DocumentWindow : public QMainWindow {
             suppressProjectWatcher_ = false;
             configureProjectWatcher();
             QMessageBox::critical(this, QStringLiteral("Save Project"), QString::fromStdString(error.what()));
+        }
+    }
+
+    bool saveCurrentFile() {
+        if (!project_ || !documents_)
+            return false;
+
+        enum class Kind { none, schematic, layout, procedural, report };
+        Kind kind = Kind::none;
+        ice::ObjectId id = 0;
+        if (documents_->currentWidget() == schematicPage_ && activeSchematicId_ != 0 &&
+            project_->project().schematicCells.contains(activeSchematicId_)) {
+            kind = Kind::schematic;
+            id = activeSchematicId_;
+        } else if (documents_->currentWidget() == layoutPage_) {
+            if (activeProceduralLayoutId_ != 0 &&
+                project_->project().proceduralLayouts.contains(activeProceduralLayoutId_)) {
+                kind = Kind::procedural;
+                id = activeProceduralLayoutId_;
+            } else if (activeLayoutId_ != 0 && project_->project().layoutCells.contains(activeLayoutId_)) {
+                kind = Kind::layout;
+                id = activeLayoutId_;
+            }
+        } else if (documents_->currentWidget() == simulationTestbenchPage_ && digitalTestbenchEditorTabs_ &&
+                   currentDigitalTestbenchEditor()) {
+            const auto index = digitalTestbenchEditorTabs_->currentIndex();
+            if (index >= 0) {
+                const auto cellId =
+                    static_cast<ice::ObjectId>(digitalTestbenchEditorTabs_->tabBar()->tabData(index).toULongLong());
+                if (cellId != 0 && project_->project().schematicCells.contains(cellId)) {
+                    kind = Kind::schematic;
+                    id = cellId;
+                }
+            }
+        } else if (documents_->currentWidget() == simulationPage_ && simulationRightStack_ && reportsView_ &&
+                   simulationRightStack_->currentWidget() == reportsView_) {
+            kind = Kind::report;
+        }
+
+        if (kind == Kind::none) {
+            statusBar()->showMessage(
+                QStringLiteral("No file is selected. Use File > Save Whole Project to save the project."), 8000);
+            return false;
+        }
+        if (kind == Kind::report) {
+            if (!saveReportSource())
+                return false;
+            const auto *report = selectedReport();
+            statusBar()->showMessage(
+                QStringLiteral("Saved %1")
+                    .arg(report ? QString::fromStdString(report->path) : QStringLiteral("simulation script")),
+                5000);
+            return true;
+        }
+        if (!prepareProjectSave())
+            return false;
+        // A newly created project has not been loaded back from disk yet.
+        // Materialize it once before switching to per-file saves.
+        if (project_->project().sourceRevision().empty()) {
+            saveProject();
+            return !project_->project().sourceRevision().empty();
+        }
+
+        suppressProjectWatcher_ = true;
+        if (projectWatcherResumeTimer_)
+            projectWatcherResumeTimer_->stop();
+        clearProjectWatcher();
+        try {
+            const auto path = project_->project().saveCellFile(id);
+            if (kind == Kind::schematic) {
+                if (const auto cell = project_->project().schematicCells.find(id);
+                    cell != project_->project().schematicCells.end())
+                    savedSchematicSignatures_[id] = schematicFileSignature(cell->second);
+                conflictedSchematicFiles_.erase(id);
+                externalSchematicFiles_.erase(id);
+            } else if (kind == Kind::layout) {
+                if (const auto cell = project_->project().layoutCells.find(id);
+                    cell != project_->project().layoutCells.end())
+                    savedLayoutSignatures_[id] = layoutFileSignature(cell->second);
+                conflictedLayoutFiles_.erase(id);
+                externalLayoutFiles_.erase(id);
+            } else if (kind == Kind::procedural) {
+                if (const auto cell = project_->project().proceduralLayouts.find(id);
+                    cell != project_->project().proceduralLayouts.end())
+                    savedProceduralSignatures_[id] = proceduralFileSignature(cell->second);
+                conflictedProceduralFiles_.erase(id);
+                externalProceduralFiles_.erase(id);
+            }
+            updateFileTabDirtyIndicators();
+            projectDiskChangePending_ = false;
+            configureProjectWatcher();
+            if (projectWatcherResumeTimer_)
+                projectWatcherResumeTimer_->start();
+            statusBar()->showMessage(
+                QStringLiteral("Saved %1").arg(QFileInfo(QString::fromStdString(path.string())).fileName()), 5000);
+            return true;
+        } catch (const ice::ProjectError &error) {
+            suppressProjectWatcher_ = false;
+            configureProjectWatcher();
+            QMessageBox::critical(this, QStringLiteral("Save File"), QString::fromStdString(error.what()));
+            return false;
         }
     }
 
@@ -2383,7 +2462,7 @@ class DocumentWindow : public QMainWindow {
                 throw ice::ProjectError("interchange.oasis", "Binary OASIS export is not supported yet");
             if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
                 throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
-            ice::LayoutInterchange::exportGds(project_->project(), cellId, path.toStdString());
+            ice::LayoutInterchange::exportFlattenedGds(project_->project(), cellId, path.toStdString());
             statusBar()->showMessage(QStringLiteral("Layout interchange saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -2532,6 +2611,7 @@ class DocumentWindow : public QMainWindow {
             project_->execute("create schematic", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
+                ice::applyPdkDefaultGrid(project, pdk);
                 activeSchematicId_ = ice::createSchematicCell(project, name.trimmed().toStdString(), pdk);
             });
             project_->setLastHistoryLabel("Created schematic " + name.trimmed().toStdString());
@@ -2868,6 +2948,7 @@ class DocumentWindow : public QMainWindow {
             project_->execute("create SystemVerilog cell", [&](ice::Project &project) {
                 if (addDependency)
                     project.packageDependencies.push_back(pdk);
+                ice::applyPdkDefaultGrid(project, pdk);
                 createdId = ice::createSystemVerilogCell(project, trimmedName.toStdString(), pdk,
                                                          systemVerilogTemplate(trimmedName, testbench).toStdString());
             });
@@ -3037,6 +3118,7 @@ class DocumentWindow : public QMainWindow {
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
                     addPdkLayers(project, *selectedPdk, pdk, stack);
+                ice::applyPdkDefaultGrid(project, pdk);
                 activeLayoutId_ = ice::createLayoutCell(project, name.trimmed().toStdString(), pdk, stack);
             });
             project_->setLastHistoryLabel("Created layout cell " + name.trimmed().toStdString());
@@ -3101,9 +3183,14 @@ class DocumentWindow : public QMainWindow {
                     project.packageDependencies.push_back(pdk);
                 if (selectedPdk)
                     addPdkLayers(project, *selectedPdk, pdk, stack);
+                ice::applyPdkDefaultGrid(project, pdk);
                 proceduralId = ice::createProceduralLayout(project, name.trimmed().toStdString(), pdk,
                                                            ice::defaultProceduralLayoutScript(), stack);
-                generated = ice::regenerateProceduralLayout(project, proceduralId, &generationError);
+                const auto run = ice::regenerateProceduralLayout(project, proceduralId,
+                                                                 QCoreApplication::applicationFilePath().toStdString());
+                generated = run.ok;
+                if (!run.ok)
+                    generationError = QString::fromStdString(run.error);
             });
             project_->setLastHistoryLabel("Created procedural layout " + name.trimmed().toStdString());
             const auto &procedural = project_->project().proceduralLayouts.at(proceduralId);
@@ -3138,8 +3225,10 @@ class DocumentWindow : public QMainWindow {
         QString error;
         try {
             project_->execute("regenerate procedural layout", [&](ice::Project &project) {
-                if (!ice::regenerateProceduralLayout(project, proceduralId, &error))
-                    throw ice::ProjectError("layout.procedural.generate", error.toStdString());
+                const auto run = ice::regenerateProceduralLayout(project, proceduralId,
+                                                                 QCoreApplication::applicationFilePath().toStdString());
+                if (!run.ok)
+                    throw ice::ProjectError("layout.procedural.generate", run.error);
             });
         } catch (const ice::ProjectError &exception) {
             if (error.isEmpty())
@@ -3151,6 +3240,11 @@ class DocumentWindow : public QMainWindow {
         }
         project_->setLastHistoryLabel("Regenerated layout " + name);
         refreshProject();
+        if (activeProceduralLayoutId_ == proceduralId && proceduralEditor_) {
+            const auto current = project_->project().proceduralLayouts.find(proceduralId);
+            if (current != project_->project().proceduralLayouts.end())
+                proceduralEditor_->setParameters(current->second.parameters);
+        }
         statusBar()->showMessage(
             QStringLiteral("Procedural layout '%1' regenerated").arg(QString::fromStdString(name)));
     }
@@ -3184,6 +3278,30 @@ class DocumentWindow : public QMainWindow {
         source = value;
         project_->markDirty();
         updateFileTabDirtyIndicators();
+    }
+
+    void onProceduralParameterChanged(const QString &name, const QString &value) {
+        if (!project_ || activeProceduralLayoutId_ == 0)
+            return;
+        auto &procedural = project_->project().proceduralLayouts;
+        const auto it = procedural.find(activeProceduralLayoutId_);
+        if (it == procedural.end() || name.isEmpty())
+            return;
+        const auto parameterName = name.toStdString();
+        auto parameter = std::find_if(it->second.parameters.begin(), it->second.parameters.end(),
+                                      [&](const auto &entry) { return entry.name == parameterName; });
+        const auto parameterValue = value.toStdString();
+        if (parameter == it->second.parameters.end()) {
+            it->second.parameters.push_back({project_->project().nextId(), parameterName, parameterValue});
+        } else {
+            if (parameter->value == parameterValue)
+                return;
+            parameter->value = parameterValue;
+        }
+        project_->markDirty();
+        updateFileTabDirtyIndicators();
+        statusBar()->showMessage(
+            QStringLiteral("Parameter updated; press Regenerate layout to update the generated cell."), 8000);
     }
 
     void showTextSchematicEditor(ice::ObjectId schematicId) {
@@ -3338,6 +3456,11 @@ class DocumentWindow : public QMainWindow {
             const auto script = QString::fromStdString(it->second.script);
             if (proceduralEditor_->script() != script)
                 proceduralEditor_->setScript(script);
+            proceduralEditor_->setParameters(it->second.parameters);
+        }
+        if (ice::proceduralLayoutNeedsRegeneration(it->second)) {
+            statusBar()->showMessage(
+                QStringLiteral("Generated layout is out of date; press Regenerate layout to update it."), 8000);
         }
     }
 
@@ -3463,6 +3586,7 @@ class DocumentWindow : public QMainWindow {
         const auto schematicPdk = schematicIt->second.pdk;
         try {
             project_->execute("make layout from schematic", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, schematicPdk);
                 activeLayoutId_ =
                     ice::createLayoutFromSchematic(project, schematicId, {}, defaultStackForPdk(schematicPdk));
                 ensureLayoutPdkLayers(project, configuredPackageInstallDirectory());
@@ -3486,23 +3610,66 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Layout created from schematic '%1'").arg(schematicName));
     }
 
-    ice::ObjectId createLayoutDeviceInstanceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
-                                                 const ice::LayoutDeviceLibrary &library,
-                                                 const std::map<std::string, std::string> *values = nullptr,
-                                                 const ice::LayoutDeviceGeometry *geometry = nullptr) const {
-        const auto cellId = ice::createLayoutCell(
-            project, uniqueDeviceCellName(project, device.name, layoutDeviceCellPrefix(library)), library.pdk);
+    ice::ObjectId ensureLayoutDeviceCell(ice::Project &project, const ice::LayoutDeviceCell &device,
+                                         const ice::LayoutDeviceLibrary &library,
+                                         const std::map<std::string, std::string> *values = nullptr,
+                                         const ice::LayoutDeviceGeometry *geometry = nullptr) const {
+        const auto stack = activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_)
+                               ? project.layoutCells.at(activeLayoutId_).stack
+                               : std::string{};
+        std::map<std::string, std::string> wanted = parameterValues(device.parameters);
+        if (values) {
+            for (const auto &[name, value] : *values)
+                wanted[name] = value;
+        }
+        std::optional<ice::LayoutDeviceGeometry> generated;
+        if (!geometry && device.generator && device.shapes.empty()) {
+            QString error;
+            generated = generateLayoutDeviceGeometry(device, wanted, &error, library.pdk);
+            if (!generated)
+                throw ice::ProjectError(
+                    "layout.device", "Could not generate " + device.name + ": " +
+                                         (error.isEmpty() ? QStringLiteral("generator failed") : error).toStdString());
+            geometry = &*generated;
+        }
+        const auto parametersMatch = [&](const ice::LayoutCell &cell) {
+            for (const auto &[name, value] : wanted) {
+                const auto parameter =
+                    std::find_if(cell.parameters.begin(), cell.parameters.end(),
+                                 [&](const ice::Parameter &candidate) { return candidate.name == name; });
+                if (parameter == cell.parameters.end() || parameter->value != value)
+                    return false;
+            }
+            return true;
+        };
+        for (auto &[id, cell] : project.layoutCells) {
+            if (!cell.library || cell.device != device.name || !layoutPdkIdsMatch(cell.pdk, library.pdk) ||
+                cell.stack != stack || !parametersMatch(cell))
+                continue;
+            if (cell.shapes.empty()) {
+                if (geometry)
+                    applyLayoutDeviceShapes(project, cell, library, geometry->shapes, geometry->ports);
+                else
+                    applyLayoutDeviceShapes(project, cell, library, device.shapes, device.ports);
+            }
+            return id;
+        }
+        const auto baseName = layoutDeviceCellPrefix(library) + device.name;
+        const auto taken = [&](const std::string &candidate) {
+            return std::any_of(project.layoutCells.begin(), project.layoutCells.end(),
+                               [&](const auto &entry) { return entry.second.name == candidate; });
+        };
+        std::string name = baseName;
+        for (int suffix = 1; taken(name); ++suffix)
+            name = baseName + "_" + std::to_string(suffix);
+        const auto cellId = ice::createLayoutCell(project, name, library.pdk, stack);
         auto &cell = project.layoutCells.at(cellId);
         cell.library = true;
         cell.device = device.name;
-        if (activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_))
-            cell.stack = project.layoutCells.at(activeLayoutId_).stack;
         syncLayoutDeviceParameters(project, cell, device);
-        if (values) {
-            for (auto &parameter : cell.parameters) {
-                if (const auto value = values->find(parameter.name); value != values->end())
-                    parameter.value = value->second;
-            }
+        for (auto &parameter : cell.parameters) {
+            if (const auto value = wanted.find(parameter.name); value != wanted.end())
+                parameter.value = value->second;
         }
         if (geometry)
             applyLayoutDeviceShapes(project, cell, library, geometry->shapes, geometry->ports);
@@ -3519,7 +3686,10 @@ class DocumentWindow : public QMainWindow {
             statusBar()->showMessage(QStringLiteral("Select a device in the Devices tab first"));
             return;
         }
-        if (project_->project().layoutCells.empty()) {
+        const auto editableLayout =
+            std::find_if(project_->project().layoutCells.begin(), project_->project().layoutCells.end(),
+                         [](const auto &entry) { return !entry.second.library; });
+        if (editableLayout == project_->project().layoutCells.end()) {
             QMessageBox::information(this, QStringLiteral("Place Device"),
                                      QStringLiteral("Create a layout cell before placing a device."));
             return;
@@ -3527,13 +3697,21 @@ class DocumentWindow : public QMainWindow {
         if (!layoutDevicesPanel_)
             return;
         auto activeId = activeLayoutId_;
-        if (!project_->project().layoutCells.contains(activeId))
-            activeId = project_->project().layoutCells.begin()->first;
+        if (!project_->project().layoutCells.contains(activeId) || project_->project().layoutCells.at(activeId).library)
+            activeId = editableLayout->first;
         if (project_->project().layoutCells.at(activeId).library) {
             statusBar()->showMessage(QStringLiteral("Library cells are read-only"));
             return;
         }
-        const auto bounds = selectedLayoutDevice_->bounds;
+        const auto projectDevice = layoutDevicesPanel_->projectCellForDevice(selectedLayoutDevice_);
+        auto bounds = selectedLayoutDevice_->bounds;
+        if (projectDevice && selectedProjectDevicePreview_.bounds.isValid()) {
+            const auto modelBounds = selectedProjectDevicePreview_.bounds;
+            bounds = ice::Rect{static_cast<ice::Coordinate>(std::lround(modelBounds.x())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.y())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.width())),
+                               static_cast<ice::Coordinate>(std::lround(modelBounds.height()))};
+        }
         const qreal centerX = bounds.valid() ? bounds.x + bounds.width / 2.0 : 0.0;
         const qreal centerY = bounds.valid() ? bounds.y + bounds.height / 2.0 : 0.0;
         const auto x = static_cast<ice::Coordinate>(std::lround(position.x() - centerX));
@@ -3543,7 +3721,8 @@ class DocumentWindow : public QMainWindow {
         std::string placedName;
         try {
             project_->execute("place layout device", [&](ice::Project &project) {
-                const auto childId = createLayoutDeviceInstanceCell(project, *selectedLayoutDevice_, library);
+                const auto childId =
+                    projectDevice ? *projectDevice : ensureLayoutDeviceCell(project, *selectedLayoutDevice_, library);
                 if (childId == activeId)
                     return;
                 auto &cell = project.layoutCells.at(activeId);
@@ -3569,8 +3748,13 @@ class DocumentWindow : public QMainWindow {
             project_->setLastHistoryLabel("Placed layout device " + selectedLayoutDevice_->name + " " + placedName);
             activeLayoutId_ = activeId;
             refreshProject();
-            if (layoutPropertiesPanel_ && layoutLeftTabs_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_)
-                layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            if (layoutPropertiesPanel_ && layoutLeftTabs_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+                if (projectDevice && project_->project().layoutCells.contains(*projectDevice))
+                    layoutPropertiesPanel_->setLayoutCell(project_->project().layoutCells.at(*projectDevice),
+                                                          selectedProjectDevicePreview_);
+                else
+                    layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            }
             statusBar()->showMessage(
                 QStringLiteral("Placed %1").arg(QString::fromStdString(selectedLayoutDevice_->name)));
         } catch (const ice::ProjectError &error) {
@@ -3907,8 +4091,8 @@ class DocumentWindow : public QMainWindow {
                 auto cell = project.layoutCells.find(cellId);
                 if (cell == project.layoutCells.end() || cell->second.library)
                     return;
-                const auto childId = createLayoutDeviceInstanceCell(project, deviceCopy, library, &values,
-                                                                    geometry ? &*geometry : nullptr);
+                const auto childId =
+                    ensureLayoutDeviceCell(project, deviceCopy, library, &values, geometry ? &*geometry : nullptr);
                 if (childId == cellId)
                     return;
                 auto &layout = cell->second;
@@ -4934,6 +5118,8 @@ class DocumentWindow : public QMainWindow {
 
         std::set<ice::ObjectId> touchedDevices;
         for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (!device.placeholder)
+                continue;
             QPainterPath box;
             box.addRect(layoutPlannedDeviceSceneRect(device));
             if (touches(box))
@@ -5834,6 +6020,8 @@ class DocumentWindow : public QMainWindow {
             if (spec.pdk) {
                 const auto technology = spec.pdk->id.empty() ? spec.name : spec.pdk->id;
                 addPdkLayers(project, *spec.pdk, technology);
+                if (spec.pdk->manufacturingGrid > 0 && project.grid == 1)
+                    project.grid = spec.pdk->manufacturingGrid;
             }
             if (project.schematicCells.empty()) {
                 const auto schematic =
@@ -5843,6 +6031,57 @@ class DocumentWindow : public QMainWindow {
         });
         refreshProject();
         statusBar()->showMessage(QStringLiteral("%1 technology activated").arg(displayName));
+    }
+
+    ice::LayoutPreviewModel projectLayoutDevicePreviewModel(const ice::LayoutCell &cell) {
+        if (!project_)
+            return {};
+        const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        if (cell.reference) {
+            auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack,
+                                                          root, root / "build" / "layout-references");
+            if (!loaded.model.empty())
+                return loaded.model;
+        }
+        return ice::buildLayoutCellPreviewModel(project_->project(), cell, true, true, false);
+    }
+
+    std::optional<ice::LayoutPreviewModel> referencePreviewForCell(const ice::LayoutCell &cell) {
+        if (!cell.reference)
+            return std::nullopt;
+        auto model = projectLayoutDevicePreviewModel(cell);
+        if (model.empty())
+            return std::nullopt;
+        return model;
+    }
+
+    void ensureReferencePreview(const ice::LayoutCell &cell) {
+        if (!cell.reference || projectPath_.isEmpty())
+            return;
+        const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        const auto source = std::filesystem::path(cell.reference->path).is_absolute()
+                                ? std::filesystem::path(cell.reference->path)
+                                : root / cell.reference->path;
+        std::error_code status;
+        const auto stamp = std::filesystem::is_regular_file(source, status) && !status
+                               ? std::filesystem::last_write_time(source, status).time_since_epoch().count()
+                               : 0;
+        std::ostringstream key;
+        key << cell.reference->path << "|" << cell.reference->format << "|" << cell.reference->topCell << "|" << stamp;
+        const auto keyText = QString::fromStdString(key.str());
+        if (referencePreviewKey_ == keyText)
+            return;
+        referencePreviewKey_ = keyText;
+        auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack, root,
+                                                      root / "build" / "layout-references");
+        if (loaded.model.empty()) {
+            referencePreviewModel_.reset();
+            referencePreviewError_ =
+                loaded.error.isEmpty() ? QStringLiteral("Unable to load the layout reference.") : loaded.error;
+        } else {
+            referencePreviewModel_ = std::move(loaded.model);
+            referencePreviewError_.clear();
+        }
     }
 
     void refreshLayout() {
@@ -5862,18 +6101,37 @@ class DocumentWindow : public QMainWindow {
                 refreshLayoutProperties();
                 return;
             }
-            cellIt = project.layoutCells.begin();
+            const auto editable = std::find_if(project.layoutCells.begin(), project.layoutCells.end(),
+                                               [](const auto &entry) { return !entry.second.library; });
+            if (editable == project.layoutCells.end()) {
+                // Imported digital devices are library cells. Do not present
+                // one as the active user layout; keep them in Devices instead.
+                const auto &deviceCell = project.layoutCells.begin()->second;
+                if (layoutDevicesPanel_) {
+                    layoutDevicesPanel_->setPdk(deviceCell.pdk);
+                    layoutDevicesPanel_->setProjectDevices(project, deviceCell.pdk);
+                }
+                if (layersPanel_)
+                    layersPanel_->setProject(project, 0);
+                activeLayoutId_ = 0;
+                if (layoutPropertiesPanel_)
+                    layoutPropertiesPanel_->clearSelection();
+                return;
+            }
+            cellIt = editable;
             activeLayoutId_ = cellIt->first;
         }
         if (activeLayoutPathCellId_ != activeLayoutId_) {
             finishActiveLayoutPath();
             activeLayoutPathCellId_ = activeLayoutId_;
         }
-        if (layoutDevicesPanel_)
+        if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
+            layoutDevicesPanel_->setProjectDevices(project, cellIt->second.pdk);
+        }
         if (layersPanel_)
             layersPanel_->setProject(project, activeLayoutId_);
-        const bool readOnly = cellIt->second.library;
+        const bool readOnly = cellIt->second.library || cellIt->second.readOnly;
         if (layoutPlaceDeviceTool_)
             layoutPlaceDeviceTool_->setEnabled(!readOnly);
         if (layoutMoveTool_)
@@ -5924,6 +6182,58 @@ class DocumentWindow : public QMainWindow {
             const auto layer = project.layers.find(layerId);
             return layer == project.layers.end() || layer->second.visible;
         };
+        if (cellIt->second.reference) {
+            ensureReferencePreview(cellIt->second);
+            if (referencePreviewModel_) {
+                ice::LayoutRenderer::PaintOptions options;
+                for (const auto &[id, layer] : project.layers) {
+                    if (layer.visible)
+                        continue;
+                    ice::LayoutPreviewLayer previewLayer;
+                    previewLayer.id = id;
+                    previewLayer.number = layer.number;
+                    previewLayer.datatype = layer.datatype;
+                    previewLayer.name = QString::fromStdString(layer.name);
+                    options.hiddenLayers.insert(ice::layoutPreviewLayerKey(previewLayer));
+                }
+                // Layers without a matching PDK definition cannot be toggled
+                // from the Layers panel. Keep them hidden instead of leaking
+                // stray marker/label layers into the drawing.
+                for (const auto &shape : referencePreviewModel_->shapes) {
+                    if (shape.layer.id == 0)
+                        options.hiddenLayers.insert(ice::layoutPreviewLayerKey(shape.layer));
+                }
+                for (const auto &port : referencePreviewModel_->ports) {
+                    if (port.layer.id == 0)
+                        options.hiddenLayers.insert(ice::layoutPreviewLayerKey(port.layer));
+                }
+                auto *item = createLayoutPreviewItem(*referencePreviewModel_, styles, deviceStyles, options);
+                layoutCanvas_->scene()->addItem(item);
+                layoutCanvas_->scene()->setSceneRect(layoutCanvas_->scene()->itemsBoundingRect());
+                layoutCanvas_->refreshInteractionState();
+                if (!layoutViewInitialized_) {
+                    layoutCanvas_->fitToContent();
+                    layoutViewInitialized_ = true;
+                }
+                refreshLayoutProperties();
+                return;
+            }
+            auto *text = layoutCanvas_->scene()->addText(referencePreviewError_.isEmpty()
+                                                             ? QStringLiteral("Unable to load the layout reference.")
+                                                             : referencePreviewError_);
+            auto font = text->font();
+            font.setPointSize(font.pointSize() + 1);
+            text->setFont(font);
+            text->setDefaultTextColor(palette().color(QPalette::Text));
+            layoutCanvas_->scene()->setSceneRect(
+                layoutCanvas_->scene()->itemsBoundingRect().adjusted(-40, -40, 40, 40));
+            if (!layoutViewInitialized_) {
+                layoutCanvas_->fitToContent();
+                layoutViewInitialized_ = true;
+            }
+            refreshLayoutProperties();
+            return;
+        }
         std::map<ice::ObjectId, QGraphicsItemGroup *> textPolygonItems;
         for (const auto &[id, shape] : cellIt->second.shapes) {
             if (!shape.isPath() && !layerVisible(shape.layer))
@@ -6146,8 +6456,19 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->scene()->addItem(group);
             const ice::Transform transform{instance.x, instance.y, instance.orientation};
 
-            auto childModel =
-                ice::buildLayoutCellPreviewModel(project, childIt->second, true, false, false, {transform});
+            ice::LayoutPreviewModel childModel;
+            if (childIt->second.reference) {
+                ice::LayoutCell wrapper;
+                wrapper.id = 0;
+                wrapper.instances.emplace(0, ice::LayoutInstance{0, childIt->first, instance.name, instance.x,
+                                                                 instance.y, instance.orientation});
+                childModel = ice::buildLayoutCellPreviewModel(
+                    project, wrapper, true, false, false, {},
+                    [this](const ice::LayoutCell &referenceCell) { return referencePreviewForCell(referenceCell); });
+            } else {
+                childModel =
+                    ice::buildLayoutCellPreviewModel(project, childIt->second, true, false, false, {transform});
+            }
             std::erase_if(childModel.shapes, [&](const ice::LayoutPreviewShape &shape) {
                 return shape.layer.id != 0 && !layerVisible(shape.layer.id);
             });
@@ -6236,6 +6557,8 @@ class DocumentWindow : public QMainWindow {
                 item->setToolTip(QString::fromStdString(net->second.name));
         }
         for (const auto &[deviceId, device] : cellIt->second.plannedDevices) {
+            if (!device.placeholder)
+                continue;
             layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
                                                                           plannedRect(device), readOnly));
         }
@@ -6256,6 +6579,8 @@ class DocumentWindow : public QMainWindow {
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->clearDeviceSelection();
         selectedLayoutDevice_ = nullptr;
+        selectedProjectDeviceCell_ = 0;
+        selectedProjectDevicePreview_ = {};
         if (layoutCanvas_)
             layoutCanvas_->setDevicePreview(nullptr);
     }
@@ -6707,8 +7032,24 @@ class DocumentWindow : public QMainWindow {
                 layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
             return;
         }
+        if (project_) {
+            const auto activeIt = project_->project().layoutCells.find(activeLayoutId_);
+            if (activeIt != project_->project().layoutCells.end() && activeIt->second.reference) {
+                ensureReferencePreview(activeIt->second);
+                if (referencePreviewModel_)
+                    layoutPropertiesPanel_->setLayoutCell(activeIt->second, *referencePreviewModel_);
+                if (bringToFront && layoutRightTabs_)
+                    layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                return;
+            }
+        }
         const auto previewModelFor = [&](const ice::LayoutCell &cell) {
-            auto model = ice::buildLayoutCellPreviewModel(project_->project(), cell);
+            auto model = cell.reference
+                             ? projectLayoutDevicePreviewModel(cell)
+                             : ice::buildLayoutCellPreviewModel(project_->project(), cell, true, true, true, {},
+                                                                [this](const ice::LayoutCell &referenceCell) {
+                                                                    return referencePreviewForCell(referenceCell);
+                                                                });
             const auto layerVisible = [&](ice::ObjectId layerId) {
                 const auto layer = project_->project().layers.find(layerId);
                 return layer == project_->project().layers.end() || layer->second.visible;
@@ -6857,7 +7198,13 @@ class DocumentWindow : public QMainWindow {
         }
         if (layoutLeftTabs_ && layoutDevicesPanel_ && layoutLeftTabs_->currentWidget() == layoutDevicesPanel_ &&
             selectedLayoutDevice_) {
-            layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            if (selectedProjectDeviceCell_ != 0 && project_ &&
+                project_->project().layoutCells.contains(selectedProjectDeviceCell_)) {
+                layoutPropertiesPanel_->setLayoutCell(project_->project().layoutCells.at(selectedProjectDeviceCell_),
+                                                      selectedProjectDevicePreview_);
+            } else {
+                layoutPropertiesPanel_->setLayoutDevice(selectedLayoutDevice_);
+            }
             return;
         }
         if (!project_) {
@@ -8214,6 +8561,8 @@ class DocumentWindow : public QMainWindow {
             simulationPanel_->selectReport(id);
         if (simulationRightStack_ && reportsView_)
             simulationRightStack_->setCurrentWidget(reportsView_);
+        if (scriptTabs_)
+            scriptTabs_->setCurrentIndex(0);
         if (documents_ && simulationPage_)
             documents_->setCurrentWidget(simulationPage_);
         selectingReport_ = false;
@@ -8248,10 +8597,11 @@ class DocumentWindow : public QMainWindow {
             scriptGraphTabs_->removeTab(0);
             delete widget;
         }
-        scriptGraphTabs_->hide();
+        if (scriptGraphViewStack_)
+            scriptGraphViewStack_->setCurrentIndex(0);
     }
 
-    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs) {
+    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false) {
         if (!scriptGraphTabs_)
             return;
         clearScriptGraphs();
@@ -8281,10 +8631,13 @@ class DocumentWindow : public QMainWindow {
             scriptGraphTabs_->addTab(plot, QString::fromStdString(graph.name));
         }
         if (scriptGraphTabs_->count() > 0) {
-            scriptGraphTabs_->show();
             scriptGraphTabs_->setCurrentIndex(0);
-            if (scriptViewSplitter_)
-                scriptViewSplitter_->setSizes({600, 300});
+            if (scriptGraphViewStack_)
+                scriptGraphViewStack_->setCurrentIndex(1);
+            if (reveal && scriptTabs_ && scriptGraphsPage_)
+                scriptTabs_->setCurrentWidget(scriptGraphsPage_);
+        } else if (scriptGraphViewStack_) {
+            scriptGraphViewStack_->setCurrentIndex(0);
         }
     }
 
@@ -8391,7 +8744,7 @@ class DocumentWindow : public QMainWindow {
                 const auto graphs =
                     ice::parseSimulationScriptGraphs(QString::fromUtf8(graphFile.readAll()).toStdString());
                 if (!graphs.empty())
-                    displayScriptGraphs(graphs);
+                    displayScriptGraphs(graphs, true);
             } catch (const ice::ProjectError &error) {
                 appendReportMessage(QStringLiteral("[Simulation script] %1: unable to read graphs: %2")
                                         .arg(reportName, QString::fromStdString(error.what())));
@@ -10350,9 +10703,15 @@ class DocumentWindow : public QMainWindow {
                 const auto procedural = project_->project().proceduralLayouts.find(id);
                 if (procedural != project_->project().proceduralLayouts.end()) {
                     const bool conflict = conflictedProceduralFiles_.contains(id);
-                    layoutCellTabs_->setTabText(index,
-                                                fileTabLabel(QString::fromStdString(procedural->second.name),
-                                                             QStringLiteral("py"), layoutFileDirty(id), conflict));
+                    auto label = fileTabLabel(QString::fromStdString(procedural->second.name), QStringLiteral("py"),
+                                              layoutFileDirty(id), conflict);
+                    const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(procedural->second);
+                    if (needsRegeneration)
+                        label.prepend(QStringLiteral("↻ "));
+                    layoutCellTabs_->setTabText(index, label);
+                    layoutCellTabs_->setTabToolTip(
+                        index, QStringLiteral("Procedural layout (Python script)") +
+                                   (needsRegeneration ? QStringLiteral(" · regenerate needed") : QString{}));
                     continue;
                 }
                 const auto cell = project_->project().layoutCells.find(id);
@@ -10472,11 +10831,16 @@ class DocumentWindow : public QMainWindow {
                     if (!openLayoutTabs_.contains(id))
                         continue;
                     const auto index = layoutCellTabs_->count();
-                    layoutCellTabs_->addTab(new QWidget,
-                                            fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
-                                                         layoutFileDirty(id), conflictedProceduralFiles_.contains(id)));
+                    auto label = fileTabLabel(QString::fromStdString(procedural.name), QStringLiteral("py"),
+                                              layoutFileDirty(id), conflictedProceduralFiles_.contains(id));
+                    const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(procedural);
+                    if (needsRegeneration)
+                        label.prepend(QStringLiteral("↻ "));
+                    layoutCellTabs_->addTab(new QWidget, label);
                     layoutCellTabs_->tabBar()->setTabData(index, QVariant::fromValue<qulonglong>(id));
-                    layoutCellTabs_->setTabToolTip(index, QStringLiteral("Procedural layout (Python script)"));
+                    layoutCellTabs_->setTabToolTip(
+                        index, QStringLiteral("Procedural layout (Python script)") +
+                                   (needsRegeneration ? QStringLiteral(" · regenerate needed") : QString{}));
                 }
                 for (const auto &[id, cell] : project.layoutCells) {
                     if (!openLayoutTabs_.contains(id))
@@ -11508,11 +11872,14 @@ class DocumentWindow : public QMainWindow {
         auto *newAction = addCommand(QStringLiteral("New Project"), QKeySequence::New);
         auto *openAction = addCommand(QStringLiteral("Open Project"), QKeySequence::Open);
         auto *reloadProjectAction = addCommand(QStringLiteral("Reload Project from Disk"));
-        auto *saveAction = addCommand(QStringLiteral("Save Project"), QKeySequence::Save);
+        auto *saveAction = addCommand(QStringLiteral("Save"), QKeySequence::Save);
+        auto *saveProjectAction =
+            addCommand(QStringLiteral("Save Whole Project"), QKeySequence(QStringLiteral("Ctrl+Shift+S")));
         fileMenu->addAction(newAction);
         fileMenu->addAction(openAction);
         fileMenu->addAction(reloadProjectAction);
         fileMenu->addAction(saveAction);
+        fileMenu->addAction(saveProjectAction);
         fileMenu->addSeparator();
         auto *openLayoutAction = addCommand(QStringLiteral("Open GDS/OASIS Layout"));
         auto *saveLayoutAction = addCommand(QStringLiteral("Save GDS/OASIS Layout"));
@@ -11648,7 +12015,8 @@ class DocumentWindow : public QMainWindow {
         connect(newAction, &QAction::triggered, this, &DocumentWindow::newProject);
         connect(openAction, &QAction::triggered, this, &DocumentWindow::openProject);
         connect(reloadProjectAction, &QAction::triggered, this, [this] { reloadProjectFromDisk(true); });
-        connect(saveAction, &QAction::triggered, this, &DocumentWindow::saveProject);
+        connect(saveAction, &QAction::triggered, this, &DocumentWindow::saveCurrentFile);
+        connect(saveProjectAction, &QAction::triggered, this, &DocumentWindow::saveProject);
         connect(openLayoutAction, &QAction::triggered, this, &DocumentWindow::openLayoutInterchange);
         connect(saveLayoutAction, &QAction::triggered, this, &DocumentWindow::saveLayoutInterchange);
         connect(closeAction, &QAction::triggered, this, &DocumentWindow::closeProject);
@@ -11955,10 +12323,13 @@ class DocumentWindow : public QMainWindow {
             if (!hasOpenLayouts) {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
                 if (project_) {
-                    for (const auto &[id, layout] : project_->project().proceduralLayouts)
-                        candidates.emplace_back(id, fileTabLabel(QString::fromStdString(layout.name),
-                                                                 QStringLiteral("py"), layoutFileDirty(id),
-                                                                 conflictedProceduralFiles_.contains(id)));
+                    for (const auto &[id, layout] : project_->project().proceduralLayouts) {
+                        auto label = fileTabLabel(QString::fromStdString(layout.name), QStringLiteral("py"),
+                                                  layoutFileDirty(id), conflictedProceduralFiles_.contains(id));
+                        if (ice::proceduralLayoutNeedsRegeneration(layout))
+                            label.prepend(QStringLiteral("↻ "));
+                        candidates.emplace_back(id, label);
+                    }
                     for (const auto &[id, cell] : project_->project().layoutCells)
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
                                                                  QStringLiteral("icelay"), layoutFileDirty(id),
@@ -12146,6 +12517,8 @@ class DocumentWindow : public QMainWindow {
         layoutCanvasPage_ = makeEditor(QStringLiteral("Layout editor"), true);
         proceduralEditor_ = new ProceduralLayoutEditor;
         proceduralEditor_->setOnScriptEdited([this](const QString &script) { onProceduralScriptEdited(script); });
+        proceduralEditor_->setOnParameterChanged(
+            [this](const QString &name, const QString &value) { onProceduralParameterChanged(name, value); });
         proceduralEditor_->setOnRegenerate([this] {
             if (activeProceduralLayoutId_ != 0)
                 regenerateProceduralLayout(activeProceduralLayoutId_);
@@ -12298,6 +12671,23 @@ class DocumentWindow : public QMainWindow {
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setOnDeviceSelected([this](const ice::LayoutDeviceCell *cell) {
                 selectedLayoutDevice_ = cell;
+                selectedProjectDeviceCell_ = 0;
+                selectedProjectDevicePreview_ = {};
+                if (const auto projectCell = layoutDevicesPanel_->projectCellForDevice(cell);
+                    projectCell && project_ && project_->project().layoutCells.contains(*projectCell)) {
+                    const auto &layoutCell = project_->project().layoutCells.at(*projectCell);
+                    selectedProjectDeviceCell_ = *projectCell;
+                    selectedProjectDevicePreview_ = projectLayoutDevicePreviewModel(layoutCell);
+                    if (layoutCanvas_)
+                        layoutCanvas_->setDevicePreviewModel(selectedProjectDevicePreview_);
+                    if (layoutPropertiesPanel_ && layoutLeftTabs_ &&
+                        layoutLeftTabs_->currentWidget() == layoutDevicesPanel_) {
+                        layoutPropertiesPanel_->setLayoutCell(layoutCell, selectedProjectDevicePreview_);
+                        if (layoutRightTabs_)
+                            layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                    }
+                    return;
+                }
                 if (layoutCanvas_)
                     layoutCanvas_->setDevicePreview(cell);
                 if (layoutPropertiesPanel_ && layoutLeftTabs_ &&
@@ -13008,15 +13398,38 @@ class DocumentWindow : public QMainWindow {
         reportCodeEditor_->setTabStopDistance(reportCodeEditor_->fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
         reportCodeEditor_->setPlaceholderText(QStringLiteral("Select a simulation script to edit its Python source."));
         reportHighlighter_ = new PythonSyntaxHighlighter(reportCodeEditor_->document());
-        scriptViewSplitter_ = new QSplitter(Qt::Vertical);
-        scriptViewSplitter_->addWidget(reportCodeEditor_);
+
+        scriptTabs_ = new QTabWidget;
+        scriptTabs_->setDocumentMode(true);
+
+        auto *filePage = new QWidget;
+        auto *fileLayout = new QVBoxLayout(filePage);
+        fileLayout->setContentsMargins(0, 0, 0, 0);
+        fileLayout->addWidget(reportCodeEditor_, 1);
+        scriptTabs_->addTab(filePage, QStringLiteral("File"));
+
+        scriptGraphsPage_ = new QWidget;
+        auto *scriptGraphsLayout = new QVBoxLayout(scriptGraphsPage_);
+        scriptGraphsLayout->setContentsMargins(0, 0, 0, 0);
+        scriptGraphViewStack_ = new QStackedWidget;
+
+        auto *graphPlaceholder = new QWidget;
+        auto *graphPlaceholderLayout = new QVBoxLayout(graphPlaceholder);
+        graphPlaceholderLayout->setContentsMargins(12, 12, 12, 12);
+        auto *graphPlaceholderLabel = new QLabel(QStringLiteral("Run the simulation script to generate graphs."));
+        graphPlaceholderLabel->setAlignment(Qt::AlignCenter);
+        graphPlaceholderLabel->setWordWrap(true);
+        graphPlaceholderLabel->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        graphPlaceholderLayout->addWidget(graphPlaceholderLabel, 1);
+
         scriptGraphTabs_ = new QTabWidget;
         scriptGraphTabs_->setDocumentMode(true);
-        scriptGraphTabs_->hide();
-        scriptViewSplitter_->addWidget(scriptGraphTabs_);
-        scriptViewSplitter_->setStretchFactor(0, 3);
-        scriptViewSplitter_->setStretchFactor(1, 2);
-        reportsLayout->addWidget(scriptViewSplitter_, 1);
+        scriptGraphViewStack_->addWidget(graphPlaceholder);
+        scriptGraphViewStack_->addWidget(scriptGraphTabs_);
+        scriptGraphViewStack_->setCurrentWidget(graphPlaceholder);
+        scriptGraphsLayout->addWidget(scriptGraphViewStack_, 1);
+        scriptTabs_->addTab(scriptGraphsPage_, QStringLiteral("Graphs"));
+        reportsLayout->addWidget(scriptTabs_, 1);
         simulationRightStack_->addWidget(reportsView_);
 
         reportSaveTimer_ = new QTimer(this);
@@ -14290,6 +14703,11 @@ class DocumentWindow : public QMainWindow {
     SchematicCanvas *schematicCanvas_ = nullptr;
     LayoutCanvas *layoutCanvas_ = nullptr;
     bool layoutViewInitialized_ = false;
+    std::optional<ice::LayoutPreviewModel> referencePreviewModel_;
+    QString referencePreviewKey_;
+    QString referencePreviewError_;
+    ice::ObjectId selectedProjectDeviceCell_ = 0;
+    ice::LayoutPreviewModel selectedProjectDevicePreview_;
     QTabWidget *simulationTabs_ = nullptr;
     QPlainTextEdit *simulationNetlist_ = nullptr;
     QWidget *simulationTestbenchPage_ = nullptr;
@@ -14309,7 +14727,9 @@ class DocumentWindow : public QMainWindow {
     QWidget *simulationGraphsPage_ = nullptr;
     QStackedWidget *simulationRightStack_ = nullptr;
     QWidget *reportsView_ = nullptr;
-    QSplitter *scriptViewSplitter_ = nullptr;
+    QTabWidget *scriptTabs_ = nullptr;
+    QWidget *scriptGraphsPage_ = nullptr;
+    QStackedWidget *scriptGraphViewStack_ = nullptr;
     QTabWidget *scriptGraphTabs_ = nullptr;
     QLabel *reportTitleLabel_ = nullptr;
     QPlainTextEdit *reportCodeEditor_ = nullptr;

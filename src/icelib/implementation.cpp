@@ -329,6 +329,19 @@ std::string lowercase(std::string value) {
     return value;
 }
 
+std::string inferredOrfsPlatform(const std::string &pdk) {
+    const auto value = lowercase(pdk);
+    if (value.find("gf180") != std::string::npos)
+        return "gf180";
+    if (value.find("sky130") != std::string::npos)
+        return "sky130hd";
+    if (value.find("nangate45") != std::string::npos)
+        return "nangate45";
+    if (value.find("asap7") != std::string::npos)
+        return "asap7";
+    return {};
+}
+
 std::filesystem::path implementationOrfsRoot() {
     for (const auto *name : {"ICE_OPENROAD_FLOW_SCRIPTS", "OPENROAD_FLOW_SCRIPTS", "ORFS_ROOT"}) {
         if (const auto *value = std::getenv(name); value && *value) {
@@ -744,6 +757,7 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
     platform.techLef = resolve(files->techLef);
     platform.cellLef = resolve(files->cellLef);
     platform.gds = resolve(files->gds);
+    platform.gdsLayerMap = resolve(files->layerMap);
     if (!platform.gds.empty())
         platform.gdsFiles.push_back(platform.gds);
     for (const auto &[corner, paths] : files->liberty) {
@@ -915,13 +929,20 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
                             platform.rcxRules = *found;
                     }
                 }
-                if (platform.gdsFiles.empty()) {
-                    const auto gdsDirectory = platformDirectory / "gds";
-                    auto preferredTrack = lowercase(implementation.orfsTrackOption);
-                    if (preferredTrack.empty() && implementation.orfsPlatform == "gf180")
-                        preferredTrack = "9t";
-                    platform.gdsFiles = collectGdsFiles(gdsDirectory, preferredTrack);
-                }
+            }
+        }
+    }
+    if (platform.gdsFiles.empty()) {
+        const auto orfsPlatform =
+            !implementation.orfsPlatform.empty() ? implementation.orfsPlatform : inferredOrfsPlatform(platform.pdk);
+        if (!orfsPlatform.empty()) {
+            const auto orfsRoot = implementationOrfsRoot();
+            if (!orfsRoot.empty()) {
+                const auto platformDirectory = orfsRoot / "flow" / "platforms" / orfsPlatform;
+                auto preferredTrack = lowercase(implementation.orfsTrackOption);
+                if (preferredTrack.empty() && orfsPlatform == "gf180")
+                    preferredTrack = "9t";
+                platform.gdsFiles = collectGdsFiles(platformDirectory / "gds", preferredTrack);
             }
         }
     }
@@ -949,6 +970,8 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
         for (const auto &path : filesForCorner)
             requireFile(path, "Liberty (" + corner + ")", true);
     requireFile(platform.gds, "GDS", false);
+    if (!platform.gdsLayerMap.empty())
+        requireFile(platform.gdsLayerMap, "GDS layer map", true);
     requireFile(platform.tapcellScript, "tapcell script", false);
     requireFile(platform.pdnScript, "PDN script", false);
     requireFile(platform.rcScript, "RC script", false);
@@ -972,6 +995,7 @@ json implementationPlatformJson(const ImplementationPlatform &platform) {
             {"tech_lef", platform.techLef.generic_string()},
             {"cell_lef", platform.cellLef.generic_string()},
             {"gds", platform.gds.generic_string()},
+            {"gds_layer_map", platform.gdsLayerMap.generic_string()},
             {"gds_files",
              [&] {
                  json files = json::array();
@@ -1546,6 +1570,9 @@ lef_files = [path for path in config.get("lefs", []) if path and os.path.isfile(
 if lef_files:
     options.lefdef_config.lef_files = lef_files
     options.lefdef_config.read_lef_with_def = True
+layer_map = config.get("layer_map", "")
+if layer_map and os.path.isfile(layer_map):
+    options.lefdef_config.map_file = layer_map
 
 layout = pya.Layout()
 layout.read(config["def"], options)
@@ -1643,6 +1670,7 @@ ImplementationGdsExport exportImplementationGds(ImplementationRun &run, const Im
     json config = {{"def", result.defPath.generic_string()},
                    {"design", run.config.top},
                    {"lefs", json::array({platform.techLef.generic_string(), platform.cellLef.generic_string()})},
+                   {"layer_map", platform.gdsLayerMap.generic_string()},
                    {"gds", json::array()},
                    {"out", result.path.generic_string()},
                    {"summary", summaryPath.generic_string()}};

@@ -8,6 +8,7 @@
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/plugins.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -182,6 +183,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
         "implementation/tech.lef",
         "implementation/cells.lef",
         "implementation/example.gds",
+        {},
         {{"tt", {"implementation/tt.lib"}}},
         {"Metal2"},
         {"Metal3"},
@@ -191,6 +193,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
         "implementation/pdn.tcl",
         {},
         {"FILL1"},
+        {},
     };
     pdk.stacks.push_back(stack);
     package.pdk = pdk;
@@ -346,11 +349,13 @@ ice::PackagePdkStackImplementation executableTestPlatformFiles() {
             "implementation/tech.lef",
             "implementation/cells.lef",
             "implementation/example.gds",
+            {},
             {{"tt", {"implementation/tt.lib"}}},
             {"Metal2"},
             {"Metal3"},
             "Metal1",
             "Metal3",
+            {},
             {},
             {},
             {},
@@ -715,6 +720,71 @@ END DESIGN
     std::filesystem::remove_all(root);
 }
 
+TEST_CASE("implementation import creates a native digital device") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-reference-test";
+    std::filesystem::remove_all(root);
+    const auto runDirectory = root / "build" / "impl" / "counter-1";
+    std::filesystem::create_directories(runDirectory / "final");
+    {
+        ice::Project source;
+        source.identity = "counter-source";
+        source.name = "counter-source";
+        const auto layer = ice::addLayer(source, "metal1", 34);
+        const auto sourceCell = ice::createLayoutCell(source, "counter");
+        ice::addRectangle(source, sourceCell, layer, ice::Rect{0, 0, 1000, 1000});
+        ice::LayoutInterchange::exportGds(source, sourceCell, runDirectory / "final" / "6_final.gds");
+    }
+
+    ice::Project project;
+    project.identity = "reference-test";
+    project.name = "reference-test";
+
+    ice::PackageSpec package;
+    package.name = "example.pkg";
+    package.version = "1.0.0";
+    package.pdk = ice::PackagePdk{};
+    package.pdk->id = "example.pdk";
+
+    ice::ImplementationRun run;
+    run.name = "counter";
+    run.directory = "build/impl/counter-1";
+    run.config.top = "counter";
+    run.config.pdk = "example.pdk";
+    run.config.stack = "";
+
+    const auto imported = ice::importImplementationLayout(project, run, package, root);
+    CHECK(imported.layout != 0);
+    CHECK(imported.referencePath.filename() == "6_final.gds");
+    const auto &cell = project.layoutCells.at(imported.layout);
+    CHECK(cell.readOnly);
+    CHECK(cell.library);
+    CHECK(cell.device == "digital:counter");
+    CHECK(!cell.reference.has_value());
+    CHECK(!cell.shapes.empty());
+    CHECK(cell.instances.empty());
+    CHECK(project.validate().empty());
+
+    project.save(root);
+    const auto loaded = ice::Project::load(root);
+    const auto loadedCell = loaded.layoutCells.find(imported.layout);
+    CHECK(loadedCell != loaded.layoutCells.end());
+    if (loadedCell != loaded.layoutCells.end()) {
+        CHECK(!loadedCell->second.reference.has_value());
+        CHECK(loadedCell->second.readOnly);
+        CHECK(loadedCell->second.library);
+        CHECK(loadedCell->second.device == "digital:counter");
+        CHECK(!loadedCell->second.shapes.empty());
+    }
+
+    std::filesystem::remove(root / "build" / "impl" / "counter-1" / "final" / "6_final.gds");
+    ice::Project missing;
+    missing.identity = "reference-missing";
+    missing.name = "reference-missing";
+    CHECK_THROWS_AS(ice::importImplementationLayout(missing, run, package, root), ice::ProjectError);
+
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("DEF import is numeric-locale independent") {
     struct LocaleGuard {
         std::string previous;
@@ -1026,6 +1096,86 @@ TEST_CASE("projects save as split directory files") {
     CHECK(ignoreText.find("scripts/") == std::string::npos);
     CHECK(ignoreText.find("build/") != std::string::npos);
 
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("single-cell saves do not overwrite renamed files") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-collision-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "single-cell-collision";
+    project.name = "single-cell-collision";
+    const auto renamed = ice::createSchematicCell(project, "alpha", "example.pdk");
+    project.save(root);
+
+    const auto read = [](const std::filesystem::path &path) {
+        std::ifstream stream(path);
+        return std::string((std::istreambuf_iterator<char>(stream)), {});
+    };
+    const auto oldPath = root / "sch" / "alpha.icesch";
+    project.schematicCells.at(renamed).name = "renamed";
+    CHECK(project.saveCellFile(renamed) == oldPath);
+
+    const auto replacement = ice::createSchematicCell(project, "alpha", "example.pdk");
+    const auto replacementPath = project.saveCellFile(replacement);
+    CHECK(replacementPath != oldPath);
+    CHECK(std::filesystem::is_regular_file(replacementPath));
+    CHECK(read(oldPath).find("renamed") != std::string::npos);
+    CHECK(read(replacementPath).find("\"alpha\"") != std::string::npos);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("project saves one cell file at a time") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-save-test";
+    std::filesystem::remove_all(root);
+
+    ice::Project project;
+    project.identity = "single-cell-save";
+    project.name = "single-cell-save";
+    const auto schematic = ice::createSchematicCell(project, "amp", "example.pdk");
+    const auto otherSchematic = ice::createSchematicCell(project, "power", "example.pdk");
+    const auto layout = ice::createLayoutCell(project, "top", "example.pdk");
+    const auto procedural = ice::createProceduralLayout(project, "scripted", "example.pdk");
+    project.save(root);
+
+    const auto read = [](const std::filesystem::path &path) {
+        std::ifstream stream(path);
+        return std::string((std::istreambuf_iterator<char>(stream)), {});
+    };
+    const auto otherPath = root / "sch" / "power.icesch";
+    const auto layoutPath = root / "lay" / "top.icelay";
+    const auto otherBefore = read(otherPath);
+    const auto layoutBefore = read(layoutPath);
+
+    project.schematicCells.at(schematic).name = "amp2";
+    const auto schematicPath = project.saveCellFile(schematic);
+    CHECK(schematicPath == root / "sch" / "amp.icesch");
+    CHECK(read(schematicPath).find("amp2") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+    CHECK(read(layoutPath) == layoutBefore);
+
+    project.layoutCells.at(layout).name = "top2";
+    const auto savedLayout = project.saveCellFile(layout);
+    CHECK(savedLayout == layoutPath);
+    CHECK(read(savedLayout).find("top2") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+    CHECK(read(root / "sch" / "amp.icesch").find("amp2") != std::string::npos);
+
+    project.proceduralLayouts.at(procedural).script = "layout.rectangle(0, 0, 10, 10)\n";
+    const auto savedProcedural = project.saveCellFile(procedural);
+    CHECK(std::filesystem::is_regular_file(savedProcedural));
+    CHECK(read(savedProcedural).find("procedural_layout") != std::string::npos);
+    CHECK(read(otherPath) == otherBefore);
+
+    // A single-file save must update the revision used by the next full save.
+    project.save(root);
+    CHECK(std::filesystem::is_regular_file(root / "sch" / "amp2.icesch"));
+    CHECK(!std::filesystem::exists(root / "sch" / "amp.icesch"));
+    CHECK(std::filesystem::is_regular_file(root / "lay" / "top2.icelay"));
+    CHECK(project.schematicCells.contains(otherSchematic));
+
+    CHECK_THROWS_AS(project.saveCellFile(999999), ice::ProjectError);
     std::filesystem::remove_all(root);
 }
 
@@ -1544,7 +1694,131 @@ TEST_CASE("PDK transistor netlist uses subcircuit calls") {
         joined += line + "\n";
 
     CHECK(joined.find("XM1 d g s b sg13_lv_nmos W=0.2u L=0.13u") != std::string::npos);
-    CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
+    // The IHP NPN subcircuit has three nodes, so no substrate node is appended
+    // for a symbol that does not declare one.
+    CHECK(joined.find("XQ1 c base e") != std::string::npos);
+    // npn13G2 is declared as ".subckt npn13G2 c b e bn" when the IHP package is
+    // installed, so the declared bulk node is emitted and grounded.
+    if (const auto nodes = ice::pdkSubcircuitNodes("ihp-sg13g2", "npn13G2")) {
+        CHECK(nodes->size() == 4);
+        CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
+    }
+}
+
+TEST_CASE("PDK bipolar subcircuits keep a declared substrate node") {
+    ice::Project project;
+    project.identity = "bjt-substrate";
+    project.name = "bjt-substrate";
+    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto addBjt = [&](const std::string &name, const std::string &symbolName,
+                            std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, symbolName);
+        for (const auto *pinName : pins)
+            cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+        const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, name, 0, 0);
+        for (const auto &pin : cell.symbols.at(symbolId).pins) {
+            const auto netId = project.nextId();
+            cell.nets.emplace(netId, ice::Net{netId, name + "_" + pin.name, {pin.id}});
+        }
+        cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_bjt_model"});
+    };
+
+    addBjt("Q1", "SKY130 NPN 5.5V", {"B", "C", "E", "S"});
+    addBjt("Q2", "SKY130 PNP 5.5V", {"B", "C", "E"});
+
+    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+    CHECK(joined.find("XQ1 Q1_C Q1_B Q1_E Q1_S sky130_bjt_model") != std::string::npos);
+    CHECK(joined.find("XQ2 Q2_C Q2_B Q2_E sky130_bjt_model") != std::string::npos);
+}
+
+TEST_CASE("MOS geometry follows the PDK scale option") {
+    ice::Project project;
+    project.identity = "mos-scale";
+    project.name = "mos-scale";
+    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto symbolId = ice::addSymbol(project, cellId, "SKY130 NMOS 1.8V");
+    for (const auto *pinName : {"D", "G", "S", "B"})
+        cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
+    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "M1", 0, 0);
+    for (const auto &pin : cell.symbols.at(symbolId).pins) {
+        const auto netId = project.nextId();
+        cell.nets.emplace(netId, ice::Net{netId, "n_" + pin.name, {pin.id}});
+    }
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_fd_pr__nfet_01v8"});
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "w", "10u"});
+    cell.instances.at(instanceId).parameters.push_back({project.nextId(), "l", "0.5u"});
+
+    const auto join = [](const std::vector<std::string> &lines) {
+        std::string joined;
+        for (const auto &line : lines)
+            joined += line + "\n";
+        return joined;
+    };
+    const auto netlist = [&](double scale) {
+        return join(ice::buildSchematicNetlist(project, cellId, nullptr, ice::SchematicNetlistMode::analog, scale));
+    };
+    // Without a scale option the value is emitted verbatim.
+    CHECK(netlist(1.0).find("W=10u L=0.5u") != std::string::npos);
+    // SKY130 model bins are selected with `.option scale=1u`, so the simulation
+    // netlist converts SI suffixes to bare micron numbers.
+    CHECK(netlist(1e-6).find("W=10 L=0.5") != std::string::npos);
+    // A bare number is already in netlist units (SKY130 writes "60" for 60 um)
+    // and must never be rescaled.
+    auto &parameters = cell.instances.at(instanceId).parameters;
+    parameters.at(1).value = "10";
+    parameters.at(2).value = "0.5";
+    CHECK(netlist(1e-6).find("W=10 L=0.5") != std::string::npos);
+}
+
+TEST_CASE("numbered port symbols still netlist as ports") {
+    ice::Project project;
+    project.identity = "numbered-ports";
+    project.name = "numbered-ports";
+    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto inputId = ice::addSymbol(project, cellId, "Input");
+    cell.symbols.at(inputId).pins.push_back({project.nextId(), "IN", 0, 0});
+    const auto secondId = ice::addSymbol(project, cellId, "Input 2");
+    cell.symbols.at(secondId).pins.push_back({project.nextId(), "IN", 0, 0});
+    const auto supplyPort = ice::addSchematicInstance(project, cellId, inputId, "VDD", 0, 0);
+    const auto groundPort = ice::addSchematicInstance(project, cellId, secondId, "VSS", 0, 0);
+    CHECK(supplyPort != 0);
+    CHECK(groundPort != 0);
+    const auto pinOf = [&](ice::ObjectId symbolId) { return cell.symbols.at(symbolId).pins.front().id; };
+    CHECK(cell.symbols.at(inputId).pins.front().id != cell.symbols.at(secondId).pins.front().id);
+    ice::addNet(project, cellId, "VDD", {pinOf(inputId), pinOf(secondId)});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    for (const auto &note : notes)
+        CHECK(note.find("unsupported symbol") == std::string::npos);
+}
+
+TEST_CASE("placing a symbol twice gives each instance its own pins") {
+    ice::Project project;
+    project.identity = "symbol-clone";
+    project.name = "symbol-clone";
+    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    auto &cell = project.schematicCells.at(cellId);
+
+    const auto symbolId = ice::addSymbol(project, cellId, "Resistor");
+    cell.symbols.at(symbolId).pins.push_back({project.nextId(), "1", 0, 0});
+    cell.symbols.at(symbolId).pins.push_back({project.nextId(), "2", 0, 0});
+    const auto first = ice::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
+    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "R2", 0, 100);
+    const auto firstSymbol = cell.instances.at(first).symbol;
+    const auto secondSymbol = cell.instances.at(second).symbol;
+    CHECK(firstSymbol != secondSymbol);
+    CHECK(cell.symbols.at(firstSymbol).pins.front().id != cell.symbols.at(secondSymbol).pins.front().id);
+    CHECK(cell.symbols.at(secondSymbol).name == "Resistor 2");
 }
 
 TEST_CASE("hierarchical schematic instances become subcircuits") {
@@ -1602,6 +1876,97 @@ TEST_CASE("hierarchical schematic instances become subcircuits") {
     CHECK(joined.find("X1 in out filter") != std::string::npos);
     CHECK(joined.find("V1 in out 1") != std::string::npos);
     CHECK(notes.empty());
+}
+
+TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
+    ice::Project project;
+    project.identity = "hierarchy-order";
+    project.name = "hierarchy-order";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    // Child ports in subcircuit order: A (y=100) then B (y=0).
+    const auto childId = ice::createSchematicCell(project, "block");
+    const auto inputA = addSymbol(childId, "Input", {"IN"});
+    const auto inputB = addSymbol(childId, "Input 2", {"IN"});
+    const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
+    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    project.schematicCells.at(childId)
+        .instances.at(childResistor)
+        .parameters.push_back({project.nextId(), "resistance", "1k"});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputA, 0), pinIdOf(childId, resistorId, 0)});
+    ice::addNet(project, childId, "", {pinIdOf(childId, inputB, 0), pinIdOf(childId, resistorId, 1)});
+
+    // The parent symbol declares its pins in the opposite order (B, A).
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockId = addSymbol(parentId, "block", {"B", "A"});
+    project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
+    const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
+    ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    project.schematicCells.at(parentId)
+        .instances.at(source)
+        .parameters.push_back({project.nextId(), "voltage", "1"});
+    ice::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
+    ice::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find(".subckt block A B") != std::string::npos);
+    CHECK(joined.find("R1 A B 1k") != std::string::npos);
+    // Port A is wired to "na" and port B to "nb" even though the symbol lists B first.
+    CHECK(joined.find("X1 na nb block") != std::string::npos);
+    CHECK(joined.find("X1 nb na block") == std::string::npos);
+    CHECK(notes.empty());
+}
+
+TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
+    ice::Project project;
+    project.identity = "hierarchy-pins";
+    project.name = "hierarchy-pins";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name, std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto childId = ice::createSchematicCell(project, "cell");
+    const auto inputB = addSymbol(childId, "Input", {"IN"});
+    const auto inputA = addSymbol(childId, "Input 2", {"IN"});
+    const auto outputId = addSymbol(childId, "Output", {"OUT"});
+    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    ice::addSchematicInstance(project, childId, outputId, "Y", 0, 50);
+
+    const auto pins = ice::hierarchicalSymbolPins(project.schematicCells.at(childId));
+    CHECK(pins.size() == 3);
+    if (pins.size() != 3)
+        return;
+    CHECK(pins[0].name == "A");
+    CHECK(pins[1].name == "B");
+    CHECK(pins[2].name == "Y");
+    CHECK(pins[0].direction == ice::PinDirection::left);
+    CHECK(pins[1].direction == ice::PinDirection::left);
+    CHECK(pins[2].direction == ice::PinDirection::right);
+    CHECK(pins[0].x < pins[2].x);
 }
 
 TEST_CASE("layout pins and nets round-trip with required metadata") {
@@ -1781,14 +2146,15 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     auto repositoryRoot = std::filesystem::temp_directory_path() / "ice-package-test";
     std::filesystem::remove_all(repositoryRoot);
     std::filesystem::create_directories(repositoryRoot / "example-lib");
-    std::filesystem::create_directories(repositoryRoot / "example-pdk" / "layout");
+    std::filesystem::create_directories(repositoryRoot / "example-pdk" / "technology");
     std::ofstream(repositoryRoot / "example-pdk/package.toml")
         << "[package]\nname = \"example.pdk\"\nversion = \"1.0.0\"\n\n[provides]\npdk = true\n"
            "\n[pdk]\ndisplay_name = \"Example PDK\"\ndefault_schematic = \"example_top\"\n"
-           "default_stack = \"base\"\n"
+           "default_stack = \"base\"\nmanufacturing_grid = 5\n"
            "\n[pdk.implementation]\nengine = \"openroad\"\nsynthesis = \"yosys\"\nmin_openroad = \"2.0\"\n"
            "site = \"example_site\"\ntech_lef = \"implementation/tech.lef\"\n"
-           "cell_lef = \"implementation/cells.lef\"\nrouting_min_layer = \"Metal1\"\n"
+           "cell_lef = \"implementation/cells.lef\"\ngds = \"implementation/example.gds\"\n"
+           "layer_map = \"implementation/layers.map\"\nrouting_min_layer = \"Metal1\"\n"
            "routing_max_layer = \"Metal2\"\n"
            "\n[pdk.implementation.liberty]\ntt = [\"implementation/tt.lib\"]\n"
            "\n[pdk.implementation.orfs]\nplatform = \"example\"\nmetal_option = \"base\"\n"
@@ -1796,7 +2162,7 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
            "layers = [\"diff.drawing\", \"metal1.drawing\"]\n"
            "\n[[pdk.layer]]\nname = \"diff.drawing\"\nnumber = 65\ndatatype = 20\nminimum_width = 150\n"
            "\n[[pdk.layer]]\nname = \"metal1.drawing\"\nnumber = 68\ndatatype = 20\nminimum_width = 230\n";
-    std::ofstream(repositoryRoot / "example-pdk/layout/layer-styles.json")
+    std::ofstream(repositoryRoot / "example-pdk/technology/layer-styles.json")
         << R"({"schema_version": 1, "layers": [{"name": "diff", "color": "#123456", "pattern": "Diagonal /", "visible": true}]})";
     std::ofstream(repositoryRoot / "example-lib/package.toml")
         << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
@@ -1811,6 +2177,7 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
     if (pdk.pdk) {
         CHECK(pdk.pdk->displayName == "Example PDK");
         CHECK(pdk.pdk->defaultSchematic == "example_top");
+        CHECK(pdk.pdk->manufacturingGrid == 5);
         CHECK(pdk.pdk->layers.size() == 2);
         CHECK(pdk.pdk->layers.front().name == "diff.drawing");
         CHECK(pdk.pdk->layers.front().number == 65);
@@ -1840,6 +2207,8 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
                 CHECK(implementation.files->site == "example_site");
                 CHECK(implementation.files->techLef == "implementation/tech.lef");
                 CHECK(implementation.files->cellLef == "implementation/cells.lef");
+                CHECK(implementation.files->gds == "implementation/example.gds");
+                CHECK(implementation.files->layerMap == "implementation/layers.map");
                 CHECK(implementation.files->routingMinLayer == "Metal1");
                 CHECK(implementation.files->routingMaxLayer == "Metal2");
                 CHECK(implementation.files->liberty.at("tt").front() == "implementation/tt.lib");
@@ -2086,7 +2455,7 @@ TEST_CASE("package layout device libraries load") {
         {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos", 34, 0, 4},
     };
     for (const auto &package : packages) {
-        const auto path = repositoryRoot / package.directory / "layout" / "devices.json";
+        const auto path = repositoryRoot / package.directory / "layout" / "devices" / "index.json";
         if (!std::filesystem::is_regular_file(path))
             continue;
         const auto library = ice::LayoutDeviceLibrary::load(path);
@@ -2103,6 +2472,7 @@ TEST_CASE("package layout device libraries load") {
         const auto manifest = ice::PackageManager::readManifest(repositoryRoot / package.directory);
         CHECK(manifest.pdk.has_value());
         if (manifest.pdk) {
+            CHECK(manifest.pdk->manufacturingGrid == 5);
             const auto drawing =
                 std::find_if(manifest.pdk->layers.begin(), manifest.pdk->layers.end(), [&](const auto &layer) {
                     return layer.number == package.drawingLayer && layer.datatype == package.drawingDatatype;
@@ -2120,8 +2490,23 @@ TEST_CASE("package layout device libraries load") {
         if (device) {
             CHECK(device->generator.has_value());
             CHECK(!device->parameters.empty());
-            CHECK(!device->shapes.empty());
-            CHECK(device->bounds.valid());
+            CHECK(device->shapes.empty());
+        }
+        for (const auto &cell : library.cells) {
+            if (cell.generator) {
+                CHECK(cell.shapes.empty());
+            } else if (!cell.shapes.empty()) {
+                CHECK(cell.bounds.valid());
+            }
+        }
+        if (std::string(package.directory) == "ice-pkg-ihp-sg13g2") {
+            const auto *fixed = findCell("nmoscl_2");
+            CHECK(fixed != nullptr);
+            if (fixed) {
+                CHECK(!fixed->generator.has_value());
+                CHECK(!fixed->shapes.empty());
+                CHECK(fixed->bounds.valid());
+            }
         }
     }
 }
@@ -2261,6 +2646,169 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(project.validate().empty());
 }
 
+TEST_CASE("procedural layout runner generates richer geometry") {
+    ice::Project project;
+    project.identity = "procedural-runner";
+    project.name = "procedural-runner";
+    ice::createLayoutCell(project, "unit", ice::genericPdkId);
+    const auto script = R"PY(
+metal1 = layout.layer("Metal1", 1, 0)
+label = layout.layer("Metal1.label", 34, 10)
+body = metal1.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(1))
+body.name = "body"
+body.net = "VDD"
+poly = metal1.polygon([(0, 0), (1000, 0), (1000, 1000)])
+poly.name = "poly"
+trace = metal1.path([(0, 0), (4000, 0)], layout.um(0.5))
+trace.name = "trace"
+trace.net = "VDD"
+label.text(layout.um(0), layout.um(0), "M1", height=layout.um(0.5))
+layout.via("Via1", layout.um(1), layout.um(1), size=layout.um(0.2))
+layout.array("unit", (2, 1), (layout.um(5), 0), x=layout.um(6), y=0, name="array")
+layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um(1), net="VDD")
+)PY";
+    const auto proceduralId = ice::createProceduralLayout(project, "generated_top", ice::genericPdkId, script);
+    const auto &procedural = project.proceduralLayouts.at(proceduralId);
+    CHECK(project.layoutCells.at(procedural.generatedCell).readOnly);
+    CHECK(ice::proceduralLayoutNeedsRegeneration(procedural));
+
+    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(ice::proceduralScriptHash(procedural.script) == run.scriptHash);
+    CHECK(!project.proceduralLayouts.at(proceduralId).generatedScriptHash.empty());
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+
+    const auto &generated = project.layoutCells.at(procedural.generatedCell);
+    CHECK(generated.readOnly);
+    CHECK(generated.generatedBy == proceduralId);
+    CHECK(generated.shapes.size() == 5);
+    CHECK(generated.instances.size() == 2);
+    CHECK(generated.ports.size() == 1);
+    CHECK(generated.nets.size() == 1);
+    const auto hasLayer = [&](const std::string &name, int number, int datatype) {
+        return std::any_of(project.layers.begin(), project.layers.end(), [&](const auto &entry) {
+            return entry.second.name == name && entry.second.number == number && entry.second.datatype == datatype;
+        });
+    };
+    CHECK(hasLayer("Metal1", 1, 0));
+    CHECK(hasLayer("Metal1.label", 34, 10));
+    const auto hasNamedShape = [&](const std::string &name, bool expectNet) {
+        return std::any_of(generated.shapes.begin(), generated.shapes.end(), [&](const auto &entry) {
+            return entry.second.name == name &&
+                   (expectNet ? entry.second.net.has_value() : !entry.second.net.has_value());
+        });
+    };
+    CHECK(hasNamedShape("body", true));
+    CHECK(hasNamedShape("poly", false));
+    CHECK(hasNamedShape("trace", true));
+    CHECK(std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                      [](const auto &entry) { return entry.second.isPath() && entry.second.text.empty(); }));
+    CHECK(std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                      [](const auto &entry) { return entry.second.isText(); }));
+    CHECK(project.validate().empty());
+
+    const auto nestedId = ice::createProceduralLayout(project, "nested_top", ice::genericPdkId,
+                                                      "layout.instance(\"generated_top\", 0, 0, name=\"I1\")\n");
+    const auto nestedRun = ice::regenerateProceduralLayout(project, nestedId);
+    CHECK(nestedRun.ok);
+    if (nestedRun.ok) {
+        const auto &nested = project.layoutCells.at(project.proceduralLayouts.at(nestedId).generatedCell);
+        CHECK(nested.instances.size() == 1);
+        if (!nested.instances.empty())
+            CHECK(nested.instances.begin()->second.cell == procedural.generatedCell);
+    }
+
+    project.proceduralLayouts.at(proceduralId).script += "\nmetal1.rectangle(0, 0, 100, 100)\n";
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == 6);
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+
+    const auto shapeCount = project.layoutCells.at(procedural.generatedCell).shapes.size();
+    project.proceduralLayouts.at(proceduralId).script = "raise RuntimeError('boom')\n";
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(!run.ok);
+    CHECK(run.error.find("boom") != std::string::npos);
+    CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == shapeCount);
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+}
+
+TEST_CASE("procedural layout parameters drive regeneration") {
+    ice::Project project;
+    project.identity = "procedural-parameters";
+    project.name = "procedural-parameters";
+    const auto proceduralId = ice::createProceduralLayout(project, "parameter_top", ice::genericPdkId,
+                                                          "width = layout.um(layout.parameter(\"width\", \"2\"))\n"
+                                                          "metal = layout.layer(\"Metal1\", 1, 0)\n"
+                                                          "metal.rectangle(0, 0, width, 1000)\n");
+    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    const auto &procedural = project.proceduralLayouts.at(proceduralId);
+    CHECK(procedural.parameters.size() == 1);
+    if (!procedural.parameters.empty()) {
+        CHECK(procedural.parameters.front().name == "width");
+        CHECK(procedural.parameters.front().value == "2");
+    }
+    CHECK(!procedural.generatedParameterHash.empty());
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(procedural));
+    auto &generated = project.layoutCells.at(procedural.generatedCell);
+    CHECK(generated.shapes.size() == 1);
+    if (!generated.shapes.empty())
+        CHECK(generated.shapes.begin()->second.rectangle.width == 2000);
+
+    project.proceduralLayouts.at(proceduralId).parameters.front().value = "3";
+    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
+    CHECK(generated.shapes.size() == 1);
+    if (!generated.shapes.empty())
+        CHECK(generated.shapes.begin()->second.rectangle.width == 3000);
+}
+
+TEST_CASE("procedural layout boolean operations and holes") {
+    ice::Project project;
+    project.identity = "procedural-boolean";
+    project.name = "procedural-boolean";
+    const auto script = R"PY(
+metal = layout.layer("Metal1", 1, 0)
+a = metal.rectangle(0, 0, 1000, 1000)
+b = metal.rectangle(500, 500, 1000, 1000)
+layout.union("Metal1", a, b, name="union")
+metal.polygon(
+    [(0, 0), (4000, 0), (4000, 4000), (0, 4000)],
+    holes=[[(1000, 1000), (3000, 1000), (3000, 3000), (1000, 3000)]],
+    name="ring",
+)
+)PY";
+    const auto proceduralId = ice::createProceduralLayout(project, "boolean_top", ice::genericPdkId, script);
+    const auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
+    CHECK(!generated.shapes.empty());
+    const auto area = [](const std::vector<ice::LayoutPoint> &points) {
+        ice::Polygon polygon;
+        polygon.reserve(points.size());
+        for (const auto &point : points)
+            polygon.push_back({point.x, point.y});
+        return std::abs(static_cast<double>(polygonArea(polygon)));
+    };
+    double unionArea = 0.0;
+    double ringArea = 0.0;
+    for (const auto &[_, shape] : generated.shapes) {
+        CHECK(shape.rectangle.valid());
+        if (shape.name.starts_with("union"))
+            unionArea += area(shape.polygon);
+        if (shape.name.starts_with("ring"))
+            ringArea += area(shape.polygon);
+    }
+    CHECK(std::abs(unionArea - 1750000.0) < 1.0);
+    CHECK(std::abs(ringArea - 12000000.0) < 1.0);
+    CHECK(project.validate().empty());
+}
+
 TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {
     ice::GeometryKernel kernel;
     const ice::MultiPolygon contours = {
@@ -2386,14 +2934,15 @@ TEST_CASE("build info exposes a feature fingerprint") {
     CHECK(std::find(info.features.begin(), info.features.end(), "pdk_status") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "implementation_runs") != info.features.end());
     CHECK(std::find(info.features.begin(), info.features.end(), "implementation_openroad_plan") != info.features.end());
+    CHECK(std::find(info.features.begin(), info.features.end(), "project_migrate") == info.features.end());
 }
 
-TEST_CASE("generated AGENTS guidance is versioned and stable") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-agents-migration-test";
+TEST_CASE("generated AGENTS guidance is created once and preserved") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-agents-guidance-test";
     std::filesystem::remove_all(root);
     ice::Project project;
-    project.identity = "agents-migration";
-    project.name = "agents-migration";
+    project.identity = "agents-guidance";
+    project.name = "agents-guidance";
     project.save(root);
 
     const auto path = root / "AGENTS.md";
@@ -2402,25 +2951,29 @@ TEST_CASE("generated AGENTS guidance is versioned and stable") {
         return std::string((std::istreambuf_iterator<char>(input)), {});
     };
     const auto first = read();
-    CHECK(first.find("ICE generated guidance: begin (version 5)") != std::string::npos);
+    CHECK(first.find("ICE generated guidance: begin -->") != std::string::npos);
     CHECK(first.find("simulation_measure") != std::string::npos);
     CHECK(first.find("pdk_info") != std::string::npos);
     CHECK(first.find("ask the user which installed PDK to use") != std::string::npos);
-    CHECK(first.find("project_migrate") != std::string::npos);
+    CHECK(first.find("project_migrate") == std::string::npos);
     CHECK(first.find("zero crossings") != std::string::npos);
     CHECK(first.find("implementation_export_gds") != std::string::npos);
     CHECK(first.find("drc_run") != std::string::npos);
+    CHECK(first.find("layout_create_from_schematic") != std::string::npos);
+    CHECK(first.find("lvs_run") != std::string::npos);
+    CHECK(first.find("pex_run") != std::string::npos);
+    CHECK(first.find("mixed-signal GDS") != std::string::npos);
 
     project.save(root);
     CHECK(read() == first);
 
     std::ofstream(path) << "# Old project\n\nOld guidance.\n\nUser note.\n";
     project.save(root);
-    const auto migrated = read();
-    CHECK(migrated.find("Old guidance.") != std::string::npos);
-    CHECK(migrated.find("User note.") != std::string::npos);
-    CHECK(migrated.find("ICE generated guidance: begin") != std::string::npos);
-    CHECK(migrated.find("simulation_measure") != std::string::npos);
+    const auto preserved = read();
+    CHECK(preserved.find("Old guidance.") != std::string::npos);
+    CHECK(preserved.find("User note.") != std::string::npos);
+    CHECK(preserved.find("ICE generated guidance: begin") == std::string::npos);
+    CHECK(preserved.find("simulation_measure") == std::string::npos);
     std::filesystem::remove_all(root);
 }
 
@@ -2444,7 +2997,7 @@ TEST_CASE("project saves reject stale revisions") {
 TEST_CASE("PDK discovery reports missing OSDI models and a usable lib line") {
     const auto root = std::filesystem::temp_directory_path() / "ice-pdk-package-test";
     std::filesystem::remove_all(root);
-    const auto models = root / "libs.tech" / "ngspice" / "models";
+    const auto models = root / "simulation" / "ngspice" / "models";
     std::filesystem::create_directories(models);
     std::ofstream(models / "cornerMOSlv.lib") << ".LIB mos_tt\n.model sg13_lv_nmos psp103va\n.ENDL mos_tt\n";
     std::ofstream(models / "sg13g2_moslv_parm.lib") << ".model sg13g2_lv_nmos_psp psp103va\n";
@@ -2460,7 +3013,7 @@ display_name = "Test IHP"
 
 [pdk.simulation]
 engine = "ngspice"
-root = "libs.tech/ngspice"
+root = "simulation/ngspice"
 model_file = "models/cornerMOSlv.lib"
 section = "mos_tt"
 requires_osdi = true
@@ -3040,6 +3593,34 @@ TEST_CASE("layout paths persist and move as one shape") {
     CHECK(metal1ReachesVia);
     CHECK(metal2ReachesVia);
     CHECK(viaExported);
+    std::filesystem::remove(gds);
+}
+
+TEST_CASE("flattened GDS export preserves child geometry") {
+    ice::Project project;
+    project.identity = "flatten-export-test";
+    project.name = "flatten-export-test";
+    const auto layer = ice::addLayer(project, "Metal1", 34);
+    const auto child = ice::createLayoutCell(project, "child");
+    ice::addRectangle(project, child, layer, ice::Rect{0, 0, 100, 100});
+    ice::addRectangle(project, child, layer, ice::Rect{200, 0, 100, 100});
+    ice::addRectangle(project, child, layer, ice::Rect{400, 0, 100, 100});
+    const auto parent = ice::createLayoutCell(project, "parent");
+    const auto instanceId = project.nextId();
+    project.layoutCells.at(parent).instances.emplace(
+        instanceId, ice::LayoutInstance{instanceId, child, "child_1", 5000, 0, ice::Orientation::r0});
+
+    const auto gds = std::filesystem::temp_directory_path() / "ice-flatten-export-test.gds";
+    ice::LayoutInterchange::exportFlattenedGds(project, parent, gds);
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    CHECK(imported.layoutCells.size() == 1);
+    CHECK(imported.layoutCells.begin()->second.shapes.size() == 3);
+    bool shifted = false;
+    for (const auto &[_, shape] : imported.layoutCells.begin()->second.shapes) {
+        if (shape.rectangle.x == 5000)
+            shifted = true;
+    }
+    CHECK(shifted);
     std::filesystem::remove(gds);
 }
 

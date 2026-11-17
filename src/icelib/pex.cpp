@@ -101,13 +101,14 @@ ParsedLayer parseLayer(const std::string &name) {
     if (containsAny(base, {"via", "contact", "licon", "mcon", "vmim"}))
         parsed.kind = LayerKind::via;
     else if (containsAny(base, {"well", "implant", "marker", "boundary", "keepout", "text", "label", "outline",
-                                "areaid", "mim"}))
+                                "areaid", "mim", "nsdm", "psdm", "nplus", "pplus", "npc"}))
         parsed.kind = LayerKind::ignored;
     else if (containsAny(base, {"poly", "gate"}))
         parsed.kind = LayerKind::poly;
-    else if (containsAny(base, {"activ", "diff"}))
+    else if (containsAny(base, {"activ", "diff", "comp", "tap"}))
         parsed.kind = LayerKind::diffusion;
-    else if (containsAny(base, {"metal", "dfpad", "pad"}))
+    else if (containsAny(base, {"metal", "dfpad", "pad"}) || base.starts_with("met") || base.starts_with("li") ||
+             (base.size() == 2 && base[0] == 'm' && std::isdigit(static_cast<unsigned char>(base[1])) != 0))
         parsed.kind = LayerKind::metal;
     return parsed;
 }
@@ -1385,6 +1386,19 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
         report.nets.push_back(std::move(net));
     }
 
+    // Non-conducting layers are excluded from net groups, so scan the layout
+    // directly to report them.
+    for (const auto &[_, shape] : layout.shapes) {
+        if (shape.isText())
+            continue;
+        const auto layerIt = project.layers.find(shape.layer);
+        if (layerIt == project.layers.end())
+            continue;
+        const auto layer = parseLayer(layerIt->second.name);
+        if (isDrawingPurpose(layer) && layer.kind == LayerKind::ignored)
+            skippedLayers.insert(layerIt->second.name);
+    }
+
     if (!skippedLayers.empty()) {
         std::ostringstream note;
         note << "Skipped non-conducting or unrecognized layers: ";
@@ -1399,8 +1413,15 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     }
     if (report.totalResistance == 0.0 && report.totalCapacitance == 0.0)
         notes.push_back("No conductor geometry was recognized; use layers named Metal*, GatPoly, Activ, or Via*.");
-    if (!layout.plannedDevices.empty())
-        notes.push_back("Planned-device placeholders do not contribute geometry or devices to this extraction.");
+    if (!layout.plannedDevices.empty()) {
+        const auto hasDeviceMetadata =
+            std::any_of(layout.plannedDevices.begin(), layout.plannedDevices.end(), [](const auto &entry) {
+                return !entry.second.model.empty() || !entry.second.device.empty() || !entry.second.terminals.empty();
+            });
+        notes.push_back(hasDeviceMetadata
+                            ? "Planned-device metadata is kept for LVS; PEX extracts geometry-based devices."
+                            : "Planned-device placeholders do not contribute geometry or devices to this extraction.");
+    }
     if (options.extractPolygonDevices) {
         if (!extractionRules) {
             if (!layout.pdk.empty() && layout.pdk != genericPdkId)

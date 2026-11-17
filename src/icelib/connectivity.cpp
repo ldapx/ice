@@ -1,4 +1,5 @@
 #include "icelib/connectivity.hpp"
+#include "icelib/geometry.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -28,8 +29,132 @@ bool isConnectLayer(const std::string &name) {
     lower.reserve(name.size());
     for (const auto character : name)
         lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
-    return lower.find("via") != std::string::npos || lower.find("contact") != std::string::npos ||
-           lower.find("licon") != std::string::npos || lower.find("mcon") != std::string::npos;
+    const auto dot = lower.find('.');
+    const auto base = dot == std::string::npos ? lower : lower.substr(0, dot);
+    return base.find("via") != std::string::npos || base.find("contact") != std::string::npos ||
+           base.find("licon") != std::string::npos || base.find("mcon") != std::string::npos;
+}
+
+bool isNonConductingLayer(const std::string &name) {
+    std::string lower;
+    lower.reserve(name.size());
+    for (const auto character : name)
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
+    const auto dot = lower.find('.');
+    const auto base = dot == std::string::npos ? lower : lower.substr(0, dot);
+    static const std::vector<std::string> markers = {"well",   "implant", "marker", "boundary", "outline",
+                                                     "areaid", "mim",     "nsdm",   "psdm",     "nplus",
+                                                     "pplus",  "npc",     "label",  "text"};
+    for (const auto &marker : markers) {
+        if (base.find(marker) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+std::string layerBase(const Layer &layer) {
+    auto base = layer.name;
+    if (const auto dot = base.rfind('.'); dot != std::string::npos)
+        base = base.substr(0, dot);
+    for (auto &character : base)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return base;
+}
+
+bool isDrawingPurpose(const Layer &layer) {
+    const auto dot = layer.name.rfind('.');
+    if (dot == std::string::npos)
+        return true;
+    auto purpose = layer.name.substr(dot + 1);
+    for (auto &character : purpose)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return purpose == "drawing" || purpose == "pin";
+}
+
+bool isActiveLayer(const Layer &layer) {
+    if (!isDrawingPurpose(layer))
+        return false;
+    const auto base = layerBase(layer);
+    return base == "diff" || base == "activ" || base == "active" || base == "comp";
+}
+
+bool isGateLayer(const Layer &layer) {
+    if (!isDrawingPurpose(layer))
+        return false;
+    const auto base = layerBase(layer);
+    return base == "poly" || base == "poly2" || base == "gate" || base == "gatpoly";
+}
+
+Polygon shapePolygon(const Shape &shape) {
+    Polygon polygon;
+    if (!shape.polygon.empty()) {
+        polygon.reserve(shape.polygon.size());
+        for (const auto &point : shape.polygon)
+            polygon.push_back({point.x, point.y});
+        return polygon;
+    }
+    if (!shape.rectangle.valid())
+        return polygon;
+    const auto &rect = shape.rectangle;
+    polygon = {{rect.x, rect.y},
+               {rect.x + rect.width, rect.y},
+               {rect.x + rect.width, rect.y + rect.height},
+               {rect.x, rect.y + rect.height}};
+    return polygon;
+}
+
+std::vector<LayoutPoint> toLayoutPoints(const Polygon &polygon) {
+    std::vector<LayoutPoint> points;
+    points.reserve(polygon.size());
+    for (const auto &point : polygon)
+        points.push_back({point.x, point.y});
+    return points;
+}
+
+// The active area under a gate is a channel, not a conductor. Split active
+// shapes around the gate so source and drain do not appear shorted in the
+// connectivity graph. This is a no-op after a PDK-aware device split.
+void splitActiveUnderGate(const Project &project, const LayoutCell &cell, std::map<ObjectId, Shape> &shapes) {
+    MultiPolygon gates;
+    for (const auto &[_, shape] : cell.shapes) {
+        const auto layer = project.layers.find(shape.layer);
+        if (layer == project.layers.end() || !isGateLayer(layer->second))
+            continue;
+        auto polygon = shapePolygon(shape);
+        if (!polygon.empty())
+            gates.push_back(std::move(polygon));
+    }
+    if (gates.empty())
+        return;
+    GeometryKernel kernel;
+    const auto gateUnion = kernel.booleanOp(gates, {}, BooleanOperation::union_);
+    ObjectId nextId = 1;
+    for (const auto &[id, _] : cell.shapes)
+        nextId = std::max(nextId, id + 1);
+    for (const auto &[id, shape] : cell.shapes) {
+        const auto layer = project.layers.find(shape.layer);
+        if (layer == project.layers.end() || !isActiveLayer(layer->second))
+            continue;
+        auto polygon = shapePolygon(shape);
+        if (polygon.empty())
+            continue;
+        const auto fragments = kernel.booleanOp({polygon}, gateUnion, BooleanOperation::difference);
+        if (fragments.size() <= 1)
+            continue;
+        shapes.erase(id);
+        bool first = true;
+        for (const auto &fragment : fragments) {
+            Shape split;
+            split.id = first ? id : nextId++;
+            split.layer = shape.layer;
+            split.net = shape.net;
+            split.name = shape.name;
+            split.polygon = toLayoutPoints(fragment);
+            split.rectangle = GeometryKernel::bounds(fragment);
+            shapes.emplace(split.id, std::move(split));
+            first = false;
+        }
+    }
 }
 
 bool overlapsOrTouches(const Rect &left, const Rect &right) {
@@ -86,12 +211,17 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
     if (cell == project.layoutCells.end())
         throw ProjectError("layout.connectivity", "Layout cell does not exist");
 
+    std::map<ObjectId, Shape> effectiveShapes = cell->second.shapes;
+    splitActiveUnderGate(project, cell->second, effectiveShapes);
+
     std::vector<ObjectRecord> objects;
-    objects.reserve(cell->second.shapes.size() + cell->second.ports.size());
-    for (const auto &[id, shape] : cell->second.shapes) {
+    objects.reserve(effectiveShapes.size() + cell->second.ports.size());
+    for (const auto &[id, shape] : effectiveShapes) {
         if (shape.isText() || !shape.rectangle.valid())
             continue;
         const auto layer = project.layers.find(shape.layer);
+        if (layer != project.layers.end() && isNonConductingLayer(layer->second.name))
+            continue;
         const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name);
         const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(shape.layer)
                                                               : layoutLayerConnectivityKey(layer->second);
@@ -102,6 +232,8 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
         if (!port.visible)
             continue;
         const auto layer = project.layers.find(port.layer);
+        if (layer != project.layers.end() && isNonConductingLayer(layer->second.name))
+            continue;
         const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name);
         const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(port.layer)
                                                               : layoutLayerConnectivityKey(layer->second);

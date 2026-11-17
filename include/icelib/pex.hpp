@@ -33,7 +33,7 @@ struct PexOptions {
     bool extractPlacedDevices = true;
     // Extract devices drawn directly as polygons using the PDK extraction
     // rules. The rules are loaded from the installed package's
-    // layout/extraction.json, or from extractionRulesPath when non-empty.
+    // technology/extraction.json, or from extractionRulesPath when non-empty.
     bool extractPolygonDevices = true;
     std::filesystem::path extractionRulesPath;
     // Fallback when no placed devices are extracted: include the inferred
