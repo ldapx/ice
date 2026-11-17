@@ -10,6 +10,7 @@
 #   scripts/build-ice-openroad.sh
 #   ICE_OPENROAD_SRC=/path/to/OpenROAD scripts/build-ice-openroad.sh
 #   scripts/build-ice-openroad.sh --install /home/user/.local/bin
+#   scripts/build-ice-openroad.sh --output-dir build/linux/x86_64/debug
 #   scripts/build-ice-openroad.sh --sdk-install /home/user/.local/ice-openroad
 #
 # The helper is copied next to ice-cli by default so ICE and ice-cli discover
@@ -30,6 +31,7 @@ source "$pins_file"
 openroad_src="${ICE_OPENROAD_SRC:-}"
 install_dir=""
 sdk_install_dir=""
+output_dir=""
 jobs="${ICE_OPENROAD_JOBS:-2}"
 refresh=0
 fetch_only=0
@@ -42,6 +44,8 @@ Usage: $(basename "$0") [options]
 
 Options:
   --install <dir>         Also install ice-openroad into <dir>.
+  --output-dir <dir>      Install ice-openroad into <dir> instead of
+                          build/linux/x86_64/release.
   --sdk-install <dir>     Install the helper, shared library, headers, and
                           pkg-config file under <dir>.
   --jobs <n>              Bazel job count (default: ${jobs}).
@@ -66,6 +70,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
     --install)
         install_dir="${2:?missing --install directory}"
+        shift 2
+        ;;
+    --output-dir)
+        output_dir="${2:?missing --output-dir directory}"
         shift 2
         ;;
     --sdk-install)
@@ -104,11 +112,12 @@ ice_version() {
 install_helper() {
     local source="$1"
     [[ -x "$source" ]] || die "helper is not executable: $source"
-    mkdir -p "$default_dir"
-    rm -f "$default_dir/ice-openroad"
-    cp "$source" "$default_dir/ice-openroad"
-    chmod +x "$default_dir/ice-openroad"
-    info "Installed $default_dir/ice-openroad"
+    local helper_dir="${output_dir:-$default_dir}"
+    mkdir -p "$helper_dir"
+    rm -f "$helper_dir/ice-openroad"
+    cp "$source" "$helper_dir/ice-openroad"
+    chmod +x "$helper_dir/ice-openroad"
+    info "Installed $helper_dir/ice-openroad"
     if [[ -n "$install_dir" ]]; then
         mkdir -p "$install_dir"
         rm -f "$install_dir/ice-openroad"

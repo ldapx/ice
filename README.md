@@ -64,6 +64,7 @@ simulations are stored as individual files.
 - Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
 - `spdlog`, `nlohmann_json` (via xmake packages)
 - `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
+- `bazelisk` or `bazel` for the required `ice-openroad` helper (see below)
 - Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
 - Bundled `agentsdk-cpp` submodule for the Agent Client Protocol tab and MCP
   server. Clone with `--recursive`, or run
@@ -82,14 +83,18 @@ Build the desktop app (requires Qt 6):
 xmake build ice
 ```
 
-Build the C++ OpenROAD helper. The pinned OpenROAD/OpenSTA source pair is
-fetched automatically into `$HOME/.cache/ice/openroad-sdk`:
+The C++ OpenROAD helper (`ice-openroad`) is required by the physical design
+flow. Building `ice`, `ice-cli`, or `ice-mcp` builds it automatically; the
+pinned OpenROAD/OpenSTA source pair is fetched into
+`$HOME/.cache/ice/openroad-sdk` on the first build. Build or rebuild it on its
+own with:
 
 ```sh
-xmake openroad-sdk
+xmake build ice-openroad
 ```
 
-Set `ICE_OPENROAD_SRC=/path/to/OpenROAD` to build against an existing source
+This requires `bazelisk` or `bazel` on `PATH`. Set
+`ICE_OPENROAD_SRC=/path/to/OpenROAD` to build against an existing source
 checkout instead.
 
 ## Test

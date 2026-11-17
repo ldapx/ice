@@ -1099,6 +1099,13 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
     const auto toDatabase = [unitsPerMicron](double value) {
         return static_cast<Coordinate>(std::llround(value * 1000.0 / unitsPerMicron));
     };
+    if (dieArea.valid()) {
+        // DIEAREA is parsed directly from the DEF token stream, so it is still
+        // in DEF database units. Convert it like every other DEF coordinate;
+        // otherwise the die boundary frame does not match the cells, pins, and
+        // routes and the fitted preview shrinks away from the viewport.
+        dieArea = {toDatabase(dieArea.x), toDatabase(dieArea.y), toDatabase(dieArea.width), toDatabase(dieArea.height)};
+    }
 
     ParsedLef lef;
     std::error_code fileStatus;

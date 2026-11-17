@@ -37,7 +37,12 @@ struct ImplementationTool {
 };
 
 struct ImplementationToolchain {
+    // The OpenROAD Tcl binary, only used to launch the interactive GUI and
+    // timing reports. Physical stages run through iceOpenRoad below.
     ImplementationTool openroad;
+    // The C++ OpenROAD helper. It is required by the physical stages; the
+    // Tcl backend is no longer a fallback.
+    ImplementationTool iceOpenRoad;
     ImplementationTool yosys;
     ImplementationTool klayout;
 
@@ -48,8 +53,9 @@ struct ImplementationToolchain {
 ImplementationToolchain discoverImplementationToolchain();
 nlohmann::ordered_json implementationToolchainJson(const ImplementationToolchain &toolchain);
 
-// Discovers the optional C++ OpenROAD helper used for physical stages and
-// ODB-backed previews/heat maps. Returns an empty optional when unavailable.
+// Discovers the C++ OpenROAD helper used for physical stages and ODB-backed
+// previews/heat maps. Physical stages fail without it; returns an empty
+// optional when unavailable.
 std::optional<std::filesystem::path> findOpenRoadHelper();
 
 // Resolved physical data for one package stack. Paths are absolute after

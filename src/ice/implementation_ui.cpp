@@ -427,6 +427,225 @@ std::vector<ice::LayoutPreviewMarker> parseDrcMarkers(const std::filesystem::pat
     return markers;
 }
 
+struct DefPreviewExtras {
+    double unitsPerMicron = 1000.0;
+    std::vector<ice::LayoutPreviewRow> rows;
+};
+
+bool parseNumber(const std::string &text, double &value) {
+    try {
+        std::size_t consumed = 0;
+        value = std::stod(text, &consumed);
+        return consumed == text.size();
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+DefPreviewExtras parseDefPreviewExtras(const std::filesystem::path &path) {
+    DefPreviewExtras extras;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return extras;
+    struct RawRow {
+        std::string site;
+        double x = 0.0;
+        double y = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+    };
+    std::vector<RawRow> rawRows;
+    ice::Rect die;
+    bool haveDie = false;
+    bool inRows = false;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream stream(line);
+        std::string keyword;
+        stream >> keyword;
+        if (!stream)
+            continue;
+        if (keyword == "UNITS") {
+            std::string distance;
+            std::string microns;
+            double units = 0.0;
+            stream >> distance >> microns >> units;
+            if (distance == "DISTANCE" && microns == "MICRONS" && units > 0.0)
+                extras.unitsPerMicron = units;
+            continue;
+        }
+        if (keyword == "DIEAREA") {
+            std::vector<double> values;
+            std::string token;
+            while (stream >> token) {
+                double value = 0.0;
+                if (token == "(" || token == ")" || token == ";" || !parseNumber(token, value))
+                    continue;
+                values.push_back(value);
+            }
+            if (values.size() >= 4) {
+                die = {static_cast<ice::Coordinate>(std::llround(std::min(values[0], values[2]))),
+                       static_cast<ice::Coordinate>(std::llround(std::min(values[1], values[3]))),
+                       static_cast<ice::Coordinate>(std::llround(std::abs(values[2] - values[0]))),
+                       static_cast<ice::Coordinate>(std::llround(std::abs(values[3] - values[1])))};
+                haveDie = true;
+            }
+            continue;
+        }
+        if (keyword == "ROWS") {
+            inRows = true;
+            continue;
+        }
+        if (keyword == "ROW") {
+            RawRow row;
+            std::string name;
+            std::string orientation;
+            std::string doKeyword;
+            std::string byKeyword;
+            std::string stepKeyword;
+            int count = 0;
+            int rowsPerRow = 0;
+            double stepX = 0.0;
+            double stepY = 0.0;
+            stream >> name >> row.site >> row.x >> row.y >> orientation >> doKeyword >> count >> byKeyword >>
+                rowsPerRow >> stepKeyword >> stepX >> stepY;
+            if (!stream || row.site.empty())
+                continue;
+            row.width = static_cast<double>(count) * stepX;
+            row.height = stepY;
+            rawRows.push_back(std::move(row));
+            continue;
+        }
+        if (!inRows)
+            continue;
+        if (keyword == "END")
+            break;
+        if (keyword != "-")
+            continue;
+        RawRow row;
+        std::string orientation;
+        stream >> row.site >> row.x >> row.y >> orientation;
+        if (!stream || row.site.empty())
+            continue;
+        rawRows.push_back(std::move(row));
+    }
+    if (rawRows.empty())
+        return extras;
+    const auto scale = [&](double value) {
+        return static_cast<ice::Coordinate>(std::llround(value * 1000.0 / extras.unitsPerMicron));
+    };
+    std::vector<ice::Coordinate> rowY;
+    rowY.reserve(rawRows.size());
+    for (const auto &row : rawRows)
+        rowY.push_back(scale(row.y));
+    std::sort(rowY.begin(), rowY.end());
+    rowY.erase(std::unique(rowY.begin(), rowY.end()), rowY.end());
+    ice::Coordinate pitch = 0;
+    for (std::size_t index = 1; index < rowY.size(); ++index) {
+        const auto delta = rowY[index] - rowY[index - 1];
+        if (delta > 0 && (pitch == 0 || delta < pitch))
+            pitch = delta;
+    }
+    if (pitch <= 0)
+        pitch = 1000;
+    ice::Coordinate dieRight = 0;
+    if (haveDie)
+        dieRight = scale(die.x + die.width);
+    for (const auto &row : rawRows) {
+        const auto x = scale(row.x);
+        const auto y = scale(row.y);
+        const auto width =
+            row.width > 0.0 ? scale(row.width) : (haveDie ? std::max<ice::Coordinate>(1, dieRight - x) : pitch);
+        const auto height = row.height > 0.0 ? scale(row.height) : pitch;
+        ice::LayoutPreviewRow preview;
+        preview.rectangle = QRectF(x, y, width, height);
+        preview.site = QString::fromStdString(row.site);
+        extras.rows.push_back(std::move(preview));
+    }
+    return extras;
+}
+
+bool isKnownPreviewLayer(const ice::Project *project, const std::string &name) {
+    if (!project || name.empty())
+        return false;
+    for (const auto &[_, layer] : project->layers) {
+        if (lowerName(QString::fromStdString(layer.name)) == lowerName(QString::fromStdString(name)))
+            return true;
+    }
+    return false;
+}
+
+std::vector<ice::LayoutPreviewGuide> parseRouteGuides(const std::filesystem::path &path, double unitsPerMicron,
+                                                      const ice::Project *project) {
+    std::vector<ice::LayoutPreviewGuide> guides;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return guides;
+    if (unitsPerMicron <= 0.0)
+        unitsPerMicron = 1000.0;
+    const auto scale = [&](double value) {
+        return static_cast<ice::Coordinate>(std::llround(value * 1000.0 / unitsPerMicron));
+    };
+    std::string currentNet;
+    std::string currentLayer;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::string cleaned = line;
+        std::replace(cleaned.begin(), cleaned.end(), '(', ' ');
+        std::replace(cleaned.begin(), cleaned.end(), ')', ' ');
+        std::istringstream stream(cleaned);
+        std::vector<std::string> tokens;
+        std::string token;
+        while (stream >> token)
+            tokens.push_back(token);
+        if (tokens.empty())
+            continue;
+        std::vector<double> numbers;
+        std::size_t firstNumber = tokens.size();
+        for (std::size_t index = 0; index < tokens.size(); ++index) {
+            double value = 0.0;
+            if (!parseNumber(tokens[index], value))
+                continue;
+            if (firstNumber == tokens.size())
+                firstNumber = index;
+            numbers.push_back(value);
+        }
+        if (numbers.size() >= 4 && firstNumber <= 2) {
+            std::vector<std::string> prefix(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(firstNumber));
+            std::vector<std::string> suffix(tokens.begin() + static_cast<std::ptrdiff_t>(firstNumber + 4),
+                                            tokens.end());
+            if (!suffix.empty())
+                currentLayer = suffix.front();
+            if (!prefix.empty()) {
+                if (prefix.size() >= 2) {
+                    currentNet = prefix.front();
+                    currentLayer = prefix.back();
+                } else if (isKnownPreviewLayer(project, prefix.front())) {
+                    currentLayer = prefix.front();
+                } else {
+                    currentNet = prefix.front();
+                }
+            }
+            const auto x0 = scale(numbers[0]);
+            const auto y0 = scale(numbers[1]);
+            const auto x1 = scale(numbers[2]);
+            const auto y1 = scale(numbers[3]);
+            ice::LayoutPreviewGuide guide;
+            guide.net = QString::fromStdString(currentNet);
+            guide.layer = QString::fromStdString(currentLayer);
+            guide.rectangle = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized();
+            if (guide.rectangle.isValid() && guide.rectangle.width() > 0.0 && guide.rectangle.height() > 0.0)
+                guides.push_back(std::move(guide));
+            continue;
+        }
+        if (numbers.empty()) {
+            currentNet = tokens.front();
+            currentLayer.clear();
+        }
+    }
+    return guides;
+}
+
 std::shared_ptr<ice::LayoutPreviewModel> parseOdbPreview(const QByteArray &json, const ice::Project *project,
                                                          QString &error) {
     QJsonParseError parseError;
@@ -1424,7 +1643,8 @@ class ImplementationPreviewCanvas : public QGraphicsView {
         if (!model && project_ && cell_ != 0) {
             const auto found = project_->layoutCells.find(cell_);
             if (found != project_->layoutCells.end())
-                fallbackModel_ = ice::buildLayoutCellPreviewModel(*project_, found->second, true, true, true);
+                fallbackModel_ =
+                    ice::buildLayoutCellPreviewModel(*project_, found->second, true, true, true, {}, true, true);
             if (fallbackModel_ && !fallbackModel_->empty())
                 model = &*fallbackModel_;
         }
@@ -1451,8 +1671,27 @@ class ImplementationPreviewCanvas : public QGraphicsView {
                 entry.visible = !hiddenLayers_.contains(key);
                 uniqueLayers.emplace(key, std::move(entry));
             };
-            for (const auto &shape : model->shapes)
+            const auto collectLayerId = [&](ice::ObjectId id) {
+                if (id == 0 || !styleProject_)
+                    return;
+                const auto found = styleProject_->layers.find(id);
+                if (found == styleProject_->layers.end())
+                    return;
+                ice::LayoutPreviewLayer layer;
+                layer.id = id;
+                layer.number = found->second.number;
+                layer.datatype = found->second.datatype;
+                layer.name = QString::fromStdString(found->second.name);
+                collectLayer(layer);
+            };
+            for (const auto &shape : model->shapes) {
                 collectLayer(shape.layer);
+                for (const auto layer : shape.segmentLayers)
+                    collectLayerId(layer);
+                for (const auto &vias : shape.pointVias)
+                    for (const auto layer : vias)
+                        collectLayerId(layer);
+            }
             for (const auto &port : model->ports)
                 collectLayer(port.layer);
             for (auto &[key, entry] : uniqueLayers)
@@ -1978,6 +2217,19 @@ ImplementationUiController::StagePreview ImplementationUiController::stagePrevie
         if (result.cell == 0) {
             result.project.reset();
             result.message = QStringLiteral("Unable to import the %1 DEF checkpoint.").arg(stageTitle(stage));
+            return cache(std::move(result));
+        }
+        const auto extras = parseDefPreviewExtras(path);
+        const auto cell = result.project->layoutCells.find(result.cell);
+        if (cell != result.project->layoutCells.end()) {
+            auto model = std::make_shared<ice::LayoutPreviewModel>(
+                ice::buildLayoutCellPreviewModel(*result.project, cell->second, true, true, true, {}, true, true));
+            model->rows = extras.rows;
+            if (const auto guides = runRoot / "reports" / "route.guide";
+                std::filesystem::is_regular_file(guides, status) && !status) {
+                model->guides = parseRouteGuides(guides, extras.unitsPerMicron, result.project.get());
+            }
+            result.model = std::move(model);
         }
         return cache(std::move(result));
     } catch (const std::exception &error) {

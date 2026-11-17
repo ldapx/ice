@@ -69,6 +69,20 @@ end
 -- -Werror is intentionally not enabled.
 local first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
 
+-- The C++ OpenROAD helper is required by the physical implementation flow
+-- and the ODB-backed previews. It is no longer an optional extra: the targets
+-- that run physical stages depend on it, so a normal build always produces it.
+-- Building it needs bazelisk (or bazel) and the pinned OpenROAD source; see
+-- scripts/build-ice-openroad.sh.
+target("ice-openroad")
+    set_kind("phony")
+    on_build(function (target)
+        os.execv("bash", {
+            path.join(os.projectdir(), "scripts", "build-ice-openroad.sh"),
+            "--output-dir", target:targetdir()
+        })
+    end)
+
 target("icelib")
     set_kind("static")
     add_files("src/icelib/*.cpp")
@@ -109,7 +123,7 @@ end
 target("ice")
     set_kind("binary")
     add_files("src/ice/*.cpp")
-    add_deps("icelib")
+    add_deps("icelib", "ice-openroad")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
     add_includedirs("include", "/usr/include/qt6", "/usr/include/qt6/QtCore",
                     "/usr/include/qt6/QtGui", "/usr/include/qt6/QtWidgets",
@@ -135,7 +149,7 @@ target("ice")
 target("ice-cli")
     set_kind("binary")
     add_files("src/ice-cli/main.cpp")
-    add_deps("icelib")
+    add_deps("icelib", "ice-openroad")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
@@ -151,7 +165,7 @@ target("ice-pkg")
 target("ice-mcp")
     set_kind("binary")
     add_files("src/ice-mcp/main.cpp")
-    add_deps("icelib")
+    add_deps("icelib", "ice-openroad")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')

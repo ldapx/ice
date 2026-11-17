@@ -29,8 +29,11 @@ tested OpenROAD/OpenSTA pair in `scripts/openroad-sdk-pins.env`.
 
 ### Automatic source build
 
+The helper is required by the physical implementation flow, so building `ice`,
+`ice-cli`, or `ice-mcp` builds it automatically. To build it on its own:
+
 ```sh
-xmake openroad-sdk
+xmake build ice-openroad
 ```
 
 When `ICE_OPENROAD_SRC` is not set, the build script fetches the pinned
@@ -124,23 +127,13 @@ Supported kinds are `placement`, `routing`, `power`, `pin`, `rudy`, and
 `irdrop`. ICE exposes overlay toggles for the embedded placement/routing maps
 and an **Export CSV** action for the native maps.
 
-## Backend selection
+## Backend requirement
 
-`icelib` uses the C++ backend automatically when `ice-openroad` is available.
-The legacy Tcl backend can be forced for debugging or during migration:
-
-```sh
-ICE_OPENROAD_BACKEND=tcl xmake run ice
-ICE_OPENROAD_BACKEND=tcl ice-cli implementation-run ...
-```
-
-Force the C++ backend with:
-
-```sh
-ICE_OPENROAD_BACKEND=cpp ice-cli implementation-run ...
-```
-
-If the helper is missing, ICE falls back to the Tcl backend in `auto` mode.
+Physical stages always run through `ice-openroad`. There is no Tcl fallback: if
+the helper cannot be found, `implementation-run` fails with a toolchain error
+and `implementation-toolchain` reports `ice-openroad` as missing. Discovery
+checks `ICE_OPENROAD_HELPER`, the directory containing `ice-cli`, and `PATH`, in
+that order.
 
 ## Current status
 

@@ -25,6 +25,7 @@ Python scientific stack.
 - Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
 - `spdlog`, `nlohmann_json`, `clipper2` (via xmake packages)
 - `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
+- `bazelisk` or `bazel` for the required `ice-openroad` helper
 - Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
 - `clang-format` (formatting via `xmake format`)
 - The bundled `agentsdk-cpp` submodule. Clone with `--recursive`, or run
@@ -63,6 +64,13 @@ Verify the package before simulating with:
 
 ```sh
 ice-cli pdk-info ihp-sg13g2 --probe
+```
+
+Building `ice`, `ice-cli`, or `ice-mcp` also builds the required `ice-openroad`
+helper. To build or rebuild only the helper:
+
+```sh
+xmake build ice-openroad
 ```
 
 Build the desktop app (requires Qt 6):

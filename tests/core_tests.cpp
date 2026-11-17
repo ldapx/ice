@@ -334,10 +334,6 @@ class ScopedEnvironment {
     bool hadPrevious_ = false;
 };
 
-struct TclBackendForTests {
-    TclBackendForTests() { setenv("ICE_OPENROAD_BACKEND", "tcl", 1); }
-} tclBackendForTests;
-
 void writeExecutable(const std::filesystem::path &path, const std::string &text) {
     std::ofstream(path) << text;
     std::filesystem::permissions(path, std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
@@ -410,42 +406,45 @@ done
 printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n' > "$out"
 exit 0
 )");
-    writeExecutable(binRoot / "openroad", R"(#!/bin/sh
-if [ "$1" = "-version" ]; then
-  echo "Fake OpenROAD 9.99"
+    writeExecutable(binRoot / "ice-openroad", R"(#!/bin/sh
+if [ "$1" = "--version" ] || [ "$1" = "-version" ]; then
+  echo "Fake ice-openroad 9.99"
   exit 0
 fi
+stage="$1"
 metrics=""
-script=""
+log=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -metrics) metrics="$2"; shift 2 ;;
-    -threads) shift 2 ;;
-    -no_init|-no_splash|-exit) shift ;;
-    *) script="$1"; shift ;;
+    --metrics) metrics="$2"; shift 2 ;;
+    --log) log="$2"; shift 2 ;;
+    *) shift ;;
   esac
 done
-name=$(basename "$script")
-if [ -n "$FAKE_OPENROAD_FAIL_STAGE" ] && [ "$name" = "$FAKE_OPENROAD_FAIL_STAGE" ]; then
-  echo "fake openroad failure" >&2
+if [ -n "$FAKE_OPENROAD_FAIL_STAGE" ] && [ "$stage" = "$FAKE_OPENROAD_FAIL_STAGE" ]; then
+  echo "fake ice-openroad failure" >&2
   exit 3
 fi
-mkdir -p db def final reports
-case "$name" in
-  01-floorplan.tcl) touch db/2_floorplan.odb def/2_floorplan.def final/2_floorplan.sdc ;;
-  02-place.tcl) touch db/3_place.odb def/3_place.def final/3_place.sdc ;;
-  03-cts.tcl) touch db/4_cts.odb def/4_cts.def final/4_cts.sdc ;;
-  04-route.tcl) touch db/5_route.odb def/5_route.def final/5_route.sdc final/5_route.spef reports/route.guide reports/route_drc.rpt ;;
-  05-final.tcl) touch db/6_final.odb def/6_final.def final/6_final.v final/6_final.spef final/6_final.sdc ;;
+mkdir -p db def final reports logs
+case "$stage" in
+  floorplan) touch db/2_floorplan.odb def/2_floorplan.def final/2_floorplan.sdc ;;
+  placement) touch db/3_place.odb def/3_place.def final/3_place.sdc ;;
+  cts) touch db/4_cts.odb def/4_cts.def final/4_cts.sdc ;;
+  routing) touch db/5_route.odb def/5_route.def final/5_route.sdc final/5_route.spef reports/route.guide reports/route_drc.rpt ;;
+  final) touch db/6_final.odb def/6_final.def final/6_final.v final/6_final.spef final/6_final.sdc ;;
 esac
 if [ -n "$metrics" ]; then
   printf '{"design__die__area": 1234.5, "route__wirelength": 42}\n' > "$metrics"
 fi
-echo "fake openroad $name"
+message="fake ice-openroad $stage"
+if [ -n "$log" ]; then
+  echo "$message" > "$log"
+fi
+echo "$message"
 exit 0
 )");
     ScopedEnvironment yosys("ICE_YOSYS", (binRoot / "yosys").string());
-    ScopedEnvironment openroad("ICE_OPENROAD", (binRoot / "openroad").string());
+    ScopedEnvironment openroad("ICE_OPENROAD_HELPER", (binRoot / "ice-openroad").string());
     ScopedEnvironment graphviz("ICE_DOT", (binRoot / "dot").string());
 
     ice::PackageSpec package;
@@ -502,7 +501,7 @@ exit 0
           ice::ImplementationStage::cts, ice::ImplementationStage::routing, ice::ImplementationStage::final})
         CHECK(run.stages.at(stage).status == ice::ImplementationStageStatus::succeeded);
     CHECK(run.toolVersions.at("yosys") == "Fake Yosys 0.99");
-    CHECK(run.toolVersions.at("openroad") == "Fake OpenROAD 9.99");
+    CHECK(run.toolVersions.at("openroad") == "Fake ice-openroad 9.99");
     CHECK(std::abs(run.metrics.at("synth.cells") - 12.0) < 1e-9);
     CHECK(std::abs(run.metrics.at("synth.chip_area_um2") - 56.75) < 1e-9);
     CHECK(std::abs(run.metrics.at("design__die__area") - 1234.5) < 1e-9);
@@ -519,7 +518,7 @@ exit 0
     CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.svg"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.dot"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis-overview.dot"));
-    CHECK(ice::readImplementationLog(run, root, ice::ImplementationStage::final).find("fake openroad") !=
+    CHECK(ice::readImplementationLog(run, root, ice::ImplementationStage::final).find("fake ice-openroad") !=
           std::string::npos);
 
     // Rerunning one stage invalidates only that stage and later ones.
@@ -536,7 +535,7 @@ exit 0
     CHECK(run.stages.at(ice::ImplementationStage::final).status == ice::ImplementationStageStatus::pending);
 
     // A failing stage preserves the earlier checkpoint and records the log.
-    setenv("FAKE_OPENROAD_FAIL_STAGE", "04-route.tcl", 1);
+    setenv("FAKE_OPENROAD_FAIL_STAGE", "routing", 1);
     ice::ImplementationExecutionOptions failure;
     failure.from = ice::ImplementationStage::routing;
     failure.to = ice::ImplementationStage::final;
@@ -762,6 +761,42 @@ TEST_CASE("DEF import is numeric-locale independent") {
     CHECK(cell.instances.size() == 1);
     CHECK(cell.instances.begin()->second.x == 230);
     CHECK(cell.instances.begin()->second.y == 345);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("DEF import scales DIEAREA by the DEF distance units") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-def-die-units-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    // GF180MCU DEF files use 2000 database units per micron. The die boundary
+    // must be converted like components, pins, and routes; otherwise the
+    // preview bounds are twice the real design and the fitted view shrinks.
+    const auto def = root / "top.def";
+    std::ofstream(def) << "VERSION 5.8 ;\nDESIGN top ;\nUNITS DISTANCE MICRONS 2000 ;\n"
+                          "DIEAREA ( 0 0 ) ( 20000 20000 ) ;\nCOMPONENTS 0 ;\nEND COMPONENTS\n"
+                          "END DESIGN\n";
+
+    ice::DefImportOptions options;
+    options.pdk = "example.pdk";
+    options.stack = "base";
+    options.layers["metal1"] = {34, 0};
+
+    ice::Project project;
+    project.identity = "def-die-units";
+    project.name = "def-die-units";
+    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    CHECK(cellId != 0);
+    const auto &cell = project.layoutCells.at(cellId);
+    const auto boundary = std::find_if(cell.shapes.begin(), cell.shapes.end(),
+                                       [](const auto &entry) { return entry.second.name == "Die area"; });
+    CHECK(boundary != cell.shapes.end());
+    if (boundary != cell.shapes.end()) {
+        CHECK(boundary->second.rectangle.x == 0);
+        CHECK(boundary->second.rectangle.y == 0);
+        CHECK(boundary->second.rectangle.width == 10000);
+        CHECK(boundary->second.rectangle.height == 10000);
+    }
 
     std::filesystem::remove_all(root);
 }
