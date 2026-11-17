@@ -546,6 +546,9 @@ class Project {
     std::map<ObjectId, SimulationItem> simulations;
     std::map<ObjectId, ProjectReport> reports;
 
+    // Returns a fresh object id. Ids are monotonic even when several are
+    // allocated before the objects are inserted (for example a copied symbol
+    // together with its pins).
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;
     std::vector<Diagnostic> validate() const;
@@ -570,6 +573,9 @@ class Project {
   private:
     mutable std::filesystem::path sourceRoot_;
     mutable std::string sourceRevision_;
+    // Highest id handed out by nextId(). Kept as a high-water mark so that ids
+    // allocated in a batch, before the objects exist, stay unique.
+    ObjectId lastIssuedId_ = 0;
 };
 
 class SelectionModel {

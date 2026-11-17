@@ -243,8 +243,9 @@ ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId
         name = source.name;
     const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(artwork), sourceCellId);
     auto &symbol = project.schematicCells.at(parentCellId).symbols.at(symbolId);
+    auto nextPinId = project.nextId();
     for (auto pin : hierarchicalSymbolPins(source)) {
-        pin.id = project.nextId();
+        pin.id = nextPinId++;
         symbol.pins.push_back(std::move(pin));
     }
     return symbolId;
@@ -383,10 +384,11 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
     auto instanceSymbol = symbolId;
     if (symbolInUse) {
         Symbol copy = existing->second;
-        copy.id = project.nextId();
+        auto nextCopyId = project.nextId();
+        copy.id = nextCopyId++;
         copy.name = uniqueSchematicSymbolName(cell, existing->second.name);
         for (auto &pin : copy.pins)
-            pin.id = project.nextId();
+            pin.id = nextCopyId++;
         instanceSymbol = copy.id;
         cell.symbols.emplace(copy.id, std::move(copy));
     }
