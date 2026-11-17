@@ -351,19 +351,6 @@ std::optional<std::filesystem::path> findIceOpenRoadHelper() {
     return std::nullopt;
 }
 
-bool useCppOpenRoadBackend(const std::optional<std::filesystem::path> &helper) {
-    if (!helper)
-        return false;
-    if (const auto *mode = std::getenv("ICE_OPENROAD_BACKEND"); mode && *mode) {
-        const std::string value(mode);
-        if (value == "tcl")
-            return false;
-        if (value == "cpp")
-            return true;
-    }
-    return true;
-}
-
 std::string joinLayers(const std::vector<std::string> &layers) {
     std::string result;
     for (const auto &layer : layers) {
@@ -765,9 +752,10 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
     if (needsYosys && toolchain.yosys.path.empty())
         addDiagnostic(result.diagnostics, Diagnostic::Severity::error, "implementation.toolchain",
                       "Yosys was not found. Install Yosys or set ICE_YOSYS to its executable.");
-    if (needsOpenRoad && toolchain.openroad.path.empty())
+    if (needsOpenRoad && toolchain.iceOpenRoad.path.empty())
         addDiagnostic(result.diagnostics, Diagnostic::Severity::error, "implementation.toolchain",
-                      "OpenROAD was not found. Install OpenROAD or set ICE_OPENROAD to its executable.");
+                      "The ice-openroad helper was not found. Build it with `xmake build ice-openroad` or set "
+                      "ICE_OPENROAD_HELPER to its executable.");
     if (hasErrors(result.diagnostics)) {
         run.status = ImplementationStatus::failed;
         run.lastError = result.diagnostics.front().message;
@@ -832,18 +820,11 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
     if (needsYosys)
         run.toolVersions["yosys"] = queryToolVersion(toolchain.yosys.path, {"-V"});
     if (needsOpenRoad)
-        run.toolVersions["openroad"] = queryToolVersion(toolchain.openroad.path, {"-version"});
+        run.toolVersions["openroad"] = queryToolVersion(toolchain.iceOpenRoad.path, {"--version"});
     run.status = ImplementationStatus::running;
     run.lastError.clear();
     run.updatedAt = nowUtc();
 
-    const auto cppHelper = findIceOpenRoadHelper();
-    if (const auto *mode = std::getenv("ICE_OPENROAD_BACKEND");
-        mode && std::string(mode) == "cpp" && !cppHelper &&
-        static_cast<int>(options.to) >= static_cast<int>(ImplementationStage::floorplan)) {
-        return fail(options.from,
-                    "ICE_OPENROAD_BACKEND=cpp requires the ice-openroad helper next to ice-cli or in PATH");
-    }
     const auto ctsEnabled = run.config.ctsEnabled;
     const auto stages = implementationStages();
     for (const auto stage : stages) {
@@ -876,8 +857,10 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             continue;
         }
 
-        const bool useCppStage = useCppOpenRoadBackend(cppHelper) && stage != ImplementationStage::elaboration &&
-                                 stage != ImplementationStage::synthesis;
+        // Elaboration and synthesis are Yosys stages. Every physical stage runs
+        // through the required ice-openroad helper; there is no Tcl fallback.
+        const bool useCppStage =
+            stage != ImplementationStage::elaboration && stage != ImplementationStage::synthesis;
         std::error_code fileStatus;
         if (stage == ImplementationStage::floorplan) {
             const auto mappedNetlist = runDirectory / implementationMappedNetlistRelativePath();
@@ -895,11 +878,7 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
                 }
             }
         }
-        const auto scriptPath = runDirectory / implementationStageScriptRelativePath(stage);
         const auto input = stageInput(stage, ctsEnabled);
-        if (!useCppStage && (!std::filesystem::is_regular_file(scriptPath, fileStatus) || fileStatus)) {
-            return fail(stage, "Generated stage script is missing: " + scriptPath.string());
-        }
         if (!input.empty()) {
             const auto inputPath = runDirectory / input;
             if (!std::filesystem::is_regular_file(inputPath, fileStatus) || fileStatus) {
@@ -938,9 +917,10 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             {"ICE_STAGE", implementationStageName(stage)},
         };
         if (stage == ImplementationStage::elaboration || stage == ImplementationStage::synthesis) {
-            process.arguments = {toolchain.yosys.path.generic_string(), "-s", scriptPath.generic_string()};
-        } else if (useCppStage) {
-            std::vector<std::string> args = {cppHelper->generic_string(),
+            const auto yosysScript = runDirectory / implementationStageScriptRelativePath(stage);
+            process.arguments = {toolchain.yosys.path.generic_string(), "-s", yosysScript.generic_string()};
+        } else {
+            std::vector<std::string> args = {toolchain.iceOpenRoad.path.generic_string(),
                                              implementationStageName(stage),
                                              "--run-dir",
                                              runDirectory.generic_string(),
@@ -1092,24 +1072,6 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
             if (!logPath.empty())
                 add("--log", (runDirectory / logPath).generic_string());
             process.arguments = std::move(args);
-        } else {
-            process.arguments = {
-                toolchain.openroad.path.generic_string(),       "-no_init", "-no_splash", "-exit", "-threads",
-                std::to_string(std::max(1, run.config.threads))};
-            const auto metrics = stageMetricPath(stage);
-            if (!metrics.empty())
-                process.arguments.insert(process.arguments.end(),
-                                         {"-metrics", (runDirectory / metrics).generic_string()});
-            // OpenROAD feeds the script argument to Tcl as an unquoted
-            // `source`, so an absolute path breaks whenever it contains a
-            // space (run directories are named "<run> <id>" and run names
-            // usually end in "run"). Pass it relative to the working
-            // directory instead.
-            auto scriptArgument = scriptPath;
-            const auto scriptRelative = scriptPath.lexically_relative(runDirectory);
-            if (!scriptRelative.empty() && !scriptRelative.generic_string().starts_with(".."))
-                scriptArgument = scriptRelative;
-            process.arguments.push_back(scriptArgument.generic_string());
         }
 
         if (stage == ImplementationStage::elaboration || stage == ImplementationStage::synthesis) {

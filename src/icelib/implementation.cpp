@@ -644,12 +644,14 @@ std::string implementationRunStem(const ImplementationRun &run) {
     return safeStem(run.name) + "-" + std::to_string(run.id);
 }
 
-bool ImplementationToolchain::ready() const { return !openroad.path.empty() && !yosys.path.empty(); }
+bool ImplementationToolchain::ready() const {
+    return !iceOpenRoad.path.empty() && !yosys.path.empty();
+}
 
 std::vector<std::string> ImplementationToolchain::missing() const {
     std::vector<std::string> result;
-    if (openroad.path.empty())
-        result.push_back("openroad");
+    if (iceOpenRoad.path.empty())
+        result.push_back("ice-openroad");
     if (yosys.path.empty())
         result.push_back("yosys");
     if (klayout.path.empty())
@@ -672,6 +674,10 @@ ImplementationToolchain discoverImplementationToolchain() {
     toolchain.yosys = {"yosys", std::move(yosys), std::move(yosysSource)};
     auto [klayout, klayoutSource] = findTool("klayout");
     toolchain.klayout = {"klayout", std::move(klayout), std::move(klayoutSource)};
+    if (const auto helper = findOpenRoadHelper())
+        toolchain.iceOpenRoad = {"ice-openroad", *helper, "helper"};
+    else
+        toolchain.iceOpenRoad = {"ice-openroad", {}, "missing"};
     return toolchain;
 }
 
@@ -684,6 +690,7 @@ json implementationToolchainJson(const ImplementationToolchain &toolchain) {
     return {{"ready", toolchain.ready()},
             {"missing", toolchain.missing()},
             {"openroad", tool(toolchain.openroad)},
+            {"ice-openroad", tool(toolchain.iceOpenRoad)},
             {"yosys", tool(toolchain.yosys)},
             {"klayout", tool(toolchain.klayout)}};
 }

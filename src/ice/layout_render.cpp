@@ -218,6 +218,8 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 continue;
             for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
                 const auto layerId = index < shape.segmentLayers.size() ? shape.segmentLayers[index] : shape.layer.id;
+                if (layerId != shape.layer.id && !layerVisible(layerIdOnly(layerId)))
+                    continue;
                 const auto segmentStyle =
                     layerId == shape.layer.id ? style : styleFor(layerIdOnly(layerId), styles, deviceStyles);
                 const auto polygon = pathPolygon(
@@ -229,6 +231,8 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
                 if (index >= shape.pointVias.size())
                     continue;
                 for (const auto layerId : shape.pointVias[index]) {
+                    if (!layerVisible(layerIdOnly(layerId)))
+                        continue;
                     const auto viaStyle = styleFor(layerIdOnly(layerId), styles, deviceStyles);
                     const auto center = transform.map(shape.centerline[index]);
                     const auto half = shape.width * transform.scale * 0.5;
@@ -325,6 +329,156 @@ DisplayTransform centeredTransform(const QRectF &bounds, QPointF center) {
     return transform;
 }
 
+// DEF-imported cells only carry a master name, not an OpenDB master type, so
+// classify the common standard-cell families from their LEF names.
+QString instanceCategoryForName(const std::string &name) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    if (lower.find("__fill") != std::string::npos || lower.find("__spacer") != std::string::npos)
+        return QStringLiteral("fill");
+    if (lower.find("__endcap") != std::string::npos)
+        return QStringLiteral("endcap");
+    if (lower.find("__tap") != std::string::npos || lower.find("welltap") != std::string::npos)
+        return QStringLiteral("tap");
+    if (lower.find("__antenna") != std::string::npos)
+        return QStringLiteral("antenna");
+    if (lower.find("__cover") != std::string::npos)
+        return QStringLiteral("cover");
+    return QStringLiteral("stdcell");
+}
+
+// Fallback heat maps mirror the ODB reader so the DEF preview keeps the same
+// overlays when the optional ice-openroad helper is not built.
+std::optional<LayoutPreviewHeatMap> computePlacementDensity(const LayoutPreviewModel &model, int bins) {
+    const auto bounds = model.bounds;
+    if (bins <= 0 || !bounds.isValid() || bounds.width() <= 0.0 || bounds.height() <= 0.0)
+        return std::nullopt;
+    const double binWidth = bounds.width() / bins;
+    const double binHeight = bounds.height() / bins;
+    const double binArea = binWidth * binHeight;
+    if (binArea <= 0.0)
+        return std::nullopt;
+    LayoutPreviewHeatMap map;
+    map.bounds = bounds;
+    map.columns = bins;
+    map.rows = bins;
+    map.values.assign(static_cast<std::size_t>(bins) * bins, 0.0);
+    const auto accumulate = [&](const QRectF &rectangle) {
+        const auto clipped = rectangle.intersected(bounds);
+        if (!clipped.isValid() || clipped.width() <= 0.0 || clipped.height() <= 0.0)
+            return;
+        const int x0 =
+            std::clamp(static_cast<int>(std::floor((clipped.left() - bounds.left()) / binWidth)), 0, bins - 1);
+        const int x1 = std::clamp(static_cast<int>(std::ceil((clipped.right() - bounds.left()) / binWidth)), 0, bins);
+        const int y0 =
+            std::clamp(static_cast<int>(std::floor((clipped.top() - bounds.top()) / binHeight)), 0, bins - 1);
+        const int y1 = std::clamp(static_cast<int>(std::ceil((clipped.bottom() - bounds.top()) / binHeight)), 0, bins);
+        for (int y = y0; y < y1; ++y) {
+            const double top = bounds.top() + y * binHeight;
+            const double bottom = top + binHeight;
+            const double overlapY = std::min(clipped.bottom(), bottom) - std::max(clipped.top(), top);
+            if (overlapY <= 0.0)
+                continue;
+            for (int x = x0; x < x1; ++x) {
+                const double left = bounds.left() + x * binWidth;
+                const double right = left + binWidth;
+                const double overlapX = std::min(clipped.right(), right) - std::max(clipped.left(), left);
+                if (overlapX <= 0.0)
+                    continue;
+                map.values[static_cast<std::size_t>(y) * bins + x] += 100.0 * overlapX * overlapY / binArea;
+            }
+        }
+    };
+    for (const auto &device : model.plannedDevices) {
+        const auto category = device.category.toLower();
+        if (category == QStringLiteral("fill") || category == QStringLiteral("endcap") ||
+            category == QStringLiteral("tap") || category == QStringLiteral("antenna") ||
+            category == QStringLiteral("cover"))
+            continue;
+        accumulate(device.rectangle);
+    }
+    double maximum = 0.0;
+    for (auto &value : map.values) {
+        value = std::min(100.0, value);
+        maximum = std::max(maximum, value);
+    }
+    if (maximum <= 0.0)
+        return std::nullopt;
+    map.minimum = 0.0;
+    map.maximum = maximum;
+    return map;
+}
+
+std::optional<LayoutPreviewHeatMap> computeRoutingCongestion(const LayoutPreviewModel &model, int bins) {
+    const auto bounds = model.bounds;
+    if (bins <= 0 || !bounds.isValid() || bounds.width() <= 0.0 || bounds.height() <= 0.0)
+        return std::nullopt;
+    const double binWidth = bounds.width() / bins;
+    const double binHeight = bounds.height() / bins;
+    const double binArea = binWidth * binHeight;
+    if (binArea <= 0.0)
+        return std::nullopt;
+    LayoutPreviewHeatMap map;
+    map.bounds = bounds;
+    map.columns = bins;
+    map.rows = bins;
+    map.values.assign(static_cast<std::size_t>(bins) * bins, 0.0);
+    const auto accumulate = [&](const QRectF &rectangle) {
+        const auto clipped = rectangle.intersected(bounds);
+        if (!clipped.isValid() || clipped.width() <= 0.0 || clipped.height() <= 0.0)
+            return;
+        const int x0 =
+            std::clamp(static_cast<int>(std::floor((clipped.left() - bounds.left()) / binWidth)), 0, bins - 1);
+        const int x1 = std::clamp(static_cast<int>(std::ceil((clipped.right() - bounds.left()) / binWidth)), 0, bins);
+        const int y0 =
+            std::clamp(static_cast<int>(std::floor((clipped.top() - bounds.top()) / binHeight)), 0, bins - 1);
+        const int y1 = std::clamp(static_cast<int>(std::ceil((clipped.bottom() - bounds.top()) / binHeight)), 0, bins);
+        for (int y = y0; y < y1; ++y) {
+            const double top = bounds.top() + y * binHeight;
+            const double bottom = top + binHeight;
+            const double overlapY = std::min(clipped.bottom(), bottom) - std::max(clipped.top(), top);
+            if (overlapY <= 0.0)
+                continue;
+            for (int x = x0; x < x1; ++x) {
+                const double left = bounds.left() + x * binWidth;
+                const double right = left + binWidth;
+                const double overlapX = std::min(clipped.right(), right) - std::max(clipped.left(), left);
+                if (overlapX <= 0.0)
+                    continue;
+                map.values[static_cast<std::size_t>(y) * bins + x] += 100.0 * overlapX * overlapY / binArea;
+            }
+        }
+    };
+    for (const auto &shape : model.shapes) {
+        if (shape.netId == 0 || shape.kind == LayoutPreviewShape::Kind::text)
+            continue;
+        if (shape.kind == LayoutPreviewShape::Kind::path) {
+            for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+                const auto start = shape.centerline[index];
+                const auto end = shape.centerline[index + 1];
+                const auto width = index < shape.segmentWidths.size() ? shape.segmentWidths[index] : shape.width;
+                const auto half = std::max<qreal>(0.0, width * 0.5);
+                accumulate(QRectF(QPointF(std::min(start.x(), end.x()) - half, std::min(start.y(), end.y()) - half),
+                                  QPointF(std::max(start.x(), end.x()) + half, std::max(start.y(), end.y()) + half))
+                               .normalized());
+            }
+            continue;
+        }
+        accumulate(shape.polygon.boundingRect());
+    }
+    double maximum = 0.0;
+    for (auto &value : map.values) {
+        value = std::min(100.0, value);
+        maximum = std::max(maximum, value);
+    }
+    if (maximum <= 0.0)
+        return std::nullopt;
+    map.minimum = 0.0;
+    map.maximum = maximum;
+    return map;
+}
+
 } // namespace
 
 bool LayoutPreviewModel::empty() const {
@@ -366,7 +520,8 @@ LayoutPreviewModel buildLayoutDevicePreviewModel(const LayoutDeviceCell &device)
 
 LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const LayoutCell &cell, bool includeInstances,
                                                bool includePorts, bool includePlannedDevices,
-                                               const std::vector<Transform> &rootTransform) {
+                                               const std::vector<Transform> &rootTransform, bool includeInstanceDevices,
+                                               bool includeNets) {
     LayoutPreviewModel model;
     QRectF bounds;
     bool valid = false;
@@ -374,6 +529,22 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
 
     std::function<void(const LayoutCell &, const std::vector<Transform> &, bool)> collect;
     collect = [&](const LayoutCell &current, const std::vector<Transform> &chain, bool root) {
+        if (includeNets && root) {
+            for (const auto &[netId, net] : current.nets) {
+                LayoutPreviewNet preview;
+                preview.id = static_cast<int>(netId);
+                preview.name = QString::fromStdString(net.name);
+                model.nets.push_back(std::move(preview));
+            }
+        }
+        const auto applyNet = [&](LayoutPreviewShape &preview, const Shape &shape) {
+            if (!includeNets || !shape.net)
+                return;
+            preview.netId = static_cast<int>(*shape.net);
+            const auto net = current.nets.find(*shape.net);
+            if (net != current.nets.end())
+                preview.net = QString::fromStdString(net->second.name);
+        };
         for (const auto &[_, shape] : current.shapes) {
             const auto layer = layerFor(project, shape.layer);
             if (shape.isText()) {
@@ -387,6 +558,7 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 preview.textRectangle = QRectF(QPointF(std::min(first.x, second.x), std::min(first.y, second.y)),
                                                QPointF(std::max(first.x, second.x), std::max(first.y, second.y)))
                                             .normalized();
+                applyNet(preview, shape);
                 includeRect(bounds, valid, preview.textRectangle);
                 model.shapes.push_back(std::move(preview));
                 continue;
@@ -424,6 +596,7 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                         bounds, valid,
                         QRectF(minX - margin, minY - margin, maxX - minX + 2.0 * margin, maxY - minY + 2.0 * margin));
                 }
+                applyNet(preview, shape);
                 model.shapes.push_back(std::move(preview));
                 continue;
             }
@@ -448,6 +621,7 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                     preview.polygon << QPointF(mapped.x, mapped.y);
                 }
             }
+            applyNet(preview, shape);
             includeRect(bounds, valid, preview.polygon.boundingRect());
             model.shapes.push_back(std::move(preview));
         }
@@ -577,7 +751,71 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
         }
     };
     collect(cell, rootTransform, true);
+
+    if (includeInstanceDevices) {
+        // Imported DEF cells place their standard cells as child layout cells.
+        // Report each top-level instance as a preview device so the physical
+        // display controls can group instances the same way an ODB preview does.
+        std::map<ObjectId, QRectF> masterBounds;
+        for (const auto &[_, instance] : cell.instances) {
+            const auto child = project.layoutCells.find(instance.cell);
+            if (child == project.layoutCells.end())
+                continue;
+            auto found = masterBounds.find(instance.cell);
+            if (found == masterBounds.end()) {
+                const auto childModel = buildLayoutCellPreviewModel(project, child->second, true, true, false);
+                found = masterBounds.emplace(instance.cell, childModel.bounds).first;
+            }
+            if (!found->second.isValid())
+                continue;
+            const Transform transform{instance.x, instance.y, instance.orientation};
+            const auto &master = found->second;
+            const std::array<Point, 4> corners = {
+                Point{static_cast<Coordinate>(std::llround(master.left())),
+                      static_cast<Coordinate>(std::llround(master.top()))},
+                Point{static_cast<Coordinate>(std::llround(master.left() + master.width())),
+                      static_cast<Coordinate>(std::llround(master.top()))},
+                Point{static_cast<Coordinate>(std::llround(master.left() + master.width())),
+                      static_cast<Coordinate>(std::llround(master.top() + master.height()))},
+                Point{static_cast<Coordinate>(std::llround(master.left())),
+                      static_cast<Coordinate>(std::llround(master.top() + master.height()))},
+            };
+            qreal minX = 0.0;
+            qreal minY = 0.0;
+            qreal maxX = 0.0;
+            qreal maxY = 0.0;
+            bool firstCorner = true;
+            for (const auto &corner : corners) {
+                const auto mapped = transform.apply(corner);
+                if (firstCorner) {
+                    minX = maxX = mapped.x;
+                    minY = maxY = mapped.y;
+                    firstCorner = false;
+                    continue;
+                }
+                minX = std::min<qreal>(minX, mapped.x);
+                minY = std::min<qreal>(minY, mapped.y);
+                maxX = std::max<qreal>(maxX, mapped.x);
+                maxY = std::max<qreal>(maxY, mapped.y);
+            }
+            LayoutPreviewPlannedDevice device;
+            device.rectangle = QRectF(QPointF(minX, minY), QPointF(maxX, maxY)).normalized();
+            device.name = QString::fromStdString(instance.name);
+            device.id = static_cast<int>(instance.id);
+            device.master = QString::fromStdString(child->second.name);
+            device.category = instanceCategoryForName(child->second.name);
+            device.orientation = QString::fromStdString(orientationName(instance.orientation));
+            includeRect(bounds, valid, device.rectangle);
+            model.plannedDevices.push_back(std::move(device));
+        }
+    }
+
     model.bounds = valid ? bounds : QRectF{};
+    if (includeNets && includeInstanceDevices) {
+        constexpr int heatMapBins = 32;
+        model.placementDensity = computePlacementDensity(model, heatMapBins);
+        model.routingCongestion = computeRoutingCongestion(model, heatMapBins);
+    }
     return model;
 }
 

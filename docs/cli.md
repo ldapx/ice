@@ -217,15 +217,15 @@ generates:
 - `scripts/04-route.tcl`;
 - `scripts/05-final.tcl`.
 
-`implementation-run` executes those scripts through the cancellable process
-runner. When the C++ backend is available (`ice-openroad` next to `ice-cli` or
-set through `ICE_OPENROAD_HELPER`), the OpenROAD physical stages use the
-OpenROAD C++ APIs instead of generated Tcl. Set `ICE_OPENROAD_BACKEND=tcl` to
-force the legacy backend or `ICE_OPENROAD_BACKEND=cpp` to require the C++
-backend. The same helper provides read-only ODB tooling (`ice-openroad
+`implementation-run` executes Yosys synthesis and then runs every physical
+stage through the required `ice-openroad` helper (next to `ice-cli`, or set
+through `ICE_OPENROAD_HELPER`), which uses the OpenROAD C++ APIs instead of
+generated Tcl. The Tcl stage scripts are still written for inspection, but they
+are not executed. The same helper provides read-only ODB tooling (`ice-openroad
 odb-info`, `ice-openroad odb-preview`) and native heat-map CSV export
-(`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). Build
-it from the pinned OpenROAD/OpenSTA revisions with `xmake openroad-sdk`; use
+(`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). It is
+built with `xmake build ice-openroad` (also pulled in by `ice`, `ice-cli`, and
+`ice-mcp`) from the pinned OpenROAD/OpenSTA revisions; use
 `scripts/build-ice-openroad.sh --sdk-install <prefix>` for an SDK install. See
 `openroad_sdk/README.md`. Yosys synthesis is technology-independent and writes
 the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform

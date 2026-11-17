@@ -314,6 +314,10 @@ int main(int argc, char **argv) {
     }
 
     const std::string command = argv[1];
+    if (command == "--version" || command == "-version" || command == "version") {
+        std::cout << "ice-openroad " << ice::openroad::Engine::version() << "\n";
+        return 0;
+    }
     if (command == "odb-info" || command == "odb-preview") {
         if (argc < 3) {
             std::cerr << "Usage: ice-openroad " << command << " <odb> [options]\n";

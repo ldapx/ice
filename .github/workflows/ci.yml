@@ -9,6 +9,12 @@ jobs:
       - uses: xmake-io/github-action@v1
         with:
           xmake-version: 2.9.8
+      - name: Install bazelisk
+        run: |
+          curl -fsSL -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
       - run: xmake build doctest ice-cli ice-pkg ice-mcp
       - run: xmake run doctest
       - run: python3 -m pip install -r docs/requirements.txt

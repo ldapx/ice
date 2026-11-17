@@ -147,10 +147,16 @@ struct LayoutPreviewModel {
 // Builds a flattened, project-independent render model. Layer ids remain
 // project ids so the caller can apply the same LayerStyle map used by the
 // interactive canvas.
+// When includeInstanceDevices is set, each top-level placed instance is also
+// emitted as a preview device with its master name and category. This lets
+// previews that were built from an imported DEF populate the same instance
+// display controls as an ODB preview. includeNets copies the root cell's nets
+// into the model and tags shapes with their net ids.
 LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const LayoutCell &cell,
                                                bool includeInstances = true, bool includePorts = true,
                                                bool includePlannedDevices = true,
-                                               const std::vector<Transform> &rootTransform = {});
+                                               const std::vector<Transform> &rootTransform = {},
+                                               bool includeInstanceDevices = false, bool includeNets = false);
 LayoutPreviewModel buildLayoutDevicePreviewModel(const LayoutDeviceCell &device);
 
 struct LayoutPaintOptions {
