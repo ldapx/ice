@@ -3758,3 +3758,48 @@ TEST_CASE("schematic comments survive serialization") {
     ice::removeSchematicComment(project, cellId, commentId);
     CHECK(project.schematicCells.at(cellId).comments.empty());
 }
+
+TEST_CASE("project session keeps saving after undo and redo") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-session-undo-test";
+    std::filesystem::remove_all(root);
+    ice::Project seed;
+    seed.identity = "session-undo";
+    seed.name = "session-undo";
+    seed.save(root);
+    const auto path = root / "project.icepro";
+
+    ice::ProjectSession session(ice::Project::load(path));
+    session.execute("first", [](ice::Project &project) { ice::createSchematicCell(project, "a"); });
+    session.save(path);
+    session.execute("second", [](ice::Project &project) { ice::createSchematicCell(project, "b"); });
+    session.save(path);
+
+    REQUIRE(session.undo());
+    session.save(path);
+    REQUIRE(session.undo());
+    session.save(path);
+    session.execute("third", [](ice::Project &project) { ice::createSchematicCell(project, "c"); });
+    session.save(path);
+
+    const auto reloaded = ice::Project::load(path);
+    CHECK(reloaded.schematicCells.size() == 1);
+}
+
+TEST_CASE("replacing a session from disk leaves it clean") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-session-replace-test";
+    std::filesystem::remove_all(root);
+    ice::Project seed;
+    seed.identity = "session-replace";
+    seed.name = "session-replace";
+    seed.save(root);
+    const auto path = root / "project.icepro";
+    ice::createSchematicCell(seed, "draft");
+    seed.save(path);
+
+    ice::ProjectSession session(ice::Project::load(path));
+    session.execute("dirty", [](ice::Project &project) { ice::createSchematicCell(project, "local"); });
+    CHECK(session.dirty());
+
+    session.replaceProject(ice::Project::load(path), false);
+    CHECK(!session.dirty());
+}

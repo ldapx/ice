@@ -115,6 +115,29 @@ TEST_CASE("distinct explicit nets stay separate when geometry overlaps") {
     CHECK(groupFor(groups, power) != groupFor(groups, ground));
 }
 
+TEST_CASE("unlabeled geometry bridging two nets reports aliases") {
+    auto fixture = makeFixture();
+    const auto powerNet = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");
+    const auto biasNet = ice::createLayoutNet(fixture.project, fixture.cell, "NBIAS");
+    // A resistor body is unlabeled geometry: its two ends never touch on the
+    // metal layers, so only the body itself can join the named nets.
+    const auto power = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000}, powerNet);
+    const auto bias = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {3000, 0, 1000, 1000}, biasNet);
+    ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {900, 400, 2200, 200}, 0);
+
+    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    CHECK(groups.size() == 1);
+    if (groups.size() != 1)
+        return;
+    const auto &group = groups.front();
+    CHECK(group.net == powerNet);
+    CHECK(group.name == "VDD");
+    CHECK(group.aliases == std::vector<std::string>{"NBIAS"});
+    CHECK(group.shapes.size() == 3);
+    CHECK(groupFor(groups, power) == &group);
+    CHECK(groupFor(groups, bias) == &group);
+}
+
 TEST_CASE("connectivity ignores hidden pins and text shapes") {
     auto fixture = makeFixture();
     const auto shape = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000});

@@ -405,6 +405,7 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
 
     std::map<std::size_t, LayoutNetGroup> groups;
     std::map<std::size_t, ObjectId> groupNets;
+    std::map<std::size_t, std::vector<ObjectId>> groupNetIds;
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const auto root = findRoot(parents, index);
         auto &group = groups[root];
@@ -412,8 +413,13 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
             group.shapes.push_back(objects[index].id);
         else
             group.ports.push_back(objects[index].id);
-        if (objects[index].net != 0 && groupNets[root] == 0)
-            groupNets[root] = objects[index].net;
+        if (objects[index].net != 0) {
+            if (groupNets[root] == 0)
+                groupNets[root] = objects[index].net;
+            auto &ids = groupNetIds[root];
+            if (std::find(ids.begin(), ids.end(), objects[index].net) == ids.end())
+                ids.push_back(objects[index].net);
+        }
     }
 
     std::map<ObjectId, std::size_t> rootByNet;
@@ -450,6 +456,18 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
         }
         if (group.name.empty())
             group.name = "N" + std::to_string(group.net != 0 ? group.net : root);
+        // Report any other explicit net that this component reached through
+        // unlabeled geometry so a merged net is not silently reported as one.
+        if (const auto ids = groupNetIds.find(root); ids != groupNetIds.end()) {
+            for (const auto id : ids->second) {
+                if (id == group.net)
+                    continue;
+                const auto net = cell->second.nets.find(id);
+                group.aliases.push_back(net == cell->second.nets.end() ? "N" + std::to_string(id)
+                                                                       : net->second.name);
+            }
+            std::sort(group.aliases.begin(), group.aliases.end());
+        }
         std::sort(group.shapes.begin(), group.shapes.end());
         std::sort(group.ports.begin(), group.ports.end());
         std::sort(group.connections.begin(), group.connections.end());

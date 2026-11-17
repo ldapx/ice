@@ -1503,7 +1503,7 @@ class IceMcpServer {
                 if (session_->dirty())
                     throw ToolError("Project changed outside ice-mcp while local changes are pending; save or reopen "
                                     "the project before mutating it.");
-                session_->replaceProject(ice::Project::load(projectPath_));
+                session_->replaceProject(ice::Project::load(projectPath_), false);
                 projectStamp_ = projectStateStamp(projectPath_);
             }
         }
@@ -1514,7 +1514,17 @@ class IceMcpServer {
                 projectStamp_ = projectStateStamp(projectPath_);
                 result["saved"] = true;
             } catch (const ice::ProjectError &error) {
-                throw ToolError("Mutation was applied in memory but could not be saved: " + std::string(error.what()));
+                // Never leave the session dirty with a state that cannot be
+                // persisted: every later call would retry the same doomed save
+                // and fail, including read-only ones. Drop back to the on-disk
+                // state and report what happened.
+                try {
+                    session_->replaceProject(ice::Project::load(projectPath_), false);
+                    projectStamp_ = projectStateStamp(projectPath_);
+                } catch (const std::exception &) {
+                    // Keep the save error below; it is the actionable one.
+                }
+                throw ToolError("Mutation could not be saved and was discarded: " + std::string(error.what()));
             }
         }
         return result;
@@ -1663,13 +1673,15 @@ class IceMcpServer {
 
         if (name == "project_reload") {
             requireSession();
-            if (session_->dirty())
-                throw ToolError("Cannot reload a project with unsaved local changes.");
+            const bool discard = optionalBoolean(arguments, "discard", false);
+            if (session_->dirty() && !discard)
+                throw ToolError("Cannot reload a project with unsaved local changes. Pass discard=true to throw the "
+                                "local changes away and reload from disk.");
             const bool recover = optionalBoolean(arguments, "recover", false);
             ice::ProjectLoadOptions options;
             options.recover = recover;
             ice::ProjectLoadReport report;
-            session_->replaceProject(ice::Project::load(projectPath_, options, &report));
+            session_->replaceProject(ice::Project::load(projectPath_, options, &report), false);
             projectStamp_ = projectStateStamp(projectPath_);
             if (recover) {
                 session_->save(projectPath_);
@@ -2860,9 +2872,15 @@ class IceMcpServer {
             const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
             std::vector<std::string> notes;
             const auto netlist = ice::buildSimulationNetlist(session.project(), cellId, &notes);
+            // Expose the subcircuit port order so callers can wrap a drawn cell
+            // in their own testbench without guessing the pin sequence.
+            json ports = json::array();
+            for (const auto *port : ice::schematicPortInstances(session.project().schematicCells.at(cellId)))
+                ports.push_back(port->name);
             return {{"id", cellId},
                     {"name", session.project().schematicCells.at(cellId).name},
                     {"netlist", netlist},
+                    {"ports", std::move(ports)},
                     {"notes", notes}};
         }
         if (name == "schematic_validate_hierarchy") {
@@ -3369,6 +3387,7 @@ class IceMcpServer {
             for (const auto &group : ice::extractLayoutNets(session.project(), cell)) {
                 nets.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
                                 {"name", group.name},
+                                {"aliases", group.aliases},
                                 {"shapes", group.shapes},
                                 {"ports", group.ports},
                                 {"connections", group.connections}});
@@ -3866,6 +3885,7 @@ class IceMcpServer {
             tool_builder("project_reload")
                 .with_description("Reload the open project from disk.")
                 .with_boolean_param("recover", "Quarantine invalid sidecar files and reload the rest", false)
+                .with_boolean_param("discard", "Throw unsaved in-memory changes away and reload from disk", false)
                 .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());

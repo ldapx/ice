@@ -29,9 +29,11 @@ diagnostics, and doctor/PDK discovery.
 The MCP server exposes `simulation_create`, `simulation_update`, and
 `simulation_run`, so a client can create, configure, and run a simulation
 without switching to `ice-cli`. `project_reload` explicitly refreshes an open
-project; the server also detects changes made by another ICE client before a
-mutation. Existing text SPICE and SystemVerilog cells can be edited with
-`schematic_set_text`.
+project (`discard=true` throws unsaved in-memory changes away first); the server
+also detects changes made by another ICE client before a mutation. A mutation
+whose automatic save fails is rolled back to the on-disk state and reported, so
+a read-only call afterwards still works. Existing text SPICE and SystemVerilog
+cells can be edited with `schematic_set_text`.
 
 Or open a project at startup:
 

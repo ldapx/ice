@@ -1601,6 +1601,11 @@ void Project::save(const std::filesystem::path &path) const {
     spdlog::info("Saved project {}", (root / "project.icepro").string());
 }
 
+void Project::adoptSourceRevisionFrom(const Project &other) {
+    sourceRoot_ = other.sourceRoot_;
+    sourceRevision_ = other.sourceRevision_;
+}
+
 std::filesystem::path Project::saveCellFile(ObjectId id) const {
     const auto diagnostics = validate();
     if (!diagnostics.empty())
@@ -1849,9 +1854,9 @@ void ProjectSession::setLastHistoryLabel(std::string label) {
     if (historyPosition_ != 0 && historyPosition_ <= historyLabels_.size())
         historyLabels_[historyPosition_ - 1] = std::move(label);
 }
-void ProjectSession::replaceProject(Project project) {
+void ProjectSession::replaceProject(Project project, bool markDirty) {
     project_ = std::move(project);
-    dirty_ = true;
+    dirty_ = markDirty;
     notify();
 }
 void ProjectSession::markDirty() {
@@ -1905,7 +1910,9 @@ bool ProjectSession::undo() {
     if (historyPosition_ == 0)
         return false;
     --historyPosition_;
-    project_ = historyStates_[historyPosition_];
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
     dirty_ = true;
     notify();
     return true;
@@ -1914,7 +1921,9 @@ bool ProjectSession::redo() {
     if (historyPosition_ >= historyLabels_.size())
         return false;
     ++historyPosition_;
-    project_ = historyStates_[historyPosition_];
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
     dirty_ = true;
     notify();
     return true;
