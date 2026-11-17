@@ -1,4 +1,4 @@
-# Simulation Contract
+# Simulation
 
 ICE provides analog and digital simulation through `icelib::SimulationRunner`.
 The default `AutoSimulator` dispatches to `NgspiceSimulator` for SPICE analyses

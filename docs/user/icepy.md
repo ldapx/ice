@@ -145,7 +145,9 @@ The API is new-format-only and reads runs from `build/simulations`.
 
 ## Procedural layouts
 
-`icepy.Project` exposes procedural layouts alongside static layout cells:
+`icepy.Project` exposes procedural layouts alongside static layout cells. See
+{doc}`procedural-layout` for the script-side `layout` builder API, units,
+devices, routing, and the generated API reference.
 
 ```python
 project = icepy.new_project("generated_demo")

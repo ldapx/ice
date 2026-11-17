@@ -1,7 +1,11 @@
-# Getting Started
+# Building and Testing
 
-This page covers prerequisites, building, and testing ICE.
-Product intent is in {doc}`vision`; technical contracts are in {doc}`architecture`.
+This page is for developers building ICE from source. If you only want to use
+ICE, start with the {doc}`/user/getting-started` guide instead.
+
+Product intent is in {doc}`/project/vision`; technical contracts are in
+{doc}`architecture`. The workspace layout and contribution workflow are in
+{doc}`plan`.
 
 ## Components
 
@@ -29,7 +33,7 @@ Python scientific stack.
 - `clang-format` (formatting via `xmake format`)
 - The bundled `agentsdk-cpp` submodule. Clone with `--recursive`, or run
   `git submodule update --init --recursive` after cloning. The build produces
-  `libagentsdk.so` and installs it alongside ICE
+  `libagentsdk.so` and installs it alongside ICE.
 
 ## Build
 
@@ -51,20 +55,6 @@ server keeps the code it loaded at process start. `ice-cli --version` and the
 MCP `ice_version` tool print the commit, build time, executable path, and
 feature flags.
 
-Simulation PDKs are provided by ICE packages under `~/.ice/packages` (or
-`ICE_PACKAGE_ROOT`); Volare, CIEL, `PDK_ROOT`, and `PDK` are not used.
-OSDI-based packages need a one-time local build:
-
-```sh
-ice-cli pdk-build ihp-sg13g2
-```
-
-Verify the package before simulating with:
-
-```sh
-ice-cli pdk-info ihp-sg13g2 --probe
-```
-
 Build the desktop app (requires Qt 6):
 
 ```sh
@@ -79,7 +69,24 @@ export PYTHONPATH="$PWD/build/linux/x86_64/release:$PWD/python"
 python3 -c "import icepy; print(icepy.new_project('demo').name)"
 ```
 
-See {doc}`icepy` for the layout builder and PDK PCell runtime.
+See {doc}`/user/icepy` for the layout builder and PDK PCell runtime.
+
+Simulation PDKs are provided by ICE packages under `~/.ice/packages` (or
+`ICE_PACKAGE_ROOT`); Volare, CIEL, `PDK_ROOT`, and `PDK` are not used.
+OSDI-based packages need a one-time local build:
+
+```sh
+ice-cli pdk-build ihp-sg13g2
+```
+
+Verify the package before simulating with:
+
+```sh
+ice-cli pdk-info ihp-sg13g2 --probe
+```
+
+See {doc}`/user/packages` for installing and selecting packages, and
+{doc}`packages` for the package format and PDK authoring contracts.
 
 ## Test
 
@@ -99,13 +106,21 @@ Format first-party C++ sources:
 xmake format
 ```
 
-## Build the docs
-
-Install the docs dependencies and build this site:
+Pure-Python test suites:
 
 ```sh
-pip install -r docs/requirements.txt
-sphinx-build -b html docs docs/_build
+PYTHONPATH=python python3 tests/icepy_sim_tests.py
+python3 tests/icepy_report_runner_tests.py
+python3 tests/procedural_router_test.py
+```
+
+## Build the documentation
+
+Install the docs dependencies and build the site from the repository root:
+
+```sh
+python3 -m pip install -r docs/requirements.txt
+sphinx-build -b html docs docs/_build -W --keep-going
 ```
 
 or via xmake:
@@ -114,9 +129,13 @@ or via xmake:
 xmake docs
 ```
 
+The API reference for procedural layouts is generated with Sphinx autodoc from
+`assets/layout/procedural_runner.py`. See {doc}`/user/procedural-layout` for the
+published page and {doc}`plan` for the documentation structure.
+
 ## Next steps
 
-- {doc}`vision` — what ICE is and why it exists
-- {doc}`gui` — desktop shell and editors
-- {doc}`simulation` — simulation contract and testbenches
-- {doc}`packages` — packages, PDK installation, and GDSII/OASIS interchange
+- {doc}`architecture` — domain model, interfaces, and subsystem contracts.
+- {doc}`capabilities` — GUI / CLI / Python capability parity.
+- {doc}`packages` — package format, device libraries, and PDK integration.
+- {doc}`plan` — how the documentation is organized.

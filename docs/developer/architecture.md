@@ -1,7 +1,7 @@
 # ICE Architecture
 
-> Product intent is in {doc}`vision`; capabilities and acceptance
-> criteria are in {doc}`roadmap`.
+> Product intent is in {doc}`/project/vision`; capabilities and acceptance
+> criteria are in {doc}`/project/roadmap`.
 
 ## Overview
 

@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Execute an ICE procedural layout script and emit generated geometry as JSON.
+"""Run an ICE procedural layout script and emit generated geometry as JSON.
 
 The user script is executed with a single injected object named ``layout``.
 It builds an in-memory description of the generated static layout. ICE parses
-the resulting JSON and applies it to the project's layout database.
+the resulting JSON, validates it, and applies it to the project's layout
+database.
 
 Coordinates are integer database units (one nanometer by default). Use
 ``layout.nm(...)``, ``layout.um(...)``, ``layout.db(...)``, and
 ``layout.snap(...)`` to work in physical units.
+
+The public script-facing API is documented on the
+:doc:`procedural layout API </user/procedural-layout>` page. Scripts should normally
+use :class:`Layout`, :class:`Layer`, :class:`Shape`,
+:class:`DevicePlacement`, and :class:`Route`; the remaining names in this
+module are runner internals.
 """
 
 from __future__ import annotations
@@ -88,7 +95,17 @@ def _path_segment_polygon(start, end, width):
 
 
 class Shape:
-    """Handle for a shape added through the layout builder."""
+    """Handle for a shape added through the layout builder.
+
+    Shapes are returned by :meth:`Layout.rectangle`, :meth:`Layout.polygon`,
+    :meth:`Layout.path`, :meth:`Layout.text`, and the boolean helpers. A shape
+    is already part of the generated layout when it is returned; the handle
+    exposes its editable ``name`` and ``net`` metadata.
+
+    :ivar name: Optional shape name shown in the layout hierarchy.
+    :ivar net: Optional layout net name. Routers treat same-net shapes as
+        connectable geometry and other-net shapes as obstacles.
+    """
 
     def __init__(self, layout, record):
         self._layout = layout
@@ -96,6 +113,7 @@ class Shape:
 
     @property
     def name(self):
+        """Shape name, or an empty string when the shape is unnamed."""
         return self._record.get("name", "")
 
     @name.setter
@@ -107,6 +125,7 @@ class Shape:
 
     @property
     def net(self):
+        """Layout net name, or an empty string when the shape has no net."""
         return self._record.get("net", "")
 
     @net.setter
@@ -123,9 +142,30 @@ class DevicePlacement:
     The device geometry is flattened into the generated layout, but this
     object keeps the absolute pin rectangles and the device metadata so a
     script can route to the device and LVS can recognize it.
+
+    Pin rectangles are available both as attributes and through
+    :attr:`ports`, for example ``m1.G`` and ``m1.ports["G"]``. Each pin
+    rectangle is a ``(x, y, width, height)`` tuple in database units and can
+    be passed directly to :meth:`Layout.route`.
+
+    :ivar name: Instance name used to prefix emitted pin and shape names.
+    :ivar device: Device-library cell name.
+    :ivar model: SPICE model name when the device library declares one.
+    :ivar parameters: Resolved device parameter values as strings.
+    :ivar shapes: Flattened :class:`Shape` handles emitted for the device.
+    :ivar ports: Mapping of pin name to absolute ``(x, y, width, height)``.
+    :ivar port_info: Per-pin metadata with ``rectangle``, ``layer``, ``side``,
+        ``direction``, and ``net`` keys.
+    :ivar bounds: Absolute device bounding box as ``x``, ``y``, ``width``,
+        and ``height`` keys.
+
+    Iterating a placement yields its flattened shapes, ``len(placement)`` is
+    the shape count, and indexing with a pin name returns that pin rectangle.
     """
 
-    def __init__(self, name, device, model, parameters, shapes, ports, port_info, bounds):
+    def __init__(
+        self, name, device, model, parameters, shapes, ports, port_info, bounds
+    ):
         self.name = name
         self.device = device
         self.model = model
@@ -154,7 +194,30 @@ class DevicePlacement:
 
 
 class Route:
-    """Handle returned by :meth:`Layout.route` and :meth:`Layout.connect`."""
+    """Handle returned by :meth:`Layout.route` and :meth:`Layout.connect`.
+
+    A route is already committed to the generated layout: its metal and via
+    shapes are appended to the builder and carry the requested ``net``.
+    The handle reports the planned path and geometry so scripts can inspect
+    or reuse the result.
+
+    :ivar net: Net name carried by the emitted shapes.
+    :ivar layer: Layer of the first route point.
+    :ivar width: Route width in database units.
+    :ivar points: Ordered ``(x, y)`` route points, including pin centers.
+    :ivar point_layers: Layer name for each entry in ``points``.
+    :ivar segments: Straight segments with ``start``, ``end``, and ``layer``.
+    :ivar vias: Via records with ``x``, ``y``, ``lower``, ``upper``,
+        ``via_layers``, ``pad_size``, and ``cut_size``.
+    :ivar shapes: Emitted :class:`Shape` handles.
+    :ivar length: Total Manhattan length in database units.
+    :ivar bends: Number of direction changes within a layer.
+    :ivar layer_stack: Layer names available to the route.
+    :ivar via_count: Number of via transitions.
+
+    Iterating a route yields its emitted shapes and ``len(route)`` is the
+    shape count.
+    """
 
     def __init__(
         self,
@@ -363,8 +426,9 @@ def _route_inflate(obstacles, inflate):
 
 
 def _route_inside_obstacle(x, y, inflated):
-    return any(left < x < right and top < y < bottom
-               for left, top, right, bottom in inflated)
+    return any(
+        left < x < right and top < y < bottom for left, top, right, bottom in inflated
+    )
 
 
 def _route_segment_blocked(first, second, inflated):
@@ -431,8 +495,7 @@ def _route_simplify_layers(points):
             first = result[-2]
             second = result[-1]
             if first[2] == second[2] == point[2] and (
-                first[0] == second[0] == point[0]
-                or first[1] == second[1] == point[1]
+                first[0] == second[0] == point[0] or first[1] == second[1] == point[1]
             ):
                 result[-1] = point
                 continue
@@ -592,8 +655,7 @@ def _route_manhattan_layers(
             first = simplified[-2]
             second = simplified[-1]
             if first[2] == second[2] == point[2] and (
-                first[0] == second[0] == point[0]
-                or first[1] == second[1] == point[1]
+                first[0] == second[0] == point[0] or first[1] == second[1] == point[1]
             ):
                 simplified[-1] = point
                 continue
@@ -602,7 +664,17 @@ def _route_manhattan_layers(
 
 
 class Layer:
-    """Handle returned by Layout.layer()."""
+    """Handle returned by :meth:`Layout.layer`.
+
+    The handle binds a layer name (and optionally its stream number and
+    datatype) so geometry calls do not need to repeat the layer argument.
+    ``rect`` and ``poly`` are aliases for :meth:`rectangle` and
+    :meth:`polygon`.
+
+    :ivar name: Layer name, including any purpose suffix such as ``.pin``.
+    :ivar number: GDS layer number, or ``None`` when it is resolved later.
+    :ivar datatype: GDS datatype, or ``None`` when it is resolved later.
+    """
 
     def __init__(self, layout, name, number=None, datatype=None):
         self._layout = layout
@@ -611,6 +683,7 @@ class Layer:
         self.datatype = datatype
 
     def rectangle(self, x, y, width, height, name=None, net=None):
+        """Draw a rectangle on this layer; see :meth:`Layout.rectangle`."""
         return self._layout.rectangle(
             self.name, x, y, width, height, name=name, net=net
         )
@@ -618,23 +691,49 @@ class Layer:
     rect = rectangle
 
     def polygon(self, points, holes=None, name=None, net=None):
+        """Draw a polygon on this layer; see :meth:`Layout.polygon`."""
         return self._layout.polygon(self.name, points, holes=holes, name=name, net=net)
 
     poly = polygon
 
     def path(self, points, width, name=None, net=None):
+        """Draw a path on this layer; see :meth:`Layout.path`."""
         return self._layout.path(self.name, points, width, name=name, net=net)
 
     def text(self, x, y, text, height=1000, width=None, name=None, net=None):
+        """Draw text on this layer; see :meth:`Layout.text`."""
         return self._layout.text(
             self.name, x, y, text, height=height, width=width, name=name, net=net
         )
 
 
 class Layout:
-    """Builder exposed to procedural layout scripts."""
+    """Builder exposed to procedural layout scripts as ``layout``.
 
-    def __init__(self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1, parameters=None):
+    A script writes geometry by calling methods on this object. ICE executes
+    the script in a temporary directory, reads the builder's output, validates
+    it, and replaces the read-only generated child of the procedural layout.
+    Coordinates are integer database units by default; use :meth:`nm`,
+    :meth:`um`, :meth:`db`, or :meth:`snap` for physical values.
+
+    :ivar pdk: Active PDK package id, or ``None`` for a generic layout.
+    :ivar pdk_root: Installed package root used for device and connectivity
+        lookups, or ``None`` when no package is active.
+    :ivar db_unit_nm: Size of one database unit in nanometers.
+    :ivar grid: Project manufacturing/snap grid in database units.
+    :ivar params: Current parameter values keyed by parameter name.
+    :ivar parameter_specs: Declared parameter metadata keyed by name.
+    :ivar layers: Registered layer specs keyed by layer name.
+    :ivar shapes: Emitted shape records in creation order.
+    :ivar ports: Emitted port records in creation order.
+    :ivar instances: Emitted child-instance records in creation order.
+    :ivar devices: Planned-device metadata used by LVS and extraction.
+    :ivar dummy_fill_requests: Queued PDK dummy-fill requests.
+    """
+
+    def __init__(
+        self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1, parameters=None
+    ):
         self.pdk = pdk
         self.pdk_root = pdk_root
         self.db_unit_nm = float(db_unit_nm)
@@ -678,11 +777,20 @@ class Layout:
         return name, current["number"], current["datatype"]
 
     def layer(self, name, number=None, datatype=None):
-        """Register or resolve a layer.
+        """Register or resolve a layer and return a reusable handle.
 
         When ``number``/``datatype`` are omitted, ICE resolves the layer from
         the active PDK package or the project's existing layers. Explicit
-        values win when no matching PDK/project layer exists.
+        values win when no matching PDK/project layer exists. A purpose suffix
+        such as ``Metal1.pin`` is preserved, so pin layers can carry their own
+        datatype.
+
+        :param name: Non-empty layer name.
+        :param number: Optional GDS layer number.
+        :param datatype: Optional GDS datatype.
+        :returns: A :class:`Layer` handle bound to the resolved name.
+        :raises ValueError: If the name is empty or the stream values are
+            negative.
         """
         name, number, datatype = self._layer_spec(name, number, datatype)
         return Layer(self, name, number, datatype)
@@ -705,6 +813,17 @@ class Layout:
         return Shape(self, record)
 
     def rectangle(self, layer, x, y, width, height, name=None, net=None):
+        """Draw an axis-aligned filled rectangle.
+
+        :param layer: Layer name or :class:`Layer` handle.
+        :param x: Left edge in database units.
+        :param y: Bottom edge in database units.
+        :param width: Positive width in database units.
+        :param height: Positive height in database units.
+        :param name: Optional shape name.
+        :param net: Optional net name for connectivity checks and routing.
+        :returns: The created :class:`Shape`.
+        """
         record = {
             "layer": self._layer_name(layer),
             "rectangle": {
@@ -724,6 +843,20 @@ class Layout:
     rect = rectangle
 
     def polygon(self, layer, points, holes=None, name=None, net=None):
+        """Draw a filled polygon, optionally with hole contours.
+
+        Points may be ``(x, y)`` tuples or mappings with ``x`` and ``y`` keys.
+        Holes use the same point format and must contain at least three
+        points.
+
+        :param layer: Layer name or :class:`Layer` handle.
+        :param points: Outer contour with at least three points.
+        :param holes: Optional list of hole contours.
+        :param name: Optional shape name.
+        :param net: Optional net name for connectivity checks and routing.
+        :returns: The created :class:`Shape`.
+        :raises ValueError: If the contour has fewer than three points.
+        """
         name_value = self._layer_name(layer)
         polygon = []
         for index, point in enumerate(points):
@@ -756,14 +889,20 @@ class Layout:
             record = copy.deepcopy(operand._record)
             if "centerline" in record or "text" in record:
                 raise ValueError("Boolean operands must be rectangles or polygons")
-            if "boolean" not in record and "polygon" not in record and "rectangle" not in record:
+            if (
+                "boolean" not in record
+                and "polygon" not in record
+                and "rectangle" not in record
+            ):
                 raise ValueError("Boolean operand has no filled geometry")
             operand._record["boolean_operand"] = True
             record["boolean_operand"] = True
             return record
         if not isinstance(operand, (list, tuple)):
             raise ValueError("Boolean operands must be shapes or point lists")
-        if len(operand) == 4 and all(isinstance(value, (int, float)) for value in operand):
+        if len(operand) == 4 and all(
+            isinstance(value, (int, float)) for value in operand
+        ):
             x, y, width, height = operand
             return {
                 "layer": layer,
@@ -786,8 +925,20 @@ class Layout:
         """Combine two or more rectangles/polygons with a boolean operation.
 
         Supported operations are ``union``, ``intersection``, ``difference``
-        and ``xor``. Operands are consumed by the operation.
+        and ``xor``. Operands can be :class:`Shape` handles, ``(x, y, width,
+        height)`` rectangles, or point lists. The result is emitted on
+        ``layer`` and the operand shapes are consumed by the operation.
+
+        :param operation: ``union``, ``intersection``, ``difference``, or
+            ``xor`` (aliases such as ``or``, ``and``, ``subtract``, and
+            ``minus`` are accepted).
+        :param layer: Output layer name or :class:`Layer` handle.
+        :param operands: Two or more shapes or geometry operands.
+        :param name: Optional shape name.
+        :param net: Optional net name.
+        :returns: The created :class:`Shape`.
         """
+
         operation = str(operation).strip().lower()
         aliases = {
             "union": "union",
@@ -800,7 +951,9 @@ class Layout:
             "xor": "xor",
         }
         if operation not in aliases:
-            raise ValueError("Boolean operation must be union, intersection, difference, or xor")
+            raise ValueError(
+                "Boolean operation must be union, intersection, difference, or xor"
+            )
         operation = aliases[operation]
         if len(operands) < 2:
             raise ValueError("Boolean operations need at least two operands")
@@ -819,18 +972,34 @@ class Layout:
         return shape
 
     def union(self, layer, *operands, name=None, net=None):
+        """Alias for ``boolean("union", ...)``."""
         return self.boolean("union", layer, *operands, name=name, net=net)
 
     def intersection(self, layer, *operands, name=None, net=None):
+        """Alias for ``boolean("intersection", ...)``."""
         return self.boolean("intersection", layer, *operands, name=name, net=net)
 
     def subtract(self, layer, *operands, name=None, net=None):
+        """Alias for ``boolean("difference", ...)``."""
         return self.boolean("difference", layer, *operands, name=name, net=net)
 
     def xor(self, layer, *operands, name=None, net=None):
+        """Alias for ``boolean("xor", ...)``."""
         return self.boolean("xor", layer, *operands, name=name, net=net)
 
     def path(self, layer, points, width, name=None, net=None):
+        """Draw a stroked polyline as a path shape.
+
+        The path stores its centerline and width. ICE expands it to polygons
+        for display and for :meth:`iter_polygons`.
+
+        :param layer: Layer name or :class:`Layer` handle.
+        :param points: Two or more centerline ``(x, y)`` points.
+        :param width: Positive path width in database units.
+        :param name: Optional shape name.
+        :param net: Optional net name for connectivity checks and routing.
+        :returns: The created :class:`Shape`.
+        """
         name_value = self._layer_name(layer)
         centerline = []
         for index, point in enumerate(points):
@@ -852,6 +1021,22 @@ class Layout:
         return shape
 
     def text(self, layer, x, y, text, height=1000, width=None, name=None, net=None):
+        """Place a text label on a layer.
+
+        Text is represented as a bounding rectangle with text metadata. When
+        ``width`` is omitted, a readable width is estimated from the label
+        length and text height.
+
+        :param layer: Layer name or :class:`Layer` handle.
+        :param x: Left edge in database units.
+        :param y: Bottom edge in database units.
+        :param text: Non-empty label.
+        :param height: Text height in database units (default 1000).
+        :param width: Optional explicit text width in database units.
+        :param name: Optional shape name.
+        :param net: Optional net name.
+        :returns: The created text :class:`Shape`.
+        """
         if not isinstance(text, str) or not text:
             raise ValueError("Text must be a non-empty string")
         height = _positive(height, "text height")
@@ -879,7 +1064,22 @@ class Layout:
     def via(
         self, layers, x, y, size=1000, width=None, height=None, name=None, net=None
     ):
-        """Convenience helper for a stack of square/rectangular via shapes."""
+        """Draw one rectangle on each of ``layers`` to form a via stack.
+
+        This is a geometry convenience helper; it does not emit router via
+        metadata. Use :meth:`route` or :meth:`connect` when the via must be
+        included in an autorouted connection.
+
+        :param layers: Layer name or list of layer names, ordered bottom-up.
+        :param x: Left edge of the via cut in database units.
+        :param y: Bottom edge of the via cut in database units.
+        :param size: Default square size in database units.
+        :param width: Optional width override.
+        :param height: Optional height override.
+        :param name: Optional name prefix; each layer gets ``name_<index>``.
+        :param net: Optional net name applied to every shape.
+        :returns: List of created :class:`Shape` handles.
+        """
         if isinstance(layers, str):
             layers = [layers]
         elif layers is None:
@@ -905,7 +1105,21 @@ class Layout:
         return shapes
 
     def array(self, cell, count, pitch, x=0, y=0, orientation="r0", name=None):
-        """Place a rectangular array of an existing layout cell."""
+        """Place a rectangular array of copies of an existing layout cell.
+
+        Instances are named ``<name>_<column>_<row>`` and reference ``cell``
+        rather than copying its geometry. The target may be a static layout
+        cell, another generated cell, or a package fixed-device cell.
+
+        :param cell: Layout cell name.
+        :param count: ``(columns, rows)``, both positive.
+        :param pitch: ``(x_pitch, y_pitch)`` in database units.
+        :param x: Optional x offset in database units.
+        :param y: Optional y offset in database units.
+        :param orientation: Placement orientation (see :meth:`instance`).
+        :param name: Optional instance-name prefix (default ``array``).
+        :returns: List of placed instance names.
+        """
         try:
             columns, rows = (int(count[0]), int(count[1]))
             pitch_x, pitch_y = (pitch[0], pitch[1])
@@ -948,6 +1162,26 @@ class Layout:
         visible=True,
         locked=False,
     ):
+        """Add a pin/port to the generated layout cell.
+
+        Ports are part of the generated cell's interface and can be used for
+        hierarchy wiring, connectivity checks, LVS, and routing.
+
+        :param name: Non-empty port name.
+        :param layer: Layer name or :class:`Layer` handle.
+        :param x: Left edge in database units.
+        :param y: Bottom edge in database units.
+        :param width: Positive port width in database units.
+        :param height: Positive port height in database units.
+        :param direction: ``input``, ``output``, ``inout``, ``power``, or
+            ``ground``.
+        :param side: ``left``, ``right``, ``top``, or ``bottom``.
+        :param net: Optional net name bound to the port.
+        :param label: Optional display label; defaults to ``name``.
+        :param visible: Whether the port is visible in the layout editor.
+        :param locked: Whether the port is protected from editing.
+        :returns: ``None``. The port is stored on the builder.
+        """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Port name must be a non-empty string")
         if direction not in {"input", "output", "inout", "power", "ground"}:
@@ -982,6 +1216,20 @@ class Layout:
         )
 
     def instance(self, cell, x, y, orientation="r0", name=None):
+        """Place an instance of an existing layout cell.
+
+        The instance references another cell in the project, including static
+        layouts, read-only generated procedurals, and package fixed devices.
+        Geometry is not copied into the generated cell.
+
+        :param cell: Non-empty layout cell name.
+        :param x: Placement x origin in database units.
+        :param y: Placement y origin in database units.
+        :param orientation: ``r0``, ``r90``, ``r180``, ``r270``, ``mx``,
+            ``my``, ``m45``, or ``m135``.
+        :param name: Optional instance name.
+        :returns: ``None``. The instance is stored on the builder.
+        """
         if not isinstance(cell, str) or not cell.strip():
             raise ValueError("Instance cell must be a non-empty layout cell name")
         orientations = {"r0", "r90", "r180", "r270", "mx", "my", "m45", "m135"}
@@ -1003,7 +1251,18 @@ class Layout:
         )
 
     def parameter(self, name, default="", description=""):
-        """Declare a user-editable parameter and return its current value."""
+        """Declare a user-editable parameter and return its current value.
+
+        Parameter values are always strings. Use :meth:`um`, :meth:`nm`,
+        :meth:`length`, or :meth:`int`/``float`` conversions in the script.
+        Declared parameters appear in the GUI parameter form and can be
+        changed with the CLI, ``icepy``, or MCP before regeneration.
+
+        :param name: Non-empty parameter name.
+        :param default: Value used when the project has no stored value.
+        :param description: Human-readable description shown by the editor.
+        :returns: The current value as a string.
+        """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Parameter name must be a non-empty string")
         name = name.strip()
@@ -1019,7 +1278,9 @@ class Layout:
         if self._device_library is not None:
             return self._device_library
         if not self.pdk_root:
-            raise RuntimeError("Device placement requires an installed PDK package root")
+            raise RuntimeError(
+                "Device placement requires an installed PDK package root"
+            )
         root = Path(self.pdk_root)
         index_path = root / "layout" / "devices" / "index.json"
         if not index_path.is_file():
@@ -1028,7 +1289,9 @@ class Layout:
         try:
             library = json.loads(index_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Unable to read device library {index_path}: {error}") from error
+            raise RuntimeError(
+                f"Unable to read device library {index_path}: {error}"
+            ) from error
         self._device_layers = {}
         for layer in library.get("layers", []):
             try:
@@ -1036,7 +1299,9 @@ class Layout:
                 datatype = int(layer.get("datatype", 0))
             except (KeyError, TypeError, ValueError):
                 continue
-            self._device_layers[(number, datatype)] = str(layer.get("name", f"Layer {number}"))
+            self._device_layers[(number, datatype)] = str(
+                layer.get("name", f"Layer {number}")
+            )
         self._device_library = library
         return library
 
@@ -1066,16 +1331,23 @@ class Layout:
         if not generator:
             layout_path = cell.get("layout")
             if not layout_path:
-                raise RuntimeError(f"Device '{cell.get('name', '')}' has no generator or layout file")
+                raise RuntimeError(
+                    f"Device '{cell.get('name', '')}' has no generator or layout file"
+                )
             path = Path(self.pdk_root) / "layout" / "devices" / str(layout_path)
             try:
                 document = json.loads(path.read_text())
                 return document["device"]
             except (OSError, KeyError, json.JSONDecodeError) as error:
-                raise RuntimeError(f"Unable to read device geometry {path}: {error}") from error
+                raise RuntimeError(
+                    f"Unable to read device geometry {path}: {error}"
+                ) from error
 
-        key = (str(generator.get("module", "")), str(generator.get("class", "")),
-               tuple(sorted((str(k), str(v)) for k, v in parameters.items())))
+        key = (
+            str(generator.get("module", "")),
+            str(generator.get("class", "")),
+            tuple(sorted((str(k), str(v)) for k, v in parameters.items())),
+        )
         cached = self._device_geometry_cache.get(key)
         if cached is not None:
             return cached
@@ -1109,7 +1381,9 @@ class Layout:
                     check=False,
                 )
             except OSError as error:
-                raise RuntimeError(f"Unable to run device generator: {error}") from error
+                raise RuntimeError(
+                    f"Unable to run device generator: {error}"
+                ) from error
             if completed.returncode != 0:
                 details = (completed.stderr or completed.stdout or "").strip()
                 raise RuntimeError(
@@ -1118,7 +1392,9 @@ class Layout:
             try:
                 geometry = json.loads(output_path.read_text())
             except (OSError, json.JSONDecodeError) as error:
-                raise RuntimeError(f"Unable to read generated device geometry: {error}") from error
+                raise RuntimeError(
+                    f"Unable to read generated device geometry: {error}"
+                ) from error
         self._device_geometry_cache[key] = geometry
         return geometry
 
@@ -1143,11 +1419,26 @@ class Layout:
         if orientation == "r0":
             return side
         if orientation == "r90":
-            return {"left": "bottom", "right": "top", "top": "left", "bottom": "right"}.get(side, side)
+            return {
+                "left": "bottom",
+                "right": "top",
+                "top": "left",
+                "bottom": "right",
+            }.get(side, side)
         if orientation == "r180":
-            return {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}.get(side, side)
+            return {
+                "left": "right",
+                "right": "left",
+                "top": "bottom",
+                "bottom": "top",
+            }.get(side, side)
         if orientation == "r270":
-            return {"left": "top", "right": "bottom", "top": "right", "bottom": "left"}.get(side, side)
+            return {
+                "left": "top",
+                "right": "bottom",
+                "top": "right",
+                "bottom": "left",
+            }.get(side, side)
         if orientation == "mx":
             return {"top": "bottom", "bottom": "top"}.get(side, side)
         if orientation == "my":
@@ -1171,11 +1462,27 @@ class Layout:
         LVS and extraction. Ports are prefixed with the instance name so
         multiple copies can coexist. ``nets`` maps device pin names to layout
         net names, for example ``nets={"G": "GATE", "S": "VSS"}``.
+
+        :param device_name: Device-library cell name; matching is
+            case-insensitive and falls back to a substring match.
+        :param x: Placement x origin in database units.
+        :param y: Placement y origin in database units.
+        :param orientation: ``r0``, ``r90``, ``r180``, ``r270``, ``mx``, or
+            ``my``.
+        :param name: Optional instance name; defaults to ``device_<n>``.
+        :param nets: Optional mapping of pin names to layout net names.
+        :param parameters: Device parameters as keyword arguments, for
+            example ``w="2u"`` or ``nf="2"``.
+        :returns: A :class:`DevicePlacement` with absolute pin rectangles.
+        :raises RuntimeError: If the active package has no device library,
+            the device cannot be found, or its generator fails.
         """
         cell = self._device_cell(device_name)
         orientation = str(orientation)
         if orientation not in {"r0", "r90", "r180", "r270", "mx", "my"}:
-            raise ValueError("Device orientation must be r0, r90, r180, r270, mx, or my")
+            raise ValueError(
+                "Device orientation must be r0, r90, r180, r270, mx, or my"
+            )
         defaults = {
             str(parameter.get("name", "")): str(parameter.get("value", ""))
             for parameter in cell.get("parameters", [])
@@ -1185,7 +1492,9 @@ class Layout:
             values[str(key)] = "" if value is None else str(value)
         geometry = self._device_geometry(cell, values)
         self._device_count += 1
-        instance_name = str(name).strip() if name is not None else f"device_{self._device_count}"
+        instance_name = (
+            str(name).strip() if name is not None else f"device_{self._device_count}"
+        )
         if not instance_name:
             raise ValueError("Device instance name must not be empty")
         origin_x = _coordinate(x, "device x")
@@ -1206,7 +1515,9 @@ class Layout:
                     try:
                         px, py = point
                     except (TypeError, ValueError) as error:
-                        raise RuntimeError("Device shape point must be (x, y)") from error
+                        raise RuntimeError(
+                            "Device shape point must be (x, y)"
+                        ) from error
                 tx, ty = self._device_transform(
                     _coordinate(px, "device point x"),
                     _coordinate(py, "device point y"),
@@ -1215,7 +1526,9 @@ class Layout:
                 points.append({"x": tx + origin_x, "y": ty + origin_y})
             if len(points) < 3:
                 continue
-            layer_name = self._device_layer_name(source.get("layer", 0), source.get("datatype", 0))
+            layer_name = self._device_layer_name(
+                source.get("layer", 0), source.get("datatype", 0)
+            )
             record = {"layer": layer_name, "polygon": points}
             source_name = source.get("name", "")
             if source_name:
@@ -1233,11 +1546,16 @@ class Layout:
             for px, py in (
                 (rect.get("x", 0), rect.get("y", 0)),
                 (rect.get("x", 0) + rect.get("width", 0), rect.get("y", 0)),
-                (rect.get("x", 0) + rect.get("width", 0), rect.get("y", 0) + rect.get("height", 0)),
+                (
+                    rect.get("x", 0) + rect.get("width", 0),
+                    rect.get("y", 0) + rect.get("height", 0),
+                ),
                 (rect.get("x", 0), rect.get("y", 0) + rect.get("height", 0)),
             ):
                 tx, ty = self._device_transform(
-                    _coordinate(px, "device port x"), _coordinate(py, "device port y"), orientation
+                    _coordinate(px, "device port x"),
+                    _coordinate(py, "device port y"),
+                    orientation,
                 )
                 corners.append((tx, ty))
             min_x = min(point[0] for point in corners)
@@ -1253,7 +1571,9 @@ class Layout:
                 "height": max(max_y - min_y, 1),
             }
             net = net_map.get(pin)
-            layer_name = self._device_layer_name(source.get("layer", 0), source.get("datatype", 0))
+            layer_name = self._device_layer_name(
+                source.get("layer", 0), source.get("datatype", 0)
+            )
             side = self._device_side(str(source.get("side", "left")), orientation)
             direction = str(source.get("direction", "inout"))
             self.ports.append(
@@ -1331,8 +1651,7 @@ class Layout:
             "model": model,
             "type": model or str(cell.get("name", device_name)),
             "parameters": [
-                {"name": str(key), "value": str(value)}
-                for key, value in values.items()
+                {"name": str(key), "value": str(value)} for key, value in values.items()
             ],
             "bounds": bounds,
             "ports": port_records,
@@ -1408,7 +1727,10 @@ class Layout:
             document = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return {}
-        if not isinstance(document, dict) or int(document.get("schema_version", 0)) != 1:
+        if (
+            not isinstance(document, dict)
+            or int(document.get("schema_version", 0)) != 1
+        ):
             return {}
         layers = {}
         for entry in document.get("layers", []):
@@ -1440,9 +1762,11 @@ class Layout:
         stack = routing.get("stack") if isinstance(routing, dict) else None
         if not isinstance(stack, list):
             stack = document.get("routing_stack")
-        routing_stack = [
-            str(name) for name in stack or [] if str(name).strip()
-        ] if isinstance(stack, list) else []
+        routing_stack = (
+            [str(name) for name in stack or [] if str(name).strip()]
+            if isinstance(stack, list)
+            else []
+        )
         return {"layers": layers, "vias": vias, "routing_stack": routing_stack}
 
     def _declared_via(self, lower, upper):
@@ -1460,7 +1784,11 @@ class Layout:
 
         Names are resolved to the layer spellings registered by the device
         library when possible, so the returned list can be passed directly to
-        :meth:`route` or :meth:`connect`.
+        :meth:`route` or :meth:`connect`. When the package does not declare a
+        stack, conductor layers are inferred from names such as ``met1``,
+        ``Metal2``, or ``m3``.
+
+        :returns: Ordered list of layer names, bottom to top.
         """
         declared = self._connectivity.get("routing_stack") or []
         if not declared:
@@ -1476,7 +1804,9 @@ class Layout:
         result = []
         for base in declared:
             key = _connectivity_key(base)
-            matches = [name for name in available_names if _connectivity_key(name) == key]
+            matches = [
+                name for name in available_names if _connectivity_key(name) == key
+            ]
             matches.sort(key=lambda name: (_layer_purpose_rank(name), name))
             result.append(matches[0] if matches else base)
         return result
@@ -1540,9 +1870,16 @@ class Layout:
                 continue
             via_candidates.append((name, index, number, datatype))
         if lower_index is not None:
-            exact = [candidate for candidate in via_candidates if candidate[1] == lower_index]
+            exact = [
+                candidate for candidate in via_candidates if candidate[1] == lower_index
+            ]
             if exact:
-                exact.sort(key=lambda item: (0 if "topvia" not in item[0].lower() else 1, item[0]))
+                exact.sort(
+                    key=lambda item: (
+                        0 if "topvia" not in item[0].lower() else 1,
+                        item[0],
+                    )
+                )
                 name = exact[0][0]
                 self._register_inferred_layer(name, available)
                 return name
@@ -1651,7 +1988,7 @@ class Layout:
         start_layer=None,
         end_layer=None,
     ):
-        """Route one Manhattan connection between two points or port rectangles.
+        """Route one Manhattan connection between two points or rectangles.
 
         Use ``layer`` for a single-layer route, or ``layers=[...]`` to route
         through a vertical layer stack. When both are omitted, the PDK
@@ -1661,6 +1998,44 @@ class Layout:
         when omitted, the package connectivity document is consulted first and
         common names such as ``via``/``via2``, ``Via1``/``Via2`` and
         ``Metal1``/``Metal2`` are used as a fallback.
+
+        Endpoints may be ``(x, y)`` points, ``(x, y, width, height)`` pin
+        rectangles, or pin tuples from a :class:`DevicePlacement`. Rectangle
+        endpoints escape from the requested or nearest side by ``escape``.
+        The router is deterministic and raises an error instead of emitting a
+        short when no legal path exists.
+
+        :param start: Start point or pin rectangle.
+        :param end: End point or pin rectangle.
+        :param layer: Single routing layer name or :class:`Layer` handle.
+        :param width: Route width in database units (default 0.4 µm).
+        :param net: Optional net name carried by the emitted shapes.
+        :param start_side: Preferred escape side for a start rectangle:
+            ``left``, ``right``, ``top``, or ``bottom``.
+        :param end_side: Preferred escape side for an end rectangle.
+        :param obstacles: Extra obstacle rectangle(s), a list, or a mapping
+            from layer name to obstacle rectangles.
+        :param clearance: Edge-to-edge clearance in database units (default
+            ``max(width, 0.2 µm)``).
+        :param escape: Pin escape distance (default ``max(2 * width, 0.5 µm)``).
+        :param bend_penalty: Extra cost per bend (default
+            ``max(2 * width, 1 µm)``).
+        :param include_devices: Treat placed device bounds as obstacles.
+        :param include_shapes: Treat other-net layout shapes as obstacles.
+        :param exclude_device_bounds: Device bounds that should not block the
+            route even when ``include_devices`` is true.
+        :param layers: Vertical layer stack, bottom to top.
+        :param via_layers: Mapping of adjacent layer pairs to via cut layer(s).
+        :param via_size: Via cut size in database units (default 0.15 µm).
+        :param via_enclosure: Via enclosure in database units (default 0.1 µm).
+        :param via_cost: Cost of changing layers (default
+            ``max(4 * width, 1 µm)``).
+        :param start_layer: Explicit start layer when using a stack.
+        :param end_layer: Explicit end layer when using a stack.
+        :returns: A :class:`Route` describing the emitted path.
+        :raises RuntimeError: If no legal path or via transition exists.
+        :raises ValueError: If endpoints, layers, or side arguments are
+            invalid.
         """
         if layer is None and layers is None:
             layers = self.routing_stack()
@@ -1686,7 +2061,9 @@ class Layout:
         margin = max(width * 4, self.um(1))
         via_size_explicit = via_size is not None
         via_enclosure_explicit = via_enclosure is not None
-        via_size = self.um(0.15) if via_size is None else _positive(via_size, "via size")
+        via_size = (
+            self.um(0.15) if via_size is None else _positive(via_size, "via size")
+        )
         via_enclosure = (
             self.um(0.1)
             if via_enclosure is None
@@ -1794,17 +2171,18 @@ class Layout:
             if declared_via:
                 if not via_size_explicit and declared_via.get("size"):
                     pair_size = _positive(self.nm(declared_via["size"]), "via size")
-                if not via_enclosure_explicit and declared_via.get("enclosure") is not None:
-                    pair_enclosure = _coordinate(self.nm(declared_via["enclosure"]), "via enclosure")
+                if (
+                    not via_enclosure_explicit
+                    and declared_via.get("enclosure") is not None
+                ):
+                    pair_enclosure = _coordinate(
+                        self.nm(declared_via["enclosure"]), "via enclosure"
+                    )
             pair_pad = max(width, pair_size + 2 * pair_enclosure)
             metal_inflate = clearance + pair_pad // 2
             cut_inflate = clearance + pair_size // 2
-            lower_obstacles = _route_inflate(
-                obstacles_by_layer[lower], metal_inflate
-            )
-            upper_obstacles = _route_inflate(
-                obstacles_by_layer[upper], metal_inflate
-            )
+            lower_obstacles = _route_inflate(obstacles_by_layer[lower], metal_inflate)
+            upper_obstacles = _route_inflate(obstacles_by_layer[upper], metal_inflate)
             cut_obstacles = []
             for cut in cut_layers:
                 cut_extra = self._route_extra_for_layer(obstacles, cut)
@@ -1825,7 +2203,9 @@ class Layout:
             def legal(x, y, lo=lower_obstacles, uo=upper_obstacles, co=cut_obstacles):
                 if _route_inside_obstacle(x, y, lo) or _route_inside_obstacle(x, y, uo):
                     return False
-                return not any(_route_inside_obstacle(x, y, obstacle) for obstacle in co)
+                return not any(
+                    _route_inside_obstacle(x, y, obstacle) for obstacle in co
+                )
 
             option = {
                 "lower": lower,
@@ -1846,7 +2226,7 @@ class Layout:
             stack = [start_index]
             while stack:
                 current = stack.pop()
-                for (lower_index, upper_index) in via_options:
+                for lower_index, upper_index in via_options:
                     if lower_index == current and upper_index not in seen:
                         seen.add(upper_index)
                         stack.append(upper_index)
@@ -2077,12 +2457,39 @@ class Layout:
     ):
         """Route directly between two pins of placed package devices.
 
-        ``device_a`` and ``device_b`` are the ``DevicePlacement`` objects
-        returned by :meth:`device`. For a single-layer connection, ``layer``
-        is optional when both pins already share a layer. For pins on
-        different layers, pass ``layers=[...]`` in vertical stack order and,
-        if the package does not expose inferable via names, a ``via_layers``
-        mapping.
+        ``device_a`` and ``device_b`` are the :class:`DevicePlacement`
+        objects returned by :meth:`device`. For a single-layer connection,
+        ``layer`` is optional when both pins already share a layer. For pins
+        on different layers, pass ``layers=[...]`` in vertical stack order
+        and, if the package does not expose inferable via names, a
+        ``via_layers`` mapping. The net is inferred from the pin metadata
+        when ``net`` is omitted, and connecting pins on different nets is
+        rejected.
+
+        :param device_a: First placed device.
+        :param pin_a: Pin name on ``device_a`` (for example ``"G"``).
+        :param device_b: Second placed device.
+        :param pin_b: Pin name on ``device_b``.
+        :param layer: Single routing layer for a same-layer connection.
+        :param width: Route width in database units (default 0.4 µm).
+        :param net: Optional net name; must agree with pin nets when set.
+        :param obstacles: Extra obstacle rectangle(s), a list, or a mapping
+            from layer name to obstacle rectangles.
+        :param clearance: Edge-to-edge clearance in database units.
+        :param escape: Pin escape distance in database units.
+        :param bend_penalty: Extra cost per bend.
+        :param include_devices: Treat other device bounds as obstacles.
+        :param include_shapes: Treat other-net layout shapes as obstacles.
+        :param layers: Vertical layer stack, bottom to top.
+        :param via_layers: Mapping of adjacent layer pairs to via cut layer(s).
+        :param via_size: Via cut size in database units.
+        :param via_enclosure: Via enclosure in database units.
+        :param via_cost: Cost of changing layers.
+        :returns: A :class:`Route` describing the emitted connection.
+        :raises TypeError: If an argument is not a ``DevicePlacement``.
+        :raises ValueError: If a pin or layer is unknown, or the pins belong
+            to different nets.
+        :raises RuntimeError: If no legal path or via transition exists.
         """
         if not isinstance(device_a, DevicePlacement) or not isinstance(
             device_b, DevicePlacement
@@ -2128,9 +2535,7 @@ class Layout:
             if not layer_a or not layer_b:
                 raise ValueError("connect pins need layer metadata for a layer stack")
             if layer_a not in layer_names or layer_b not in layer_names:
-                raise ValueError(
-                    "both pin layers must be included in the layers stack"
-                )
+                raise ValueError("both pin layers must be included in the layers stack")
             start_layer_name = layer_a
             end_layer_name = layer_b
         start_net = info_a.get("net")
@@ -2141,9 +2546,7 @@ class Layout:
             net = start_net or end_net
         else:
             if start_net and start_net != net:
-                raise ValueError(
-                    f"start pin belongs to net '{start_net}', not '{net}'"
-                )
+                raise ValueError(f"start pin belongs to net '{start_net}', not '{net}'")
             if end_net and end_net != net:
                 raise ValueError(f"end pin belongs to net '{end_net}', not '{net}'")
         if width is None:
@@ -2248,11 +2651,15 @@ class Layout:
 
     # -- unit helpers -----------------------------------------------------
     def db(self, value):
-        """Return ``value`` as integer database units."""
+        """Return ``value`` rounded to the nearest integer database unit."""
         return _coordinate(value, "database value")
 
     def nm(self, value):
-        """Convert nanometers to integer database units."""
+        """Convert nanometers to integer database units.
+
+        The conversion uses :attr:`db_unit_nm`, which is normally 1 for a
+        1 nm database unit.
+        """
         if self.db_unit_nm <= 0:
             raise ValueError("Database unit size must be positive")
         return _coordinate(
@@ -2270,7 +2677,11 @@ class Layout:
         return int(round(coordinate / grid)) * grid
 
     def length(self, value):
-        """Convert ``2.5u``/``150n``/``1mm`` or a bare DB-unit number."""
+        """Convert a length string or bare number to database units.
+
+        Parses SPICE-style suffixes such as ``2.5u``, ``150n``, ``4k``, and
+        ``1mm``. A bare number is interpreted as database units.
+        """
         if isinstance(value, (int, float)):
             return _coordinate(value, "length")
         text = str(value).strip()
@@ -2297,6 +2708,11 @@ class Layout:
         return self.db(float(text))
 
     def to_dict(self):
+        """Return the builder output as a JSON-compatible dictionary.
+
+        This is the document ICE validates and applies after the script
+        finishes; scripts normally do not need to call it directly.
+        """
         return {
             "format": "ice-procedural-layout",
             "schema_version": SCHEMA_VERSION,
@@ -2363,7 +2779,9 @@ def main():
         "--script", required=True, help="Procedural layout Python script"
     )
     parser.add_argument("--output", required=True, help="Generated geometry JSON path")
-    parser.add_argument("--params-file", help="Optional procedural parameter values (JSON object)")
+    parser.add_argument(
+        "--params-file", help="Optional procedural parameter values (JSON object)"
+    )
     parser.add_argument("--pdk", default=None, help="Active PDK identifier")
     parser.add_argument("--pdk-root", default=None, help="Installed PDK package root")
     parser.add_argument(
@@ -2385,7 +2803,9 @@ def main():
         try:
             parameters = json.loads(Path(args.params_file).read_text())
         except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Unable to read procedural parameters: {error}") from error
+            raise RuntimeError(
+                f"Unable to read procedural parameters: {error}"
+            ) from error
         if not isinstance(parameters, dict):
             raise RuntimeError("Procedural parameters must be a JSON object")
     builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm, args.grid, parameters)

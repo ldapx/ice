@@ -1,4 +1,7 @@
-# ICE Packages
+# Package and PDK Authoring
+
+> **Audience:** package and PDK authors. To install, activate, or manage
+> packages in a project, see {doc}`/user/packages` instead.
 
 Packages are directories containing a versioned `package.toml` manifest and
 capability-oriented content such as `symbols/`, `technology/`, `layout/`,

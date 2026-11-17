@@ -1009,7 +1009,7 @@ std::string defaultProceduralLayoutScript() {
 # layer.text(0, 0, "M1", height=500)
 # layout.port("P1", "Metal1", 0, 0, 1000, 1000)
 # layout.union("Metal1", shape_a, shape_b)
-# layout.polygon(points, holes=[hole_points])
+# layout.polygon("Metal1", points, holes=[hole_points])
 # layout.device("nmos", name="M1", x=0, y=0, w="1u", l="0.15u")
 # layout.connect(device_a, "G", device_b, "G", layer="Metal1", width=400, net="GATE")
 # layout.route((0, 0), (4000, 0), layer="Metal1", width=400, net="VDD")
