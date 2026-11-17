@@ -1412,7 +1412,7 @@ TEST_CASE("ngspice simulation reports missing netlists explicitly") {
 
     ice::SimulationRequest unsupported = request;
     unsupported.netlist = {"* test", ".end"};
-    unsupported.analysis = "ac";
+    unsupported.analysis = "unsupported-analysis";
     auto rejected = runner.run(unsupported, std::chrono::seconds(1));
     CHECK(rejected.state == ice::JobState::failed);
     CHECK(rejected.error.find("unsupported") != std::string::npos);

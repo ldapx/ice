@@ -27,6 +27,7 @@
 #include "schematic_utils.hpp"
 #include "shortcuts.hpp"
 #include "side_panels.hpp"
+#include "simulation_experiment_ui.hpp"
 
 #include "appearance.hpp"
 #include "file_labels.hpp"
@@ -7930,15 +7931,45 @@ class DocumentWindow : public QMainWindow {
         const bool transient = analysis == QStringLiteral("transient");
         if (useInitialConditions_)
             useInitialConditions_->setEnabled(transient);
+        ice::SimulationItem settings;
+        if (project_ && activeSimulationId_ != 0) {
+            if (const auto found = project_->project().simulations.find(activeSimulationId_);
+                found != project_->project().simulations.end())
+                settings = found->second;
+        }
         QString line;
         if (transient) {
             line = QStringLiteral(".tran %1 %2").arg(stepTime_->value()).arg(stopTime_->value());
             if (useInitialConditions_ && useInitialConditions_->isChecked())
                 line += QStringLiteral(" uic");
         } else if (analysis == QStringLiteral("dc")) {
-            line = QStringLiteral(".dc V1 0 1 0.01");
+            line =
+                QStringLiteral(".dc %1 %2 %3 %4")
+                    .arg(settings.dcSource.empty() ? QStringLiteral("V1") : QString::fromStdString(settings.dcSource))
+                    .arg(settings.dcStart)
+                    .arg(settings.dcStop)
+                    .arg(settings.dcStep);
         } else if (analysis == QStringLiteral("ac")) {
-            line = QStringLiteral(".ac dec 10 1 1e6");
+            line = QStringLiteral(".ac %1 %2 %3 %4")
+                       .arg(QString::fromStdString(settings.acVariation))
+                       .arg(settings.acPoints)
+                       .arg(settings.acStart)
+                       .arg(settings.acStop);
+        } else if (analysis == QStringLiteral("noise")) {
+            line = QStringLiteral(".noise v(%1) %2 %3 %4 %5 %6")
+                       .arg(settings.noiseOutput.empty() ? QStringLiteral("out")
+                                                         : QString::fromStdString(settings.noiseOutput),
+                            settings.noiseInput.empty() ? QStringLiteral("V1")
+                                                        : QString::fromStdString(settings.noiseInput),
+                            QString::fromStdString(settings.noiseVariation))
+                       .arg(settings.noisePoints)
+                       .arg(settings.noiseStart)
+                       .arg(settings.noiseStop);
+        } else if (analysis == QStringLiteral("tf")) {
+            line =
+                QStringLiteral(".tf v(%1) %2")
+                    .arg(settings.tfOutput.empty() ? QStringLiteral("out") : QString::fromStdString(settings.tfOutput),
+                         settings.tfSource.empty() ? QStringLiteral("V1") : QString::fromStdString(settings.tfSource));
         } else if (analysis == QStringLiteral("digital")) {
             line = QStringLiteral("SystemVerilog testbench: $finish / VCD traces");
         } else {
@@ -9064,67 +9095,75 @@ class DocumentWindow : public QMainWindow {
             graphTabs_->currentWidget()->update();
     }
 
-    ice::SimulationRequest buildSimulationRequest(const ice::SimulationItem &sim, QStringList &netlistNotes) const {
-        ice::SimulationRequest request;
-        request.analysis = sim.analysis;
-        request.simulator = sim.simulator;
-        request.stop = sim.stop;
-        request.step = sim.step;
-        request.use_initial_conditions = sim.use_initial_conditions;
-        if (!projectPath_.isEmpty())
-            request.workingDirectory = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
-        // The circuit comes from the schematic the simulation points at, so
-        // Run simulates what you drew instead of hand-typed directives. The
-        // additional directives box is reserved for model cards / .include
-        // lines.
-        const auto &project = project_->project();
-        const auto cellId = sim.schematic != 0 && project.schematicCells.contains(sim.schematic)
-                                ? sim.schematic
-                                : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
-        bool hdl = false;
-        if (cellId != 0) {
-            const auto &cell = project.schematicCells.at(cellId);
-            if (cell.systemVerilogSchematic) {
-                hdl = true;
-                request.simulator = "iverilog";
-                request.analysis = "digital";
-                const auto source = ice::buildSystemVerilogSimulationSource(project, cellId);
-                std::istringstream lines(source);
-                std::string line;
-                while (std::getline(lines, line))
-                    request.netlist.push_back(line);
-                netlistNotes << QStringLiteral("SystemVerilog source cell");
-            } else if (ice::schematicContainsHdl(project, cellId)) {
-                std::string error;
-                if (!ice::prepareMixedSignalRequest(request, project, cellId, &error))
-                    throw ice::ProjectError("simulation.mixed", error);
-                ice::applyPdkSimulationSetup(cell.pdk, request);
-                netlistNotes << QStringLiteral("Mixed-signal co-simulation (ngspice + Icarus Verilog)");
-            } else {
-                request.simulator = "ngspice";
-                std::vector<std::string> notes;
-                const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
-                request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
-                ice::applyPdkSimulationSetup(cell.pdk, request);
-                for (const auto &noteText : notes)
-                    netlistNotes << QString::fromStdString(noteText);
-            }
+    void openSimulationExperimentDialog() {
+        if (!project_ || activeSimulationId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Simulation Experiment"),
+                                     QStringLiteral("Select a simulation first."));
+            return;
         }
-        if (!hdl) {
-            for (const auto &line : additionalDirectives_->text().split('\n')) {
-                const auto trimmed = line.trimmed();
-                // Skip analysis/control directives the runner already handles from
-                // the simulation properties; keep model cards and includes.
-                if (trimmed.isEmpty() || isAnalysisControlDirective(trimmed))
-                    continue;
-                request.netlist.push_back(trimmed.toStdString());
-            }
+        const auto simulation = project_->project().simulations.find(activeSimulationId_);
+        if (simulation == project_->project().simulations.end()) {
+            QMessageBox::information(this, QStringLiteral("Simulation Experiment"),
+                                     QStringLiteral("Select a simulation first."));
+            return;
         }
-        // The captured-signal list tells the adapter which vectors to fetch
-        // back from ngspice. Graph axis selections then pick from those traces.
-        for (const auto &signal : parseSignalList(QString::fromStdString(sim.captureSignals)))
-            request.probeSignals.push_back(signal.toStdString());
+        auto item = simulation->second;
+        if (!simulationItemIsDigital(item)) {
+            const auto form = currentSimulationFormItem();
+            item.schematic = form.schematic;
+            item.simulator = form.simulator;
+            item.analysis = form.analysis;
+            item.stop = form.stop;
+            item.step = form.step;
+            item.use_initial_conditions = form.use_initial_conditions;
+            item.directives = form.directives;
+            item.captureSignals = form.captureSignals;
+        }
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        SimulationExperimentDialog dialog(project_->project(), item, root, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto updated = dialog.simulation();
+        project_->execute("configure simulation experiment", [&](ice::Project &project) {
+            auto target = project.simulations.find(activeSimulationId_);
+            if (target == project.simulations.end())
+                return;
+            target->second.temperature = updated.temperature;
+            target->second.modelSection = updated.modelSection;
+            target->second.dcSource = updated.dcSource;
+            target->second.dcStart = updated.dcStart;
+            target->second.dcStop = updated.dcStop;
+            target->second.dcStep = updated.dcStep;
+            target->second.acVariation = updated.acVariation;
+            target->second.acPoints = updated.acPoints;
+            target->second.acStart = updated.acStart;
+            target->second.acStop = updated.acStop;
+            target->second.noiseOutput = updated.noiseOutput;
+            target->second.noiseInput = updated.noiseInput;
+            target->second.noiseVariation = updated.noiseVariation;
+            target->second.noisePoints = updated.noisePoints;
+            target->second.noiseStart = updated.noiseStart;
+            target->second.noiseStop = updated.noiseStop;
+            target->second.tfOutput = updated.tfOutput;
+            target->second.tfSource = updated.tfSource;
+            target->second.corners = updated.corners;
+            target->second.sweeps = updated.sweeps;
+            target->second.monteCarlo = updated.monteCarlo;
+            target->second.measurements = updated.measurements;
+        });
+        statusBar()->showMessage(QStringLiteral("Simulation experiment settings saved"));
+    }
 
+    ice::SimulationRequest buildSimulationRequest(const ice::SimulationItem &sim, QStringList &netlistNotes) const {
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        std::vector<std::string> notes;
+        auto request = ice::simulationRequestForItem(project_->project(), sim, root, &notes);
+        for (const auto &note : notes)
+            netlistNotes << QString::fromStdString(note);
         return request;
     }
 
@@ -9181,6 +9220,11 @@ class DocumentWindow : public QMainWindow {
 
     ice::SimulationItem currentSimulationFormItem() const {
         ice::SimulationItem sim;
+        if (project_ && activeSimulationId_ != 0) {
+            if (const auto found = project_->project().simulations.find(activeSimulationId_);
+                found != project_->project().simulations.end())
+                sim = found->second;
+        }
         sim.schematic = selectedSimulationSchematicId();
         sim.simulator = simulatorSelector_->currentData().toString().toStdString();
         sim.analysis = analysisSelector_->currentData().toString().toStdString();
@@ -9698,10 +9742,27 @@ class DocumentWindow : public QMainWindow {
                             QString::fromStdString(result.simulator_version)));
         if (result.state == ice::JobState::succeeded) {
             logMessage(ice::logging::simulation, spdlog::level::info,
-                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s)")
+                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s) on %4")
                            .arg(name)
                            .arg(result.time.size())
-                           .arg(result.traces.size()));
+                           .arg(result.traces.size())
+                           .arg(QString::fromStdString(result.xAxis)));
+            for (const auto &measurement : result.measurements) {
+                if (!measurement.valid) {
+                    logMessage(ice::logging::simulation, spdlog::level::warn,
+                               QStringLiteral("Measurement '%1' (%2) failed: %3")
+                                   .arg(QString::fromStdString(measurement.name),
+                                        QString::fromStdString(measurement.metric),
+                                        QString::fromStdString(measurement.error)));
+                    continue;
+                }
+                logMessage(
+                    ice::logging::simulation, spdlog::level::info,
+                    QStringLiteral("Measurement '%1' (%2): %3 %4")
+                        .arg(QString::fromStdString(measurement.name), QString::fromStdString(measurement.metric))
+                        .arg(measurement.value)
+                        .arg(QString::fromStdString(measurement.unit)));
+            }
         } else {
             logMessage(ice::logging::simulation,
                        result.state == ice::JobState::cancelled ? spdlog::level::warn : spdlog::level::err,
@@ -12661,6 +12722,8 @@ class DocumentWindow : public QMainWindow {
         analysisSelector_->addItem(QStringLiteral("DC sweep"), QStringLiteral("dc"));
         analysisSelector_->addItem(QStringLiteral("AC sweep"), QStringLiteral("ac"));
         analysisSelector_->addItem(QStringLiteral("Operating point"), QStringLiteral("op"));
+        analysisSelector_->addItem(QStringLiteral("Noise"), QStringLiteral("noise"));
+        analysisSelector_->addItem(QStringLiteral("Transfer function"), QStringLiteral("tf"));
         stopTime_ = new QDoubleSpinBox;
         stopTime_->setRange(1e-12, 1e9);
         stopTime_->setDecimals(9);
@@ -12715,9 +12778,15 @@ class DocumentWindow : public QMainWindow {
         simulationBuildNetlistButton_->setAccessibleName(QStringLiteral("Build simulation netlist"));
         simulationBuildNetlistButton_->setEnabled(false);
         simulationBuildNetlistButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        auto *experimentButton = new QPushButton(QStringLiteral("Experiment Setup…"));
+        setLucideIcon(experimentButton, QStringLiteral("flask-conical"), 16);
+        experimentButton->setToolTip(QStringLiteral("Configure analysis parameters, corners, sweeps, "
+                                                    "Monte Carlo, and measurements"));
+        connect(experimentButton, &QPushButton::clicked, this, [this] { openSimulationExperimentDialog(); });
         auto *runRow = new QHBoxLayout;
         runRow->addWidget(simulationBuildNetlistButton_, 1);
         runRow->addWidget(runButton, 1);
+        runRow->addWidget(experimentButton, 1);
         propertiesColumn->addLayout(runRow);
 
         simulationNetlist_ = new QPlainTextEdit;

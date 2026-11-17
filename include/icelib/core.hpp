@@ -494,19 +494,95 @@ struct SimulationGraph {
     std::optional<double> yMax;
 };
 
+// One process/temperature/supply corner for a simulation experiment. Empty
+// modelSection and parameters keep the project/PDK defaults; sourceOverrides
+// use ngspice source names such as "V1".
+struct SimulationCorner {
+    std::string name = "tt";
+    std::string modelSection;
+    double temperature = 27.0;
+    std::map<std::string, double> sourceOverrides;
+    std::map<std::string, double> parameters;
+};
+
+// One parameter sweep axis. Values are expanded as a Cartesian product.
+struct SimulationSweep {
+    std::string parameter;
+    std::vector<double> values;
+};
+
+// Deterministic Monte Carlo variation on top of the nominal run or corners.
+struct SimulationMonteCarloOptions {
+    bool enabled = false;
+    int samples = 20;
+    double temperatureSigma = 0.0;
+    double supplySigmaPercent = 0.0;
+    std::string supplySource = "V1";
+    double supplyNominal = 1.0;
+    std::map<std::string, double> parameterSigmaPercent;
+    std::uint32_t seed = 1;
+};
+
+// Declarative post-simulation measurement. Supported metrics are gain,
+// bandwidth, phase_margin, slew_rate, settling_time, and power.
+struct SimulationMeasurementSpec {
+    std::string name;
+    std::string metric;
+    std::string signal;
+    std::string input;
+    double voltage = 0.0;
+    std::optional<double> threshold;
+    double tolerance = 0.02;
+};
+
 struct SimulationItem {
     ObjectId id = 0;
     std::string name;
     ObjectId schematic = 0;
     std::string simulator = "ngspice";
     std::string analysis = "transient";
+    // Transient analysis window. `start` is optional (zero keeps the ngspice
+    // default) and `stop`/`step` are also reused by DC sweeps unless the
+    // dedicated DC fields are set.
+    double start = 0.0;
     double stop = 1.0;
     double step = 0.01;
     bool use_initial_conditions = false;
     std::string directives;
+    // Process/temperature/supply overrides applied to every run.
+    double temperature = 27.0;
+    std::string modelSection;
+    std::map<std::string, double> parameters;
+    std::map<std::string, double> sourceOverrides;
+    // DC sweep.
+    std::string dcSource;
+    double dcStart = 0.0;
+    double dcStop = 1.0;
+    double dcStep = 0.01;
+    // AC sweep.
+    std::string acVariation = "dec";
+    int acPoints = 10;
+    double acStart = 1.0;
+    double acStop = 1e6;
+    // Noise analysis.
+    std::string noiseOutput;
+    std::string noiseInput;
+    std::string noiseVariation = "dec";
+    int noisePoints = 10;
+    double noiseStart = 1.0;
+    double noiseStop = 1e6;
+    // Transfer-function analysis.
+    std::string tfOutput;
+    std::string tfSource;
     // Comma-separated signals requested from the simulator. Axis selections in
     // each graph reference entries in this list, or the special "time" value.
     std::string captureSignals;
+    // Optional experiment configuration. Empty corners/sweeps with Monte Carlo
+    // disabled is the normal single-run workflow.
+    std::vector<SimulationCorner> corners;
+    std::vector<SimulationSweep> sweeps;
+    SimulationMonteCarloOptions monteCarlo;
+    std::vector<SimulationMeasurementSpec> measurements;
     std::vector<SimulationGraph> graphs;
 };
 

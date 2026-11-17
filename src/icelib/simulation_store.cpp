@@ -123,6 +123,7 @@ static std::string serializeSimulationRunWithIdentity(const SimulationRunContext
         {"created_at", created},
         {"project", {{"identity", context.projectIdentity}, {"name", context.projectName}}},
         {"simulation", {{"id", context.simulationId}, {"name", context.simulationName}}},
+        {"variant", context.variant},
         {"schematic", {{"id", context.schematicId}, {"name", context.schematicName}}},
         {"request",
          {{"analysis", context.request.analysis},
@@ -225,6 +226,7 @@ StoredSimulationRun readSimulationRun(const std::filesystem::path &path) {
         const auto simulation = run.value("simulation", json::object());
         stored.simulationId = simulation.value("id", ObjectId{0});
         stored.simulationName = simulation.value("name", std::string{});
+        stored.variant = run.value("variant", std::string{});
         const auto schematic = run.value("schematic", json::object());
         stored.schematicId = schematic.value("id", ObjectId{0});
         stored.schematicName = schematic.value("name", std::string{});
@@ -233,10 +235,18 @@ StoredSimulationRun readSimulationRun(const std::filesystem::path &path) {
         result.schema_version = document.value("schema_version", 1);
         result.state = parseJobState(run.value("state", std::string{}));
         result.analysis = document.value("analysis", run.value("analysis", std::string{}));
+        result.xAxis = document.value("x_axis", std::string{"time"});
+        result.xUnit = document.value("x_unit", std::string{"s"});
         result.simulator = document.value("simulator", run.value("simulator", std::string{}));
         result.simulator_version = document.value("simulator_version", run.value("simulator_version", std::string{}));
         result.input_fingerprint = document.value("input_fingerprint", run.value("input_fingerprint", std::string{}));
         result.error = document.value("error", run.value("error", std::string{}));
+        if (const auto scalars = document.find("scalars"); scalars != document.end() && scalars->is_object()) {
+            for (auto entry = scalars->begin(); entry != scalars->end(); ++entry) {
+                if (entry.value().is_number())
+                    result.scalars[entry.key()] = entry.value().get<double>();
+            }
+        }
         if (const auto time = document.find("time"); time != document.end() && time->is_array())
             result.time = time->get<std::vector<double>>();
         if (const auto traces = document.find("traces"); traces != document.end() && traces->is_array()) {
@@ -246,6 +256,19 @@ StoredSimulationRun readSimulationRun(const std::filesystem::path &path) {
                 if (const auto values = trace.find("values"); values != trace.end() && values->is_array())
                     entry.values = values->get<std::vector<double>>();
                 result.traces.push_back(std::move(entry));
+            }
+        }
+        if (const auto measurements = document.find("measurements");
+            measurements != document.end() && measurements->is_array()) {
+            for (const auto &measurement : *measurements) {
+                SimulationMeasurementResult entry;
+                entry.name = measurement.value("name", std::string{});
+                entry.metric = measurement.value("metric", std::string{});
+                entry.value = measurement.value("value", 0.0);
+                entry.unit = measurement.value("unit", std::string{});
+                entry.valid = measurement.value("valid", false);
+                entry.error = measurement.value("error", std::string{});
+                result.measurements.push_back(std::move(entry));
             }
         }
         return stored;

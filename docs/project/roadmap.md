@@ -118,16 +118,22 @@ Provide one complete, scriptable simulation workflow.
 ### Scope
 
 - libngspice adapter and worker lifecycle.
-- testbench model for one or more initial analyses.
+- testbench model for transient, DC, AC, operating-point, noise, and
+  transfer-function analyses.
 - asynchronous execution, cancellation, timeout, and failure reporting.
 - callback marshalling and serialized simulator access.
-- machine-readable result storage.
+- machine-readable result storage with x-axis metadata, scalars, and
+  declarative measurement results.
 - Python API for testbench execution and measurements.
-- experiment/sweep abstraction.
+- corner, parameter sweep, and Monte Carlo experiment abstraction.
+- declarative gain, bandwidth, phase-margin, slew-rate, settling-time, and
+  power measurements.
 
 ### Acceptance criteria
 
 - A deterministic example testbench runs from CLI and Python.
+- A corner/sweep/Monte Carlo experiment and declared metric run from the GUI,
+  CLI, and MCP.
 - GUI remains responsive while simulation runs.
 - Cancellation and simulator failure produce explicit terminal states.
 - Results can be reopened without rerunning the simulation.

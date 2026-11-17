@@ -127,6 +127,8 @@ def main() -> int:
                 "simulation_result",
                 "simulation_signals",
                 "simulation_measure",
+                "simulation_corner_defaults",
+                "simulation_experiment",
                 "pdk_info",
                 "pdk_build",
                 "schematic_create_systemverilog",
@@ -271,7 +273,7 @@ def main() -> int:
                 'metal1 = layout.layer("Metal1", 1)\n'
                 'metal1.rectangle(0, 0, 100, 100, net="A")\n'
                 'metal1.rectangle(1000, 0, 100, 100, net="A")\n'
-                'layout.route((0, 0, 100, 100), (1000, 0, 100, 100),\n'
+                "layout.route((0, 0, 100, 100), (1000, 0, 100, 100),\n"
                 '             "Metal1", 50, net="A",\n'
                 '             start_side="right", end_side="left")\n'
             )
@@ -751,6 +753,35 @@ def main() -> int:
             assert measured["measurements"], measured
             assert "zero_crossings" in measured["measurements"][0], measured
             assert "amplitude" in measured["measurements"][0], measured
+            slew = mcp.tool(
+                "simulation_measure",
+                simulation="rc_sim",
+                metric="slew_rate",
+                signal="out",
+            )
+            assert slew["valid"] is True, slew
+            configured = mcp.tool(
+                "simulation_update",
+                simulation="rc_sim",
+                temperature=27,
+                corners=[
+                    {"name": "tt", "temperature": 27},
+                    {"name": "ff", "temperature": 85, "source_overrides": {"V1": 1.1}},
+                ],
+                measurements=[
+                    {"name": "slew", "metric": "slew_rate", "signal": "out"},
+                ],
+            )
+            assert len(configured["corners"]) == 2, configured
+            experiment = mcp.tool(
+                "simulation_experiment",
+                simulation="rc_sim",
+                timeout_ms=30000,
+                store=False,
+            )
+            assert len(experiment["points"]) == 2, experiment
+            assert experiment["points"][0]["state"] == "succeeded", experiment
+            assert experiment["points"][0]["measurements"], experiment
 
             pdk = mcp.tool("pdk_info")
             assert "pdks" in pdk, pdk
@@ -793,20 +824,43 @@ def main() -> int:
 
             # A drawn cell netlist must expose its subcircuit port order.
             mcp.tool("schematic_create", name="ports_test")
-            mcp.tool("schematic_add_component", cell="ports_test", symbol="Input", name="A", x=0, y=0)
-            mcp.tool("schematic_add_component", cell="ports_test", symbol="Output", name="Y", x=200, y=0)
+            mcp.tool(
+                "schematic_add_component",
+                cell="ports_test",
+                symbol="Input",
+                name="A",
+                x=0,
+                y=0,
+            )
+            mcp.tool(
+                "schematic_add_component",
+                cell="ports_test",
+                symbol="Output",
+                name="Y",
+                x=200,
+                y=0,
+            )
             netlist = mcp.tool("schematic_netlist", schematic="ports_test")
             assert netlist["ports"] == ["A", "Y"], netlist
 
             # A mutation whose automatic save fails must be reported and rolled
             # back instead of leaving the server unable to save anything.
-            locked = [project, project / "sch", project / "lay", project / "sim", project / "impl"]
+            locked = [
+                project,
+                project / "sch",
+                project / "lay",
+                project / "sim",
+                project / "impl",
+            ]
             try:
                 for path in locked:
                     if path.is_dir():
                         os.chmod(path, 0o555)
                 error = mcp.tool_error(
-                    "schematic_add_component", cell="ring_test", symbol="Output", name="LOCKED"
+                    "schematic_add_component",
+                    cell="ring_test",
+                    symbol="Output",
+                    name="LOCKED",
                 )
                 assert "discarded" in error, error
                 summary = mcp.tool("project_summary")

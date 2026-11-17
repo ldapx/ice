@@ -196,6 +196,40 @@ and antenna metrics; use `implementation_log` for the failing stage first.
 `implementation_update(from="floorplan", utilization=0.5)` changes settings and
 invalidates the affected checkpoints.
 
+## Corners, sweeps, and measurements
+
+`simulation_update` accepts analysis settings, corners, sweeps, Monte Carlo
+options, and declarative measurements. Use `simulation_corner_defaults` first
+to load the PDK's TT/FF/SS sections, then add any supply or parameter overrides:
+
+```python
+simulation_corner_defaults(simulation="rc_tran")
+simulation_update(
+    simulation="rc_tran",
+    temperature=27,
+    corners=[
+        {"name": "tt", "temperature": 27},
+        {"name": "ff", "temperature": 85, "source_overrides": {"V1": 1.1}},
+    ],
+    sweeps=[{"parameter": "temperature", "values": [27, 85]}],
+    monte_carlo={"enabled": True, "samples": 20, "temperature_sigma": 2.0,
+                 "supply_sigma_percent": 5.0, "supply_source": "V1",
+                 "supply_nominal": 1.0, "seed": 7},
+    measurements=[
+        {"name": "gain", "metric": "gain", "signal": "out", "input": "in"},
+        {"name": "settling", "metric": "settling_time", "signal": "out"},
+        {"name": "power", "metric": "power", "signal": "i(v1)", "voltage": 1.0},
+    ],
+)
+experiment = simulation_experiment(simulation="rc_tran", store=False)
+for point in experiment["points"]:
+    print(point["variant"], point["state"], point["measurements"])
+```
+
+`simulation_measure` also evaluates a one-off metric with
+`metric="slew_rate"`, `"bandwidth"`, `"phase_margin"`, or `"power"` without
+storing a new measurement on the simulation.
+
 ## PDK setup matrix
 
 ICE applies the package PDK setup automatically. `pdk_info` is authoritative;

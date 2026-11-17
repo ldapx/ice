@@ -111,6 +111,13 @@ double parseDouble(const std::string &text, const char *what) {
     }
 }
 
+std::pair<std::string, double> parseAssignment(const std::string &text, const char *what) {
+    const auto separator = text.find('=');
+    if (separator == std::string::npos || separator == 0)
+        argumentError(std::string("Invalid ") + what + " (expected name=value): " + text);
+    return {text.substr(0, separator), parseDouble(text.substr(separator + 1), what)};
+}
+
 std::optional<ice::ObjectId> parseUnsigned(const std::string &text) {
     if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); }))
         return std::nullopt;
@@ -504,14 +511,6 @@ void applyImplementationConfigOption(const ice::Project &project, const std::vec
     }
 }
 
-std::string trimText(const std::string &text) {
-    const auto first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-        return {};
-    const auto last = text.find_last_not_of(" \t\r\n");
-    return text.substr(first, last - first + 1);
-}
-
 std::string verilogIdentifier(const std::string &text) {
     std::string result;
     result.reserve(text.size());
@@ -545,23 +544,13 @@ std::string normalizeAnalysisName(const std::string &text) {
         return "ac";
     if (normalized == "op" || normalized == "operatingpoint")
         return "op";
+    if (normalized == "tf" || normalized == "transferfunction")
+        return "tf";
+    if (normalized == "noise")
+        return "noise";
     if (normalized == "digital" || normalized == "vcd" || normalized == "systemverilog")
         return "digital";
     argumentError("Unsupported analysis: " + text);
-}
-
-bool isAnalysisDirective(const std::string &line) {
-    std::string normalized;
-    for (const unsigned char character : line) {
-        if (!std::isspace(character))
-            normalized.push_back(static_cast<char>(std::tolower(character)));
-    }
-    const auto starts = [&](const char *name) {
-        const std::string prefix(name);
-        return normalized == prefix || (normalized.starts_with(prefix) && normalized.size() > prefix.size() &&
-                                        std::isspace(static_cast<unsigned char>(normalized[prefix.size()])));
-    };
-    return starts(".tran") || starts(".dc") || starts(".ac") || starts(".op") || normalized == ".end";
 }
 
 std::string readTextFile(const std::filesystem::path &path) {
@@ -626,6 +615,8 @@ json diagnosticsJson(const ice::Project &project) {
     return result;
 }
 
+json simulationJson(const ice::SimulationItem &simulation);
+
 json projectSummary(const ice::Project &project, const std::string &path) {
     json result = {
         {"name", project.name},
@@ -681,14 +672,9 @@ json projectSummary(const ice::Project &project, const std::string &path) {
                                                 {"script_length", cell.script.size()}});
     }
     for (const auto &[id, simulation] : project.simulations) {
-        result["simulations"].push_back({{"id", id},
-                                         {"name", simulation.name},
-                                         {"schematic", simulation.schematic},
-                                         {"simulator", simulation.simulator},
-                                         {"analysis", simulation.analysis},
-                                         {"stop", simulation.stop},
-                                         {"step", simulation.step},
-                                         {"graphs", simulation.graphs.size()}});
+        auto entry = simulationJson(simulation);
+        entry["id"] = id;
+        result["simulations"].push_back(std::move(entry));
     }
     for (const auto &[id, report] : project.reports)
         result["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
@@ -726,6 +712,106 @@ json simulationGraphJson(const ice::SimulationGraph &graph) {
                    {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
                    {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
                    {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+    return result;
+}
+
+json cornerJson(const ice::SimulationCorner &corner) {
+    return {{"name", corner.name},
+            {"model_section", corner.modelSection},
+            {"temperature", corner.temperature},
+            {"source_overrides", corner.sourceOverrides},
+            {"parameters", corner.parameters}};
+}
+
+json measurementSpecJson(const ice::SimulationMeasurementSpec &spec) {
+    json result = {{"name", spec.name},   {"metric", spec.metric},   {"signal", spec.signal},
+                   {"input", spec.input}, {"voltage", spec.voltage}, {"tolerance", spec.tolerance}};
+    if (spec.threshold)
+        result["threshold"] = *spec.threshold;
+    return result;
+}
+
+json measurementResultJson(const ice::SimulationMeasurementResult &measurement) {
+    json result = {{"name", measurement.name},
+                   {"metric", measurement.metric},
+                   {"value", measurement.value},
+                   {"unit", measurement.unit},
+                   {"valid", measurement.valid}};
+    if (!measurement.error.empty())
+        result["error"] = measurement.error;
+    return result;
+}
+
+json simulationJson(const ice::SimulationItem &simulation) {
+    json result = {{"id", simulation.id},
+                   {"name", simulation.name},
+                   {"schematic", simulation.schematic},
+                   {"simulator", simulation.simulator},
+                   {"analysis", simulation.analysis},
+                   {"start", simulation.start},
+                   {"stop", simulation.stop},
+                   {"step", simulation.step},
+                   {"temperature", simulation.temperature},
+                   {"model_section", simulation.modelSection},
+                   {"parameters", simulation.parameters},
+                   {"source_overrides", simulation.sourceOverrides},
+                   {"dc_source", simulation.dcSource},
+                   {"dc_start", simulation.dcStart},
+                   {"dc_stop", simulation.dcStop},
+                   {"dc_step", simulation.dcStep},
+                   {"ac_variation", simulation.acVariation},
+                   {"ac_points", simulation.acPoints},
+                   {"ac_start", simulation.acStart},
+                   {"ac_stop", simulation.acStop},
+                   {"noise_output", simulation.noiseOutput},
+                   {"noise_input", simulation.noiseInput},
+                   {"noise_variation", simulation.noiseVariation},
+                   {"noise_points", simulation.noisePoints},
+                   {"noise_start", simulation.noiseStart},
+                   {"noise_stop", simulation.noiseStop},
+                   {"tf_output", simulation.tfOutput},
+                   {"tf_source", simulation.tfSource},
+                   {"signals", simulation.captureSignals},
+                   {"graphs", simulation.graphs.size()},
+                   {"corners", json::array()},
+                   {"sweeps", json::array()},
+                   {"measurements", json::array()}};
+    for (const auto &corner : simulation.corners)
+        result["corners"].push_back(cornerJson(corner));
+    for (const auto &sweep : simulation.sweeps)
+        result["sweeps"].push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+    result["monte_carlo"] = {{"enabled", simulation.monteCarlo.enabled},
+                             {"samples", simulation.monteCarlo.samples},
+                             {"temperature_sigma", simulation.monteCarlo.temperatureSigma},
+                             {"supply_sigma_percent", simulation.monteCarlo.supplySigmaPercent},
+                             {"supply_source", simulation.monteCarlo.supplySource},
+                             {"supply_nominal", simulation.monteCarlo.supplyNominal},
+                             {"parameter_sigma_percent", simulation.monteCarlo.parameterSigmaPercent},
+                             {"seed", simulation.monteCarlo.seed}};
+    for (const auto &measurement : simulation.measurements)
+        result["measurements"].push_back(measurementSpecJson(measurement));
+    return result;
+}
+
+json experimentPointJson(const ice::ExperimentPoint &point) {
+    json result = {{"variant", point.variant},
+                   {"corner", point.corner},
+                   {"sample", point.sample},
+                   {"parameters", point.parameters},
+                   {"state", ice::jobStateName(point.result.state)},
+                   {"analysis", point.result.analysis},
+                   {"x_axis", point.result.xAxis},
+                   {"x_unit", point.result.xUnit},
+                   {"time_points", point.result.time.size()},
+                   {"scalars", point.result.scalars},
+                   {"trace_names", json::array()},
+                   {"measurements", json::array()}};
+    for (const auto &trace : point.result.traces)
+        result["trace_names"].push_back(trace.name);
+    if (!point.result.error.empty())
+        result["error"] = point.result.error;
+    for (const auto &measurement : point.result.measurements)
+        result["measurements"].push_back(measurementResultJson(measurement));
     return result;
 }
 
@@ -1166,9 +1252,25 @@ void printHelp() {
               << "Simulation:\n"
               << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
                  "[signals...]\n"
+              << "  simulation-configure <project> <simulation> [--analysis name] [--start s] [--stop s] "
+                 "[--step s] [--temperature c] [--model-section s] [--dc-source s] "
+                 "[--ac-points n] [--noise-output n] [--tf-output n] [--param name=value] "
+                 "[--source name=value]...\n"
               << "  simulation-list <project>\n"
               << "  simulation-remove <project> <simulation>\n"
               << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
+              << "  simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]\n"
+              << "  simulation-corner-defaults <project> <simulation>\n"
+              << "  simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] ...\n"
+              << "  simulation-corner-list <project> <simulation>\n"
+              << "  simulation-corner-remove <project> <simulation> <name>\n"
+              << "  simulation-sweep-add <project> <simulation> <parameter> <value...>\n"
+              << "  simulation-sweep-list <project> <simulation>\n"
+              << "  simulation-sweep-remove <project> <simulation> <parameter>\n"
+              << "  simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...\n"
+              << "  simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...\n"
+              << "  simulation-measure-list <project> <simulation>\n"
+              << "  simulation-measure-remove <project> <simulation> <name>\n"
               << "  simulation-trace <project> <simulation> [signals] [max-points]\n"
               << "  simulation-measure <project> <simulation> [signal] [threshold]\n"
               << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
@@ -3170,6 +3272,401 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "simulation-configure") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-configure <project> <simulation> [analysis options]");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            auto updated = session.project().simulations.at(simulationId);
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--analysis")
+                    updated.analysis = normalizeAnalysisName(value());
+                else if (option == "--simulator")
+                    updated.simulator = value();
+                else if (option == "--start")
+                    updated.start = parseDouble(value(), "start");
+                else if (option == "--stop")
+                    updated.stop = parseDouble(value(), "stop");
+                else if (option == "--step")
+                    updated.step = parseDouble(value(), "step");
+                else if (option == "--temperature")
+                    updated.temperature = parseDouble(value(), "temperature");
+                else if (option == "--model-section")
+                    updated.modelSection = value();
+                else if (option == "--dc-source")
+                    updated.dcSource = value();
+                else if (option == "--dc-start")
+                    updated.dcStart = parseDouble(value(), "DC start");
+                else if (option == "--dc-stop")
+                    updated.dcStop = parseDouble(value(), "DC stop");
+                else if (option == "--dc-step")
+                    updated.dcStep = parseDouble(value(), "DC step");
+                else if (option == "--ac-variation")
+                    updated.acVariation = value();
+                else if (option == "--ac-points")
+                    updated.acPoints = static_cast<int>(parseInteger(value(), "AC points"));
+                else if (option == "--ac-start")
+                    updated.acStart = parseDouble(value(), "AC start");
+                else if (option == "--ac-stop")
+                    updated.acStop = parseDouble(value(), "AC stop");
+                else if (option == "--noise-output")
+                    updated.noiseOutput = value();
+                else if (option == "--noise-input")
+                    updated.noiseInput = value();
+                else if (option == "--noise-variation")
+                    updated.noiseVariation = value();
+                else if (option == "--noise-points")
+                    updated.noisePoints = static_cast<int>(parseInteger(value(), "noise points"));
+                else if (option == "--noise-start")
+                    updated.noiseStart = parseDouble(value(), "noise start");
+                else if (option == "--noise-stop")
+                    updated.noiseStop = parseDouble(value(), "noise stop");
+                else if (option == "--tf-output")
+                    updated.tfOutput = value();
+                else if (option == "--tf-source")
+                    updated.tfSource = value();
+                else if (option == "--param") {
+                    const auto [name, number] = parseAssignment(value(), "parameter");
+                    updated.parameters[name] = number;
+                } else if (option == "--source") {
+                    const auto [name, number] = parseAssignment(value(), "source override");
+                    updated.sourceOverrides[name] = number;
+                } else if (option == "--signals")
+                    updated.captureSignals = value();
+                else if (option == "--directives")
+                    updated.directives = value();
+                else if (option == "--clear-params")
+                    updated.parameters.clear();
+                else if (option == "--clear-sources")
+                    updated.sourceOverrides.clear();
+                else
+                    argumentError("Unknown simulation-configure option: " + option);
+            }
+            session.execute("configure simulation",
+                            [&](ice::Project &project) { project.simulations.at(simulationId) = updated; });
+            session.save(args[1]);
+            printJson(simulationJson(session.project().simulations.at(simulationId)));
+            return 0;
+        }
+        if (command == "simulation-corner-defaults") {
+            expectArguments(args, 3, 3, "simulation-corner-defaults <project> <simulation>");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            const auto &simulation = session.project().simulations.at(simulationId);
+            const auto schematic = session.project().schematicCells.find(simulation.schematic);
+            if (schematic == session.project().schematicCells.end())
+                throw ice::ProjectError("simulation.schematic", "Simulation references a missing schematic");
+            const auto corners = ice::pdkSimulationCorners(schematic->second.pdk);
+            session.execute("populate simulation corners",
+                            [&](ice::Project &project) { project.simulations.at(simulationId).corners = corners; });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"corners", corners.size()}});
+            return 0;
+        }
+        if (command == "simulation-corner-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-corner-add <project> <simulation> <name> [--section <section>] "
+                            "[--temperature <c>] [--supply name=value]... [--param name=value]...");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            ice::SimulationCorner corner;
+            corner.name = args[3];
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--section")
+                    corner.modelSection = value();
+                else if (option == "--temperature")
+                    corner.temperature = parseDouble(value(), "corner temperature");
+                else if (option == "--supply") {
+                    const auto [name, number] = parseAssignment(value(), "corner supply");
+                    corner.sourceOverrides[name] = number;
+                } else if (option == "--param") {
+                    const auto [name, number] = parseAssignment(value(), "corner parameter");
+                    corner.parameters[name] = number;
+                } else
+                    argumentError("Unknown simulation-corner-add option: " + option);
+            }
+            session.execute("add simulation corner", [&](ice::Project &project) {
+                auto &corners = project.simulations.at(simulationId).corners;
+                const auto found =
+                    std::find_if(corners.begin(), corners.end(),
+                                 [&](const ice::SimulationCorner &entry) { return entry.name == corner.name; });
+                if (found == corners.end())
+                    corners.push_back(corner);
+                else
+                    *found = corner;
+            });
+            session.save(args[1]);
+            printJson(cornerJson(corner));
+            return 0;
+        }
+        if (command == "simulation-corner-list") {
+            expectArguments(args, 3, 3, "simulation-corner-list <project> <simulation>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json corners = json::array();
+            for (const auto &corner : project.simulations.at(simulationId).corners)
+                corners.push_back(cornerJson(corner));
+            printJson({{"simulation", simulationId}, {"corners", std::move(corners)}});
+            return 0;
+        }
+        if (command == "simulation-corner-remove") {
+            expectArguments(args, 4, 4, "simulation-corner-remove <project> <simulation> <name>");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation corner", [&](ice::Project &project) {
+                auto &corners = project.simulations.at(simulationId).corners;
+                const auto before = corners.size();
+                std::erase_if(corners, [&](const ice::SimulationCorner &entry) { return entry.name == args[3]; });
+                removed = corners.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"name", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-sweep-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-sweep-add <project> <simulation> <parameter> <value...>");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            ice::SimulationSweep sweep;
+            sweep.parameter = args[3];
+            for (std::size_t index = 4; index < args.size(); ++index)
+                sweep.values.push_back(parseDouble(args[index], "sweep value"));
+            session.execute("add simulation sweep", [&](ice::Project &project) {
+                auto &sweeps = project.simulations.at(simulationId).sweeps;
+                const auto found = std::find_if(sweeps.begin(), sweeps.end(), [&](const ice::SimulationSweep &entry) {
+                    return entry.parameter == sweep.parameter;
+                });
+                if (found == sweeps.end())
+                    sweeps.push_back(sweep);
+                else
+                    *found = sweep;
+            });
+            session.save(args[1]);
+            printJson({{"parameter", sweep.parameter}, {"values", sweep.values}});
+            return 0;
+        }
+        if (command == "simulation-sweep-list") {
+            expectArguments(args, 3, 3, "simulation-sweep-list <project> <simulation>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json sweeps = json::array();
+            for (const auto &sweep : project.simulations.at(simulationId).sweeps)
+                sweeps.push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+            printJson({{"simulation", simulationId}, {"sweeps", std::move(sweeps)}});
+            return 0;
+        }
+        if (command == "simulation-sweep-remove") {
+            expectArguments(args, 4, 4, "simulation-sweep-remove <project> <simulation> <parameter>");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation sweep", [&](ice::Project &project) {
+                auto &sweeps = project.simulations.at(simulationId).sweeps;
+                const auto before = sweeps.size();
+                std::erase_if(sweeps, [&](const ice::SimulationSweep &entry) { return entry.parameter == args[3]; });
+                removed = sweeps.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"parameter", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-monte-carlo") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-monte-carlo <project> <simulation> [--samples n] "
+                            "[--temperature-sigma c] [--supply-sigma-percent p] [--supply-source name] "
+                            "[--supply-nominal v] [--param-sigma name=percent]... [--seed n] [--disable]");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            auto options = session.project().simulations.at(simulationId).monteCarlo;
+            options.enabled = true;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                if (option == "--disable") {
+                    options.enabled = false;
+                    continue;
+                }
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--samples")
+                    options.samples = static_cast<int>(parseInteger(value(), "Monte Carlo samples"));
+                else if (option == "--temperature-sigma")
+                    options.temperatureSigma = parseDouble(value(), "temperature sigma");
+                else if (option == "--supply-sigma-percent")
+                    options.supplySigmaPercent = parseDouble(value(), "supply sigma");
+                else if (option == "--supply-source")
+                    options.supplySource = value();
+                else if (option == "--supply-nominal")
+                    options.supplyNominal = parseDouble(value(), "supply nominal");
+                else if (option == "--seed")
+                    options.seed = static_cast<std::uint32_t>(parseInteger(value(), "Monte Carlo seed"));
+                else if (option == "--param-sigma") {
+                    const auto [name, number] = parseAssignment(value(), "parameter sigma");
+                    options.parameterSigmaPercent[name] = number;
+                } else
+                    argumentError("Unknown simulation-monte-carlo option: " + option);
+            }
+            session.execute("configure simulation monte carlo",
+                            [&](ice::Project &project) { project.simulations.at(simulationId).monteCarlo = options; });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId).monteCarlo;
+            printJson({{"simulation", simulationId},
+                       {"enabled", stored.enabled},
+                       {"samples", stored.samples},
+                       {"temperature_sigma", stored.temperatureSigma},
+                       {"supply_sigma_percent", stored.supplySigmaPercent},
+                       {"supply_source", stored.supplySource},
+                       {"supply_nominal", stored.supplyNominal},
+                       {"parameter_sigma_percent", stored.parameterSigmaPercent},
+                       {"seed", stored.seed}});
+            return 0;
+        }
+        if (command == "simulation-measure-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-measure-add <project> <simulation> <name> <metric> [--signal s] "
+                            "[--input s] [--voltage v] [--threshold v] [--tolerance v]");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            ice::SimulationMeasurementSpec spec;
+            spec.name = args[3];
+            spec.metric = args[4];
+            for (std::size_t index = 5; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--signal")
+                    spec.signal = value();
+                else if (option == "--input")
+                    spec.input = value();
+                else if (option == "--voltage")
+                    spec.voltage = parseDouble(value(), "measurement voltage");
+                else if (option == "--threshold")
+                    spec.threshold = parseDouble(value(), "measurement threshold");
+                else if (option == "--tolerance")
+                    spec.tolerance = parseDouble(value(), "measurement tolerance");
+                else
+                    argumentError("Unknown simulation-measure-add option: " + option);
+            }
+            session.execute("add simulation measurement", [&](ice::Project &project) {
+                auto &measurements = project.simulations.at(simulationId).measurements;
+                const auto found =
+                    std::find_if(measurements.begin(), measurements.end(),
+                                 [&](const ice::SimulationMeasurementSpec &entry) { return entry.name == spec.name; });
+                if (found == measurements.end())
+                    measurements.push_back(spec);
+                else
+                    *found = spec;
+            });
+            session.save(args[1]);
+            printJson(measurementSpecJson(spec));
+            return 0;
+        }
+        if (command == "simulation-measure-list") {
+            expectArguments(args, 3, 3, "simulation-measure-list <project> <simulation>");
+            const auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json measurements = json::array();
+            for (const auto &spec : project.simulations.at(simulationId).measurements)
+                measurements.push_back(measurementSpecJson(spec));
+            printJson({{"simulation", simulationId}, {"measurements", std::move(measurements)}});
+            return 0;
+        }
+        if (command == "simulation-measure-remove") {
+            expectArguments(args, 4, 4, "simulation-measure-remove <project> <simulation> <name>");
+            auto session = ice::ProjectSession(ice::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation measurement", [&](ice::Project &project) {
+                auto &measurements = project.simulations.at(simulationId).measurements;
+                const auto before = measurements.size();
+                std::erase_if(measurements,
+                              [&](const ice::SimulationMeasurementSpec &entry) { return entry.name == args[3]; });
+                removed = measurements.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"name", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-experiment") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-experiment <project> <simulation> [timeout-ms] [--no-store] "
+                            "[--output <path>]");
+            auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto simulation = project.simulations.at(simulationId);
+            std::chrono::milliseconds timeout{60000};
+            bool store = true;
+            std::filesystem::path outputPath;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                if (option == "--no-store") {
+                    store = false;
+                } else if (option == "--output") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for --output");
+                    outputPath = args[++index];
+                } else if (option.starts_with("--")) {
+                    argumentError("Unknown simulation-experiment option: " + option);
+                } else {
+                    timeout = std::chrono::milliseconds(std::max<ice::Coordinate>(1, parseInteger(option, "timeout")));
+                }
+            }
+            const auto root = projectRootForCli(args[1]);
+            const auto points = ice::runSimulationExperiment(project, simulation, timeout, {}, root);
+            json pointJson = json::array();
+            json stored = json::array();
+            for (const auto &point : points) {
+                pointJson.push_back(experimentPointJson(point));
+                if (!store || root.empty())
+                    continue;
+                const auto request = ice::simulationRequestForItem(project, simulation, root);
+                ice::SimulationRunContext context;
+                context.projectRoot = root;
+                context.projectIdentity = project.identity;
+                context.projectName = project.name;
+                context.simulationId = simulation.id;
+                context.simulationName = simulation.name;
+                context.variant = point.variant;
+                context.schematicId = simulation.schematic;
+                if (const auto schematic = project.schematicCells.find(simulation.schematic);
+                    schematic != project.schematicCells.end())
+                    context.schematicName = schematic->second.name;
+                context.request = request;
+                context.directives = simulation.directives;
+                context.graphs = simulation.graphs;
+                const auto artifact = ice::writeSimulationRun(context, point.result);
+                stored.push_back(artifact.path.string());
+            }
+            json result = {
+                {"simulation", simulation.name}, {"points", std::move(pointJson)}, {"stored", std::move(stored)}};
+            if (!outputPath.empty()) {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw ice::ProjectError("simulation.save", "Unable to open experiment output path");
+                output << result.dump(2) << "\n";
+            }
+            printJson(result);
+            return 0;
+        }
         if (command == "simulation-run") {
             expectArguments(args, 3, 5, "simulation-run <project> <simulation> [timeout-ms] [output.json]");
             std::size_t end = args.size();
@@ -3190,47 +3687,8 @@ int main(int argc, char **argv) {
             if (schematic == project.schematicCells.end())
                 throw ice::ProjectError("simulation.schematic", "Simulation references a missing schematic");
 
-            ice::SimulationRequest request;
-            request.simulator = simulation.simulator;
-            request.stop = simulation.stop;
-            request.step = simulation.step;
-            request.use_initial_conditions = simulation.use_initial_conditions;
-            request.workingDirectory = projectRootForCli(args[1]);
             std::vector<std::string> notes;
-            const bool mixedSignal =
-                !schematic->second.systemVerilogSchematic && ice::schematicContainsHdl(project, simulation.schematic);
-            const auto appendDirectives = [&] {
-                std::istringstream directives(simulation.directives);
-                std::string directive;
-                while (std::getline(directives, directive)) {
-                    const auto trimmed = trimText(directive);
-                    if (!trimmed.empty() && !isAnalysisDirective(trimmed))
-                        request.netlist.push_back(trimmed);
-                }
-            };
-            if (mixedSignal) {
-                std::string error;
-                if (!ice::prepareMixedSignalRequest(request, project, simulation.schematic, &error))
-                    throw ice::ProjectError("simulation.mixed", error);
-                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
-                appendDirectives();
-            } else if (schematic->second.systemVerilogSchematic) {
-                request.analysis = "digital";
-                request.simulator = "iverilog";
-                const auto source = ice::buildSystemVerilogSimulationSource(project, simulation.schematic);
-                std::istringstream lines(source);
-                std::string line;
-                while (std::getline(lines, line))
-                    request.netlist.push_back(line);
-            } else {
-                request.simulator = "ngspice";
-                request.analysis = normalizeAnalysisName(simulation.analysis);
-                request.netlist = ice::buildSimulationNetlist(project, simulation.schematic, &notes);
-                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
-                appendDirectives();
-            }
-            request.probeSignals = splitSignals(simulation.captureSignals);
-
+            const auto request = ice::simulationRequestForItem(project, simulation, projectRootForCli(args[1]), &notes);
             ice::SimulationRunner runner;
             const auto result = runner.run(request, timeout, [](const ice::SimulationProgress &progress) {
                 std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
@@ -3271,10 +3729,16 @@ int main(int argc, char **argv) {
             }
             json summary = {{"state", ice::jobStateName(result.state)},
                             {"analysis", result.analysis},
+                            {"x_axis", result.xAxis},
+                            {"x_unit", result.xUnit},
                             {"time_points", result.time.size()},
                             {"traces", result.traces.size()},
+                            {"scalars", result.scalars},
+                            {"measurements", json::array()},
                             {"stored", storedPath.string()},
                             {"error", result.error}};
+            for (const auto &measurement : result.measurements)
+                summary["measurements"].push_back(measurementResultJson(measurement));
             summary["warnings"] = result.warnings;
             summary["capture_signals"] = simulation.captureSignals;
             if (!runId.empty())
@@ -3340,16 +3804,23 @@ int main(int argc, char **argv) {
             }
             printJson({{"simulation", stored->simulationName},
                        {"run_id", stored->runId},
+                       {"analysis", stored->result.analysis},
+                       {"x_axis", stored->result.xAxis},
+                       {"x_unit", stored->result.xUnit},
                        {"time_points", totalPoints},
                        {"returned_points", indices.size()},
                        {"decimated", decimated},
                        {"time", std::move(time)},
-                       {"signals", std::move(traces)}});
+                       {"signals", std::move(traces)},
+                       {"scalars", stored->result.scalars}});
             return 0;
         }
 
         if (command == "simulation-measure") {
-            expectArguments(args, 3, 5, "simulation-measure <project> <simulation> [signal] [threshold]");
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-measure <project> <simulation> [signal] [threshold] "
+                            "[--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] "
+                            "[--signal s] [--input s] [--voltage v] [--tolerance v]");
             const auto project = ice::Project::load(args[1]);
             const auto simulationId = resolveSimulation(project, args[2]);
             const auto stored = ice::latestSimulationRun(projectRootForCli(args[1]), simulationId);
@@ -3357,23 +3828,76 @@ int main(int argc, char **argv) {
                 throw ice::ProjectError("simulation.result", "No stored run was found for this simulation");
             if (stored->result.time.empty() || stored->result.traces.empty())
                 throw ice::ProjectError("simulation.result", "The stored run has no time vector or traces");
+            std::string metric;
+            std::string selected;
+            std::string input;
             double threshold = std::numeric_limits<double>::quiet_NaN();
-            if (args.size() >= 5)
-                threshold = parseDouble(args[4], "threshold");
-            const std::string selected = args.size() >= 4 ? args[3] : std::string{};
+            double voltage = 0.0;
+            double tolerance = 0.02;
+            std::size_t positional = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--metric")
+                    metric = value();
+                else if (option == "--signal")
+                    selected = value();
+                else if (option == "--input")
+                    input = value();
+                else if (option == "--voltage")
+                    voltage = parseDouble(value(), "measurement voltage");
+                else if (option == "--tolerance")
+                    tolerance = parseDouble(value(), "measurement tolerance");
+                else if (option == "--threshold")
+                    threshold = parseDouble(value(), "threshold");
+                else if (positional++ == 0)
+                    selected = option;
+                else
+                    threshold = parseDouble(option, "threshold");
+            }
+            if (!metric.empty()) {
+                ice::SimulationMeasurementSpec spec;
+                spec.name = "measurement";
+                spec.metric = metric;
+                spec.signal = selected;
+                spec.input = input;
+                spec.voltage = voltage;
+                spec.tolerance = tolerance;
+                if (std::isfinite(threshold))
+                    spec.threshold = threshold;
+                const auto measurements = ice::evaluateMeasurements({spec}, stored->result);
+                printJson({{"simulation", stored->simulationName},
+                           {"schematic", stored->schematicName},
+                           {"run_id", stored->runId},
+                           {"measurement", measurementResultJson(measurements.front())}});
+                return 0;
+            }
             json measurements = json::array();
             for (const auto &trace : stored->result.traces) {
                 if (!selected.empty() && trace.name != selected)
                     continue;
                 measurements.push_back(measurementJson(ice::measureSignal(trace, stored->result.time, threshold)));
             }
-            if (measurements.empty())
+            json declarative = json::array();
+            if (const auto simulation = project.simulations.find(simulationId); simulation != project.simulations.end()) {
+                for (const auto &measurement :
+                     ice::evaluateMeasurements(simulation->second.measurements, stored->result))
+                    declarative.push_back(measurementResultJson(measurement));
+            }
+            if (measurements.empty() && declarative.empty())
                 argumentError("No captured signal matched '" + selected + "'");
             printJson({{"simulation", stored->simulationName},
                        {"schematic", stored->schematicName},
                        {"run_id", stored->runId},
+                       {"analysis", stored->result.analysis},
+                       {"x_axis", stored->result.xAxis},
                        {"time_points", stored->result.time.size()},
-                       {"measurements", measurements}});
+                       {"measurements", measurements},
+                       {"declarative_measurements", std::move(declarative)}});
             return 0;
         }
 
