@@ -259,6 +259,24 @@ def main() -> int:
             assert regenerated["ok"] is True, regenerated
             procedural_info = mcp.tool("layout_info", cell="proc_test")
             assert procedural_info["needs_regeneration"] is False, procedural_info
+            route_script = (
+                'metal1 = layout.layer("Metal1", 1)\n'
+                'metal1.rectangle(0, 0, 100, 100, net="A")\n'
+                'metal1.rectangle(1000, 0, 100, 100, net="A")\n'
+                'layout.route((0, 0, 100, 100), (1000, 0, 100, 100),\n'
+                '             "Metal1", 50, net="A",\n'
+                '             start_side="right", end_side="left")\n'
+            )
+            mcp.tool("layout_set_script", layout="proc_test", script=route_script)
+            regenerated = mcp.tool("layout_regenerate", layout="proc_test")
+            assert regenerated["ok"] is True, regenerated
+            connectivity = mcp.tool(
+                "layout_connectivity", cell=str(procedural["generated_cell"])
+            )
+            assert any(
+                net["name"] == "A" and len(net["shapes"]) >= 3
+                for net in connectivity["nets"]
+            ), connectivity
             mcp.tool("layout_add_layer", name="Metal1", number=8)
             mcp.tool("layout_add_net", cell="pin_test", name="VIN")
             mcp.tool(

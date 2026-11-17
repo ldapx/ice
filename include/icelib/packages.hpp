@@ -23,6 +23,17 @@ struct PackagePdkOsdiSource {
     std::string output;
 };
 
+struct PackagePdkProbe {
+    // PCell-independent DC probe used by the package readiness check. Width
+    // and length are emitted verbatim so a package can use either micrometer
+    // suffixes or unitless values with a simulation `.option scale=...`.
+    std::string width = "1u";
+    std::string length = "0.13u";
+    double vdd = 1.2;
+    double vd = 0.6;
+    bool declared = false;
+};
+
 struct PackagePdkSimulation {
     std::string engine = "ngspice";
     // Model directory relative to the package root.
@@ -39,6 +50,7 @@ struct PackagePdkSimulation {
     std::vector<std::string> compilerFlags;
     std::vector<PackagePdkOsdiSource> osdiSources;
     std::map<std::string, std::string> devices;
+    PackagePdkProbe probe;
 };
 
 struct PackageLayerStyle {
@@ -85,6 +97,16 @@ struct PackagePdkImplementation {
     // Optional filename substring used to pick a Liberty corner from the ORFS
     // platform library directory, e.g. "tt_025C_5v00".
     std::string orfsLibertyPattern;
+    // Optional physical defaults used only when the package relies on an ORFS
+    // platform and does not declare equivalent per-stack paths. They keep PDK
+    // policy in the package instead of switching on the PDK id in ICE.
+    std::string orfsSite;
+    std::vector<std::string> orfsIoHorizontalLayers;
+    std::vector<std::string> orfsIoVerticalLayers;
+    std::string orfsRoutingMinLayer;
+    std::string orfsRoutingMaxLayer;
+    // Preferred ORFS GDS subdirectory, for example "9t".
+    std::string orfsGdsTrack;
     // Fallback physical data for PDKs without stack variants.
     std::optional<PackagePdkStackImplementation> files;
 };

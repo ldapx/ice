@@ -2,7 +2,10 @@
 
 #include "icelib/core.hpp"
 
+#include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ice {
@@ -21,6 +24,20 @@ struct LayoutNetGroup {
 };
 
 std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId cellId);
+
+// Layer-level connectivity graph used by net tracing and the planned router.
+// The graph is built from the package's `technology/connectivity.json` when
+// available and falls back to generic layer-name conventions for custom PDKs.
+struct LayoutConnectivity {
+    std::set<ObjectId> conductors;
+    std::map<ObjectId, std::set<ObjectId>> viaConductors;
+    std::set<std::pair<ObjectId, ObjectId>> directPairs;
+    // Conductors usable as routing layers, and their vertical order.
+    std::set<ObjectId> routingLayers;
+    std::vector<ObjectId> routingOrder;
+};
+
+LayoutConnectivity inferLayoutConnectivity(const Project &project, const std::string &pdkId);
 
 // Electrical identity of a layout layer. Drawing and pin-purpose variants of
 // the same base layer share a key (for example Metal1 and Metal1.pin), while

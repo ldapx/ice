@@ -329,19 +329,6 @@ std::string lowercase(std::string value) {
     return value;
 }
 
-std::string inferredOrfsPlatform(const std::string &pdk) {
-    const auto value = lowercase(pdk);
-    if (value.find("gf180") != std::string::npos)
-        return "gf180";
-    if (value.find("sky130") != std::string::npos)
-        return "sky130hd";
-    if (value.find("nangate45") != std::string::npos)
-        return "nangate45";
-    if (value.find("asap7") != std::string::npos)
-        return "asap7";
-    return {};
-}
-
 std::filesystem::path implementationOrfsRoot() {
     for (const auto *name : {"ICE_OPENROAD_FLOW_SCRIPTS", "OPENROAD_FLOW_SCRIPTS", "ORFS_ROOT"}) {
         if (const auto *value = std::getenv(name); value && *value) {
@@ -817,39 +804,16 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
                              }))
                         platform.cellLef = *found;
                 }
-                if (platform.site.empty()) {
-                    if (implementation.orfsPlatform == "gf180")
-                        platform.site = track == "7t" ? "GF018hv5v_mcu_sc7" : "GF018hv5v_green_sc9";
-                    else if (implementation.orfsPlatform == "sky130hd")
-                        platform.site = "unithd";
-                    else if (implementation.orfsPlatform == "sky130hs")
-                        platform.site = "uniths";
-                }
+                if (platform.site.empty() && !implementation.orfsSite.empty())
+                    platform.site = implementation.orfsSite;
                 if (platform.ioHorizontalLayers.empty() && platform.ioVerticalLayers.empty()) {
-                    if (implementation.orfsPlatform == "gf180") {
-                        platform.ioHorizontalLayers = {"Metal3"};
-                        platform.ioVerticalLayers = {"Metal4"};
-                    } else if (implementation.orfsPlatform.rfind("sky130", 0) == 0) {
-                        platform.ioHorizontalLayers = {"met3"};
-                        platform.ioVerticalLayers = {"met2"};
-                    }
+                    platform.ioHorizontalLayers = implementation.orfsIoHorizontalLayers;
+                    platform.ioVerticalLayers = implementation.orfsIoVerticalLayers;
                 }
-                if (platform.routingMinLayer.empty() && implementation.orfsPlatform == "gf180")
-                    platform.routingMinLayer = "Metal1";
-                if (platform.routingMaxLayer.empty() && implementation.orfsPlatform == "gf180") {
-                    if (stackId == "3LM_1TM")
-                        platform.routingMaxLayer = "Metal3";
-                    else if (stackId == "4LM_1TM")
-                        platform.routingMaxLayer = "Metal4";
-                    else if (stackId == "6LM_1TM")
-                        platform.routingMaxLayer = "MetalTop";
-                    else
-                        platform.routingMaxLayer = "Metal5";
-                }
-                if (platform.routingMinLayer.empty() && implementation.orfsPlatform.rfind("sky130", 0) == 0)
-                    platform.routingMinLayer = "met1";
-                if (platform.routingMaxLayer.empty() && implementation.orfsPlatform.rfind("sky130", 0) == 0)
-                    platform.routingMaxLayer = "met5";
+                if (platform.routingMinLayer.empty())
+                    platform.routingMinLayer = implementation.orfsRoutingMinLayer;
+                if (platform.routingMaxLayer.empty())
+                    platform.routingMaxLayer = implementation.orfsRoutingMaxLayer;
                 if (platform.liberty.empty()) {
                     auto cornerToken = lowercase(implementation.orfsLibertyPattern);
                     if (cornerToken.empty()) {
@@ -878,65 +842,20 @@ ImplementationPlatform resolveImplementationPlatform(const PackageSpec &package,
                 }
                 if (platform.rcxRules.empty()) {
                     if (const auto rules = platformDirectory / "rcx_patterns.rules";
-                        std::filesystem::is_regular_file(rules, status) && !status) {
+                        std::filesystem::is_regular_file(rules, status) && !status)
                         platform.rcxRules = rules;
-                    } else if (implementation.orfsPlatform == "gf180") {
-                        const auto rulesDirectory = platformDirectory / "openROAD" / "rcx";
-                        auto metalToken = std::string{"1p"};
-                        if (!stackId.empty() && std::isdigit(static_cast<unsigned char>(stackId.front())))
-                            metalToken.push_back(stackId.front());
-                        metalToken += "m_1tm";
-                        auto trackToken = lowercase(implementation.orfsTrackOption);
-                        if (trackToken.ends_with("t"))
-                            trackToken.back() = 'k';
-                        auto cornerToken = lowercase(implementation.orfsCorner);
-                        std::string cornerSuffix;
-                        if (cornerToken == "bc")
-                            cornerSuffix = "bst";
-                        else if (cornerToken == "wc")
-                            cornerSuffix = "wst";
-                        else if (cornerToken == "tc")
-                            cornerSuffix = "typ";
-                        else
-                            cornerSuffix = cornerToken;
-                        const auto preferToken = lowercase(implementation.orfsPowerOption).starts_with("5v0")
-                                                     ? std::string{"optb"}
-                                                     : std::string{};
-                        const auto matchRules = [&](bool requirePreferred) {
-                            return findFirstFile(rulesDirectory, [&](const std::string &name) {
-                                const auto lower = lowercase(name);
-                                if (!lower.ends_with(".rules"))
-                                    return false;
-                                if (!metalToken.empty() && lower.find(metalToken) == std::string::npos)
-                                    return false;
-                                if (!trackToken.empty() && lower.find(trackToken) == std::string::npos)
-                                    return false;
-                                if (!cornerSuffix.empty() && lower.find(cornerSuffix) == std::string::npos)
-                                    return false;
-                                return !requirePreferred || lower.find(preferToken) != std::string::npos;
-                            });
-                        };
-                        if (const auto found = matchRules(!preferToken.empty()))
-                            platform.rcxRules = *found;
-                        else if (const auto found = matchRules(false))
-                            platform.rcxRules = *found;
-                    }
                 }
             }
         }
     }
-    if (platform.gdsFiles.empty()) {
-        const auto orfsPlatform =
-            !implementation.orfsPlatform.empty() ? implementation.orfsPlatform : inferredOrfsPlatform(platform.pdk);
-        if (!orfsPlatform.empty()) {
-            const auto orfsRoot = implementationOrfsRoot();
-            if (!orfsRoot.empty()) {
-                const auto platformDirectory = orfsRoot / "flow" / "platforms" / orfsPlatform;
-                auto preferredTrack = lowercase(implementation.orfsTrackOption);
-                if (preferredTrack.empty() && orfsPlatform == "gf180")
-                    preferredTrack = "9t";
-                platform.gdsFiles = collectGdsFiles(platformDirectory / "gds", preferredTrack);
-            }
+    if (platform.gdsFiles.empty() && !implementation.orfsPlatform.empty()) {
+        const auto orfsRoot = implementationOrfsRoot();
+        if (!orfsRoot.empty()) {
+            const auto platformDirectory = orfsRoot / "flow" / "platforms" / implementation.orfsPlatform;
+            auto preferredTrack = lowercase(implementation.orfsGdsTrack);
+            if (preferredTrack.empty())
+                preferredTrack = lowercase(implementation.orfsTrackOption);
+            platform.gdsFiles = collectGdsFiles(platformDirectory / "gds", preferredTrack);
         }
     }
     const auto requireFile = [&](const std::filesystem::path &path, const std::string &label, bool required) {

@@ -364,6 +364,12 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                     entry.orfsPowerOption = readString(*orfs, "power_option");
                     entry.orfsCorner = readString(*orfs, "corner");
                     entry.orfsLibertyPattern = readString(*orfs, "liberty_pattern");
+                    entry.orfsSite = readString(*orfs, "site");
+                    entry.orfsIoHorizontalLayers = readStringArray(*orfs, "io_horizontal_layers");
+                    entry.orfsIoVerticalLayers = readStringArray(*orfs, "io_vertical_layers");
+                    entry.orfsRoutingMinLayer = readString(*orfs, "routing_min_layer");
+                    entry.orfsRoutingMaxLayer = readString(*orfs, "routing_max_layer");
+                    entry.orfsGdsTrack = readString(*orfs, "gds_track");
                 }
                 auto files = readStackImplementation(*implementation, "pdk.implementation");
                 if (!files.site.empty() || !files.techLef.empty() || !files.cellLef.empty() || !files.gds.empty() ||
@@ -451,6 +457,13 @@ PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoo
                         if (auto text = value.value<std::string>())
                             sim.devices.emplace(std::string(key), *text);
                     }
+                }
+                if (const auto *probe = (*simulation)["probe"].as_table()) {
+                    sim.probe.declared = true;
+                    sim.probe.width = readString(*probe, "w", sim.probe.width);
+                    sim.probe.length = readString(*probe, "l", sim.probe.length);
+                    sim.probe.vdd = (*probe)["vdd"].value_or(sim.probe.vdd);
+                    sim.probe.vd = (*probe)["vd"].value_or(sim.probe.vd);
                 }
                 if (const auto *sources = (*simulation)["osdi"].as_array()) {
                     for (const auto &item : *sources) {
