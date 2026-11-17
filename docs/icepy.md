@@ -143,12 +143,49 @@ for name, run in runs.items():
 
 The API is new-format-only and reads runs from `build/simulations`.
 
+## Procedural layouts
+
+`icepy.Project` exposes procedural layouts alongside static layout cells:
+
+```python
+project = icepy.new_project("generated_demo")
+procedural = project.create_procedural_layout(
+    "generated_top",
+    "generic",
+    "",
+    'width = layout.um(layout.parameter("width", "4"))\n'
+    'metal = layout.layer("Metal1", 1, 0)\n'
+    'metal.rectangle(layout.um(0), layout.um(0), width, layout.um(1))\n',
+    {"width": "4"},
+)
+assert procedural.needs_regeneration
+procedural = project.regenerate_procedural_layout("generated_top")
+assert not procedural.needs_regeneration
+cell = project.layout_cell_by_id(procedural.generated_cell)
+```
+
+The script API includes datatype-aware layers, unit helpers, rectangles,
+polygons (including holes), boolean operations, paths, text, vias, rectangular
+arrays, ports, instances, and package device placement through
+`layout.device(...)` with an installed PDK package. A placement returns a
+`DevicePlacement` with absolute pin rectangles and `device`/`model` metadata;
+pass `nets={"G": "GATE", ...}` to bind pins. The generated cell also stores
+planned-device metadata, so LVS can match flattened PCells by model, W/L/M, and
+terminal nets. Generated children are read-only and can be inspected, exported,
+or instanced by other layout cells. `ProceduralLayout` exposes the generated
+script/output hashes and `needs_regeneration`.
+
 ## PCell runtime
 
-`icepy.pcells` has two package-facing paths.
+`icepy.pcells` has two package-facing paths. The shared `PackagePcell` MOS
+template builds isolated fingers (one diff island per finger), licon/mcon
+contact arrays, body taps, and well/implant layers. Packages can override
+`contact_size`, `contact_spacing`, and `contact_margin`; SKY130 uses 0.17/0.19
+µm and GF180MCU uses 0.22/0.25 µm. Device width is the channel width per finger,
+and `nf` produces parallel fingers instead of overlapping diffusion.
 
 **ICE-native package PCells** use `PackagePcell` subclasses stored in
-`<package>/layout/pcells.py`. Each class declares its parameter metadata,
+`<package>/layout/devices/pcell/pcells.py`. Each class declares its parameter metadata,
 logical layer map, and device family. The runtime builds it through the normal
 `icepy` layout builder and returns JSON geometry:
 
@@ -161,12 +198,12 @@ geometry = pcells.generate_package_geometry(
 ```
 
 `generate_package_geometry(...)` is the contract behind
-`layout/device_generator.py` and `layout/generate_devices.py`. The Sky130 and
+`layout/devices/generator.py` and `layout/devices/build.py`. The Sky130 and
 GF180MCU packages use this path, so their PCell replicas are defined entirely
 with the ICE layout API.
 
 **IHP PyCell runtime.** The upstream IHP PyCell implementations are vendored
-inside the IHP package under `upstream/ihp`. `icepy` provides the ICE-side
+inside the IHP package under `vendor/ihp`. `icepy` provides the ICE-side
 runtime, transfers generated polygons directly into an `icepy` layout cell, and
 converts the PyCell `MkPin` terminal declarations into layout pins:
 
@@ -192,17 +229,17 @@ print(len(cell.shapes), cell.bounds)
 The IHP package uses this runtime through:
 
 ```text
-ice-pkg-ihp/layout/device_generator.py
+ice-pkg-ihp/layout/devices/generator.py
 ```
 
 ICE loads that package hook for layout-device regeneration, and the package
-passes its vendored `upstream/ihp` tree as the IHP root. Building `icepy` is
+passes its vendored `vendor/ihp` tree as the IHP root. Building `icepy` is
 therefore required for IHP PCell regeneration.
 
 The generic package generator contract is:
 
 ```text
-<pdk-root>/layout/device_generator.py --pdk-root <package> \
+<pdk-root>/layout/devices/generator.py --pdk-root <package> \
     --module <module> --class <class> \
     --params-file <params.json> --output <geometry.json>
 ```

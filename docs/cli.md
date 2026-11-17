@@ -11,15 +11,14 @@ ice-cli project-create <folder|project.icepro> [name]
 ice-cli project-info [folder|project.icepro]
 ice-cli project-validate <folder|project.icepro>
 ice-cli project-repair <folder|project.icepro>
-ice-cli project-migrate <folder|project.icepro>
 ice-cli doctor [project] [--probe]
 ice-cli pdk-info [pdk] [--probe]
 ```
 
 `project-create` initializes `project.icepro`, `sch/`, `lay/`, `sim/`,
-`scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. `project-migrate` refreshes
-the versioned generated section of `AGENTS.md` and preserves user text outside
-the markers. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
+`scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. The generated `AGENTS.md`
+is written once when the project is created and is not rewritten on later
+saves. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
 the current directory and its parents for a single `project.icepro`.
 
 `ice-cli --version` prints the build fingerprint as JSON, including the git
@@ -122,6 +121,8 @@ rejected.
 ```sh
 ice-cli layout-add-cell <project> <name> [pdk] [stack]
 ice-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]
+ice-cli layout-regenerate <project> <procedural> [timeout-seconds]
+ice-cli layout-set-parameter <project> <procedural> <name> <value>
 ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>
@@ -154,7 +155,11 @@ left|right|top|bottom`, `--net <name-or-id>`, `--label <text>`, `--hidden`,
 `layout-remove` accepts either a static layout cell or a procedural layout;
 removing a procedural layout also removes its generated static child. Removal
 is blocked when instances reference the layout, and library cells cannot be
-removed. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
+removed. `layout-add-procedural` generates the default script or the supplied
+script immediately and reports `generated`, `generation_error`, and
+`needs_regeneration`. `layout-regenerate` reruns an existing script; the generated child is read-only
+and `layout-info` reports its generation hashes, parameter values, and stale
+state. `layout-set-parameter` edits a declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
 TEXT label. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
 layers also connect overlapping layers. `layout-export-lef` and
@@ -245,9 +250,11 @@ only that stage and the stages after it.
 
 After `final`, ICE attempts to stream `def/6_final.def` plus the platform
 standard-cell GDS decks to `final/6_final.gds` with KLayout. Package stacks can
-declare a merged `gds` file; OpenROAD-flow-scripts platform fallbacks discover
-`gds/*.gds` automatically. If KLayout or standard-cell GDS decks are missing,
-the final stage still succeeds and records a warning. Use
+declare a merged `gds` file and a `layer_map` that maps LEF/DEF layer names to
+the PDK's real GDS numbers; OpenROAD-flow-scripts platform fallbacks discover
+`gds/*.gds` automatically. If the map is omitted, KLayout assigns sequential
+numbers to DEF layers instead of the PDK numbering. If KLayout or standard-cell
+GDS decks are missing, the final stage still succeeds and records a warning. Use
 `implementation-export-gds` to rerun or redirect the export explicitly.
 
 `--from` defaults to `synthesis`, `--to` defaults to `final`, and `--timeout`
@@ -258,11 +265,13 @@ PID recorded under `build/impl/<run>/run.pid` and sends SIGTERM after checking
 that the process is OpenROAD or Yosys.
 
 `implementation-log` prints the bounded merged log for one stage; `--tail` keeps
-only the last N lines. `implementation-import` reads the newest available DEF
-checkpoint (`6_final.def` down to `2_floorplan.def`), creates package-mapped
-layers, top-level pins and nets, standard-cell instances, and routed paths, and
-stores the new layout id on the run. `--replace` reuses the previously imported
-layout instead of creating another cell.
+only the last N lines. `implementation-import` looks for a final GDS/OASIS stream
+(`final/6_final.gds`, `.gdsii`, `.oas`, or `.oasis`) and flattens it into a
+read-only **digital device** cell. The device appears under Layout > Devices >
+Digital; create a layout and place instances of it. No top-level layout is
+created. Missing streams are an error; run `implementation-export-gds` or
+complete the final stage first. `--layout-name` names the device and `--replace`
+updates the previously imported device instead of creating another cell.
 
 `implementation-toolchain` reports the resolved `openroad`, `yosys`, and
 `klayout` executables. Set `ICE_OPENROAD`, `ICE_YOSYS`, or `ICE_KLAYOUT` to
@@ -295,25 +304,32 @@ degraded state so `project_repair` and `project_open(recover=true)` remain
 callable.
 
 `lvs` compares a schematic against a layout and prints the LVS report as JSON.
-`lvs-auto` infers the schematic from planned-device links or matching names.
+`lvs-auto` infers the schematic from planned-device links, then prefers a
+`<layout>_lvs`, `<layout>_dut`, or `<layout>_layout` cell before a plain name
+match, so a testbench named after the block does not hide its DUT view.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
-device types, shared device parameters, net topology from planned connections,
-and top-level pins matched by name, direction, and bound net. The JSON report
+device types, shared device parameters, net topology from planned connections
+or procedural device terminal metadata, and top-level pins matched by name,
+direction, and bound net. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.
 
-`drc` exports the layout to a temporary GDS, runs `gdscheck` with the process
-deck derived from the layout PDK, and prints normalized violations. The work
-directory defaults to `build/drc/<layout>/` and contains `layout.gds`,
-`drc.lyrdb`, and `drc.log`. The command exits with status `1` when the report
-cannot be produced or contains error-severity violations; warnings alone keep
-status `0`.
+`drc` exports the layout to a temporary GDS and runs the DRC deck declared by
+the layout's PDK package. A package `technology/drc.json` can select a KLayout
+deck or a gdscheck process; SKY130 resolves the SkyWater KLayout deck from
+`$PDK_ROOT`, `$SKY130_ROOT`, or Volare. `--engine klayout|gdscheck` and
+`--deck <path>` override the package deck, and `--suite` selects a named deck
+variant when the package declares one. The work directory defaults to
+`build/drc/<layout>/` and contains `layout.gds`, `drc.lyrdb`, and `drc.log`.
+The JSON result reports `engine`, `deck`, `suite`, and normalized violations.
+The command exits with status `1` when the report cannot be produced or
+contains error-severity violations; warnings alone keep status `0`.
 
 `pex` extracts placed device-library instances, PDK-rule polygon devices, and
 first-order per-net resistance and capacitance from layout geometry, then
 creates or updates a text SPICE schematic in the project hierarchy. Polygon
-device rules come from the installed package's `layout/extraction.json`. When no
+device rules come from the installed package's `technology/extraction.json`. When no
 layout devices are recognized it falls back to the inferred source schematic
 device netlist. The report JSON
 includes the layout and schematic ids, per-net area, perimeter, resistance,

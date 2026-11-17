@@ -1091,6 +1091,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
         viewport()->update();
     }
 
+    void setDevicePreviewModel(const ice::LayoutPreviewModel &model) override {
+        devicePreview_ = nullptr;
+        devicePreviewModel_ = model;
+        viewport()->update();
+    }
+
     void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) override {
         deviceLayerStyles_ = styles;
         viewport()->update();
@@ -1127,8 +1133,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         shapeActivated_ = std::move(callback);
     }
 
-    void setFigureContextActionCallback(
-        std::function<void(ice::ObjectId, FigureContextAction)> callback) override {
+    void setFigureContextActionCallback(std::function<void(ice::ObjectId, FigureContextAction)> callback) override {
         figureContextAction_ = std::move(callback);
     }
 
@@ -1486,7 +1491,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void drawForeground(QPainter *painter, const QRectF &rect) override {
-        if (tool_ == Tool::placeDevice && devicePreview_ && !devicePreviewModel_.empty() && viewport()->underMouse()) {
+        if (tool_ == Tool::placeDevice && !devicePreviewModel_.empty() && viewport()->underMouse()) {
             painter->save();
             painter->setClipRect(rect);
             ice::LayoutRenderer::PaintOptions options;
@@ -1999,8 +2004,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     std::size_t current = figures.size();
                     if (hasLastFigureClick_ && cyclingFigureId_ != 0) {
                         for (std::size_t index = 0; index < figures.size(); ++index) {
-                            if (static_cast<ice::ObjectId>(figures[index]->data(0).toULongLong()) ==
-                                cyclingFigureId_) {
+                            if (static_cast<ice::ObjectId>(figures[index]->data(0).toULongLong()) == cyclingFigureId_) {
                                 current = index;
                                 break;
                             }
@@ -2011,8 +2015,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     // Repeated clicks walk down the stack one level, wrapping
                     // from the bottom figure back to the topmost so the user
                     // keeps cycling as long as they click.
-                    const std::size_t next =
-                        repeatedClick ? (current + 1) % figures.size() : std::size_t(0);
+                    const std::size_t next = repeatedClick ? (current + 1) % figures.size() : std::size_t(0);
                     selectLayoutFigure(figures[next]);
                     cyclingFigureId_ = static_cast<ice::ObjectId>(figures[next]->data(0).toULongLong());
                     lastFigureClickPosition_ = event->pos();

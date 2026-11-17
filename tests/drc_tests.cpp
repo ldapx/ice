@@ -1,6 +1,7 @@
 #include "icelib/drc.hpp"
 #include "icelib/interchange.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/verification.hpp"
 
 #include <doctest/doctest.h>
@@ -11,6 +12,56 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
+TEST_CASE("package DRC deck configuration resolves KLayout decks and suites") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-drc-package-test";
+    std::filesystem::remove_all(root);
+    const auto package = root / "testdrc";
+    std::filesystem::create_directories(package / "technology");
+    std::ofstream(package / "package.toml") << R"([package]
+schema_version = 1
+name = "test.drc"
+version = "1.0.0"
+license = "Apache-2.0"
+
+[provides]
+pdk = true
+
+[pdk]
+id = "testdrc"
+display_name = "Test DRC"
+)";
+    std::ofstream(package / "technology" / "test.lydrc") << "report(\"test\", $report)\n";
+    std::ofstream(package / "technology" / "drc.json") << R"({
+  "format": "ice-drc",
+  "schema_version": 1,
+  "engine": "klayout",
+  "deck": "test.lydrc",
+  "arguments": ["-b", "-r", "{deck}"],
+  "suites": {
+    "beol": {
+      "deck": "test.lydrc",
+      "arguments": ["-b", "-r", "{deck}", "-rd", "beol=1"]
+    }
+  }
+})";
+    ice::setPdkPackageRoots({root});
+    const auto mainDeck = ice::drcDeckForPdk("testdrc", "main");
+    CHECK(mainDeck.has_value());
+    if (mainDeck) {
+        CHECK(mainDeck->engine == "klayout");
+        CHECK(mainDeck->path.filename() == "test.lydrc");
+        CHECK(mainDeck->arguments.size() == 3);
+    }
+    const auto beolDeck = ice::drcDeckForPdk("testdrc", "beol");
+    CHECK(beolDeck.has_value());
+    if (beolDeck) {
+        CHECK(beolDeck->path.filename() == "test.lydrc");
+        CHECK(beolDeck->arguments.size() == 5);
+    }
+    ice::setPdkPackageRoots({});
+    std::filesystem::remove_all(root);
+}
 
 TEST_CASE("gdscheck lyrdb reports become normalized DRC violations") {
     const std::string text = R"XML(<?xml version="1.0" encoding="utf-8"?>

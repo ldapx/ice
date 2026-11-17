@@ -251,6 +251,9 @@ struct Port {
     std::string label;
     bool visible = true;
     bool locked = false;
+    // True for automatically promoted device terminals. Internal pins are
+    // useful for routing and connectivity but are not top-level LVS ports.
+    bool internal = false;
     // Set when this pin is promoted from a child layout instance.
     ObjectId sourceInstance = 0;
     ObjectId sourcePort = 0;
@@ -282,6 +285,17 @@ struct PlannedDevice {
     Coordinate y = 0;
     Coordinate width = 0;
     Coordinate height = 0;
+    // Optional device identity. Procedural layout scripts use this to keep
+    // the model, parameters, and terminal nets of a placed PCell even when its
+    // geometry is flattened into the generated cell.
+    std::string device;
+    std::string model;
+    std::vector<Parameter> parameters;
+    // Device terminal name (for example "G") to layout net id.
+    std::map<std::string, ObjectId> terminals;
+    // False when this entry only preserves device identity for LVS while the
+    // real geometry is already stored in the cell.
+    bool placeholder = true;
 };
 
 // A straight logical connection between two planned devices, placed layout
@@ -306,6 +320,15 @@ struct PlannedConnection {
     bool routed = false;
 };
 
+struct LayoutReference {
+    // Path to the external stream, relative to the project root when possible.
+    std::string path;
+    // "gds" or "oasis".
+    std::string format;
+    // Top cell to display. Empty lets the reader choose the sole top cell.
+    std::string topCell;
+};
+
 struct LayoutCell {
     ObjectId id = 0;
     std::string name;
@@ -315,6 +338,13 @@ struct LayoutCell {
     std::string stack;
     // True for cells imported from a read-only device library.
     bool library = false;
+    // True for imported cells that should be visible in the layout tree but
+    // cannot be edited. Unlike `library`, this does not tie the cell to the
+    // device-library browser.
+    bool readOnly = false;
+    // When set, the cell is a read-only reference to an external GDS/OASIS
+    // stream instead of native geometry stored in this project.
+    std::optional<LayoutReference> reference;
     // Source device name in the bundled layout library. Empty for ordinary
     // user cells and non-device library cells.
     std::string device;
@@ -343,6 +373,16 @@ struct ProceduralLayout {
     std::string stack;
     std::string script;
     ObjectId generatedCell = 0;
+    // User-editable parameters exposed to the script through layout.parameter().
+    std::vector<Parameter> parameters;
+    // Hash of the script used for the last successful generation. Empty means
+    // the generated cell has never been produced.
+    std::string generatedScriptHash;
+    // Hash of the parameter values used for the last successful generation.
+    std::string generatedParameterHash;
+    // Provenance for the last successful generation.
+    std::string generatedPdkVersion;
+    std::string generatedOutputHash;
 };
 
 enum class ImplementationStage { created, elaboration, synthesis, floorplan, placement, cts, routing, final };
@@ -515,6 +555,10 @@ class Project {
     // its project.icepro file. The project file contains only project metadata;
     // schematics, layouts, and simulations are stored in sch/, lay/, and sim/.
     void save(const std::filesystem::path &path) const;
+    // Saves only the file for one schematic, layout, or procedural cell. The
+    // project must already have been saved once so its root is known. Returns
+    // the file that was written.
+    std::filesystem::path saveCellFile(ObjectId id) const;
     static Project load(const std::filesystem::path &path);
     static Project load(const std::filesystem::path &path, const ProjectLoadOptions &options,
                         ProjectLoadReport *report = nullptr);

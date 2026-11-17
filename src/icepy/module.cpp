@@ -4,6 +4,7 @@
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/verification.hpp"
 
 #include <nanobind/nanobind.h>
@@ -380,6 +381,7 @@ NB_MODULE(icepy, module) {
         .def_rw("label", &Port::label)
         .def_rw("visible", &Port::visible)
         .def_rw("locked", &Port::locked)
+        .def_rw("internal", &Port::internal)
         .def_rw("source_instance", &Port::sourceInstance)
         .def_rw("source_port", &Port::sourcePort);
 
@@ -523,6 +525,9 @@ NB_MODULE(icepy, module) {
         .def_prop_rw(
             "device", [](const LayoutCell &cell) { return cell.device; },
             [](LayoutCell &cell, const std::string &device) { cell.device = device; })
+        .def_prop_rw(
+            "read_only", [](const LayoutCell &cell) { return cell.readOnly; },
+            [](LayoutCell &cell, bool readOnly) { cell.readOnly = readOnly; })
         .def_prop_ro("generated_by", [](const LayoutCell &cell) { return cell.generatedBy; })
         .def_prop_ro("parameters", [](const LayoutCell &cell) { return cell.parameters; })
         .def_prop_ro("shapes",
@@ -564,6 +569,30 @@ NB_MODULE(icepy, module) {
         .def_ro("code", &Diagnostic::code)
         .def_ro("message", &Diagnostic::message)
         .def_ro("object", &Diagnostic::object);
+
+    nb::class_<ProceduralLayout>(module, "ProceduralLayout")
+        .def_prop_ro("id", [](const ProceduralLayout &layout) { return layout.id; })
+        .def_prop_rw(
+            "name", [](const ProceduralLayout &layout) { return layout.name; },
+            [](ProceduralLayout &layout, const std::string &name) { layout.name = name; })
+        .def_prop_rw(
+            "pdk", [](const ProceduralLayout &layout) { return layout.pdk; },
+            [](ProceduralLayout &layout, const std::string &pdk) { layout.pdk = pdk; })
+        .def_prop_rw(
+            "stack", [](const ProceduralLayout &layout) { return layout.stack; },
+            [](ProceduralLayout &layout, const std::string &stack) { layout.stack = stack; })
+        .def_prop_rw(
+            "script", [](const ProceduralLayout &layout) { return layout.script; },
+            [](ProceduralLayout &layout, const std::string &script) { layout.script = script; })
+        .def_prop_ro("generated_cell", [](const ProceduralLayout &layout) { return layout.generatedCell; })
+        .def_prop_ro("generated_script_hash", [](const ProceduralLayout &layout) { return layout.generatedScriptHash; })
+        .def_prop_ro("generated_pdk_version", [](const ProceduralLayout &layout) { return layout.generatedPdkVersion; })
+        .def_prop_ro("generated_output_hash", [](const ProceduralLayout &layout) { return layout.generatedOutputHash; })
+        .def_prop_ro("generated_parameter_hash",
+                     [](const ProceduralLayout &layout) { return layout.generatedParameterHash; })
+        .def_prop_ro("parameters", [](const ProceduralLayout &layout) { return layout.parameters; })
+        .def_prop_ro("needs_regeneration",
+                     [](const ProceduralLayout &layout) { return proceduralLayoutNeedsRegeneration(layout); });
 
     nb::class_<LayoutBuilder>(module, "LayoutBuilder")
         .def_prop_ro("id", &LayoutBuilder::id)
@@ -613,6 +642,73 @@ NB_MODULE(icepy, module) {
         .def("layout_cell",
              [](const Project &project, const std::string &name) { return findLayoutCell(project, name); })
         .def("layout_cell_by_id", [](const Project &project, ObjectId id) { return findLayoutCell(project, id); })
+        .def_prop_ro("procedural_layouts",
+                     [](const Project &project) {
+                         std::vector<ProceduralLayout> layouts;
+                         layouts.reserve(project.proceduralLayouts.size());
+                         for (const auto &[_, layout] : project.proceduralLayouts)
+                             layouts.push_back(layout);
+                         return layouts;
+                     })
+        .def(
+            "procedural_layout",
+            [](const Project &project, const std::string &name) -> ProceduralLayout {
+                for (const auto &[_, layout] : project.proceduralLayouts) {
+                    if (layout.name == name)
+                        return layout;
+                }
+                throw ProjectError("icepy.procedural", "Procedural layout does not exist: " + name);
+            },
+            nb::arg("name"))
+        .def(
+            "create_procedural_layout",
+            [](Project &project, const std::string &name, const std::string &pdk, const std::string &stack,
+               const std::string &script, const std::map<std::string, std::string> &parameters) -> ProceduralLayout {
+                std::vector<Parameter> entries;
+                entries.reserve(parameters.size());
+                for (const auto &[parameterName, value] : parameters)
+                    entries.push_back({0, parameterName, value});
+                const auto id = ice::createProceduralLayout(project, name, pdk, script, stack, std::move(entries));
+                return project.proceduralLayouts.at(id);
+            },
+            nb::arg("name"), nb::arg("pdk") = genericPdkId, nb::arg("stack") = "", nb::arg("script") = "",
+            nb::arg("parameters") = std::map<std::string, std::string>{})
+        .def(
+            "regenerate_procedural_layout",
+            [](Project &project, const std::string &name) -> ProceduralLayout {
+                auto id = ObjectId{0};
+                for (const auto &[candidate, layout] : project.proceduralLayouts) {
+                    if (layout.name == name) {
+                        id = candidate;
+                        break;
+                    }
+                }
+                if (id == 0)
+                    throw ProjectError("icepy.procedural", "Procedural layout does not exist: " + name);
+                const auto result = ice::regenerateProceduralLayout(project, id);
+                if (!result.ok)
+                    throw ProjectError("icepy.procedural.generate", result.error);
+                return project.proceduralLayouts.at(id);
+            },
+            nb::arg("name"))
+        .def(
+            "set_procedural_parameter",
+            [](Project &project, const std::string &name, const std::string &parameterName,
+               const std::string &value) -> ProceduralLayout {
+                for (auto &[_, layout] : project.proceduralLayouts) {
+                    if (layout.name != name)
+                        continue;
+                    const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                        [&](const auto &entry) { return entry.name == parameterName; });
+                    if (parameter == layout.parameters.end())
+                        layout.parameters.push_back({project.nextId(), parameterName, value});
+                    else
+                        parameter->value = value;
+                    return layout;
+                }
+                throw ProjectError("icepy.procedural", "Procedural layout does not exist: " + name);
+            },
+            nb::arg("name"), nb::arg("parameter"), nb::arg("value"))
         .def(
             "add_layer",
             [](Project &project, const std::string &name, int number, int datatype) {

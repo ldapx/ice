@@ -286,7 +286,8 @@ Point applyTransformChain(Point point, const std::vector<Transform> &chain) {
 }
 
 void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::vector<Transform> &chain,
-                            std::set<ObjectId> &ancestors, Project &targetProject, LayoutCell &targetCell) {
+                            std::set<ObjectId> &ancestors, Project &targetProject, LayoutCell &targetCell,
+                            ObjectId &nextId) {
     const auto cellIt = project.layoutCells.find(cellId);
     if (cellIt == project.layoutCells.end())
         return;
@@ -294,7 +295,7 @@ void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::
     for (const auto &[_, shape] : cell.shapes) {
         if (shape.isText()) {
             const auto origin = applyTransformChain({shape.rectangle.x, shape.rectangle.y}, chain);
-            const auto shapeId = targetProject.nextId();
+            const auto shapeId = nextId++;
             Shape flattened{shapeId,
                             shape.layer,
                             shape.net,
@@ -328,7 +329,7 @@ void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::
         }
         if (polygon.empty() || maxX <= minX || maxY <= minY)
             continue;
-        const auto shapeId = targetProject.nextId();
+        const auto shapeId = nextId++;
         Shape flattened{shapeId, shape.layer, shape.net, {minX, minY, maxX - minX, maxY - minY}, std::move(polygon)};
         if (shape.isPath()) {
             flattened.centerline.reserve(shape.centerline.size());
@@ -349,7 +350,7 @@ void collectFlattenedShapes(const Project &project, ObjectId cellId, const std::
         ancestors.insert(instance.cell);
         auto childChain = chain;
         childChain.push_back(Transform{instance.x, instance.y, instance.orientation});
-        collectFlattenedShapes(project, instance.cell, childChain, ancestors, targetProject, targetCell);
+        collectFlattenedShapes(project, instance.cell, childChain, ancestors, targetProject, targetCell, nextId);
         ancestors.erase(instance.cell);
     }
 }
@@ -372,7 +373,8 @@ void LayoutInterchange::exportFlattenedGds(const Project &project, ObjectId cell
     flatCell.name = cell->second.name;
     flatCell.pdk = cell->second.pdk;
     std::set<ObjectId> ancestors{cellId};
-    collectFlattenedShapes(project, cellId, {}, ancestors, flattened, flatCell);
+    auto nextId = flattened.nextId();
+    collectFlattenedShapes(project, cellId, {}, ancestors, flattened, flatCell, nextId);
     flattened.layoutCells.clear();
     flattened.layoutCells.emplace(cellId, std::move(flatCell));
     writeCell(flattened, flattened.layoutCells.at(cellId), path);
@@ -439,6 +441,17 @@ std::string layerNameFor(const Project &project, ObjectId layerId) {
         name.erase(datatype);
     return name;
 }
+std::string interchangeIdentifier(std::string name) {
+    for (auto &character : name) {
+        if (std::isalnum(static_cast<unsigned char>(character)) == 0 && character != '_')
+            character = '_';
+    }
+    if (name.empty())
+        name = "cell";
+    if (std::isdigit(static_cast<unsigned char>(name.front())) != 0)
+        name = "_" + name;
+    return name;
+}
 } // namespace
 
 void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
@@ -449,16 +462,17 @@ void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const
     std::ofstream output(path);
     if (!output)
         throw ProjectError("interchange.export", "Unable to open LEF output");
+    const auto macroName = interchangeIdentifier(cell->second.name);
     output << "VERSION 5.8 ;\n"
            << "UNITS\n  DATABASE MICRONS 1000 ;\nEND UNITS\n"
-           << "MACRO " << cell->second.name << "\n"
+           << "MACRO " << macroName << "\n"
            << "  CLASS BLOCK ;\n"
            << "  ORIGIN " << bounds.x / 1000.0 << " " << bounds.y / 1000.0 << " ;\n"
            << "  SIZE " << bounds.width / 1000.0 << " BY " << bounds.height / 1000.0 << " ;\n";
     for (const auto &[_, port] : cell->second.ports) {
-        if (!port.visible)
+        if (!port.visible || port.internal)
             continue;
-        output << "  PIN " << port.name << "\n"
+        output << "  PIN " << interchangeIdentifier(port.name) << "\n"
                << "    DIRECTION " << lefDirection(port.direction) << " ;\n"
                << "    USE " << lefUse(port.direction) << " ;\n"
                << "    PORT\n"
@@ -467,9 +481,9 @@ void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const
                << (port.rectangle.x + port.rectangle.width) / 1000.0 << " "
                << (port.rectangle.y + port.rectangle.height) / 1000.0 << " ;\n"
                << "    END\n"
-               << "  END " << port.name << "\n";
+               << "  END " << interchangeIdentifier(port.name) << "\n";
     }
-    output << "END " << cell->second.name << "\nEND LIBRARY\n";
+    output << "END " << macroName << "\nEND LIBRARY\n";
 }
 
 void LayoutInterchange::exportDef(const Project &project, ObjectId cellId, const std::filesystem::path &path) {
@@ -480,18 +494,19 @@ void LayoutInterchange::exportDef(const Project &project, ObjectId cellId, const
     std::ofstream output(path);
     if (!output)
         throw ProjectError("interchange.export", "Unable to open DEF output");
+    const auto designName = interchangeIdentifier(cell->second.name);
     output << "VERSION 5.8 ;\nDIVIDERCHAR \"/\" ;\nBUSBITCHARS \"[]\" ;\n"
-           << "DESIGN " << cell->second.name << " ;\n"
+           << "DESIGN " << designName << " ;\n"
            << "UNITS DISTANCE MICRONS 1000 ;\n"
            << "DIEAREA ( " << bounds.x << " " << bounds.y << " ) ( " << bounds.x + bounds.width << " "
            << bounds.y + bounds.height << " ) ;\n";
     int count = 0;
     for (const auto &[_, port] : cell->second.ports)
-        if (port.visible)
+        if (port.visible && !port.internal)
             ++count;
     output << "PINS " << count << " ;\n";
     for (const auto &[_, port] : cell->second.ports) {
-        if (!port.visible)
+        if (!port.visible || port.internal)
             continue;
         std::string netName = port.name;
         if (port.net != 0) {
@@ -1182,6 +1197,40 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
         // geometry once components and routes are known.
     }
 
+    const auto addRouteShape = [&](const std::string &routeLayer, const std::vector<LayoutPoint> &points,
+                                   const std::vector<std::vector<ObjectId>> &pointVias, ObjectId net) {
+        if (!options.importRoutes || points.size() < 2)
+            return;
+        Coordinate width = 200;
+        if (const auto found = lef.layerWidths.find(lowercaseInterchange(routeLayer)); found != lef.layerWidths.end())
+            width = found->second;
+        Shape shape;
+        shape.id = project.nextId();
+        shape.layer = layerFor(routeLayer);
+        shape.net = net;
+        shape.centerline = points;
+        shape.width = width;
+        shape.rectangle = boundsForPoints(points, width / 2);
+        const auto hasVias =
+            std::any_of(pointVias.begin(), pointVias.end(), [](const auto &entry) { return !entry.empty(); });
+        if (hasVias)
+            shape.pointVias = pointVias;
+        cell.shapes.emplace(shape.id, std::move(shape));
+    };
+
+    if (dieArea.valid()) {
+        // Insert the boundary first so the canvas paints it below cells and
+        // routing instead of covering them with its filled shape.
+        const auto shapeId = project.nextId();
+        const std::vector<LayoutPoint> polygon = {{dieArea.x, dieArea.y},
+                                                  {dieArea.x + dieArea.width, dieArea.y},
+                                                  {dieArea.x + dieArea.width, dieArea.y + dieArea.height},
+                                                  {dieArea.x, dieArea.y + dieArea.height}};
+        Shape boundary{shapeId, boundaryLayerFor(), std::nullopt, dieArea, polygon};
+        boundary.name = "Die area";
+        cell.shapes.emplace(shapeId, std::move(boundary));
+    }
+
     struct DefComponent {
         std::string name;
         std::string master;
@@ -1375,24 +1424,7 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
                         }
                         ++index;
                     }
-                    if (options.importRoutes && points.size() >= 2) {
-                        Coordinate width = 200;
-                        if (const auto found = lef.layerWidths.find(lowercaseInterchange(routeLayer));
-                            found != lef.layerWidths.end())
-                            width = found->second;
-                        Shape shape;
-                        shape.id = project.nextId();
-                        shape.layer = layerFor(routeLayer);
-                        shape.net = netId;
-                        shape.centerline = points;
-                        shape.width = width;
-                        shape.rectangle = boundsForPoints(points, width / 2);
-                        const auto hasVias = std::any_of(pointVias.begin(), pointVias.end(),
-                                                         [](const auto &entry) { return !entry.empty(); });
-                        if (hasVias)
-                            shape.pointVias = pointVias;
-                        cell.shapes.emplace(shape.id, std::move(shape));
-                    }
+                    addRouteShape(routeLayer, points, pointVias, netId);
                 }
                 continue;
             }
@@ -1426,24 +1458,7 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
                             pointVias.back().push_back(layerFor(via->second));
                         ++index;
                     }
-                    if (options.importRoutes && points.size() >= 2) {
-                        Coordinate width = 200;
-                        if (const auto found = lef.layerWidths.find(lowercaseInterchange(routeLayer));
-                            found != lef.layerWidths.end())
-                            width = found->second;
-                        Shape shape;
-                        shape.id = project.nextId();
-                        shape.layer = layerFor(routeLayer);
-                        shape.net = netId;
-                        shape.centerline = points;
-                        shape.width = width;
-                        shape.rectangle = boundsForPoints(points, width / 2);
-                        const auto hasVias = std::any_of(pointVias.begin(), pointVias.end(),
-                                                         [](const auto &entry) { return !entry.empty(); });
-                        if (hasVias)
-                            shape.pointVias = pointVias;
-                        cell.shapes.emplace(shape.id, std::move(shape));
-                    }
+                    addRouteShape(routeLayer, points, pointVias, netId);
                 }
                 continue;
             }
@@ -1510,12 +1525,6 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
         cell.ports.emplace(portId, std::move(pin.port));
     }
 
-    if (dieArea.valid()) {
-        const auto shapeId = project.nextId();
-        Shape boundary{shapeId, boundaryLayerFor(), std::nullopt, dieArea};
-        boundary.name = "Die area";
-        cell.shapes.emplace(shapeId, std::move(boundary));
-    }
     return cellId;
 }
 

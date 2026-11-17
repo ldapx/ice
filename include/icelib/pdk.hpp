@@ -32,6 +32,9 @@ struct PdkInfo {
     std::string packageVersion;
     std::string source = "ice-package";
     std::filesystem::path packageRoot;
+    // PDK manufacturing grid in database units (nanometres). Zero when the
+    // package does not declare one.
+    Coordinate manufacturingGrid = 0;
     std::filesystem::path root;
     std::filesystem::path versionRoot;
     std::string version;
@@ -101,6 +104,14 @@ std::vector<PdkInfo> discoverPdks(const std::vector<std::filesystem::path> &root
 // Finds a PDK by canonical id, alias, package name, or package path.
 std::vector<PdkInfo> findPdks(const std::string &idOrPath, const std::vector<std::filesystem::path> &roots = {});
 
+// Returns the declared manufacturing grid for a PDK, or zero when it is not
+// specified or the PDK is not installed.
+Coordinate pdkManufacturingGrid(const std::string &idOrPath);
+
+// Applies a PDK manufacturing grid as the default layout grid. An explicitly
+// changed project grid is preserved; the old 1 nm default is updated.
+void applyPdkDefaultGrid(Project &project, const std::string &pdkId);
+
 // Builds the package's Verilog-A sources into the local OSDI cache with
 // openvaf-r/openvaf. This is always an explicit user action.
 PdkBuildResult buildPdkOsdi(const PdkInfo &info, std::chrono::milliseconds timeout = std::chrono::minutes(5));
@@ -116,17 +127,29 @@ struct SimulationRequest;
 struct PdkSimulationSetup {
     std::vector<std::string> netlistLines;
     std::vector<std::string> initCommands;
+    // Meters per netlist length unit implied by a `.option scale=<value>` line.
+    // PDKs that netlist device geometry in microns (for example SKY130, where
+    // the model library sets `.option scale=1u`) report 1e-6 here, so the
+    // schematic netlist can emit geometry that matches the model bins.
+    double geometryScale = 1.0;
 };
 
 // Resolves a package PDK and returns its simulation preamble. Throws when a
 // non-generic PDK is requested but no ICE package provides it.
 PdkSimulationSetup pdkSimulationSetupFor(const std::string &pdkId);
 
+// Returns the geometry scale declared by the package simulation options
+// (`.option scale=1u` -> 1e-6) or 1.0 when the package declares none or cannot
+// be resolved. Never throws, so netlist construction keeps working offline.
+double pdkNetlistGeometryScale(const std::string &pdkId);
+
+// Returns the SPICE node names of a package subcircuit (for example the
+// terminal order of a bipolar model), read from the package model files. Used
+// to instantiate three and four terminal devices with the right node count.
+// Returns nullopt when the model cannot be found.
+std::optional<std::vector<std::string>> pdkSubcircuitNodes(const std::string &pdkId, const std::string &model);
+
 // Inserts package setup before the schematic netlist and records OSDI commands.
 void applyPdkSimulationSetup(const std::string &pdkId, SimulationRequest &request);
-
-// Rewrites project PDK references to the package canonical IDs. Returns true
-// when anything changed.
-bool migrateProjectPdkIds(Project &project);
 
 } // namespace ice

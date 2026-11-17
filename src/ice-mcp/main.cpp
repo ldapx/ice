@@ -8,6 +8,7 @@
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
+#include "icelib/procedural_layout.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -708,9 +709,12 @@ json doctorJson(const std::filesystem::path &executablePath) {
                 it.disable_recursion_pending();
                 continue;
             }
-            if (!it->is_regular_file() || it->path().extension() != ".lib")
+            if (!it->is_regular_file())
                 continue;
-            if (it->path().string().find("/libs.ref/") == std::string::npos)
+            const auto filename = it->path().filename().string();
+            if (!filename.ends_with(".lib") && !filename.ends_with(".lib.gz"))
+                continue;
+            if (it->path().string().find("/implementation/common/lib/") == std::string::npos)
                 continue;
             timingLibraries.push_back(it->path().string());
             if (timingLibraries.size() >= 50)
@@ -797,6 +801,24 @@ ice::ImplementationStage implementationStageArgument(const json &arguments, cons
     if (!parsed || *parsed == ice::ImplementationStage::created)
         throw ToolError(std::string("Invalid implementation stage for ") + key);
     return *parsed;
+}
+
+ice::ObjectId resolveProceduralLayout(const ice::Project &project, const json &value) {
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        if (project.proceduralLayouts.contains(id))
+            return id;
+        throw ToolError("Unknown procedural layout id: " + std::to_string(id));
+    }
+    if (value.is_string()) {
+        const auto name = value.get<std::string>();
+        for (const auto &[id, procedural] : project.proceduralLayouts) {
+            if (procedural.name == name)
+                return id;
+        }
+        throw ToolError("Unknown procedural layout: " + name);
+    }
+    throw ToolError("Expected a procedural layout name or id.");
 }
 
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
@@ -1307,12 +1329,15 @@ class IceMcpServer {
                                          {"planned_devices", cell.plannedDevices.size()}});
         }
         for (const auto &[id, cell] : project.proceduralLayouts) {
-            result["procedural_layouts"].push_back({{"id", id},
-                                                    {"name", cell.name},
-                                                    {"pdk", cell.pdk},
-                                                    {"stack", cell.stack},
-                                                    {"generated_cell", cell.generatedCell},
-                                                    {"script_length", cell.script.size()}});
+            result["procedural_layouts"].push_back(
+                {{"id", id},
+                 {"name", cell.name},
+                 {"pdk", cell.pdk},
+                 {"stack", cell.stack},
+                 {"generated_cell", cell.generatedCell},
+                 {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(cell)},
+                 {"generated_pdk_version", cell.generatedPdkVersion},
+                 {"script_length", cell.script.size()}});
         }
         for (const auto &[id, simulation] : project.simulations) {
             result["simulations"].push_back({{"id", id},
@@ -1629,40 +1654,6 @@ class IceMcpServer {
             result["repaired"] = true;
             result["warnings"] = report.warnings;
             result["quarantined_files"] = report.quarantinedFiles;
-            return result;
-        }
-        if (name == "project_migrate") {
-            auto path = projectPath_;
-            if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null())
-                path = std::filesystem::path(requiredString(arguments, "path"));
-            if (path.empty())
-                throw ToolError("Missing required argument: path (project is not open).");
-            auto root = path;
-            std::error_code status;
-            if (!std::filesystem::is_directory(root, status) || status) {
-                if (root.extension() == ".icepro" || root.filename() == "project.icepro")
-                    root = root.parent_path();
-            }
-            const auto agentsPath = root / "AGENTS.md";
-            const auto readAgents = [&] {
-                std::ifstream input(agentsPath, std::ios::binary);
-                return std::string((std::istreambuf_iterator<char>(input)), {});
-            };
-            const auto before = readAgents();
-            auto project = ice::Project::load(path);
-            const bool pdkIdsUpdated = ice::migrateProjectPdkIds(project);
-            ice::ProjectSession migration(std::move(project));
-            migration.save(path);
-            const auto after = readAgents();
-            session_ = std::make_unique<ice::ProjectSession>(ice::Project::load(path));
-            projectPath_ = path;
-            projectStamp_ = projectStateStamp(projectPath_);
-            startupWarning_.clear();
-            auto result = summary();
-            result["migrated"] = true;
-            result["agents_updated"] = before != after;
-            result["pdk_ids_updated"] = pdkIdsUpdated;
-            result["guidance_version"] = 5;
             return result;
         }
         if (name == "project_summary")
@@ -2357,6 +2348,7 @@ class IceMcpServer {
                            " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
                            "    assign out = 1'b0;\nendmodule\n";
                 session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                    ice::applyPdkDefaultGrid(project, pdk);
                     id = ice::createSystemVerilogCell(project, cellName, pdk, text);
                 });
                 return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
@@ -2365,12 +2357,15 @@ class IceMcpServer {
                 if (text.empty())
                     text = "* SPICE schematic: " + cellName + "\n.title " + cellName + "\n.end\n";
                 session.execute("mcp schematic-create-text", [&](ice::Project &project) {
+                    ice::applyPdkDefaultGrid(project, pdk);
                     id = ice::createTextSchematicCell(project, cellName, pdk, text);
                 });
                 return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "text"}, {"text", text}};
             }
-            session.execute("mcp schematic-create",
-                            [&](ice::Project &project) { id = ice::createSchematicCell(project, cellName, pdk); });
+            session.execute("mcp schematic-create", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createSchematicCell(project, cellName, pdk);
+            });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "drawn"}};
         }
         if (name == "schematic_create_systemverilog" || name == "schematic_add_systemverilog") {
@@ -2383,6 +2378,7 @@ class IceMcpServer {
                        " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
                        "    assign out = 1'b0;\nendmodule\n";
             session.execute("mcp schematic-create-systemverilog", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
                 id = ice::createSystemVerilogCell(project, cellName, pdk, text);
             });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"kind", "systemverilog"}, {"text", text}};
@@ -2704,6 +2700,34 @@ class IceMcpServer {
                         artwork = templ.artwork;
                     for (const auto &pin : templ.pins)
                         pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
+                } else if (!sourceCellRef.textSchematic) {
+                    // Drawn sub-cell: build the symbol from its ports in the
+                    // same order the netlister emits the .subckt port list
+                    // (inputs top-down, then outputs), inputs on the left and
+                    // outputs on the right.
+                    const auto ports = ice::schematicPortInstances(sourceCellRef);
+                    if (!ports.empty()) {
+                        const auto lowerType = [](std::string text) {
+                            for (auto &character : text)
+                                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                            return text;
+                        };
+                        const auto spacing = 40;
+                        int inputCount = 0;
+                        int outputCount = 0;
+                        for (const auto *port : ports) {
+                            const auto symbol = sourceCellRef.symbols.find(port->symbol);
+                            const auto type = symbol == sourceCellRef.symbols.end()
+                                                  ? std::string{}
+                                                  : ice::symbolTypeName(symbol->second.name);
+                            const bool isOutput = lowerType(type) == "output";
+                            const auto row = isOutput ? outputCount++ : inputCount++;
+                            const auto span = static_cast<int>(ports.size()) * spacing;
+                            pinInputs.push_back({port->name, isOutput ? 70 : -70, span / 2 - row * spacing,
+                                                 isOutput ? ice::PinDirection::right : ice::PinDirection::left, 1,
+                                                 true});
+                        }
+                    }
                 }
             }
             if (sourceCell == 0) {
@@ -2727,6 +2751,41 @@ class IceMcpServer {
                 throw ToolError("Symbol '" + symbolName +
                                 "' would have no pins. Use schematic_add_component, schematic_add_hdl_instance, "
                                 "or provide a non-empty pins array.");
+            std::vector<std::string> symbolWarnings;
+            if (sourceCell != 0) {
+                const auto &sourceCellRef = session.project().schematicCells.at(sourceCell);
+                if (!sourceCellRef.textSchematic && !sourceCellRef.systemVerilogSchematic) {
+                    std::vector<std::string> portNames;
+                    for (const auto *port : ice::schematicPortInstances(sourceCellRef))
+                        portNames.push_back(lowerCopy(port->name));
+                    std::vector<std::string> pinNames;
+                    for (const auto &pin : pinInputs)
+                        pinNames.push_back(lowerCopy(pin.name));
+                    std::vector<std::string> missing;
+                    std::vector<std::string> extra;
+                    for (const auto &port : portNames)
+                        if (std::find(pinNames.begin(), pinNames.end(), port) == pinNames.end())
+                            missing.push_back(port);
+                    for (const auto &pin : pinNames)
+                        if (std::find(portNames.begin(), portNames.end(), pin) == portNames.end())
+                            extra.push_back(pin);
+                    if (!missing.empty() || !extra.empty()) {
+                        std::string message = "Symbol pins do not match the ports of '" + sourceCellRef.name + "'";
+                        if (!missing.empty()) {
+                            message += "; ports without a pin: ";
+                            for (std::size_t index = 0; index < missing.size(); ++index)
+                                message += (index ? ", " : "") + missing[index];
+                        }
+                        if (!extra.empty()) {
+                            message += "; pins with no port: ";
+                            for (std::size_t index = 0; index < extra.size(); ++index)
+                                message += (index ? ", " : "") + extra[index];
+                        }
+                        message += ". The netlist wires ports by pin name and falls back to pin position.";
+                        symbolWarnings.push_back(std::move(message));
+                    }
+                }
+            }
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
                 id = ice::addSymbol(project, cell, symbolName, artwork, sourceCell);
                 auto &symbol = project.schematicCells.at(cell).symbols.at(id);
@@ -2738,6 +2797,8 @@ class IceMcpServer {
             });
             auto result = symbolJson(session.project().schematicCells.at(cell).symbols.at(id));
             result["cell"] = cell;
+            if (!symbolWarnings.empty())
+                result["warnings"] = symbolWarnings;
             return result;
         }
         if (name == "schematic_add_pin") {
@@ -2873,11 +2934,14 @@ class IceMcpServer {
             session.execute("mcp schematic-add-instance", [&](ice::Project &project) {
                 id = ice::addSchematicInstance(project, cellId, symbolId, instanceName, x, y);
             });
+            // addSchematicInstance clones the symbol when it is already used, so
+            // report the symbol the new instance really references.
+            const auto usedSymbol = session.project().schematicCells.at(cellId).instances.at(id).symbol;
             return {{"id", id},
                     {"cell", cellId},
                     {"name", instanceName},
-                    {"symbol", symbolId},
-                    {"symbol_name", cell.symbols.at(symbolId).name}};
+                    {"symbol", usedSymbol},
+                    {"symbol_name", session.project().schematicCells.at(cellId).symbols.at(usedSymbol).name}};
         }
         if (name == "schematic_set_parameter") {
             const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
@@ -2943,9 +3007,104 @@ class IceMcpServer {
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
             const auto cellName = requiredString(arguments, "name");
-            session.execute("mcp layout-create",
-                            [&](ice::Project &project) { id = ice::createLayoutCell(project, cellName, pdk, stack); });
+            session.execute("mcp layout-create", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createLayoutCell(project, cellName, pdk, stack);
+            });
             return {{"id", id}, {"name", cellName}, {"pdk", pdk}, {"stack", stack}};
+        }
+        if (name == "layout_create_procedural") {
+            ice::ObjectId id = 0;
+            ice::ObjectId generatedCell = 0;
+            const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
+            const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
+            const auto cellName = requiredString(arguments, "name");
+            const auto script = optionalString(arguments, "script", ice::defaultProceduralLayoutScript());
+            session.execute("mcp layout-create-procedural", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, pdk);
+                id = ice::createProceduralLayout(project, cellName, pdk, script, stack);
+                generatedCell = project.proceduralLayouts.at(id).generatedCell;
+            });
+            ice::ProceduralLayoutRunResult run;
+            const bool shouldRegenerate = optionalBoolean(arguments, "regenerate", true);
+            if (shouldRegenerate)
+                run = ice::regenerateProceduralLayout(session.project(), id, executablePath_);
+            return {{"id", id},
+                    {"name", cellName},
+                    {"pdk", pdk},
+                    {"stack", stack},
+                    {"generated_cell", generatedCell},
+                    {"generated", run.ok},
+                    {"generation_error", run.ok || !shouldRegenerate ? json(nullptr) : json(run.error)},
+                    {"needs_regeneration",
+                     ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}};
+        }
+        if (name == "layout_regenerate") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto timeout = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(60));
+            ice::ProceduralLayoutRunResult run;
+            session.execute("mcp layout-regenerate", [&](ice::Project &project) {
+                run = ice::regenerateProceduralLayout(project, id, executablePath_, timeout);
+                if (!run.ok)
+                    throw ToolError(run.error);
+            });
+            return {{"id", id},
+                    {"ok", true},
+                    {"script_hash", run.scriptHash},
+                    {"output_hash", run.outputHash},
+                    {"pdk_version", run.pdkVersion},
+                    {"needs_regeneration", false}};
+        }
+        if (name == "layout_get_script") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto &procedural = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : procedural.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            return {{"id", id},
+                    {"name", procedural.name},
+                    {"pdk", procedural.pdk},
+                    {"stack", procedural.stack},
+                    {"script", procedural.script},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
+                    {"generated_cell", procedural.generatedCell},
+                    {"generated_script_hash", procedural.generatedScriptHash},
+                    {"generated_parameter_hash", procedural.generatedParameterHash},
+                    {"generated_pdk_version", procedural.generatedPdkVersion},
+                    {"generated_output_hash", procedural.generatedOutputHash},
+                    {"parameters", std::move(parameters)}};
+        }
+        if (name == "layout_set_parameter") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto parameterName = requiredString(arguments, "name");
+            const auto parameterValue = requiredString(arguments, "value");
+            session.execute("mcp layout-set-parameter", [&](ice::Project &project) {
+                auto &layout = project.proceduralLayouts.at(id);
+                const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                    [&](const auto &entry) { return entry.name == parameterName; });
+                if (parameter == layout.parameters.end())
+                    layout.parameters.push_back({project.nextId(), parameterName, parameterValue});
+                else
+                    parameter->value = parameterValue;
+            });
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            return {{"id", id},
+                    {"name", layout.name},
+                    {"parameters", std::move(parameters)},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)}};
+        }
+        if (name == "layout_set_script") {
+            const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
+            const auto script = requiredString(arguments, "script");
+            session.execute("mcp layout-set-script",
+                            [&](ice::Project &project) { project.proceduralLayouts.at(id).script = script; });
+            const auto &procedural = session.project().proceduralLayouts.at(id);
+            return {{"id", id},
+                    {"name", procedural.name},
+                    {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)}};
         }
         if (name == "layout_create_from_schematic") {
             ice::ObjectId id = 0;
@@ -2954,6 +3113,7 @@ class IceMcpServer {
                                                   optionalString(arguments, "stack"));
             const auto layoutName = optionalString(arguments, "name");
             session.execute("mcp layout-create-from-schematic", [&](ice::Project &project) {
+                ice::applyPdkDefaultGrid(project, project.schematicCells.at(schematic).pdk);
                 id = ice::createLayoutFromSchematic(project, schematic, layoutName, stack);
             });
             return {{"id", id}, {"schematic", schematic}, {"stack", stack}};
@@ -3130,7 +3290,31 @@ class IceMcpServer {
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
         }
         if (name == "layout_info") {
-            const auto cellId = resolveLayoutCell(session.project(), arguments);
+            const auto itemId = resolveLayoutItem(session.project(), requiredValue(arguments, "cell"));
+            if (const auto procedural = session.project().proceduralLayouts.find(itemId);
+                procedural != session.project().proceduralLayouts.end()) {
+                return {{"id", itemId},
+                        {"name", procedural->second.name},
+                        {"pdk", procedural->second.pdk},
+                        {"stack", procedural->second.stack},
+                        {"procedural", true},
+                        {"generated_cell", procedural->second.generatedCell},
+                        {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural->second)},
+                        {"generated_script_hash", procedural->second.generatedScriptHash},
+                        {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                        {"generated_parameter_hash", procedural->second.generatedParameterHash},
+                        {"generated_output_hash", procedural->second.generatedOutputHash},
+                        {"parameters",
+                         [&] {
+                             json parameters = json::array();
+                             for (const auto &parameter : procedural->second.parameters)
+                                 parameters.push_back(
+                                     {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                             return parameters;
+                         }()},
+                        {"script", procedural->second.script}};
+            }
+            const auto cellId = itemId;
             const auto &cell = session.project().layoutCells.at(cellId);
             json ports = json::array();
             for (const auto &[id, port] : cell.ports) {
@@ -3169,6 +3353,11 @@ class IceMcpServer {
                     {"stack", cell.stack},
                     {"device", cell.device},
                     {"library", cell.library},
+                    {"read_only", cell.readOnly},
+                    {"reference", cell.reference ? json{{"path", cell.reference->path},
+                                                        {"format", cell.reference->format},
+                                                        {"top_cell", cell.reference->topCell}}
+                                                 : json(nullptr)},
                     {"shapes", cell.shapes.size()},
                     {"ports", std::move(ports)},
                     {"nets", std::move(nets)},
@@ -3508,7 +3697,7 @@ class IceMcpServer {
             const auto layoutName = optionalString(arguments, "layout_name");
             const bool replace = optionalBoolean(arguments, "replace", false);
             ice::ObjectId layoutId = 0;
-            std::vector<ice::Diagnostic> diagnostics;
+            std::filesystem::path importedStream;
             session.execute("mcp implementation-import-layout", [&](ice::Project &project) {
                 auto found = project.implementationRuns.find(runId);
                 if (found == project.implementationRuns.end())
@@ -3516,23 +3705,17 @@ class IceMcpServer {
                 auto imported = ice::importImplementationLayout(project, found->second, *package, projectRootPath(),
                                                                 layoutName, replace);
                 layoutId = imported.layout;
-                diagnostics = std::move(imported.diagnostics);
+                importedStream = imported.referencePath;
             });
-            if (layoutId == 0) {
-                std::string message = "Unable to import the implementation layout.";
-                for (const auto &diagnostic : diagnostics) {
-                    if (diagnostic.severity == ice::Diagnostic::Severity::error) {
-                        message = diagnostic.message;
-                        break;
-                    }
-                }
-                throw ToolError(message);
-            }
             const auto &layout = session.project().layoutCells.at(layoutId);
             return {{"layout", layoutId},
                     {"name", layout.name},
                     {"pdk", layout.pdk},
                     {"stack", layout.stack},
+                    {"stream", importedStream.generic_string()},
+                    {"library", layout.library},
+                    {"device", layout.device},
+                    {"read_only", layout.readOnly},
                     {"shapes", layout.shapes.size()},
                     {"ports", layout.ports.size()},
                     {"nets", layout.nets.size()},
@@ -3602,6 +3785,10 @@ class IceMcpServer {
             options.suite = optionalString(arguments, "suite", "main");
             options.topCell = optionalString(arguments, "top_cell");
             options.timeoutSeconds = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(0));
+            options.engine = optionalString(arguments, "engine");
+            const auto deck = optionalString(arguments, "deck");
+            if (!deck.empty())
+                options.deck = deck;
             const auto output = optionalString(arguments, "output");
             options.workDirectory =
                 output.empty() ? (projectRootPath() / "build" / "drc" / cell.name) : std::filesystem::path(output);
@@ -3611,6 +3798,9 @@ class IceMcpServer {
                              {"layout", result.layout},
                              {"name", result.layoutName},
                              {"pdk", cell.pdk},
+                             {"engine", result.engine},
+                             {"deck", result.deckPath.generic_string()},
+                             {"suite", options.suite},
                              {"process", ice::gdsCheckProcessForPdk(cell.pdk)},
                              {"gds", result.gdsPath.generic_string()},
                              {"report", result.reportPath.generic_string()},
@@ -3663,10 +3853,6 @@ class IceMcpServer {
                             .build());
         tools.push_back(tool_builder("project_repair")
                             .with_description("Recover a project by quarantining invalid sidecar files and saving it.")
-                            .with_string_param("path", "Optional project folder or project.icepro path", false)
-                            .build());
-        tools.push_back(tool_builder("project_migrate")
-                            .with_description("Refresh the generated AGENTS.md guidance while preserving user text.")
                             .with_string_param("path", "Optional project folder or project.icepro path", false)
                             .build());
         tools.push_back(
@@ -3885,8 +4071,8 @@ class IceMcpServer {
         agentsdk::mcp::tool symbolTool;
         symbolTool.name = "schematic_add_symbol";
         symbolTool.description =
-            "Add a symbol definition; known library names auto-load artwork and pins. Custom symbols may "
-            "provide explicit pins and artwork.";
+            "Add a symbol definition; known library names auto-load artwork and pins, and a drawn source_cell "
+            "generates one pin per port in subcircuit order. Custom symbols may provide explicit pins and artwork.";
         symbolTool.input_schema =
             R"({"type":"object","properties":{"cell":{"type":"string","description":"Schematic name or id"},)"
             R"("name":{"type":"string","description":"Symbol name"},"artwork":{"type":"string"},)"
@@ -3955,6 +4141,34 @@ class IceMcpServer {
                             .with_string_param("name", "Layout name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("stack", "Optional PDK stack identifier", false)
+                            .build());
+        tools.push_back(tool_builder("layout_create_procedural")
+                            .with_description("Create a procedural layout and generate its static child.")
+                            .with_string_param("name", "Procedural layout name")
+                            .with_string_param("pdk", "Optional PDK identifier", false)
+                            .with_string_param("stack", "Optional PDK stack identifier", false)
+                            .with_string_param("script", "Optional Python script", false)
+                            .with_boolean_param("regenerate", "Generate the script immediately (default true)", false)
+                            .build());
+        tools.push_back(tool_builder("layout_regenerate")
+                            .with_description("Run a procedural layout script and replace its generated layout.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_integer_param("timeout_seconds", "Optional timeout in seconds", false)
+                            .build());
+        tools.push_back(tool_builder("layout_get_script")
+                            .with_description("Read a procedural layout Python script and generation state.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_set_parameter")
+                            .with_description("Set a procedural layout parameter value without regenerating.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_string_param("name", "Parameter name")
+                            .with_string_param("value", "Parameter value")
+                            .build());
+        tools.push_back(tool_builder("layout_set_script")
+                            .with_description("Replace a procedural layout Python script without regenerating.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_string_param("script", "New Python script")
                             .build());
         tools.push_back(tool_builder("layout_create_from_schematic")
                             .with_description("Create a layout from a schematic.")
@@ -4052,8 +4266,8 @@ class IceMcpServer {
                             .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
                             .build());
         tools.push_back(tool_builder("layout_info")
-                            .with_description("Read a layout cell's pins, nets, instances, and shape count.")
-                            .with_string_param("cell", "Layout cell name or id")
+                            .with_description("Read a layout or procedural layout's metadata and generated state.")
+                            .with_string_param("cell", "Layout or procedural layout name or id")
                             .build());
         tools.push_back(tool_builder("layout_connectivity")
                             .with_description("Extract nets from explicit layout nets and same-layer geometry.")
@@ -4111,7 +4325,7 @@ class IceMcpServer {
                                     "Extract devices from placed layout instances (default true)", false)
                 .with_boolean_param("extract_polygon_devices", "Extract polygon devices using PDK rules (default true)",
                                     false)
-                .with_string_param("extraction_rules_path", "Optional override for layout/extraction.json", false)
+                .with_string_param("extraction_rules_path", "Optional override for technology/extraction.json", false)
                 .with_boolean_param("include_linked_schematic",
                                     "Fallback to the inferred source schematic netlist (default true)", false)
                 .build());
@@ -4209,9 +4423,9 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .build());
         tools.push_back(tool_builder("implementation_import_layout")
-                            .with_description("Import the newest implementation DEF as an ICE layout cell.")
+                            .with_description("Create a reusable read-only digital device from the final GDS/OASIS.")
                             .with_string_param("run", "Implementation run name or id")
-                            .with_string_param("layout_name", "Optional imported layout name", false)
+                            .with_string_param("layout_name", "Optional imported device name", false)
                             .with_boolean_param("replace", "Replace the layout previously produced by this run", false)
                             .build());
         tools.push_back(tool_builder("implementation_export_gds")
@@ -4225,16 +4439,19 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .with_boolean_param("purge", "Remove build/impl/<run> as well", false)
                             .build());
-        tools.push_back(tool_builder("drc_run")
-                            .with_description("Export a layout, run gdscheck with the PDK process deck, and return DRC "
-                                              "violations.")
-                            .with_string_param("layout", "Layout cell name or id")
-                            .with_boolean_param("flatten", "Flatten hierarchy before checking (default true)", false)
-                            .with_string_param("suite", "Optional gdscheck suite (default main)", false)
-                            .with_string_param("top_cell", "Optional top-cell override for gdscheck", false)
-                            .with_string_param("output", "Optional DRC work directory", false)
-                            .with_integer_param("timeout_seconds", "Optional gdscheck timeout", false)
-                            .build());
+        tools.push_back(
+            tool_builder("drc_run")
+                .with_description("Export a layout, run the package DRC deck (KLayout or gdscheck), and return DRC "
+                                  "violations.")
+                .with_string_param("layout", "Layout cell name or id")
+                .with_boolean_param("flatten", "Flatten hierarchy before checking (default true)", false)
+                .with_string_param("suite", "Optional gdscheck suite (default main)", false)
+                .with_string_param("top_cell", "Optional top-cell override for gdscheck", false)
+                .with_string_param("output", "Optional DRC work directory", false)
+                .with_integer_param("timeout_seconds", "Optional DRC timeout", false)
+                .with_string_param("engine", "Optional engine override: klayout or gdscheck", false)
+                .with_string_param("deck", "Optional DRC deck path override", false)
+                .build());
         return tools;
     }
 

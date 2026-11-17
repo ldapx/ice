@@ -51,7 +51,8 @@ ObjectId createLayoutCell(Project &project, std::string name, std::string pdk = 
 // made unique across static and procedural layouts. Returns the procedural
 // layout id, not the generated cell id.
 ObjectId createProceduralLayout(Project &project, std::string name, std::string pdk = genericPdkId,
-                                std::string script = {}, std::string stack = {});
+                                std::string script = {}, std::string stack = {},
+                                std::vector<Parameter> parameters = {});
 // Creates a layout cell using the schematic's technology and projects every
 // schematic instance into a movable planned-device box. Nets are projected as
 // straight connections between those boxes. The layout name defaults to the
@@ -115,7 +116,8 @@ bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
 // Symbols backed by another schematic (Symbol::sourceCell) are hierarchical:
 // each referenced drawn schematic is emitted once as a .subckt whose ports
 // come from its Input and Output instances, and the parent instance becomes
-// X<name> <connected nodes...> <subckt name>. Subcircuits are emitted before
+// X<name> <connected nodes...> <subckt name>. Instances are wired by port
+// name, so a symbol may declare its pins in any order. Subcircuits are emitted before
 // the parent body and recursively for nested hierarchy.
 // A raw "value" parameter is emitted verbatim. Otherwise voltage/current
 // sources support structured waveform parameters: pulse sources produce
@@ -137,12 +139,38 @@ enum class SchematicNetlistMode {
 };
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes = nullptr,
-                                               SchematicNetlistMode mode = SchematicNetlistMode::analog);
+                                               SchematicNetlistMode mode = SchematicNetlistMode::analog,
+                                               double geometryScale = 1.0);
 
 // Builds a simulation netlist from either a drawn schematic or a text SPICE
 // schematic. Analysis-control directives that the simulation properties own
 // (.tran, .dc, .ac, .op) and a trailing .end are removed from text sources.
+// Device geometry is scaled to the units implied by the PDK preamble
+// (`.option scale=1u`), so MOS sizes match the model bins.
 std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId cellId,
                                                 std::vector<std::string> *notes = nullptr);
+
+// Symbol names may carry a numeric disambiguator ("Input 2", "Resistor 3") when
+// several symbols of one kind live in the same cell. Type tests use the base
+// name so those copies still netlist and verify as ports or primitives.
+std::string symbolTypeName(std::string name);
+
+// Port instances (Input/Output symbols) of a drawn cell in subcircuit port
+// order: inputs top-to-bottom, then outputs. This is the order used for the
+// `.subckt` port list, so hierarchical instance node lists must follow it too.
+std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell);
+
+// Creates a symbol in `parentCellId` for the drawn sub-cell `sourceCellId`, with
+// one pin per port in subcircuit port order (inputs on the left, outputs on the
+// right). Returns the new symbol id.
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
+                               std::string name = {}, std::string artwork = {});
+
+// Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
+// them from the project. Useful for tools that build their own symbol.
+std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source);
+
+// Returns a name for a new symbol that is not used by any symbol in `cell`.
+std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::string &base);
 
 } // namespace ice

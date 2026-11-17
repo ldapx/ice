@@ -8,7 +8,7 @@ copied into ICE. This module provides the ICE-side runtime:
 * transfer the resulting polygons into an ``icepy`` project/layout cell.
 
 The ``main_cli`` entry point is the command-line contract used by the IHP
-package's ``layout/device_generator.py``.
+package's ``layout/devices/generator.py``.
 """
 
 from __future__ import annotations
@@ -531,8 +531,9 @@ def parameter_specs_for(ihp_root: str | Path | None, module_name: str, class_nam
 # Package-local PCell runtime
 # ---------------------------------------------------------------------------
 #
-# PDK packages ship ``layout/pcells.py`` (or ``layout/pcells/<module>.py``)
-# modules whose classes build geometry through the ``icepy`` layout builder.
+# PDK packages ship ``layout/devices/pcell/pcells.py`` (or another module in
+# ``layout/devices/pcell/``) whose classes build geometry through the ``icepy``
+# layout builder.
 # The generator contract is intentionally small so packages stay independent
 # from KLayout, gdsfactory, or any other external PCell runtime.
 
@@ -589,19 +590,19 @@ def package_parameter_values(specs, overrides: dict[str, str] | None = None):
 
 
 def load_package_pcell_module(pdk_root: str | Path, module_name: str):
-    """Import a package PCell module by name from ``<pdk>/layout``."""
+    """Import a package PCell module by name from ``<pdk>/layout/devices/pcell``."""
     import importlib.util
 
     root = Path(pdk_root).resolve()
     candidates = [
-        root / "layout" / "pcells" / f"{module_name}.py",
-        root / "layout" / f"{module_name}.py",
-        root / "layout" / "pcells.py",
+        root / "layout" / "devices" / "pcell" / f"{module_name}.py",
+        root / "layout" / "devices" / "pcell" / "pcells.py",
     ]
     path = next((candidate for candidate in candidates if candidate.is_file()), None)
     if path is None:
         raise RuntimeError(
-            f"PCell module '{module_name}' was not found under {root / 'layout'}"
+            f"PCell module '{module_name}' was not found under "
+            f"{root / 'layout' / 'devices' / 'pcell'}"
         )
     unique_name = f"ice_package_pcells_{abs(hash(path))}_{module_name}"
     spec = importlib.util.spec_from_file_location(unique_name, path)
@@ -764,6 +765,12 @@ class PackagePcell:
     res_layer = "res"
     turns = 2
     guard_ring = False
+    # Contact/via cut dimensions and enclosure. Packages override these when
+    # their contact rules differ (GF180MCU uses 0.22 um contacts with 0.25 um
+    # spacing, SKY130 uses 0.17 um contacts with 0.19 um spacing).
+    contact_size = 170
+    contact_spacing = 200
+    contact_margin = 100
 
     def __init__(self, values: dict[str, str] | None = None):
         self.values = package_parameter_values(self.parameters, values or {})
@@ -858,134 +865,305 @@ class PackagePcell:
         method(builder)
 
     # -- shared device templates -----------------------------------------
+    def _contact_layers(self):
+        """Return the contact, landing, and via layer names for this package.
+
+        SKY130 uses licon1 (diff/poly -> li1) and mcon (li1 -> met1).
+        GF180MCU uses a single contact layer (diff/poly -> metal1).
+        """
+        contact = (
+            "licon1"
+            if "licon1" in self.layers
+            else ("contact" if "contact" in self.layers else "")
+        )
+        landing = "li1" if "li1" in self.layers else ""
+        via = "mcon" if "mcon" in self.layers else ""
+        return contact, landing, via
+
+    def cut_array(
+        self,
+        builder,
+        layer: str,
+        x,
+        y,
+        width,
+        height,
+        size=None,
+        spacing=None,
+        margin=None,
+    ):
+        """Fill a landing pad with a centered rectangular array of cuts."""
+        if not layer or layer not in self.layers:
+            return
+        size = int(self.contact_size if size is None else size)
+        spacing = int(self.contact_spacing if spacing is None else spacing)
+        margin = int(self.contact_margin if margin is None else margin)
+        size = max(size, 1)
+        spacing = max(spacing, 1)
+        margin = max(margin, 0)
+        usable_w = int(width) - 2 * margin
+        usable_h = int(height) - 2 * margin
+        if usable_w < size or usable_h < size:
+            return
+        columns = max(1, (usable_w + spacing) // (size + spacing))
+        rows = max(1, (usable_h + spacing) // (size + spacing))
+        total_w = columns * size + (columns - 1) * spacing
+        total_h = rows * size + (rows - 1) * spacing
+        start_x = int(x) + (int(width) - total_w) // 2
+        start_y = int(y) + (int(height) - total_h) // 2
+        for row in range(rows):
+            for column in range(columns):
+                self.rect(
+                    builder,
+                    layer,
+                    start_x + column * (size + spacing),
+                    start_y + row * (size + spacing),
+                    size,
+                    size,
+                )
+
+    def contact_stack(self, builder, x, y, width, height, cut_size=None):
+        """Draw the contact/landing/via stack for a pad on diff or poly."""
+        contact, landing, via = self._contact_layers()
+        if not contact:
+            return
+        if landing:
+            self.rect(builder, landing, x, y, width, height)
+            self.cut_array(builder, contact, x, y, width, height, cut_size)
+            if via:
+                self.cut_array(builder, via, x, y, width, height, cut_size)
+        else:
+            self.cut_array(builder, contact, x, y, width, height, cut_size)
+
     def build_mos(self, builder):
-        total_width = max(self.um("w", 1.0), 100)
+        """Build a non-overlapping multi-finger MOS device.
+
+        Every finger gets an isolated diff island. A single poly gate column
+        crosses all fingers and doubles as the gate bus, so fingers are in
+        parallel without overlapping diffusion. Source and drain use separate
+        metal buses on either side; the body tap sits beyond the drain bus.
+        """
+        total_width = max(self.um("w", 1.0), 370)
         length = max(self.um("l", 0.15), 50)
         fingers = max(1, self.integer("nf", 1))
         multiplier = max(1, self.integer("m", 1))
-        finger_width = max(total_width // fingers, 100)
-        source_drain = max(2 * length, 300)
-        enclosure = 200
-        gap = 200
-        contact = max(min(length // 2, 200), 100)
+        count = fingers * multiplier
+        finger_width = max(total_width // fingers, 370)
+
+        enclosure = max(self.contact_margin + 100, 250)
+        finger_gap = 2 * enclosure + 300
+        pitch = finger_width + finger_gap
+        device_height = count * pitch - finger_gap
+        source_drain = max(2 * length, 3 * self.contact_size + 2 * self.contact_margin)
+        pad_margin = self.contact_margin
+        pad_width = max(min(source_drain - 2 * pad_margin, 500), self.contact_size)
+        pad_height = max(finger_width - 2 * pad_margin, self.contact_size)
+        cut_size = min(
+            self.contact_size,
+            pad_width - 2 * pad_margin,
+            pad_height - 2 * pad_margin,
+        )
+        cut_size = max(cut_size, 100)
+
+        bus_width = max(min(finger_width // 2, 500), 300)
+        bus_gap = 300
+        gate_extension = 700
+        gate_pad = max(min(length, 400), 370)
+        tap_width = max(bus_width, self.contact_size + 4 * self.contact_margin)
+        tap_gap = 400
+        implant_enclosure = max(self.contact_margin + 100, 250)
+        well_enclosure = 300
+
         pmos = (
             self.pmos
             or "pfet" in self.text("model").lower()
             or "pmos" in self.text("model").lower()
         )
-        x = 0
-        for _ in range(multiplier):
-            for finger in range(fingers):
-                y = finger * (finger_width + gap)
-                self.rect(
-                    builder,
-                    "diff",
-                    x - source_drain,
-                    y - enclosure,
-                    source_drain + length + source_drain,
-                    finger_width + 2 * enclosure,
-                )
-                self.rect(
-                    builder,
-                    "poly",
-                    x,
-                    y - enclosure,
-                    length,
-                    finger_width + 2 * enclosure,
-                )
-                pad_height = max(finger_width - 2 * enclosure, 100)
-                self.rect(
-                    builder,
-                    "li1",
-                    x - source_drain + 100,
-                    y - enclosure,
-                    contact,
-                    pad_height,
-                )
-                self.rect(
-                    builder,
-                    "li1",
-                    x + length + source_drain - contact - 100,
-                    y - enclosure,
-                    contact,
-                    pad_height,
-                )
-                self.rect(
-                    builder,
-                    "met1",
-                    x - source_drain,
-                    y - enclosure,
-                    source_drain // 2,
-                    finger_width + 2 * enclosure,
-                )
-                self.rect(
-                    builder,
-                    "met1",
-                    x + length + source_drain - source_drain // 2,
-                    y - enclosure,
-                    source_drain // 2,
-                    finger_width + 2 * enclosure,
-                )
-                self.rect(
-                    builder,
-                    "li1",
-                    x + length // 2 - contact // 2,
-                    y + finger_width + enclosure - contact // 2,
-                    contact,
-                    contact,
-                )
-                self.rect(
-                    builder,
-                    "met1",
-                    x + length // 2 - contact,
-                    y + finger_width + enclosure,
-                    2 * contact,
-                    2 * contact,
-                )
-            height = fingers * (finger_width + gap) - gap
-            well = "nwell" if pmos else "pwell"
-            if well in self.layers:
-                self.rect(
-                    builder,
-                    well,
-                    x - source_drain - enclosure,
-                    -2 * enclosure,
-                    source_drain + length + source_drain + 2 * enclosure,
-                    height + 4 * enclosure,
-                )
-            if (
-                self.guard_ring
-                or self.boolean("guard_ring")
-                or self.text("bulk").lower() in {"guard ring", "gaurd ring"}
-            ):
-                self.build_guard_ring(
-                    builder,
-                    x - source_drain - 2 * enclosure,
-                    -3 * enclosure,
-                    source_drain + length + source_drain + 4 * enclosure,
-                    height + 6 * enclosure,
-                )
-            x += length + 2 * source_drain + 500
-        height = fingers * (finger_width + gap) - gap
+        diff_implant = "psdm" if pmos else "nsdm"
+        tap_implant = "nsdm" if pmos else "psdm"
+        if diff_implant not in self.layers:
+            diff_implant = "pplus" if pmos else "nplus"
+        if tap_implant not in self.layers:
+            tap_implant = "nplus" if pmos else "pplus"
+        tap_layer = "tap" if "tap" in self.layers else "diff"
+
+        # Local geometry anchors.
+        source_bus_x = -source_drain - bus_gap - bus_width
+        drain_bus_x = length + source_drain + bus_gap
+        drain_bus_right = drain_bus_x + bus_width
+        tap_x = drain_bus_right + tap_gap
+        tap_right = tap_x + tap_width
+        source_pad_left = -source_drain + pad_margin
+        drain_pad_left = length + source_drain - pad_margin - pad_width
+        poly_bottom = -enclosure - gate_extension
+        poly_top = (count - 1) * pitch + finger_width + enclosure
+
+        # Well and implant regions are drawn first so the device layers sit on
+        # top of them.
+        well = "nwell" if pmos else "pwell"
+        if well in self.layers:
+            self.rect(
+                builder,
+                well,
+                -source_drain - well_enclosure,
+                -enclosure - well_enclosure,
+                tap_right + source_drain + 2 * well_enclosure,
+                device_height + 2 * enclosure + 2 * well_enclosure,
+            )
+        if diff_implant in self.layers:
+            self.rect(
+                builder,
+                diff_implant,
+                -source_drain - implant_enclosure,
+                -implant_enclosure,
+                length + 2 * source_drain + 2 * implant_enclosure,
+                device_height + 2 * implant_enclosure,
+            )
+
+        # Each finger is an independent diff island.
+        for finger in range(count):
+            base = finger * pitch
+            self.rect(
+                builder,
+                "diff",
+                -source_drain,
+                base,
+                length + 2 * source_drain,
+                finger_width,
+            )
+            # Source landing.
+            self.contact_stack(
+                builder,
+                source_pad_left,
+                base + pad_margin,
+                pad_width,
+                pad_height,
+                cut_size,
+            )
+            self.rect(
+                builder,
+                "met1",
+                source_bus_x,
+                base + pad_margin,
+                source_pad_left + pad_width - source_bus_x,
+                pad_height,
+            )
+            # Drain landing.
+            self.contact_stack(
+                builder,
+                drain_pad_left,
+                base + pad_margin,
+                pad_width,
+                pad_height,
+                cut_size,
+            )
+            self.rect(
+                builder,
+                "met1",
+                drain_pad_left,
+                base + pad_margin,
+                drain_bus_right - drain_pad_left,
+                pad_height,
+            )
+
+        # One poly column crosses every finger and acts as the gate bus.
+        self.rect(builder, "poly", 0, poly_bottom, length, poly_top - poly_bottom)
+        gate_pad_x = length // 2 - gate_pad // 2
+        gate_pad_y = poly_bottom + pad_margin
+        self.rect(builder, "poly", gate_pad_x, gate_pad_y, gate_pad, gate_pad)
+        self.contact_stack(
+            builder, gate_pad_x, gate_pad_y, gate_pad, gate_pad, cut_size
+        )
+        self.rect(builder, "met1", gate_pad_x, gate_pad_y, gate_pad, gate_pad)
+        if "npc" in self.layers:
+            npc_margin = 100
+            self.rect(
+                builder,
+                "npc",
+                gate_pad_x - npc_margin,
+                gate_pad_y - npc_margin,
+                gate_pad + 2 * npc_margin,
+                gate_pad + 2 * npc_margin,
+            )
+
+        # Source and drain buses. They run through the gaps between diff
+        # islands and never cross a gate.
+        bus_bottom = pad_margin - bus_width
+        bus_height = (
+            (count - 1) * pitch + pad_margin + pad_height + bus_width - bus_bottom
+        )
+        self.rect(builder, "met1", source_bus_x, bus_bottom, bus_width, bus_height)
+        self.rect(builder, "met1", drain_bus_x, bus_bottom, bus_width, bus_height)
+
+        # Body tap and its implant.
+        self.rect(
+            builder,
+            tap_layer,
+            tap_x,
+            -enclosure,
+            tap_width,
+            device_height + 2 * enclosure,
+        )
+        if tap_implant in self.layers:
+            self.rect(
+                builder,
+                tap_implant,
+                tap_x - implant_enclosure,
+                -enclosure - implant_enclosure,
+                tap_width + 2 * implant_enclosure,
+                device_height + 2 * enclosure + 2 * implant_enclosure,
+            )
+        self.contact_stack(
+            builder,
+            tap_x + pad_margin,
+            -enclosure + pad_margin,
+            tap_width - 2 * pad_margin,
+            device_height + 2 * enclosure - 2 * pad_margin,
+            cut_size,
+        )
+        self.rect(
+            builder,
+            "met1",
+            tap_x + pad_margin,
+            -enclosure + pad_margin,
+            tap_width - 2 * pad_margin,
+            device_height + 2 * enclosure - 2 * pad_margin,
+        )
+
+        if (
+            self.guard_ring
+            or self.boolean("guard_ring")
+            or self.text("bulk").lower() in {"guard ring", "gaurd ring"}
+        ):
+            self.build_guard_ring(
+                builder,
+                source_bus_x - bus_gap,
+                -enclosure - gate_extension - bus_gap,
+                tap_right - source_bus_x + 2 * bus_gap,
+                poly_top + enclosure + gate_extension + 2 * bus_gap,
+                max(bus_width, 300),
+            )
+
+        port_height = max(min(device_height, 2 * bus_width), 200)
         self.port(
             builder,
             "G",
             "met1",
-            length // 2 - contact,
-            height + enclosure,
-            2 * contact,
-            2 * contact,
+            gate_pad_x,
+            gate_pad_y,
+            gate_pad,
+            gate_pad,
             "input",
-            "top",
+            "bottom",
         )
         self.port(
             builder,
             "S",
             "met1",
-            -source_drain,
-            -enclosure,
-            source_drain // 2,
-            height + 2 * enclosure,
+            source_bus_x,
+            bus_bottom + (bus_height - port_height) // 2,
+            bus_width,
+            port_height,
             "inout",
             "left",
         )
@@ -993,10 +1171,10 @@ class PackagePcell:
             builder,
             "D",
             "met1",
-            length + source_drain // 2,
-            -enclosure,
-            source_drain // 2,
-            height + 2 * enclosure,
+            drain_bus_x,
+            bus_bottom + (bus_height - port_height) // 2,
+            bus_width,
+            port_height,
             "inout",
             "right",
         )
@@ -1004,12 +1182,12 @@ class PackagePcell:
             builder,
             "B",
             "met1",
-            -source_drain,
-            -2 * enclosure,
-            source_drain // 2,
-            enclosure,
+            tap_x + pad_margin,
+            -enclosure + pad_margin,
+            tap_width - 2 * pad_margin,
+            port_height,
             "inout",
-            "bottom",
+            "right",
         )
 
     def build_resistor(self, builder):
@@ -1172,30 +1350,79 @@ class PackagePcell:
         )
 
     def build_bjt(self, builder):
-        size = max(self.um("w", 2.0), self.um("l", 2.0), 500)
-        self.rect(builder, "nwell", -400, -400, size + 800, size + 800)
-        self.rect(
-            builder, "pwell" if "pwell" in self.layers else "diff", 0, 0, size, size
-        )
+        """Three terminal bipolar transistor with contacted base, emitter and collector.
+
+        The device is a row of three diffusion taps (base, emitter, collector).
+        Each tap gets licon1 contacts to li1, an mcon to met1 and a metal pad
+        that carries the terminal, so the drawn geometry is a real connected
+        device rather than a placeholder. Spacings follow the SKY130 diffusion
+        and implant rules (0.28 um diff, 0.38 um implant, 0.17 um contacts).
+        """
+        cut = 170
+        enclosure = 60
+        tap_width = 400
+        margin = 100
+        gap = 700
+        implant_enclosure = 125
+        pad = 400
+        size = self.um("w", 2.0)
+        size = max(size, self.um("l", 2.0), 2 * margin + tap_width + 2 * gap + 400)
+        pnp = self.doping == "p"
+        base_implant = "nsdm" if pnp else "psdm"
+        emitter_implant = "psdm" if pnp else "nsdm"
+
+        columns = [margin + index * (tap_width + gap) for index in range(3)]
+        height = size - 2 * margin
+        # A substrate PNP keeps its collector in the p-substrate, so the nwell
+        # only covers the base and emitter taps.
+        covered = 2 if pnp else 3
+        nwell_left = -enclosure
+        nwell_right = columns[covered - 1] + tap_width + implant_enclosure + enclosure
         self.rect(
             builder,
-            "nplus" if "nplus" in self.layers else "diff",
-            size // 4,
-            size // 4,
-            size // 2,
-            size // 2,
+            "nwell",
+            nwell_left,
+            -enclosure,
+            nwell_right - nwell_left,
+            size + 2 * enclosure,
         )
-        self.rect(builder, "li1", -200, size // 2 - 100, 200, 200)
-        self.rect(builder, "met1", size // 2 - 100, -200, 200, 200)
-        self.rect(builder, "met1", size // 2 - 100, size, 200, 200)
-        self.rect(builder, "met1", size, size // 2 - 100, 200, 200)
-        self.port(
-            builder, "B", "met1", -200, size // 2 - 100, 200, 200, "input", "left"
-        )
-        self.port(builder, "C", "met1", size // 2 - 100, size, 200, 200, "inout", "top")
-        self.port(
-            builder, "E", "met1", size // 2 - 100, -200, 200, 200, "inout", "bottom"
-        )
+
+        for index, x in enumerate(columns):
+            self.rect(builder, "diff", x, margin, tap_width, height)
+            if "tap" in self.layers:
+                self.rect(builder, "tap", x, margin, tap_width, height)
+            implant = base_implant if index == 0 else emitter_implant
+            self.rect(
+                builder,
+                implant,
+                x - implant_enclosure,
+                margin - implant_enclosure,
+                tap_width + 2 * implant_enclosure,
+                height + 2 * implant_enclosure,
+            )
+            # diffusion -> li1 contacts: two cuts per tap
+            for fraction in (3, 5):
+                self.rect(
+                    builder,
+                    "licon1",
+                    x + tap_width // 2 - cut // 2,
+                    margin + height * fraction // 8 - cut // 2,
+                    cut,
+                    cut,
+                )
+            self.rect(builder, "li1", x, margin, tap_width, height)
+            # li1 -> met1 contact plus the terminal pad
+            pad_x = x + tap_width // 2 - pad // 2
+            pad_y = size // 2 - pad // 2
+            self.rect(builder, "mcon", pad_x + pad // 2 - cut // 2, pad_y + pad // 2 - cut // 2, cut, cut)
+            self.rect(builder, "met1", pad_x, pad_y, pad, pad)
+
+        # Terminals are ordered base, collector, emitter so a diode connected
+        # device can strap base and collector with one local patch.
+        pads = [(x + tap_width // 2 - pad // 2, size // 2 - pad // 2) for x in columns]
+        self.port(builder, "B", "met1", pads[0][0], pads[0][1], pad, pad, "input", "left")
+        self.port(builder, "C", "met1", pads[1][0], pads[1][1], pad, pad, "inout", "top")
+        self.port(builder, "E", "met1", pads[2][0], pads[2][1], pad, pad, "inout", "right")
 
     def build_via_stack(self, builder):
         width = max(self.um("w", 1.0), 200)

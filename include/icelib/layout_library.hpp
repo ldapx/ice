@@ -77,7 +77,7 @@ struct LayoutDeviceLibrary {
     static LayoutDeviceLibrary load(const std::filesystem::path &path);
 };
 
-// Parses the JSON produced by a PDK layout/device_generator.py implementation.
+// Parses the JSON produced by a PDK layout/devices/generator.py implementation.
 // Bounds are encoded as [min_x, min_y, max_x, max_y] in database units.
 LayoutDeviceGeometry parseLayoutDeviceGeometry(const std::string &text);
 

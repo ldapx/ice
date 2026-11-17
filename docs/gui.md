@@ -132,9 +132,13 @@ and Layout:
   are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
   contextual hint below the row shows the next prerequisite, the ready action,
   or the last failure. Below the tree, **Open in OpenROAD GUI** launches the
-  standalone viewer on the active ODB, and Final places **Import final layout**
-  next to it. The `Display` tree toggles layers, net types, instance
-  categories, special nets, ports, route guides, rows, and blockages. Fill,
+  standalone viewer on the active ODB, and Final places **Import final as
+  device** next to it. **Import final as device** flattens the final GDS/OASIS into one read-only
+  device cell shown under **Layout > Devices > Digital**. Create a layout and
+  place the device as many times as needed. Missing final streams are reported
+  as an error. The `Display`
+  tree toggles layers, net types, instance categories, special nets, ports,
+  route guides, rows, and blockages. Fill,
   endcap, tap, antenna, and cover cells are hidden by default; changing
   visibility preserves zoom and pan.
 - **Middle:** an interactive canvas. The physical stages load their stage ODB
@@ -400,7 +404,7 @@ groups GDS purpose variants under their base layer number: for example
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
 checkbox. PDK packages may supply default layer colors, patterns, and
-visibility in `layout/layer-styles.json`; these styles are applied when the
+visibility in `technology/layer-styles.json`; these styles are applied when the
 package's layers are added, and layers without an entry keep the built-in
 number-based palette. Creating a custom layer opens a form with the layer name, assigned
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
@@ -425,8 +429,10 @@ left layout tool column to open the parent layout or the selected child
 instance.
 
 With nothing selected in the layout, **Properties** shows a fitted preview of
-the layout geometry and a **Grid** section with the Layout-only snap spacing in nanometers.
-The layout toolbar keeps the grid visibility and snap toggles. The layout cell
+the layout geometry and a **Grid** section with the Layout-only snap spacing in
+nanometers. New layouts default to the PDK `manufacturing_grid` (5 nm for the
+bundled GF180MCU, SKY130, and IHP SG13G2 packages). The layout toolbar keeps the
+grid visibility and snap toggles. The layout cell
 parameter table is hidden while nothing is selected. Selecting a rectangle
 shows its name, type, layer, and editable width and height in database units;
 selected polygons, paths, and texts show read-only name, type, and layer
@@ -435,31 +441,52 @@ information.
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
 Python script editor with syntax highlighting in the middle view, and contain a
-generated static layout as their child. The canvas tool columns are hidden while a procedural layout
-tab is active. The script runs with a `layout` builder that exposes
-`layout.layer()`, rectangles, polygons, ports, and instances. Right-click a
-procedural layout and choose **Regenerate layout** (or use the editor's
-**Regenerate layout** button) to replace the generated child's geometry from
-the current script. Scripts run with `python3`, or the interpreter selected by
-`ICE_PYTHON`. A failed run reports the Python error and leaves the previous
-generated geometry unchanged. The layout API also exposes
+read-only generated static layout as their child. The canvas tool columns are
+hidden while a procedural layout tab is active. The script runs with a `layout`
+builder that exposes layers with `number`/`datatype`, rectangles, polygons,
+paths, text, vias, rectangular arrays, ports, and instances. Coordinates can be
+written in database units or through `layout.nm()`, `layout.um()`, and
+`layout.snap()`. Generated shapes can carry a `name` and a `net`, and scripts
+can declare user-editable parameters with `layout.parameter(name, default)`.
+Parameters appear in a form above the script editor; edit a value and press
+**Regenerate layout** to apply it. `layout.device("nmos", ...)` places a device
+from the active package's device library, including generated PCells and fixed
+`.icelay` devices, with flattened geometry, prefixed ports, and device metadata
+for LVS. The call returns a placement object with absolute pin rectangles
+(`placement.G`, `placement.ports["G"]`). Pass `nets={"G": "GATE", ...}` to bind
+device terminals to layout nets and keep them through extraction.
+
+Right-click a procedural layout and choose **Regenerate layout** (or use the
+editor's **Regenerate layout** button) to replace the generated child's geometry
+from the current script. Scripts run with `python3`, or the interpreter selected
+by `ICE_PYTHON`, with a 60-second timeout; command-line and MCP regeneration accept a timeout override. A failed run reports the Python
+error and leaves the previous generated geometry unchanged. A `↻` marker in the
+file tab means the script changed since the last successful generation. The
+generated child is read-only; edit the script or parameter form and regenerate
+instead of drawing over generated geometry. Boolean `union`, `intersection`,
+`subtract`, and `xor` operations are available, and polygons accept hole
+contours. The layout API also exposes
 `layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: ICE forwards
 the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
-is used. The active PDK package's layout device library (`layout/devices.json`)
-appears in **Devices**, with search, category filtering, and a geometry preview
-in **Properties**. IHP SG13G2, Sky130, and GF180MCU packages ship their own
-libraries, and switching the active layout to a cell from another PDK loads that
-package's devices. The device list starts with no selection; selecting a device
-switches to **Place Device** and shows a cursor-following preview, while
-activating **Select** clears the list selection.
-Clicking in the canvas imports the device geometry into the project and creates
-a layout instance. Every placed device gets its own read-only library cell, so
-repeated placements do not share parameters or geometry. Each instance appears
-separately under its parent layout in the hierarchy and can be selected, moved,
-and deleted directly in the canvas. Selecting a placed instance in the
+is used. The active PDK package's device library appears in **Devices**, with
+search, category filtering, and a geometry preview in **Properties**.
+Parameterized devices are Python PCells generated on selection; fixed devices
+are backed by `layout/devices/fixed/*.icelay` cells. IHP SG13G2, Sky130, and GF180MCU
+packages ship their own libraries, and switching the active layout to a cell
+from another PDK loads that package's devices. Imported digital layouts appear
+in the same tab under **Digital**. The device list
+starts with no selection; selecting a device switches to **Place Device** and
+shows a cursor-following preview, while activating **Select** clears the list
+selection.
+Clicking in the canvas places a layout instance of the device cell. The first
+placement creates the read-only project `.icelay` cell; repeated placements
+reuse that cell, so instances share parameters and geometry. Each instance
+appears separately under its parent layout in the hierarchy and can be
+selected, moved, and deleted directly in the canvas. Selecting a placed
+instance in the
 hierarchy highlights it in the canvas, and selecting an instance in the canvas
 highlights its hierarchy row. PCell parameter names, values, and
 descriptions are shown in **Properties** for the device preview and for imported
@@ -470,13 +497,18 @@ through the package-local generator without changing other instances. Editing
 a device in the **Devices** tab changes the defaults used by future placements.
 
 The generator contract is
-`<pdk-root>/layout/device_generator.py --pdk-root <package> --module <module>
+`<pdk-root>/layout/devices/generator.py --pdk-root <package> --module <module>
 --class <class> --params-file <json> --output <json>`. IHP evaluates the
 vendored upstream PyCell sources (and KLayout's `pya` module) through
 `icepy.pcells`. Sky130 and GF180MCU use ICE-native PCells implemented directly
 with the `icepy` layout builder. ICE uses `python3` unless `ICE_PYTHON` points
 to another interpreter. If the package generator or Python module is
 unavailable, ICE reports the error and leaves the existing geometry unchanged.
+
+The Sky130 and GF180MCU MOS PCells draw isolated fingers, licon/mcon cuts,
+body taps, and well/implant layers. Device width is the channel width of each
+finger, and `nf` creates electrically parallel fingers instead of overlapping
+diffusion rectangles.
 
 Device placement ghosts and the Properties layout preview use the same layer
 color resolution and flattened geometry renderer as the canvas, including
@@ -636,8 +668,10 @@ Manual connection removes the logical planned connection and switches to the
 path tool.
 
 **Tools → Run DRC** exports the active layout cell to a temporary GDSII file,
-runs `gdscheck` with the process deck derived from the cell's PDK, and parses
-the generated `.lyrdb` report. Violations appear in the **Reports** tab of the
+runs the deck declared by the cell's PDK package, and parses the generated
+`.lyrdb` report. Packages can provide `technology/drc.json`; SKY130 uses the
+SkyWater KLayout signoff deck from Volare or `PDK_ROOT` and enables FEOL, BEOL,
+and off-grid checks. Violations appear in the **Reports** tab of the
 activity dock with **DRC** selected, showing severity, rule, message, cell, and
 location columns. Clicking a violation row opens the checked layout and centers
 the canvas on the reported location with a temporary highlight. The DRC view
@@ -676,7 +710,7 @@ transformed into parent coordinates, matched to the parent nets they overlap,
 and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
 placed devices are recognized, PEX falls back to copying the inferred source
 schematic's device netlist. Devices drawn purely as polygons are recognized
-through the PDK package's `layout/extraction.json` rules: PEX cuts active under
+through the PDK package's `technology/extraction.json` rules: PEX cuts active under
 gates, finds source/drain terminal nets, and emits MOS devices with geometric
 W/L. The same rules can describe simple resistors and capacitors. Use LVS to
 verify the result before relying on it. The generated deck records the
@@ -702,6 +736,7 @@ Common defaults:
 - **Select**: Space
 - **Place device**: P
 - **Delete selection**: Del
+- **Save current file / Save whole project**: Ctrl+S / Ctrl+Shift+S
 - **Run simulation / DRC / LVS**: F6 / F7 / F8
 - **Fit to view**: F
 - **Toggle grid**: Ctrl+G
@@ -713,6 +748,11 @@ Common defaults:
 - **Layout rotate / flips**: Shift+R / H / J
 - **Layout rectangle / polygon / path / comment (text label) / text polygon / pin / ruler**: R / G / W / Shift+C / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
+
+**Ctrl+S** saves the file shown in the current schematic, layout, procedural
+layout, digital-testbench, or simulation-script tab. Other dirty tabs keep
+their unsaved markers. Use **Ctrl+Shift+S** (or **File → Save Whole Project**)
+to write every project file at once.
 
 Use **Settings → Keyboard Shortcuts…** (Ctrl+Shift+K) to reassign commands,
 clear a binding, reset one command, or reset all commands. Global commands work
@@ -767,16 +807,19 @@ simulation and always creates a new Python file from the built-in template.
 Selecting a script shows the project-level script view in the A/MS Simulation
 workspace, replacing the simulation editor on the right. It is not a separate
 top-level document tab and is not stored inside any simulation. The right pane
-is an editable Python source editor with syntax highlighting. Script run
-messages, errors, and Markdown output are appended to the **Messages** tab,
-which is opened when a script runs. Scripts have access to every stored
+has **File** and **Graphs** tabs, matching the **Properties**/**Graphs** layout
+of normal simulations. **File** contains the editable Python source editor with
+syntax highlighting; **Graphs** contains the plots generated by the script.
+Script run messages, errors, and Markdown output are appended to the
+**Messages** tab, which is opened when a script runs. Scripts have access to every stored
 simulation run through the context (`simulations`, `runs`, `latest`,
 `latest_many`, and `load`) and can compare multiple simulations in one script.
 
 Scripts can generate GUI graphs with `ctx.graph(...)`. The generated graphs are
-shown in tabs below the script editor. Graphs can reference stored runs and
-signals, or use explicit `x` and `y` arrays computed by the script. Running the
-script replaces the previously generated graph tabs. The latest graph payload is
+shown in the **Graphs** tab; selecting a script opens **File** first, and a run
+that produces graphs switches to **Graphs**. Graphs can reference stored runs
+and signals, or use explicit `x` and `y` arrays computed by the script. Running
+the script replaces the previously generated graph tabs. The latest graph payload is
 cached under `build/simulation-scripts/` and reloaded when the script is selected,
 including runs started from `ice-cli`.
 
