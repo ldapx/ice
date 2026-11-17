@@ -510,7 +510,8 @@ the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
 is used. The active PDK package's device library appears in **Devices**, with
-search, category filtering, and a geometry preview in **Properties**.
+search, category filtering, and a geometry preview in **Properties**. See
+{doc}`procedural-layout` for the complete builder, device, and routing API.
 Parameterized devices are Python PCells generated on selection; fixed devices
 are backed by `layout/devices/fixed/*.icelay` cells. IHP SG13G2, Sky130, and GF180MCU
 packages ship their own libraries, and switching the active layout to a cell
