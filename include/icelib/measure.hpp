@@ -44,4 +44,10 @@ SignalMeasurement measureSignal(const SimulationTrace &trace, const std::vector<
                                 double threshold = std::numeric_limits<double>::quiet_NaN(), double startTime = 0.0,
                                 double settleTolerance = 0.02);
 
+// Evaluates declarative measurement specs against a completed simulation
+// result. Metrics are intentionally conservative: if the required traces or
+// analysis are absent, the result is marked invalid with an actionable error.
+std::vector<SimulationMeasurementResult> evaluateMeasurements(const std::vector<SimulationMeasurementSpec> &specs,
+                                                              const SimulationResult &result);
+
 } // namespace ice

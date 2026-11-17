@@ -457,6 +457,9 @@ class SimulationRun:
         self.created_at = str(run.get("created_at", ""))
         self.state = str(run.get("state", ""))
         self.analysis = str(document.get("analysis", run.get("analysis", "")))
+        self.x_axis = str(document.get("x_axis", "time"))
+        self.x_unit = str(document.get("x_unit", "s"))
+        self.variant = str(run.get("variant", ""))
         self.simulator = str(document.get("simulator", run.get("simulator", "")))
         self.simulator_version = str(
             document.get("simulator_version", run.get("simulator_version", ""))
@@ -502,6 +505,14 @@ class SimulationRun:
             self.traces[_normalize_signal(name)] = trace
             self.trace_names.append(name)
         self.graphs = document.get("graphs", [])
+        self.scalars = {
+            str(name): float(value)
+            for name, value in (document.get("scalars") or {}).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        self.measurements = [
+            dict(entry) for entry in (document.get("measurements") or []) if isinstance(entry, dict)
+        ]
 
     def __repr__(self) -> str:
         return (

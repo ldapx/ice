@@ -141,7 +141,10 @@ for name, run in runs.items():
     print(name, run.trace("v(n1)").metrics().settling_time)
 ```
 
-The API is new-format-only and reads runs from `build/simulations`.
+Each loaded run also exposes `analysis`, `x_axis`, `x_unit`, `variant`,
+`scalars`, and the declarative `measurements` stored with the run. `variant`
+identifies corner/Monte Carlo experiment points. The API is new-format-only and
+reads runs from `build/simulations`.
 
 ## Procedural layouts
 

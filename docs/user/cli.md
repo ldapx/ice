@@ -377,9 +377,24 @@ before trying to simulate a transistor-level circuit.
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
 ice-cli simulation-remove <project> <simulation>
+ice-cli simulation-configure <project> <simulation> [analysis options]
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
+ice-cli simulation-corner-defaults <project> <simulation>
+ice-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
+ice-cli simulation-corner-list <project> <simulation>
+ice-cli simulation-corner-remove <project> <simulation> <name>
+ice-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
+ice-cli simulation-sweep-list <project> <simulation>
+ice-cli simulation-sweep-remove <project> <simulation> <parameter>
+ice-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
+ice-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
+ice-cli simulation-measure-list <project> <simulation>
+ice-cli simulation-measure-remove <project> <simulation> <name>
 ice-cli simulation-trace <project> <simulation> [signals] [max-points]
-ice-cli simulation-measure <project> <simulation> [signal] [threshold]
+ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
+  [--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] \
+  [--signal s] [--input s] [--voltage v] [--tolerance v]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-info <project> <simulation> <graph>
@@ -410,6 +425,18 @@ amplitude, mean, RMS, first/last values, zero and rising crossings, period,
 frequency, and settling time. Use it to validate oscillator startup and
 frequency instead of treating `state: succeeded` as proof that the circuit
 oscillates. A `threshold` overrides the default midpoint crossing level.
+Pass `--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power` for a
+declarative check, or declare metrics once with `simulation-measure-add`; they
+are then evaluated and stored after every run.
+
+`simulation-configure` edits analysis-specific fields such as AC points/range,
+DC source/range, noise output/input, transfer-function source/output,
+temperature, model section, `.param` values, and source overrides.
+`simulation-experiment` runs the configured sweeps, corners, and Monte Carlo
+samples. Each point is written to its own run file with a variant label unless
+`--no-store` is used. `simulation-corner-defaults` populates the TT/FF/SS
+sections declared by the active PDK; `simulation-corner-add` can add any
+explicit section, temperature, supply override, or parameter set.
 
 Without an explicit output path, the simulation writes a stored run under:
 
@@ -423,8 +450,8 @@ and trace data.
 
 Drawn SPICE, text SPICE, and SystemVerilog schematics can all be used. For text
 schematics the stored SPICE source is the circuit netlist; analysis-control
-directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because
-`simulate` supplies the transient analysis.
+directives (`.tran`, `.dc`, `.ac`, `.op`, `.noise`, `.tf`) and `.end` are
+removed because the simulation definition supplies the analysis.
 
 `simulation-add` on a SystemVerilog cell stores the `iverilog` simulator and
 `digital` analysis automatically. `simulation-run` compiles the source with

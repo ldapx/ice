@@ -17,6 +17,8 @@ struct SimulationRunContext {
     std::string projectName;
     ObjectId simulationId = 0;
     std::string simulationName;
+    // Optional experiment variant label (corner, sweep, Monte Carlo sample).
+    std::string variant;
     ObjectId schematicId = 0;
     std::string schematicName;
     SimulationRequest request;
@@ -36,6 +38,7 @@ struct StoredSimulationRun {
     std::string createdAt;
     ObjectId simulationId = 0;
     std::string simulationName;
+    std::string variant;
     ObjectId schematicId = 0;
     std::string schematicName;
     SimulationResult result;

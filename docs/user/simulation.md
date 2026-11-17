@@ -12,8 +12,29 @@ parses the generated Value Change Dump (VCD) into time samples and traces.
 
 Simulation jobs have explicit terminal states: `succeeded`, `failed`,
 `cancelled`, and `timed_out`. Results contain schema metadata, simulator
-identity, an input fingerprint, time samples, named traces, and an actionable
-error string when a job does not succeed.
+identity, an input fingerprint, x-axis samples, named traces, scalar operating
+point/transfer-function results, declarative measurement results, and an
+actionable error string when a job does not succeed.
+
+## Analyses
+
+The ngspice adapter supports these analyses:
+
+| Analysis | Result axis | Main parameters |
+| --- | --- | --- |
+| Transient | time | `start` (optional), `stop`, `step`, `use_initial_conditions` |
+| DC sweep | source sweep | `dc_source`, `dc_start`, `dc_stop`, `dc_step` |
+| AC sweep | frequency | `ac_variation` (`dec`/`oct`/`lin`), `ac_points`, `ac_start`, `ac_stop` |
+| Operating point | operating point | captured signals; results are also stored in `scalars` |
+| Noise | frequency | `noise_output`, `noise_input`, `noise_variation`, `noise_points`, `noise_start`, `noise_stop` |
+| Transfer function | transfer function | `tf_output`, `tf_source`; scalar results include transfer function and impedances |
+
+All analyses accept `temperature`, `model_section`, `parameters`, and
+`source_overrides`. `model_section` rewrites the section argument of `.lib`
+lines, parameters become `.param` cards, and source overrides are applied with
+ngspice `alter` commands before the analysis runs. AC results include both the
+magnitude trace (for example `out`) and a phase trace (`out.phase`, in degrees).
+Noise results include `onoise_spectrum`/`inoise_spectrum` and scalar totals.
 
 Simulation properties define the **Signals to capture** list, a comma-separated
 set of vectors requested from the simulator (for example `v(out), v(in)`). The
@@ -27,8 +48,9 @@ model preamble (`.option`, `.include`, `.lib`) and OSDI initialization. ICE
 applies these before the schematic netlist and loads OSDI models explicitly
 through libngspice; a global `~/.spiceinit` or `PDK_ROOT`/`PDK` environment is
 not used for ICE simulations. Text source is used directly as the circuit
-netlist, with analysis-control directives (`.tran`, `.dc`, `.ac`, `.op`) and
-`.end` removed because the simulation properties supply the analysis. For text
+netlist, with analysis-control directives (`.tran`, `.dc`, `.ac`, `.op`,
+`.noise`, `.tf`) and `.end` removed because the simulation properties supply the
+analysis. For text
 schematics and SystemVerilog cells the **Build Netlist** button and the
 schematic signal-picker button are hidden; **Run Simulation** is available
 immediately. Drawn schematics keep the build-then-run flow and the signal
@@ -116,8 +138,8 @@ emitted as `X<name> <connected nodes...> <subckt name>`. Nested subcircuits are
 emitted recursively before the parent body.
 
 Graphs are presentation-only views over a result. Each graph selects a captured
-signal or the `time` variable for its X axis and one or more captured signals
-(or `time`) for its Y axis. It can also define optional axis limits; blank
+signal or the result's primary x axis (time, frequency, source sweep, or
+operating point) for its X axis and one or more captured signals for its Y axis. It can also define optional axis limits; blank
 limits auto-scale from the returned data. Axis selections and limits change
 only how the plot is drawn and never alter the simulation parameters, netlist,
 or data acquisition. Plots draw labelled axis ticks and a light grid by
@@ -131,6 +153,78 @@ work units. Experiments enumerate parameter combinations deterministically and
 reuse the same runner contract. Netlists are supplied as element/card lines;
 the ngspice adapter adds a title comment when the first line is not already a
 comment.
+
+## Corners, sweeps, and Monte Carlo
+
+A simulation can run as an experiment across process/temperature/supply
+corners, parameter sweeps, and Monte Carlo samples:
+
+- **Corners** set a model section, temperature, source overrides, and `.param`
+  values. `simulation-corner-defaults` populates the TT/FF/SS-style sections
+  declared by the active PDK; custom corners can be added explicitly.
+- **Sweeps** expand one or more parameter axes as a Cartesian product. The
+  names `temperature`, `amplitude`, and `time_constant` map to the analysis
+  fields; `supply` or `source.<name>` sets a source override. Other names become
+  `.param` values used by the netlist.
+- **Monte Carlo** samples temperature, a nominated supply source, and any
+  parameter percentages with a deterministic seed.
+
+Each result point records its corner, sample index, applied parameters, x-axis,
+traces, scalars, and measurement results. In the GUI, open **Experiment
+Setup…** next to **Run Simulation** to edit the analysis parameters, corners,
+sweeps, Monte Carlo settings, and measurements, then run the experiment from the
+same dialog. The **Results** tab lists one row per variant.
+
+From the CLI:
+
+```sh
+ice-cli simulation-configure <project> <simulation> --analysis ac \
+  --ac-points 20 --ac-start 1 --ac-stop 1e8 --signals out,in
+ice-cli simulation-corner-defaults <project> <simulation>
+ice-cli simulation-corner-add <project> <simulation> ff --section ff \
+  --temperature 85 --supply V1=1.1
+ice-cli simulation-sweep-add <project> <simulation> temperature 27 85
+ice-cli simulation-monte-carlo <project> <simulation> --samples 50 \
+  --temperature-sigma 5 --supply-sigma-percent 5 --supply-nominal 1.8
+ice-cli simulation-experiment <project> <simulation>
+```
+
+MCP exposes the same configuration through `simulation_update` and runs it
+with `simulation_experiment`; `simulation_corner_defaults` loads the PDK
+sections. Every point is stored under `build/simulations` with a variant label
+unless `store=false`/`--no-store` is requested.
+
+## Declarative measurements
+
+A simulation can declare metrics that are evaluated automatically after every
+run:
+
+| Metric | Required traces | Unit |
+| --- | --- | --- |
+| `gain` | AC output and input magnitude (input optional) | dB for AC, V/V for transient |
+| `bandwidth` | AC output/input magnitude | Hz |
+| `phase_margin` | AC output/input magnitude and `.phase` traces | degrees |
+| `slew_rate` | transient signal | V/s |
+| `settling_time` | transient signal | s |
+| `power` | transient current/power signal; set `voltage` for supply current | W |
+
+Add a measurement from the GUI experiment dialog, with
+`simulation-measure-add`, or through `simulation_update`'s `measurements` array.
+Results are stored on the run and returned by `simulation_run`/`simulation_result`:
+
+```sh
+ice-cli simulation-measure-add <project> <simulation> gain gain \
+  --signal out --input in
+ice-cli simulation-measure-add <project> <simulation> settling settling_time \
+  --signal out --tolerance 0.02
+ice-cli simulation-measure <project> <simulation>
+```
+
+For a one-off check without changing the simulation:
+
+```sh
+ice-cli simulation-measure <project> <simulation> --metric slew_rate --signal out
+```
 
 ## Stored runs
 
@@ -214,8 +308,26 @@ scripts must define `build_script(ctx)`.
 ```text
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
 ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
+ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals...]
+ice-cli simulation-configure <project> <simulation> [analysis options]
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
 ice-cli simulation-remove <project> <simulation>
+ice-cli simulation-corner-defaults <project> <simulation>
+ice-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
+ice-cli simulation-corner-list <project> <simulation>
+ice-cli simulation-corner-remove <project> <simulation> <name>
+ice-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
+ice-cli simulation-sweep-list <project> <simulation>
+ice-cli simulation-sweep-remove <project> <simulation> <parameter>
+ice-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
+ice-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
+ice-cli simulation-measure-list <project> <simulation>
+ice-cli simulation-measure-remove <project> <simulation> <name>
+ice-cli simulation-trace <project> <simulation> [signals] [max-points]
+ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
+  [--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] \
+  [--signal s] [--input s] [--voltage v] [--tolerance v]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
@@ -243,8 +355,8 @@ it falls back to the newest run for the simulation's schematic. The GUI also
 watches `build/simulations` and refreshes the active plots when new runs appear.
 
 Text schematics accept ordinary ngspice element cards and comments. ICE owns the
-analysis directive, so `.tran`, `.dc`, `.ac`, `.op`, and `.end` are ignored from
-the text source; the current simulation properties provide the transient
+analysis directive, so `.tran`, `.dc`, `.ac`, `.op`, `.noise`, `.tf`, and `.end`
+are ignored from the text source; the current simulation properties provide the
 analysis. Capture node voltages as `v(node)` (or just `node`) and device vectors
 as `i(v1)` or `@l1[i]`. Unsupported requested vectors are reported in the run's
 `warnings` array instead of being silently discarded.

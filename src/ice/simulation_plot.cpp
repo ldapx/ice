@@ -190,7 +190,7 @@ const std::vector<double> *SimulationPlot::valuesForSignal(const std::string &si
     const auto normalized = normalizedSignalName(signal);
     if (normalized.empty())
         return nullptr;
-    if (isTimeSignal(normalized))
+    if (isTimeSignal(normalized) || normalized == normalizedSignalName(result.xAxis))
         return &result.time;
     for (const auto &trace : result.traces) {
         if (normalizedSignalName(trace.name) == normalized)
@@ -209,11 +209,20 @@ void SimulationPlot::ensureDisplayCache() const {
 
     // Display labels fall back to the signal name. They are stored per signal
     // on the graph, so a renamed axis or legend entry survives project reloads.
-    const auto labelFor = [this](const std::string &signal) {
+    const auto labelFor = [this, &result](const std::string &signal) {
         const auto override = graph_.signalLabels.find(signal);
         if (override != graph_.signalLabels.end() && !override->second.empty())
             return QString::fromStdString(override->second);
-        return isTimeSignal(normalizedSignalName(signal)) ? QStringLiteral("Time (s)") : QString::fromStdString(signal);
+        if (isTimeSignal(normalizedSignalName(signal)) ||
+            normalizedSignalName(signal) == normalizedSignalName(result.xAxis)) {
+            if (result.xAxis.empty() || result.xAxis == "time")
+                return QStringLiteral("Time (s)");
+            if (result.xUnit.empty())
+                return QString::fromStdString(result.xAxis);
+            return QStringLiteral("%1 (%2)").arg(QString::fromStdString(result.xAxis),
+                                                 QString::fromStdString(result.xUnit));
+        }
+        return QString::fromStdString(signal);
     };
     const QFontMetricsF metrics(font());
     const qreal legendWidth = std::max<qreal>(40.0, rect().width() - plotLeft - plotRightMargin);
@@ -235,6 +244,8 @@ void SimulationPlot::ensureDisplayCache() const {
     // missing signals fall back to time on X and the first returned trace on Y,
     // which keeps older projects readable after signals are renamed.
     std::string effectiveX = graph_.xAxis;
+    if ((effectiveX.empty() || effectiveX == "time") && !result.xAxis.empty() && result.xAxis != "time")
+        effectiveX = result.xAxis;
     const auto *xValues = valuesForSignal(effectiveX);
     if (!xValues || xValues->empty()) {
         effectiveX = "time";

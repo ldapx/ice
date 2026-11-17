@@ -1,11 +1,16 @@
 #include "icelib/simulation.hpp"
 
+#include "icelib/measure.hpp"
+#include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/vcd.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <clocale>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +20,8 @@
 #include <mutex>
 #include <ngspice/sharedspice.h>
 #include <nlohmann/json.hpp>
+#include <numbers>
+#include <random>
 #include <sstream>
 
 #ifndef _WIN32
@@ -182,15 +189,54 @@ std::string fingerprintRequest(const SimulationRequest &request) {
     mixString(request.analysis);
     mixString(request.simulator);
     mixString(request.simulator_version);
-    mix(reinterpret_cast<const char *>(&request.stop), sizeof(request.stop));
-    mix(reinterpret_cast<const char *>(&request.step), sizeof(request.step));
+    const auto mixDouble = [&](double value) { mix(reinterpret_cast<const char *>(&value), sizeof(value)); };
+    const auto mixInt = [&](int value) { mix(reinterpret_cast<const char *>(&value), sizeof(value)); };
+    mixDouble(request.start);
+    mixDouble(request.stop);
+    mixDouble(request.step);
+    mixDouble(request.amplitude);
+    mixDouble(request.time_constant);
+    mixDouble(request.temperature);
+    mixString(request.modelSection);
+    mixDouble(request.dcStart);
+    mixDouble(request.dcStop);
+    mixDouble(request.dcStep);
+    mixString(request.dcSource);
+    mixString(request.acVariation);
+    mixInt(request.acPoints);
+    mixDouble(request.acStart);
+    mixDouble(request.acStop);
+    mixString(request.noiseOutput);
+    mixString(request.noiseInput);
+    mixString(request.noiseVariation);
+    mixInt(request.noisePoints);
+    mixDouble(request.noiseStart);
+    mixDouble(request.noiseStop);
+    mixString(request.tfOutput);
+    mixString(request.tfSource);
     mix(reinterpret_cast<const char *>(&request.use_initial_conditions), sizeof(request.use_initial_conditions));
+    for (const auto &[name, value] : request.parameters) {
+        mixString(name);
+        mixDouble(value);
+    }
+    for (const auto &[name, value] : request.sourceOverrides) {
+        mixString(name);
+        mixDouble(value);
+    }
     for (const auto &line : request.netlist)
         mixString(line);
     for (const auto &signal : request.probeSignals)
         mixString(signal);
     for (const auto &command : request.initCommands)
         mixString(command);
+    for (const auto &measurement : request.measurements) {
+        mixString(measurement.name);
+        mixString(measurement.metric);
+        mixString(measurement.signal);
+        mixString(measurement.input);
+        mixDouble(measurement.voltage);
+        mixDouble(measurement.tolerance);
+    }
     std::ostringstream text;
     text << std::hex << std::setw(16) << std::setfill('0') << hash;
     return "fnv1a64:" + text.str();
@@ -410,6 +456,226 @@ std::string verilogStringLiteral(const std::filesystem::path &path) {
     return result;
 }
 
+std::string lowerCopy(std::string text) {
+    for (auto &character : text)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return text;
+}
+
+std::string trimCopy(std::string text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+        text.erase(text.begin());
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+        text.pop_back();
+    return text;
+}
+
+std::string formatDouble(double value) {
+    std::ostringstream stream;
+    stream << std::setprecision(17) << value;
+    return stream.str();
+}
+
+bool isSpiceComment(const std::string &line) {
+    const auto trimmed = trimCopy(line);
+    return !trimmed.empty() && (trimmed.front() == '*' || trimmed.front() == ';');
+}
+
+std::string firstSourceName(const std::vector<std::string> &netlist) {
+    for (const auto &line : netlist) {
+        const auto trimmed = trimCopy(line);
+        if (trimmed.empty() || isSpiceComment(trimmed) || trimmed.front() == '.' || trimmed.front() == '+')
+            continue;
+        const auto first = trimmed.find_first_of(" \t");
+        const auto name = lowerCopy(trimmed.substr(0, first));
+        if (!name.empty() && (name.front() == 'v' || name.front() == 'i') && name.size() > 1)
+            return name;
+    }
+    return {};
+}
+
+void applyNetlistOverrides(std::vector<std::string> &lines, const SimulationRequest &request) {
+    const auto section = trimCopy(request.modelSection);
+    for (auto &line : lines) {
+        if (section.empty())
+            break;
+        const auto trimmed = trimCopy(line);
+        const auto lowered = lowerCopy(trimmed);
+        if (!lowered.starts_with(".lib") || lowered.starts_with(".library"))
+            continue;
+        // Replace the final section token while preserving the quoted model
+        // file. Comments after the section are preserved.
+        std::size_t comment = trimmed.find_first_of("*;");
+        const auto body = trimCopy(trimmed.substr(0, comment));
+        const auto lastSpace = body.find_last_of(" \t");
+        if (lastSpace == std::string::npos || lastSpace == 0)
+            continue;
+        const auto before = body.substr(0, lastSpace + 1);
+        std::string suffix;
+        if (comment != std::string::npos)
+            suffix = " " + trimmed.substr(comment);
+        line = before + section + suffix;
+    }
+    for (const auto &[name, value] : request.parameters) {
+        if (name.empty())
+            continue;
+        lines.push_back(".param " + name + "=" + formatDouble(value));
+    }
+    if (std::abs(request.temperature - 27.0) > 1e-9)
+        lines.push_back(".temp " + formatDouble(request.temperature));
+    std::erase_if(lines, [](const std::string &line) { return lowerCopy(trimCopy(line)) == ".end"; });
+}
+
+std::string stripLogPrefix(std::string line) {
+    const auto trimmed = trimCopy(line);
+    if (trimmed.starts_with("stdout "))
+        return trimCopy(trimmed.substr(7));
+    if (trimmed.starts_with("stderr "))
+        return trimCopy(trimmed.substr(7));
+    return trimmed;
+}
+
+std::vector<std::string> displayVectorNames(const NgspiceLog &log) {
+    std::vector<std::string> names;
+    std::string text;
+    {
+        std::lock_guard lock(const_cast<NgspiceLog &>(log).mutex);
+        text = log.text;
+    }
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        line = stripLogPrefix(line);
+        const auto marker = line.find(" : ");
+        if (marker == std::string::npos)
+            continue;
+        const auto name = trimCopy(line.substr(0, marker));
+        if (name.empty() || name.find(' ') != std::string::npos || name.starts_with("Title") ||
+            name.starts_with("Name"))
+            continue;
+        names.push_back(name);
+    }
+    return names;
+}
+
+std::string plotNameContaining(const NgspiceLog &log, const std::string &needle) {
+    std::string text;
+    {
+        std::lock_guard lock(const_cast<NgspiceLog &>(log).mutex);
+        text = log.text;
+    }
+    std::istringstream stream(text);
+    std::string line;
+    const auto loweredNeedle = lowerCopy(needle);
+    while (std::getline(stream, line)) {
+        line = stripLogPrefix(line);
+        const auto lowered = lowerCopy(line);
+        if (lowered.find(loweredNeedle) == std::string::npos)
+            continue;
+        std::istringstream tokens(line);
+        std::string first;
+        tokens >> first;
+        if (!first.empty() && first != "Current" && first != "*")
+            return first;
+    }
+    return {};
+}
+
+bool fetchRealVector(const std::string &name, std::vector<double> &values) {
+    auto *vector = ngGet_Vec_Info(const_cast<char *>(name.c_str()));
+    if (!vector || vector->v_length <= 0)
+        return false;
+    values.clear();
+    values.reserve(static_cast<std::size_t>(vector->v_length));
+    if (vector->v_realdata) {
+        for (int index = 0; index < vector->v_length; ++index)
+            values.push_back(vector->v_realdata[index]);
+        return true;
+    }
+    if (vector->v_compdata) {
+        for (int index = 0; index < vector->v_length; ++index)
+            values.push_back(vector->v_compdata[index].cx_real);
+        return true;
+    }
+    return false;
+}
+
+bool fetchComplexVector(const std::string &name, std::vector<double> &magnitude, std::vector<double> &phaseDegrees) {
+    auto *vector = ngGet_Vec_Info(const_cast<char *>(name.c_str()));
+    if (!vector || vector->v_length <= 0)
+        return false;
+    magnitude.clear();
+    phaseDegrees.clear();
+    magnitude.reserve(static_cast<std::size_t>(vector->v_length));
+    phaseDegrees.reserve(static_cast<std::size_t>(vector->v_length));
+    if (vector->v_compdata) {
+        for (int index = 0; index < vector->v_length; ++index) {
+            const auto real = vector->v_compdata[index].cx_real;
+            const auto imaginary = vector->v_compdata[index].cx_imag;
+            magnitude.push_back(std::hypot(real, imaginary));
+            phaseDegrees.push_back(std::atan2(imaginary, real) * 180.0 / std::numbers::pi);
+        }
+        return true;
+    }
+    if (vector->v_realdata) {
+        for (int index = 0; index < vector->v_length; ++index) {
+            magnitude.push_back(std::abs(vector->v_realdata[index]));
+            phaseDegrees.push_back(vector->v_realdata[index] < 0.0 ? 180.0 : 0.0);
+        }
+        return true;
+    }
+    return false;
+}
+
+std::string vectorExpressionForSignal(const std::string &signal) {
+    std::string name = trimCopy(signal);
+    const auto lowered = lowerCopy(name);
+    if (lowered.empty())
+        return {};
+    if ((lowered.starts_with("v(") || lowered.starts_with("i(") || lowered.starts_with('@')) && name.size() >= 3)
+        return name;
+    if (lowered.find("#branch") != std::string::npos || lowered.find("#input_impedance") != std::string::npos)
+        return name;
+    return "v(" + name + ")";
+}
+
+bool isAnalysisDirective(const std::string &line) {
+    const auto lowered = lowerCopy(trimCopy(line));
+    return lowered.starts_with(".tran") || lowered.starts_with(".dc") || lowered.starts_with(".ac") ||
+           lowered.starts_with(".op") || lowered.starts_with(".noise") || lowered.starts_with(".tf") ||
+           lowered.starts_with(".end");
+}
+
+std::vector<std::string> splitSignalList(const std::string &text) {
+    std::vector<std::string> signals;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const auto end = text.find_first_of(", \t\r\n", start);
+        const auto token = trimCopy(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (!token.empty() && std::find(signals.begin(), signals.end(), token) == signals.end())
+            signals.push_back(token);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return signals;
+}
+
+std::string normalizedAnalysis(std::string analysis) {
+    analysis = lowerCopy(trimCopy(analysis));
+    if (analysis == "tran")
+        return "transient";
+    if (analysis == "dcsweep")
+        return "dc";
+    if (analysis == "acsweep")
+        return "ac";
+    if (analysis == "operating" || analysis == "operatingpoint")
+        return "op";
+    if (analysis == "transfer")
+        return "tf";
+    return analysis.empty() ? "transient" : analysis;
+}
+
 } // namespace
 
 bool populateSimulationSignalsFromTraces(SimulationItem &simulation, const std::vector<SimulationTrace> &traces) {
@@ -451,40 +717,72 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
                                        const ProgressCallback &progress) {
     std::lock_guard lock(ngspiceMutex);
     ScopedNumericLocale numericLocale;
-    SimulationResult result{1, JobState::running, request.analysis, {}, {}, "ngspice", NGSPICE_PACKAGE_VERSION, {}, {}};
+    SimulationResult result;
+    result.state = JobState::running;
+    result.analysis = lowerCopy(trimCopy(request.analysis));
+    if (result.analysis == "tran")
+        result.analysis = "transient";
+    else if (result.analysis == "transfer")
+        result.analysis = "tf";
+    else if (result.analysis == "dcsweep")
+        result.analysis = "dc";
+    else if (result.analysis == "acsweep")
+        result.analysis = "ac";
+    else if (result.analysis == "operating" || result.analysis == "operatingpoint")
+        result.analysis = "op";
+    result.simulator = "ngspice";
+    result.simulator_version = NGSPICE_PACKAGE_VERSION;
     result.input_fingerprint = fingerprintRequest(request);
     if (request.netlist.empty()) {
         result.state = JobState::failed;
         result.error = "ngspice requires a netlist";
         return result;
     }
-    if (request.analysis != "transient" && request.analysis != "tran") {
+    const auto analysis = result.analysis;
+    const bool transient = analysis == "transient";
+    const bool dc = analysis == "dc" || analysis == "dcsweep";
+    const bool ac = analysis == "ac" || analysis == "acsweep";
+    const bool op = analysis == "op" || analysis == "operating" || analysis == "operatingpoint";
+    const bool noise = analysis == "noise";
+    const bool tf = analysis == "tf";
+    if (!transient && !dc && !ac && !op && !noise && !tf) {
         result.state = JobState::failed;
         result.error = "unsupported ngspice analysis: " + request.analysis;
         return result;
     }
-    if (!(request.step > 0.0) || !(request.stop > 0.0)) {
+    if (transient && (!(request.step > 0.0) || !(request.stop > 0.0))) {
         result.state = JobState::failed;
         result.error = "transient analysis requires positive step and stop times";
         return result;
     }
+    if (dc && (!(request.dcStep > 0.0) || request.dcStop < request.dcStart)) {
+        result.state = JobState::failed;
+        result.error = "DC sweep requires a positive step and stop >= start";
+        return result;
+    }
+    if (ac && (!(request.acPoints > 0) || !(request.acStart > 0.0) || !(request.acStop >= request.acStart))) {
+        result.state = JobState::failed;
+        result.error = "AC sweep requires positive points and start, with stop >= start";
+        return result;
+    }
+    if (noise &&
+        (!(request.noisePoints > 0) || !(request.noiseStart > 0.0) || !(request.noiseStop >= request.noiseStart))) {
+        result.state = JobState::failed;
+        result.error = "noise analysis requires positive points and start, with stop >= start";
+        return result;
+    }
+
     std::vector<std::string> lines = request.netlist;
-    const auto firstLineIsComment = [](const std::string &line) {
-        for (const char character : line) {
-            if (std::isspace(static_cast<unsigned char>(character)))
-                continue;
-            return character == '*' || character == ';';
-        }
-        return false;
-    };
-    if (lines.empty() || !firstLineIsComment(lines.front()))
+    if (lines.empty() || !isSpiceComment(lines.front()))
         lines.insert(lines.begin(), "* ICE simulation");
+    applyNetlistOverrides(lines, request);
     lines.push_back(".end");
     std::vector<char *> circuit;
     circuit.reserve(lines.size() + 1);
     for (auto &line : lines)
         circuit.push_back(line.data());
     circuit.push_back(nullptr);
+
     NgspiceLog log;
     if (ngSpice_Init(collectOutput, collectStatus, collectExit, nullptr, nullptr, nullptr, &log) != 0) {
         result.state = JobState::failed;
@@ -508,103 +806,298 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
-    std::ostringstream command;
-    command << "tran " << request.step << " " << request.stop;
-    if (request.use_initial_conditions)
-        command << " uic";
+    for (const auto &[source, value] : request.sourceOverrides) {
+        if (source.empty())
+            continue;
+        const auto command = "alter " + lowerCopy(source) + " = " + formatDouble(value);
+        std::vector<char> buffer(command.begin(), command.end());
+        buffer.push_back('\0');
+        if (ngSpice_Command(buffer.data()) != 0) {
+            result.state = JobState::failed;
+            result.error = "ngspice could not apply source override: " + command;
+            appendFailureDetails(result.error, compactNgspiceLog(log));
+            return result;
+        }
+    }
+
+    std::string command;
+    std::string xVector;
+    std::string xAxis = "time";
+    std::string xUnit = "s";
+    bool complexAnalysis = false;
+    bool scalarAnalysis = false;
+    std::string analysisOutput;
+    std::string source;
+    if (dc)
+        source = trimCopy(request.dcSource);
+    else if (noise)
+        source = trimCopy(request.noiseInput);
+    else if (tf)
+        source = trimCopy(request.tfSource);
+    if (source.empty())
+        source = firstSourceName(request.netlist);
+    if (transient) {
+        command = "tran " + formatDouble(request.step) + " " + formatDouble(request.stop);
+        if (request.start > 0.0)
+            command += " " + formatDouble(request.start);
+        if (request.use_initial_conditions)
+            command += " uic";
+        xVector = "time";
+    } else if (dc) {
+        if (source.empty()) {
+            result.state = JobState::failed;
+            result.error = "DC sweep requires a source name (for example V1)";
+            return result;
+        }
+        command = "dc " + lowerCopy(source) + " " + formatDouble(request.dcStart) + " " + formatDouble(request.dcStop) +
+                  " " + formatDouble(request.dcStep);
+        xVector = "v-sweep";
+        xAxis = lowerCopy(source) + " sweep";
+        xUnit = "V";
+    } else if (ac) {
+        command = "ac " + request.acVariation + " " + std::to_string(request.acPoints) + " " +
+                  formatDouble(request.acStart) + " " + formatDouble(request.acStop);
+        xVector = "frequency";
+        xAxis = "frequency";
+        xUnit = "Hz";
+        complexAnalysis = true;
+    } else if (op) {
+        command = "op";
+        xAxis = "operating point";
+        xUnit = "";
+        scalarAnalysis = true;
+    } else if (noise) {
+        auto output = trimCopy(request.noiseOutput);
+        if (output.empty() && !request.probeSignals.empty())
+            output = request.probeSignals.front();
+        if (output.empty()) {
+            result.state = JobState::failed;
+            result.error = "noise analysis requires an output node or signal";
+            return result;
+        }
+        if (source.empty()) {
+            result.state = JobState::failed;
+            result.error = "noise analysis requires an input source name (for example V1)";
+            return result;
+        }
+        const auto outputExpression = output.find('(') != std::string::npos ? output : "v(" + output + ")";
+        command = "noise " + outputExpression + " " + lowerCopy(source) + " " + request.noiseVariation + " " +
+                  std::to_string(request.noisePoints) + " " + formatDouble(request.noiseStart) + " " +
+                  formatDouble(request.noiseStop);
+        xVector = "frequency";
+        xAxis = "frequency";
+        xUnit = "Hz";
+    } else {
+        auto output = trimCopy(request.tfOutput);
+        if (output.empty() && !request.probeSignals.empty())
+            output = request.probeSignals.front();
+        if (output.empty()) {
+            result.state = JobState::failed;
+            result.error = "transfer-function analysis requires an output node or signal";
+            return result;
+        }
+        if (source.empty()) {
+            result.state = JobState::failed;
+            result.error = "transfer-function analysis requires an input source name (for example V1)";
+            return result;
+        }
+        const auto outputExpression = output.find('(') != std::string::npos ? output : "v(" + output + ")";
+        command = "tf " + outputExpression + " " + lowerCopy(source);
+        xAxis = "transfer function";
+        xUnit = "";
+        scalarAnalysis = true;
+        analysisOutput = output;
+    }
+
     if (token.cancelled()) {
         result.state = JobState::cancelled;
         result.error = "simulation cancelled";
         return result;
     }
-    auto commandText = command.str();
-    if (ngSpice_Command(commandText.data()) != 0) {
+    auto commandBuffer = command;
+    auto *commandText = commandBuffer.data();
+    if (ngSpice_Command(commandText) != 0) {
         result.state = JobState::failed;
-        result.error = "ngspice transient analysis failed";
+        result.error = "ngspice " + analysis + " analysis failed";
         appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
-    auto *time = ngGet_Vec_Info(const_cast<char *>("time"));
-    if (time == nullptr || time->v_realdata == nullptr || time->v_length <= 0) {
+    const auto analysisLog = compactNgspiceLog(log);
+    if (analysisLog.find("aborted") != std::string::npos || analysisLog.find("not found") != std::string::npos ||
+        analysisLog.find("no such device") != std::string::npos) {
         result.state = JobState::failed;
-        result.error = "ngspice did not produce a time vector";
+        result.error = "ngspice " + analysis + " analysis failed";
+        appendFailureDetails(result.error, analysisLog);
+        return result;
+    }
+
+    if (noise) {
+        char listPlots[] = "setplot";
+        ngSpice_Command(listPlots);
+        const auto spectrumPlot = plotNameContaining(log, "Noise Spectral Density");
+        if (!spectrumPlot.empty()) {
+            auto setplot = std::string("setplot ") + spectrumPlot;
+            ngSpice_Command(setplot.data());
+        }
+    }
+
+    const auto fetchX = [&]() {
+        if (xVector.empty()) {
+            result.time = {0.0};
+            return true;
+        }
+        return fetchRealVector(xVector, result.time) && !result.time.empty();
+    };
+    if (!fetchX()) {
+        result.state = JobState::failed;
+        result.error = "ngspice " + analysis + " did not produce the expected x axis (" + xVector + ")";
         appendFailureDetails(result.error, compactNgspiceLog(log));
         return result;
     }
 
-    // Bare names are node voltages. Explicit ngspice vector expressions are
-    // passed through so current probes such as i(v1) and @l1[i] work too.
-    const auto vectorName = [](const std::string &signal) {
-        std::string name = signal;
-        for (auto &character : name)
-            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-        if ((name.starts_with("v(") || name.starts_with("i(") || name.starts_with('@')) && name.size() >= 3)
-            return name;
-        return "v(" + name + ")";
+    std::vector<std::string> requested;
+    for (const auto &signal : request.probeSignals) {
+        const auto trimmed = trimCopy(signal);
+        if (!trimmed.empty() && std::find(requested.begin(), requested.end(), trimmed) == requested.end())
+            requested.push_back(trimmed);
+    }
+    if (scalarAnalysis && requested.empty() && op) {
+        char display[] = "display";
+        ngSpice_Command(display);
+        requested = displayVectorNames(log);
+    }
+    if (noise) {
+        std::vector<std::string> noiseSignals = {"onoise_spectrum", "inoise_spectrum"};
+        for (const auto &signal : requested) {
+            const auto lowered = lowerCopy(signal);
+            if (lowered.find("noise") != std::string::npos &&
+                std::find(noiseSignals.begin(), noiseSignals.end(), signal) == noiseSignals.end())
+                noiseSignals.push_back(signal);
+        }
+        requested = std::move(noiseSignals);
+    } else if (tf) {
+        std::vector<std::string> tfSignals = {"transfer_function", "output_impedance", "input_impedance"};
+        for (const auto &signal : requested) {
+            if (std::find(tfSignals.begin(), tfSignals.end(), signal) == tfSignals.end())
+                tfSignals.push_back(signal);
+        }
+        requested = std::move(tfSignals);
+    } else if (requested.empty()) {
+        requested = {"out"};
+    }
+
+    const auto addScalar = [&](const std::string &name, double value, bool keepTrace) {
+        result.scalars[name] = value;
+        if (keepTrace) {
+            SimulationTrace trace{name, {value}};
+            result.traces.push_back(std::move(trace));
+        }
+    };
+    const auto fetchNamedScalar = [&](const std::string &name, const std::vector<std::string> &candidates,
+                                      bool keepTrace) {
+        for (const auto &candidate : candidates) {
+            std::vector<double> values;
+            if (fetchRealVector(candidate, values) && values.size() == 1) {
+                addScalar(name, values.front(), keepTrace);
+                return true;
+            }
+        }
+        return false;
     };
 
-    std::vector<std::string> wanted = request.probeSignals;
-    if (wanted.empty())
-        wanted.push_back("out");
-
-    std::vector<std::string> missing;
-    const int timeCount = time->v_length;
-    result.time.reserve(static_cast<std::size_t>(timeCount));
-    for (int index = 0; index < timeCount; ++index) {
-        if (token.cancelled()) {
-            result.state = JobState::cancelled;
-            result.error = "simulation cancelled";
-            return result;
+    if (op) {
+        for (const auto &signal : requested) {
+            const auto expression = vectorExpressionForSignal(signal);
+            std::vector<double> values;
+            if (fetchRealVector(expression, values) && values.size() == 1)
+                addScalar(signal, values.front(), true);
         }
-        result.time.push_back(time->v_realdata[index]);
-    }
-
-    for (const auto &signal : wanted) {
-        if (signal.empty())
-            continue;
-        const auto normalizedName = vectorName(signal);
-        auto *vector = ngGet_Vec_Info(const_cast<char *>(normalizedName.c_str()));
-        if (vector == nullptr || vector->v_realdata == nullptr || vector->v_length <= 0) {
-            missing.push_back(signal);
-            continue;
+    } else if (tf) {
+        const auto output = analysisOutput.empty() ? "out" : analysisOutput;
+        const auto sourceName = lowerCopy(source);
+        for (const auto &signal : requested) {
+            const auto normalized = lowerCopy(signal);
+            std::vector<std::string> candidates;
+            if (normalized == "transfer_function" || normalized == "transfer-function" || normalized == "tf")
+                candidates = {"Transfer_function", "transfer_function"};
+            else if (normalized == "output_impedance" || normalized == "output-impedance")
+                candidates = {"output_impedance_at_V(" + output + ")", "output_impedance_at_v(" + output + ")"};
+            else if (normalized == "input_impedance" || normalized == "input-impedance")
+                candidates = {sourceName + "#Input_impedance", sourceName + "#input_impedance"};
+            else
+                candidates = {signal, vectorExpressionForSignal(signal)};
+            fetchNamedScalar(signal, candidates, true);
         }
-        const int count = std::min(timeCount, vector->v_length);
-        auto trace = SimulationTrace{signal, {}};
-        trace.values.reserve(static_cast<std::size_t>(count));
-        for (int index = 0; index < count; ++index) {
-            if (token.cancelled()) {
-                result.state = JobState::cancelled;
-                result.error = "simulation cancelled";
-                return result;
+    } else if (noise) {
+        for (const auto &signal : requested) {
+            const auto expression = signal.find('(') != std::string::npos ? signal : signal;
+            std::vector<double> values;
+            if (fetchRealVector(expression, values) && !values.empty()) {
+                result.traces.push_back({signal, std::move(values)});
             }
-            trace.values.push_back(vector->v_realdata[index]);
         }
-        result.traces.push_back(std::move(trace));
+        char listPlots[] = "setplot";
+        ngSpice_Command(listPlots);
+        const auto integratedPlot = plotNameContaining(log, "Integrated Noise");
+        if (!integratedPlot.empty()) {
+            auto setplot = std::string("setplot ") + integratedPlot;
+            ngSpice_Command(setplot.data());
+            fetchNamedScalar("onoise_total", {"onoise_total"}, false);
+            fetchNamedScalar("inoise_total", {"inoise_total"}, false);
+        }
+    } else {
+        for (const auto &signal : requested) {
+            if (complexAnalysis) {
+                std::vector<double> magnitude;
+                std::vector<double> phase;
+                const auto expression = vectorExpressionForSignal(signal);
+                if (!fetchComplexVector(expression, magnitude, phase))
+                    continue;
+                result.traces.push_back({signal, std::move(magnitude)});
+                result.traces.push_back({signal + ".phase", std::move(phase)});
+            } else {
+                std::vector<double> values;
+                if (signal == xVector) {
+                    values = result.time;
+                } else {
+                    const auto expression = vectorExpressionForSignal(signal);
+                    if (!fetchRealVector(expression, values))
+                        continue;
+                }
+                result.traces.push_back({signal, std::move(values)});
+            }
+        }
     }
 
-    if (result.traces.empty()) {
+    if (result.traces.empty() && result.scalars.empty()) {
         result.state = JobState::failed;
         std::string listed;
-        for (const auto &signal : wanted) {
+        for (const auto &signal : requested) {
             if (!listed.empty())
                 listed += ", ";
             listed += signal;
         }
         result.error = "ngspice did not produce the requested vectors (" + listed +
-                       ") — check the Signals to capture list matches the schematic's nets";
+                       ") - check the Signals to capture list matches the schematic's nets";
         return result;
     }
-    for (const auto &signal : missing)
-        result.warnings.push_back(signal + ": not captured by ngspice");
+    if (xVector.empty())
+        result.time = {0.0};
+    result.xAxis = xAxis;
+    result.xUnit = xUnit;
     if (progress)
-        progress({1.0, "ngspice transient analysis complete"});
+        progress({1.0, "ngspice " + analysis + " analysis complete"});
     result.state = JobState::succeeded;
     return result;
 }
 
 SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, const CancellationToken &token,
                                              const ProgressCallback &progress) {
-    SimulationResult result{1, JobState::running, "digital", {}, {}, "iverilog", "Icarus Verilog", {}, {}};
+    SimulationResult result;
+    result.state = JobState::running;
+    result.analysis = "digital";
+    result.simulator = "iverilog";
+    result.simulator_version = "Icarus Verilog";
     result.input_fingerprint = fingerprintRequest(request);
     std::ostringstream sourceStream;
     for (std::size_t index = 0; index < request.netlist.size(); ++index) {
@@ -827,16 +1320,13 @@ SimulationResult SimulationRunner::run(const SimulationRequest &request, std::ch
         // waits for the worker. ngspice has no async abort here; the timeout
         // marks the result while cancellation propagates cooperatively.
         auto result = future.get();
-        if (result.state == JobState::succeeded || result.state == JobState::running)
-            result = {1,
-                      JobState::timed_out,
-                      request.analysis,
-                      {},
-                      {},
-                      request.simulator,
-                      request.simulator_version,
-                      result.input_fingerprint,
-                      "simulation timed out"};
+        if (result.state == JobState::succeeded || result.state == JobState::running) {
+            result.state = JobState::timed_out;
+            result.error = "simulation timed out";
+            result.traces.clear();
+            result.scalars.clear();
+            result.measurements.clear();
+        }
         {
             std::lock_guard lock(tokenMutex_);
             if (activeToken_ == token)
@@ -850,6 +1340,8 @@ SimulationResult SimulationRunner::run(const SimulationRequest &request, std::ch
         if (activeToken_ == token)
             activeToken_.reset();
     }
+    if (result.state == JobState::succeeded && !request.measurements.empty())
+        result.measurements = evaluateMeasurements(request.measurements, result);
     return result;
 }
 
@@ -875,28 +1367,263 @@ void Experiment::addParameter(std::string name, std::vector<double> values) {
     parameters_.push_back({std::move(name), std::move(values)});
 }
 
+void Experiment::addCorner(SimulationCorner corner) {
+    if (corner.name.empty())
+        throw ProjectError("experiment.corner", "Simulation corners require a name");
+    corners_.push_back(std::move(corner));
+}
+
+void Experiment::setMonteCarlo(SimulationMonteCarloOptions options) {
+    if (options.enabled && options.samples <= 0)
+        throw ProjectError("experiment.monte_carlo", "Monte Carlo requires at least one sample");
+    monteCarlo_ = std::move(options);
+}
+
 std::vector<ExperimentPoint> Experiment::run(const SimulationRequest &base, std::chrono::milliseconds timeout,
                                              const ProgressCallback &progress) const {
     std::vector<ExperimentPoint> points;
-    std::function<void(std::size_t, std::map<std::string, double>)> visit;
-    visit = [&](std::size_t index, std::map<std::string, double> values) {
-        if (index == parameters_.size()) {
-            auto request = base;
-            if (auto it = values.find("amplitude"); it != values.end())
-                request.amplitude = it->second;
-            if (auto it = values.find("time_constant"); it != values.end())
-                request.time_constant = it->second;
-            points.push_back({values, SimulationRunner().run(request, timeout, progress)});
-            return;
-        }
-        for (double value : parameters_[index].values) {
-            auto next = values;
-            next[parameters_[index].name] = value;
-            visit(index + 1, std::move(next));
+    const auto applyValue = [](SimulationRequest &request, const std::string &name, double value) {
+        if (name == "temperature") {
+            request.temperature = value;
+        } else if (name == "amplitude") {
+            request.amplitude = value;
+        } else if (name == "time_constant") {
+            request.time_constant = value;
+        } else if (name == "supply") {
+            const auto source =
+                request.sourceOverrides.empty() ? std::string{"V1"} : request.sourceOverrides.begin()->first;
+            request.sourceOverrides[source] = value;
+        } else if (name.starts_with("source.") || name.starts_with("source:")) {
+            const auto source = name.substr(name.find_first_of(".:") + 1);
+            if (!source.empty())
+                request.sourceOverrides[source] = value;
+        } else {
+            request.parameters[name] = value;
         }
     };
-    visit(0, {});
+    const auto applyCorner = [&](SimulationRequest &request, const SimulationCorner &corner) {
+        if (!corner.modelSection.empty())
+            request.modelSection = corner.modelSection;
+        request.temperature = corner.temperature;
+        for (const auto &[source, value] : corner.sourceOverrides)
+            request.sourceOverrides[source] = value;
+        for (const auto &[name, value] : corner.parameters)
+            request.parameters[name] = value;
+    };
+
+    std::vector<SimulationCorner> corners = corners_;
+    if (corners.empty()) {
+        SimulationCorner nominal;
+        nominal.name = "nominal";
+        nominal.temperature = base.temperature;
+        corners.push_back(std::move(nominal));
+    }
+    std::vector<std::map<std::string, double>> sweeps(1);
+    for (const auto &axis : parameters_) {
+        std::vector<std::map<std::string, double>> expanded;
+        for (const auto &combination : sweeps) {
+            for (const double value : axis.values) {
+                auto next = combination;
+                next[axis.name] = value;
+                expanded.push_back(std::move(next));
+            }
+        }
+        sweeps = std::move(expanded);
+    }
+
+    std::size_t total = 0;
+    for (const auto &corner : corners) {
+        (void)corner;
+        total += sweeps.size() * static_cast<std::size_t>(monteCarlo_.enabled ? std::max(1, monteCarlo_.samples) : 1);
+    }
+    std::size_t completed = 0;
+    SimulationRunner runner;
+    for (std::size_t cornerIndex = 0; cornerIndex < corners.size(); ++cornerIndex) {
+        for (const auto &sweep : sweeps) {
+            const auto samples = monteCarlo_.enabled ? std::max(1, monteCarlo_.samples) : 1;
+            for (int sample = 0; sample < samples; ++sample) {
+                auto request = base;
+                applyCorner(request, corners[cornerIndex]);
+                for (const auto &[name, value] : sweep)
+                    applyValue(request, name, value);
+                std::map<std::string, double> applied = sweep;
+                if (monteCarlo_.enabled) {
+                    std::mt19937 generator(monteCarlo_.seed + static_cast<std::uint32_t>(cornerIndex * 100003) +
+                                           static_cast<std::uint32_t>(sample) * 7919);
+                    std::normal_distribution<double> normal(0.0, 1.0);
+                    if (monteCarlo_.temperatureSigma > 0.0) {
+                        request.temperature += normal(generator) * monteCarlo_.temperatureSigma;
+                        applied["temperature"] = request.temperature;
+                    }
+                    if (monteCarlo_.supplySigmaPercent > 0.0 && !monteCarlo_.supplySource.empty()) {
+                        const auto nominal = monteCarlo_.supplyNominal;
+                        const auto varied =
+                            nominal * (1.0 + normal(generator) * monteCarlo_.supplySigmaPercent / 100.0);
+                        request.sourceOverrides[lowerCopy(monteCarlo_.supplySource)] = varied;
+                        applied["supply"] = varied;
+                    }
+                    for (const auto &[name, sigma] : monteCarlo_.parameterSigmaPercent) {
+                        if (!(sigma > 0.0))
+                            continue;
+                        const auto found = request.parameters.find(name);
+                        const auto nominal = found == request.parameters.end() ? 0.0 : found->second;
+                        const auto varied = nominal * (1.0 + normal(generator) * sigma / 100.0);
+                        request.parameters[name] = varied;
+                        applied[name] = varied;
+                    }
+                }
+                ExperimentPoint point;
+                point.corner = corners[cornerIndex].name;
+                point.sample = monteCarlo_.enabled ? sample + 1 : 0;
+                point.variant = point.corner;
+                for (const auto &[name, value] : sweep)
+                    point.variant += " " + name + "=" + formatDouble(value);
+                if (monteCarlo_.enabled)
+                    point.variant += "/mc" + std::to_string(point.sample);
+                point.parameters = std::move(applied);
+                point.result = runner.run(request, timeout, [&](const SimulationProgress &update) {
+                    SimulationProgress scaled = update;
+                    if (progress && total > 0)
+                        scaled.fraction =
+                            (static_cast<double>(completed) + update.fraction) / static_cast<double>(total);
+                    if (progress)
+                        progress(scaled);
+                });
+                points.push_back(std::move(point));
+                ++completed;
+            }
+        }
+    }
     return points;
+}
+
+SimulationRequest simulationRequestForItem(const Project &project, const SimulationItem &item,
+                                           const std::filesystem::path &projectRoot, std::vector<std::string> *notes) {
+    SimulationRequest request;
+    request.analysis = normalizedAnalysis(item.analysis);
+    request.simulator = item.simulator.empty() ? "ngspice" : item.simulator;
+    request.start = item.start;
+    request.stop = item.stop;
+    request.step = item.step;
+    request.use_initial_conditions = item.use_initial_conditions;
+    request.temperature = item.temperature;
+    request.modelSection = item.modelSection;
+    request.parameters = item.parameters;
+    request.sourceOverrides = item.sourceOverrides;
+    request.dcSource = item.dcSource;
+    request.dcStart = item.dcStart;
+    request.dcStop = item.dcStop;
+    request.dcStep = item.dcStep;
+    request.acVariation = item.acVariation;
+    request.acPoints = item.acPoints;
+    request.acStart = item.acStart;
+    request.acStop = item.acStop;
+    request.noiseOutput = item.noiseOutput;
+    request.noiseInput = item.noiseInput;
+    request.noiseVariation = item.noiseVariation;
+    request.noisePoints = item.noisePoints;
+    request.noiseStart = item.noiseStart;
+    request.noiseStop = item.noiseStop;
+    request.tfOutput = item.tfOutput;
+    request.tfSource = item.tfSource;
+    request.measurements = item.measurements;
+    request.probeSignals = splitSignalList(item.captureSignals);
+    if (!projectRoot.empty())
+        request.workingDirectory = projectRoot;
+
+    const auto cellIt = project.schematicCells.find(item.schematic);
+    if (cellIt == project.schematicCells.end())
+        throw ProjectError("simulation.schematic", "Simulation '" + item.name + "' references a missing schematic");
+    const auto &cell = cellIt->second;
+    if (cell.systemVerilogSchematic) {
+        request.simulator = "iverilog";
+        request.analysis = "digital";
+        const auto source = buildSystemVerilogSimulationSource(project, cell.id);
+        std::istringstream stream(source);
+        std::string line;
+        while (std::getline(stream, line))
+            request.netlist.push_back(line);
+        if (notes)
+            notes->push_back("SystemVerilog source cell");
+    } else if (schematicContainsHdl(project, cell.id)) {
+        std::string error;
+        request.simulator = "mixed";
+        request.analysis = "transient";
+        if (!prepareMixedSignalRequest(request, project, cell.id, &error))
+            throw ProjectError("simulation.mixed", error);
+        applyPdkSimulationSetup(cell.pdk, request);
+        if (notes)
+            notes->push_back("Mixed-signal co-simulation (ngspice + Icarus Verilog)");
+    } else {
+        request.simulator = "ngspice";
+        std::vector<std::string> netlistNotes;
+        request.netlist = buildSimulationNetlist(project, cell.id, &netlistNotes);
+        applyPdkSimulationSetup(cell.pdk, request);
+        if (notes) {
+            for (const auto &note : netlistNotes)
+                notes->push_back(note);
+        }
+    }
+    if (request.simulator == "ngspice" || request.simulator == "mixed") {
+        std::istringstream directives(item.directives);
+        std::string line;
+        while (std::getline(directives, line)) {
+            const auto trimmed = trimCopy(line);
+            if (trimmed.empty() || isAnalysisDirective(trimmed))
+                continue;
+            request.netlist.push_back(trimmed);
+        }
+    }
+    return request;
+}
+
+std::vector<SimulationCorner> pdkSimulationCorners(const std::string &pdkId) {
+    std::vector<SimulationCorner> corners;
+    if (pdkId.empty() || pdkId == genericPdkId)
+        return corners;
+    std::vector<PdkInfo> pdks;
+    try {
+        pdks = findPdks(pdkId);
+    } catch (const std::exception &) {
+        return corners;
+    }
+    if (pdks.empty())
+        return corners;
+    const PdkInfo *selected = &pdks.front();
+    for (const auto &pdk : pdks) {
+        if (pdk.simulationReady) {
+            selected = &pdk;
+            break;
+        }
+    }
+    for (const auto &section : selected->sections) {
+        const auto lowered = lowerCopy(section);
+        const bool standard = lowered.ends_with("tt") || lowered.ends_with("ff") || lowered.ends_with("ss") ||
+                              lowered.find("_tt") != std::string::npos || lowered.find("_ff") != std::string::npos ||
+                              lowered.find("_ss") != std::string::npos;
+        if (!standard)
+            continue;
+        SimulationCorner corner;
+        corner.name = section;
+        corner.modelSection = section;
+        corners.push_back(std::move(corner));
+    }
+    return corners;
+}
+
+std::vector<ExperimentPoint> runSimulationExperiment(const Project &project, const SimulationItem &item,
+                                                     std::chrono::milliseconds timeout,
+                                                     const ProgressCallback &progress,
+                                                     const std::filesystem::path &projectRoot) {
+    const auto request = simulationRequestForItem(project, item, projectRoot);
+    Experiment experiment;
+    for (const auto &sweep : item.sweeps)
+        experiment.addParameter(sweep.parameter, sweep.values);
+    for (const auto &corner : item.corners)
+        experiment.addCorner(corner);
+    if (item.monteCarlo.enabled)
+        experiment.setMonteCarlo(item.monteCarlo);
+    return experiment.run(request, timeout, progress);
 }
 
 std::string jobStateName(JobState state) {
@@ -921,7 +1648,10 @@ std::string serializeSimulationResult(const SimulationResult &result) {
     json output{{"schema_version", result.schema_version},
                 {"state", jobStateName(result.state)},
                 {"analysis", result.analysis},
+                {"x_axis", result.xAxis},
+                {"x_unit", result.xUnit},
                 {"time", result.time},
+                {"scalars", result.scalars},
                 {"simulator", result.simulator},
                 {"simulator_version", result.simulator_version},
                 {"input_fingerprint", result.input_fingerprint},
@@ -930,6 +1660,17 @@ std::string serializeSimulationResult(const SimulationResult &result) {
                 {"traces", json::array()}};
     for (const auto &trace : result.traces)
         output["traces"].push_back({{"name", trace.name}, {"values", trace.values}});
+    output["measurements"] = json::array();
+    for (const auto &measurement : result.measurements) {
+        json entry = {{"name", measurement.name},
+                      {"metric", measurement.metric},
+                      {"value", measurement.value},
+                      {"unit", measurement.unit},
+                      {"valid", measurement.valid}};
+        if (!measurement.error.empty())
+            entry["error"] = measurement.error;
+        output["measurements"].push_back(std::move(entry));
+    }
     return output.dump(2) + "\n";
 }
 } // namespace ice

@@ -834,6 +834,18 @@ are written here instead of appearing below the netlist pane. Implementation
 stage output, DRC summaries/violations, LVS summaries/mismatches, and generic
 application messages use the same category-aware sinks.
 
+## Simulation experiments
+
+Selecting a simulation exposes **Experiment Setup…** next to **Run Simulation**.
+The dialog edits analysis parameters for transient, DC sweep, AC sweep,
+operating point, noise, and transfer-function analyses; PDK TT/FF/SS corners
+(and custom corners with temperature, supply, and parameter overrides);
+parameter sweeps; deterministic Monte Carlo sampling; and declarative
+measurements. **Run Experiment** executes every corner/sweep/sample and lists
+one result per variant with its measurement values and stored run path. The
+main **Run Simulation** button runs the nominal simulation only; both paths use
+the same project model, CLI, and MCP configuration.
+
 ## Simulation scripts
 
 The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation

@@ -852,19 +852,28 @@ A testbench should be able to specify:
 * Parameters
 * Sweeps
 
-Supported analysis should eventually include:
+The ngspice adapter currently supports:
 
 ```text
-DC
-AC
+DC sweep
+AC sweep
 Transient
 Noise
 Operating point
+Transfer function
 Parameter sweeps
 Temperature sweeps
 Corner analysis
-Monte Carlo, where supported
+Monte Carlo sampling
 ```
+
+`SimulationItem` stores the analysis-specific fields, corners, sweeps, Monte
+Carlo options, and declarative measurements. The GUI experiment dialog, CLI
+(`simulation-configure`, `simulation-corner-*`, `simulation-sweep-*`,
+`simulation-monte-carlo`, `simulation-measure-*`, `simulation-experiment`), and
+MCP tools (`simulation_update`, `simulation_corner_defaults`,
+`simulation_experiment`) all use the same `Experiment`/`SimulationRunner`
+contract.
 
 ---
 
