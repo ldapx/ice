@@ -51,7 +51,9 @@ omitted when a PDK does not need them.
 ├── symbols/                       # schematic sidecars
 ├── technology/
 │   ├── layer-styles.json
-│   └── extraction.json
+│   ├── extraction.json
+│   ├── connectivity.json         # layer roles, vias, routing stack
+│   └── drc.json                  # external deck or gdscheck process
 ├── layout/
 │   ├── devices/
 │   │   ├── index.json
@@ -111,7 +113,19 @@ verilog_a = "simulation/verilog-a"
 [pdk.simulation.devices]
 nmos = "sg13_lv_nmos"
 pmos = "sg13_lv_pmos"
+
+[pdk.simulation.probe]
+w = "1u"
+l = "0.13u"
+vdd = 1.2
+vd = 0.6
 ```
+
+`[pdk.simulation.probe]` supplies the minimum-size NMOS dimensions and bias
+used by `ice-cli pdk-doctor`/the GUI PDK readiness check. Width and length are
+emitted verbatim, so a package whose model library sets `.option scale=1u` can
+use unitless values. When the block is absent, ICE uses generic defaults
+(`1u`, `0.13u`, 1.2 V, 0.6 V) instead of guessing from the PDK id.
 
 `manufacturing_grid` is the PDK coordinate grid in ICE database units
 (nanometres). ICE uses it as the default layout grid for new layouts while
@@ -264,10 +278,24 @@ and the die outline land on layers that do not exist in the PDK.
 When `[pdk.implementation.orfs]` is present, ICE may resolve missing LEF,
 Liberty, site, IO-layer, routing, OpenRCX rule, and standard-cell GDS defaults
 from an OpenROAD-flow-scripts platform under `OPENROAD_FLOW_SCRIPTS` or
-`ICE_OPENROAD_FLOW_SCRIPTS`. The Liberty pattern should include the standard-cell
-variant (for GF180MCU, `mcu9t5v0` for 9-track data) so Liberty masters match the
-cell LEF. Explicit per-stack paths take precedence. `implementation-toolchain`
-reports whether `openroad`, `yosys`, and `klayout` are available.
+`ICE_OPENROAD_FLOW_SCRIPTS`. The block can also carry fallback physical policy
+that ICE must not infer from the PDK name:
+
+```toml
+[pdk.implementation.orfs]
+platform = "gf180"
+site = "GF018hv5v_green_sc9"
+io_horizontal_layers = ["Metal3"]
+io_vertical_layers = ["Metal4"]
+routing_min_layer = "Metal1"
+routing_max_layer = "Metal5"
+gds_track = "9t"
+```
+
+Explicit per-stack paths always take precedence. The Liberty pattern should
+include the standard-cell variant (for GF180MCU, `mcu9t5v0` for 9-track data) so
+Liberty masters match the cell LEF. `implementation-toolchain` reports whether
+`openroad`, `yosys`, and `klayout` are available.
 
 ### Layer styles
 
@@ -426,9 +454,10 @@ and a `cell_prefix` used for instance names (for example `IHP `, `SKY130 `, or
 `GF180 `). No global PDK installation is consulted.
 
 The IHP SG13G2 package ships its complete device library plus vendored IHP
-PyCell sources under `vendor/ihp`. Parametric regeneration evaluates those
-sources through `icepy.pcells` and transfers polygons into an `icepy` layout
-cell.
+PyCell sources under `vendor/ihp`. Parametric regeneration runs the package's
+`layout/devices/pcell/ihp_runtime.py`, which evaluates those sources and
+transfers polygons into an `icepy` layout cell. ICE's `icepy.pcells` module is
+technology-neutral and contains only the shared package PCell runtime.
 
 The Sky130 and GF180MCU packages ship ICE-native replicas of their PCell
 families in `layout/devices/pcell/pcells.py`. They use the `icepy` layout
@@ -443,12 +472,64 @@ at a KLayout `.lydrc`/`.drc` deck (with `{deck}`, `{input}`, `{report}`,
 `{top_cell}`, `{suite}`, and `{workdir}` placeholders) or a gdscheck process,
 and may list search paths for an externally installed PDK. The SKY130 package
 uses this to run the SkyWater KLayout signoff deck from `$PDK_ROOT` or Volare.
+The gdscheck variant declares the exact process name:
+
+```json
+{
+  "schema_version": 1,
+  "engine": "gdscheck",
+  "process": "ihp-sg13g2"
+}
+```
+
 Named `suites` can select alternate decks or rule groups. `ICE_DRC_DECK`
 overrides the deck path for every PDK, and `ICE_DRC_DECK_<PDK>` (for example
-`ICE_DRC_DECK_SKY130A`) overrides it for one PDK.
+`ICE_DRC_DECK_SKY130A`) overrides it for one PDK. Packages without
+`technology/drc.json` use a generic identifier-normalizing fallback; ICE no
+longer contains a table of known PDK process names.
+
+### Layer connectivity and routing
+
+`technology/connectivity.json` tells ICE the electrical role of each layer,
+which cut layers connect which conductor pairs, and the vertical stack used by
+the procedural router and the planned-connection router:
+
+```json
+{
+  "format": "ice-pdk-connectivity",
+  "schema_version": 1,
+  "layers": [
+    {"name": "diff", "role": "active"},
+    {"name": "poly", "role": "gate"},
+    {"name": "li1", "role": "conductor", "sheet_resistance": 12.5},
+    {"name": "met1", "role": "conductor"},
+    {"name": "met2", "role": "conductor"},
+    {"name": "licon1", "role": "via"},
+    {"name": "mcon", "role": "via"},
+    {"name": "via", "role": "via"},
+    {"name": "nwell", "role": "marker"}
+  ],
+  "vias": [
+    {"name": "licon1", "lower": ["diff", "poly"], "upper": ["li1"], "size": 170, "enclosure": 50},
+    {"name": "mcon", "lower": ["li1"], "upper": ["met1"], "size": 170, "enclosure": 60},
+    {"name": "via", "lower": ["met1"], "upper": ["met2"], "size": 150, "enclosure": 60}
+  ],
+  "routing": {"stack": ["met1", "met2"]}
+}
+```
+
+Names are matched case-insensitively after removing a trailing `.purpose`, so
+`met1` matches `met1.drawing` and `met1.pin`. Roles are `conductor` (or
+`metal`/`pad`), `active` (or `diffusion`), `gate` (or `poly`), `via`, `marker`,
+`implant`, `well`, `boundary`, `label`, `text`, `ignored`, and `insulator`. `sheet_resistance` is in ohm/square and overrides PEX's generic
+per-kind coefficient for that layer. Via `size` and `enclosure` are in
+nanometres and become the router defaults for that layer pair. Layers and vias
+not declared in the file keep ICE's generic name fallback, so custom PDKs still
+work without the document.
 
 `ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
-`layout_generator`, and `layout_extraction` paths for each installed package.
+`layout_generator`, `layout_extraction`, `layout_connectivity`, and
+`drc_config` paths for each installed package.
 
 ### Polygon extraction rules
 

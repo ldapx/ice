@@ -1,5 +1,6 @@
 #include "app_window.hpp"
 #include "app_widgets.hpp"
+#include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
 #include "icelib/drc.hpp"
 #include "icelib/hdl.hpp"
@@ -456,12 +457,6 @@ ice::ObjectId layoutPortForSchematicPin(const ice::LayoutCell &child, const std:
     return 0;
 }
 
-struct LayoutConnectivity {
-    std::set<ice::ObjectId> conductors;
-    std::map<ice::ObjectId, std::set<ice::ObjectId>> viaConductors;
-    std::set<std::pair<ice::ObjectId, ice::ObjectId>> directPairs;
-};
-
 struct LayoutNetTrace {
     std::set<ice::ObjectId> shapes;
     std::set<ice::ObjectId> connections;
@@ -592,128 +587,6 @@ PinRoutePoint pinRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
     return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}} : PinRoutePoint{{centerX, rect.y}, {0, -1}};
 }
 
-bool parseIndexedLayer(const std::string &key, const std::string &prefix, int &index) {
-    if (!key.starts_with(prefix))
-        return false;
-    const auto digits = key.substr(prefix.size());
-    if (digits.empty() ||
-        !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c) != 0; }))
-        return false;
-    try {
-        index = std::stoi(digits);
-    } catch (const std::exception &) {
-        return false;
-    }
-    return index >= 0;
-}
-
-LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
-    LayoutConnectivity connectivity;
-    std::map<std::string, ice::ObjectId> layersByKey;
-    for (const auto &[id, layer] : project.layers) {
-        const auto key = layerKey(layer.name);
-        if (!key.empty())
-            layersByKey.emplace(key, id);
-    }
-    const auto layerFor = [&](const std::string &key) -> ice::ObjectId {
-        const auto layer = layersByKey.find(key);
-        return layer == layersByKey.end() ? 0 : layer->second;
-    };
-    const auto addConductor = [&](ice::ObjectId layer) {
-        if (layer != 0)
-            connectivity.conductors.insert(layer);
-    };
-
-    std::vector<std::pair<int, ice::ObjectId>> metals;
-    std::vector<std::pair<int, ice::ObjectId>> topMetals;
-    for (const auto &[key, id] : layersByKey) {
-        int index = 0;
-        if (parseIndexedLayer(key, "metal", index))
-            metals.emplace_back(index, id);
-        else if (parseIndexedLayer(key, "topmetal", index))
-            topMetals.emplace_back(index, id);
-    }
-    std::sort(metals.begin(), metals.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
-    std::sort(topMetals.begin(), topMetals.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
-
-    std::vector<std::pair<int, bool>> stack; // layer index, is top metal
-    for (const auto &entry : metals)
-        stack.emplace_back(entry.first, false);
-    for (const auto &entry : topMetals)
-        stack.emplace_back(entry.first, true);
-    if (!stack.empty()) {
-        for (const auto &[_, id] : metals)
-            addConductor(id);
-        for (const auto &[_, id] : topMetals)
-            addConductor(id);
-        for (std::size_t index = 0; index + 1 < stack.size(); ++index) {
-            const auto lowerLayer = stack[index].second ? layerFor("topmetal" + std::to_string(stack[index].first))
-                                                        : layerFor("metal" + std::to_string(stack[index].first));
-            const auto upperLayer = stack[index + 1].second
-                                        ? layerFor("topmetal" + std::to_string(stack[index + 1].first))
-                                        : layerFor("metal" + std::to_string(stack[index + 1].first));
-            if (lowerLayer == 0 || upperLayer == 0)
-                continue;
-            std::string viaKey;
-            if (!stack[index].second && !stack[index + 1].second)
-                viaKey = "via" + std::to_string(stack[index].first);
-            else
-                viaKey = "topvia" + std::to_string(stack[index + 1].first);
-            const auto viaLayer = layerFor(viaKey);
-            if (viaLayer != 0) {
-                auto &allowed = connectivity.viaConductors[viaLayer];
-                allowed.insert(lowerLayer);
-                allowed.insert(upperLayer);
-            } else {
-                connectivity.directPairs.emplace(std::min(lowerLayer, upperLayer), std::max(lowerLayer, upperLayer));
-            }
-        }
-    }
-
-    // A contact layer connects active/poly to the first metal layer. Include
-    // those device layers so a trace can continue from metal into a device.
-    const auto contactLayer = layerFor("contact");
-    if (contactLayer != 0) {
-        std::set<ice::ObjectId> contactConductors;
-        for (const auto &key : {"activ", "gatpoly", "poly2", "metal1"}) {
-            if (const auto layer = layerFor(key); layer != 0)
-                contactConductors.insert(layer);
-        }
-        if (contactConductors.size() >= 2) {
-            auto &allowed = connectivity.viaConductors[contactLayer];
-            for (const auto layer : contactConductors) {
-                allowed.insert(layer);
-                addConductor(layer);
-            }
-        }
-    }
-
-    if (connectivity.conductors.empty()) {
-        // Generic projects may not use technology layer names. Fall back to a
-        // permissive stack so tracing still works for custom layer naming.
-        std::vector<ice::ObjectId> viaLayers;
-        for (const auto &[key, id] : layersByKey) {
-            const bool via = key.find("via") != std::string::npos || key.find("contact") != std::string::npos;
-            const bool ignored = key.find("text") != std::string::npos || key.find("label") != std::string::npos ||
-                                 key.find("boundary") != std::string::npos;
-            if (via) {
-                viaLayers.push_back(id);
-            } else if (!ignored) {
-                addConductor(id);
-            }
-        }
-        if (connectivity.conductors.empty()) {
-            for (const auto &[_, layer] : project.layers)
-                addConductor(layer.id);
-        }
-        for (const auto via : viaLayers)
-            connectivity.viaConductors[via] = connectivity.conductors;
-    }
-    return connectivity;
-}
-
 struct AutoRouteGeometry {
     ice::ObjectId layer = 0;
     std::vector<ice::LayoutPoint> points;
@@ -779,7 +652,7 @@ double routePointSegmentDistance(ice::LayoutPoint point, ice::LayoutPoint a, ice
 }
 
 AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::PlannedConnection &connection,
-                                      const LayoutConnectivity &connectivity) {
+                                      const ice::LayoutConnectivity &connectivity) {
     AutoRouteObstacles result;
     for (const auto &[_, shape] : cell.shapes) {
         if (shape.routedConnection == 0 || shape.routedConnection == connection.id)
@@ -819,7 +692,7 @@ AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::Pl
 
 int autoRouteConflictCount(const std::vector<ice::LayoutPoint> &points, const std::vector<ice::ObjectId> &segmentLayers,
                            const std::vector<std::vector<ice::ObjectId>> &pointVias, ice::Coordinate width,
-                           const AutoRouteObstacles &obstacles, const LayoutConnectivity &connectivity,
+                           const AutoRouteObstacles &obstacles, const ice::LayoutConnectivity &connectivity,
                            ice::Coordinate margin) {
     if (points.size() < 2 || segmentLayers.size() + 1 != points.size())
         return std::numeric_limits<int>::max() / 2;
@@ -947,7 +820,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     if (sourceLayer == 0 || targetLayer == 0)
         return fail("A pin layer has no drawing layer to route from.");
 
-    const auto connectivity = inferLayoutConnectivity(project);
+    const auto connectivity = ice::inferLayoutConnectivity(project, cellIt->second.pdk);
     std::map<ice::ObjectId, std::vector<std::pair<ice::ObjectId, ice::ObjectId>>> graph;
     for (const auto &[via, conductors] : connectivity.viaConductors) {
         for (const auto left : conductors) {
@@ -1018,7 +891,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
             layerIsPinLayer(layerIt->second))
             continue;
-        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+        if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
         const auto sourceVias = viaStack(sourceLayer, layer, predecessorFrom);
         const auto targetVias = viaStack(targetLayer, layer, predecessorTo);
@@ -1174,7 +1047,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
             layerIsPinLayer(layerIt->second))
             continue;
-        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+        if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
         if (std::find(bridgeLayers.begin(), bridgeLayers.end(), neighbor) == bridgeLayers.end())
             bridgeLayers.push_back(neighbor);
@@ -3838,8 +3711,26 @@ class DocumentWindow : public QMainWindow {
                 QStringLiteral("Create a layout layer before converting sources or grounds to pins."));
             return;
         }
-        const auto isMetalLayer = [](const ice::Layer &layer) {
-            return layerKey(layer.name).find("metal") != std::string::npos;
+        const auto connectivity = ice::inferLayoutConnectivity(project_->project(), cellIt->second.pdk);
+        std::set<std::string> routingBases;
+        for (const auto layerId : connectivity.routingLayers) {
+            const auto layer = project_->project().layers.find(layerId);
+            if (layer != project_->project().layers.end()) {
+                auto base = layer->second.name;
+                if (const auto dot = base.find('.'); dot != std::string::npos)
+                    base = base.substr(0, dot);
+                routingBases.insert(layerKey(base));
+            }
+        }
+        const auto isMetalLayer = [&](const ice::Layer &layer) {
+            if (connectivity.routingLayers.contains(layer.id))
+                return true;
+            auto base = layer.name;
+            if (const auto dot = base.find('.'); dot != std::string::npos)
+                base = base.substr(0, dot);
+            if (routingBases.contains(layerKey(base)))
+                return true;
+            return routingBases.empty() && layerKey(layer.name).find("metal") != std::string::npos;
         };
         const auto isPinLayer = [](const ice::Layer &layer) { return layerIsPinLayer(layer); };
 
@@ -4344,45 +4235,33 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto &project = project_->project();
         const auto layers = layoutLayers(project, activeLayoutId_);
-        const auto findLayer = [&](const char *name) -> ice::ObjectId {
-            const auto wanted = QString::fromLatin1(name);
-            QStringList wantedNames{wanted};
-            // SKY130 names its metal layers met1-met5 instead of Metal1-Metal5.
-            if (wanted.startsWith(QStringLiteral("Metal"), Qt::CaseInsensitive))
-                wantedNames.push_back(QStringLiteral("met") + wanted.mid(5));
-            for (const auto &[id, layer] : project.layers) {
-                if (!layerAvailableForLayout(project, activeLayoutId_, layer))
-                    continue;
-                const auto candidate = QString::fromStdString(layer.name);
-                const auto base = candidate.section('.', 0, 0);
-                for (const auto &candidateName : wantedNames) {
-                    if (candidate.compare(candidateName, Qt::CaseInsensitive) == 0 ||
-                        base.compare(candidateName, Qt::CaseInsensitive) == 0)
-                        return id;
-                }
-            }
-            return 0;
-        };
-        static constexpr std::array<std::pair<const char *, const char *>, 7> steps = {{
-            {"Metal1", "Via1"},
-            {"Metal2", "Via2"},
-            {"Metal3", "Via3"},
-            {"Metal4", "Via4"},
-            {"Metal5", "TopVia1"},
-            {"TopMetal1", "TopVia2"},
-            {"TopMetal2", nullptr},
-        }};
+        const auto cell = project.layoutCells.find(activeLayoutId_);
+        const auto connectivity =
+            ice::inferLayoutConnectivity(project, cell == project.layoutCells.end() ? std::string{} : cell->second.pdk);
+
         LayoutPathConfig config;
         config.width = 0;
         config.cell = activeLayoutId_;
-        for (const auto &[metal, via] : steps) {
-            const auto layerId = findLayer(metal);
-            if (layerId == 0)
-                break;
-            const auto viaId = via ? findLayer(via) : 0;
-            const auto layerIt = project.layers.find(layerId);
-            const auto minimum = layerIt == project.layers.end() ? 0 : layoutPathMinimumWidth(layerIt->second);
-            config.layers.push_back({layerId, viaId, metal, minimum});
+        const auto viaBetween = [&](ice::ObjectId lower, ice::ObjectId upper) -> ice::ObjectId {
+            for (const auto &[via, allowed] : connectivity.viaConductors) {
+                if (allowed.contains(lower) && allowed.contains(upper))
+                    return via;
+            }
+            return 0;
+        };
+        std::vector<ice::ObjectId> order;
+        for (const auto layerId : connectivity.routingOrder) {
+            const auto layer = project.layers.find(layerId);
+            if (layer == project.layers.end() || !layerAvailableForLayout(project, activeLayoutId_, layer->second))
+                continue;
+            order.push_back(layerId);
+        }
+        for (std::size_t index = 0; index < order.size(); ++index) {
+            const auto layer = project.layers.find(order[index]);
+            const auto viaId = index + 1 < order.size() ? viaBetween(order[index], order[index + 1]) : 0;
+            const auto minimum = layer == project.layers.end() ? 0 : layoutPathMinimumWidth(layer->second);
+            config.layers.push_back(
+                {order[index], viaId, layer == project.layers.end() ? std::string{} : layer->second.name, minimum});
         }
         if (config.layers.empty() && !layers.empty()) {
             for (const auto &layerRef : layers) {
@@ -4864,7 +4743,7 @@ class DocumentWindow : public QMainWindow {
         const auto cell = project_->project().layoutCells.find(activeLayoutId_);
         if (cell == project_->project().layoutCells.end())
             return trace;
-        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto connectivity = ice::inferLayoutConnectivity(project_->project(), cell->second.pdk);
         const auto shapeLayers = [](const ice::Shape &shape) {
             std::set<ice::ObjectId> layers;
             if (shape.isPath()) {
@@ -5181,7 +5060,10 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
-        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto activeCell = project_->project().layoutCells.find(activeLayoutId_);
+        const auto connectivity = ice::inferLayoutConnectivity(
+            project_->project(),
+            activeCell == project_->project().layoutCells.end() ? std::string{} : activeCell->second.pdk);
         const auto nameOf = [&](ice::ObjectId layerId) -> QString {
             const auto layer = project_->project().layers.find(layerId);
             return layer == project_->project().layers.end() ? QStringLiteral("#%1").arg(layerId)

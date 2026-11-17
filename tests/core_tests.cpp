@@ -1881,9 +1881,7 @@ TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
     const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
     ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
     const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
-    project.schematicCells.at(parentId)
-        .instances.at(source)
-        .parameters.push_back({project.nextId(), "voltage", "1"});
+    project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "voltage", "1"});
     ice::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
     ice::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
 
@@ -1906,7 +1904,8 @@ TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
     project.identity = "hierarchy-pins";
     project.name = "hierarchy-pins";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name, std::initializer_list<const char *> pins) {
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
         const auto symbolId = ice::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
@@ -2476,8 +2475,11 @@ TEST_CASE("package layout device libraries load") {
     }
 }
 
-TEST_CASE("shipped IHP layout device library loads") {
-    const auto libraryPath = std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json";
+TEST_CASE("package IHP geometry library loads") {
+    const auto repositoryRoot = std::filesystem::path(ICE_SOURCE_DIR).parent_path();
+    const auto libraryPath = repositoryRoot / "ice-pkg-ihp-sg13g2" / "layout" / "devices" / "ihp.sg13g2.json";
+    if (!std::filesystem::is_regular_file(libraryPath))
+        return;
     const auto library = ice::LayoutDeviceLibrary::load(libraryPath);
     CHECK(library.name == "IHP SG13G2");
     CHECK(library.pdk == "ihp-sg13g2");
@@ -2987,6 +2989,12 @@ verilog_a = "verilog-a"
 [pdk.simulation.devices]
 nmos = "sg13_lv_nmos"
 pmos = "sg13_lv_pmos"
+
+[pdk.simulation.probe]
+w = "1.5u"
+l = "0.2u"
+vdd = 1.5
+vd = 0.75
 )";
 
     const auto pdks = ice::discoverPdks({root});
@@ -2994,6 +3002,15 @@ pmos = "sg13_lv_pmos"
     if (pdks.size() == 1) {
         CHECK(pdks.front().id == "ihp-sg13g2");
         CHECK(pdks.front().packageName == "test.ihp");
+        CHECK(pdks.front().packageSimulation.has_value());
+        if (pdks.front().packageSimulation) {
+            const auto &probe = pdks.front().packageSimulation->probe;
+            CHECK(probe.declared);
+            CHECK(probe.width == "1.5u");
+            CHECK(probe.length == "0.2u");
+            CHECK(probe.vdd == 1.5);
+            CHECK(probe.vd == 0.75);
+        }
         CHECK(pdks.front().packageVersion == "1.0.0");
         CHECK(pdks.front().needsOsdi);
         CHECK(!pdks.front().simulationReady);

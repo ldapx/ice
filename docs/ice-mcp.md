@@ -327,9 +327,10 @@ standard-cell GDS decks and records `final/6_final.gds`; the package
 GDS decks produce a warning, and `implementation_export_gds` can rerun the
 export.
 
-`drc_run` exports the layout, invokes the deck declared by
-`<package>/technology/drc.json` (or the gdscheck process derived from its PDK),
-and returns normalized violations. Optional `engine` and `deck` arguments
+`drc_run` exports the layout, invokes the deck or declared gdscheck process in
+`<package>/technology/drc.json`, and returns normalized violations. Packages
+without a DRC configuration fall back to a generic identifier normalization,
+not a PDK-specific process table. Optional `engine` and `deck` arguments
 override the package deck, and `suite` selects a named variant. The response
 includes `engine`, `deck`, and `suite`. DRC and LVS results are
 separate from physical-flow route DRC metrics in `implementation_status`.

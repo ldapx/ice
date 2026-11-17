@@ -489,28 +489,27 @@ std::optional<DrcDeck> drcDeckForPdk(const std::string &pdk, const std::string &
 }
 
 std::string gdsCheckProcessForPdk(const std::string &pdk) {
-    std::string compact;
-    for (const unsigned char character : pdk) {
-        if (std::isalnum(character) != 0)
-            compact.push_back(static_cast<char>(std::tolower(character)));
-    }
-    if (compact.empty() || compact == std::string(genericPdkId))
+    if (pdk.empty() || pdk == genericPdkId)
         return {};
-    if (compact.find("ihpsg13g2") != std::string::npos)
-        return "ihp-sg13g2";
-    if (compact.find("ihpsg13cmos5l") != std::string::npos)
-        return "ihp-sg13cmos5l";
-    if (compact.find("gf180mcua") != std::string::npos)
-        return "gf180mcuA";
-    if (compact.find("gf180mcud") != std::string::npos)
-        return "gf180mcuD";
-    if (compact.find("gf180mcu") != std::string::npos)
-        return "gf180mcuA";
-    if (compact.find("icsprout55") != std::string::npos)
-        return "icsprout55";
-    // Unknown PDKs may still be valid gdscheck process names. Preserve the
-    // original identifier rather than rejecting it here.
-    return pdk;
+    // Packages normally declare the exact process in technology/drc.json. This
+    // fallback keeps legacy projects working for identifiers that already look
+    // like process tokens, and normalizes display-style ids such as
+    // "IHP SG13G2" or "ihp.sg13g2" into "ihp-sg13g2".
+    if (pdk.find_first_of(". _") == std::string::npos)
+        return pdk;
+    std::string process;
+    bool pendingSeparator = false;
+    for (const unsigned char character : pdk) {
+        if (std::isalnum(character) != 0) {
+            if (pendingSeparator && !process.empty())
+                process.push_back('-');
+            pendingSeparator = false;
+            process.push_back(static_cast<char>(std::tolower(character)));
+        } else {
+            pendingSeparator = true;
+        }
+    }
+    return process.empty() ? pdk : process;
 }
 
 std::vector<std::string> gdsCheckArguments(const GdsCheckOptions &options) {

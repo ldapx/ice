@@ -166,8 +166,9 @@ cell = project.layout_cell_by_id(procedural.generated_cell)
 
 The script API includes datatype-aware layers, unit helpers, rectangles,
 polygons (including holes), boolean operations, paths, text, vias, rectangular
-arrays, ports, instances, and package device placement through
-`layout.device(...)` with an installed PDK package. A placement returns a
+arrays, ports, instances, package device placement through
+`layout.device(...)` with an installed PDK package, and Manhattan routing with
+`layout.route(...)`/`layout.connect(...)`. A placement returns a
 `DevicePlacement` with absolute pin rectangles and `device`/`model` metadata;
 pass `nets={"G": "GATE", ...}` to bind pins. The generated cell also stores
 planned-device metadata, so LVS can match flattened PCells by model, W/L/M, and
@@ -177,7 +178,8 @@ script/output hashes and `needs_regeneration`.
 
 ## PCell runtime
 
-`icepy.pcells` has two package-facing paths. The shared `PackagePcell` MOS
+`icepy.pcells` is the technology-neutral package PCell runtime. It has two
+package-facing paths. The shared `PackagePcell` MOS
 template builds isolated fingers (one diff island per finger), licon/mcon
 contact arrays, body taps, and well/implant layers. Packages can override
 `contact_size`, `contact_spacing`, and `contact_margin`; SKY130 uses 0.17/0.19
@@ -203,18 +205,24 @@ GF180MCU packages use this path, so their PCell replicas are defined entirely
 with the ICE layout API.
 
 **IHP PyCell runtime.** The upstream IHP PyCell implementations are vendored
-inside the IHP package under `vendor/ihp`. `icepy` provides the ICE-side
-runtime, transfers generated polygons directly into an `icepy` layout cell, and
-converts the PyCell `MkPin` terminal declarations into layout pins:
+inside the IHP package under `vendor/ihp`. The package owns the ICE-side bridge
+in `layout/devices/pcell/ihp_runtime.py`; it bootstraps the CNI/PyCell layer,
+transfers generated polygons directly into an `icepy` layout cell, and converts
+the PyCell `MkPin` terminal declarations into layout pins:
 
 ```python
+import sys
+from pathlib import Path
 import icepy
 
+sys.path.insert(0, "/path/to/ice-pkg-ihp-sg13g2/layout/devices/pcell")
+from ihp_runtime import generate_cell
+
 project = icepy.new_project("nmos_demo")
-cell = icepy.pcells.generate_cell(
+cell = generate_cell(
     project,
     "IHP nmos_1",
-    "/path/to/IHP",
+    "/path/to/ice-pkg-ihp-sg13g2/vendor/ihp",
     "nmos_code",
     "nmos",
     {"w": "1u", "l": "0.13u", "ng": "1"},
@@ -222,19 +230,20 @@ cell = icepy.pcells.generate_cell(
 print(len(cell.shapes), cell.bounds)
 ```
 
-`icepy.pcells.generate_geometry(...)` returns the device-library JSON shape
+`ihp_runtime.generate_geometry(...)` returns the device-library JSON shape
 (`bounds` plus layer/datatype/polygon records), while
 `parameter_specs_for(...)` returns the PCell parameter definitions.
 
-The IHP package uses this runtime through:
+The package exposes this runtime through:
 
 ```text
 ice-pkg-ihp/layout/devices/generator.py
 ```
 
-ICE loads that package hook for layout-device regeneration, and the package
+ICE loads that package hook for layout-device regeneration, and the generator
 passes its vendored `vendor/ihp` tree as the IHP root. Building `icepy` is
-therefore required for IHP PCell regeneration.
+therefore required for IHP PCell regeneration, but no IHP-specific runtime code
+is required in the ICE repository.
 
 The generic package generator contract is:
 
@@ -266,9 +275,15 @@ core model and transaction guarantees.
 PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_smoke.py
 ```
 
-The test exercises the layout builder and project round-trip. If
-`ICE_IHP_ROOT` is set, or an `IHP` checkout exists next to the ICE repository,
-it also generates the IHP nmos PCell through `icepy.pcells`.
+The test exercises the layout builder and project round-trip. If the IHP
+package is installed, it also generates the IHP nmos PCell through the
+package's `ihp_runtime.py` bridge.
+
+Procedural autorouter coverage is available separately:
+
+```sh
+python3 tests/procedural_router_test.py
+```
 
 Package PCell regression coverage is available separately:
 

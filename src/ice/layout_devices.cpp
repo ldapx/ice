@@ -239,43 +239,16 @@ std::filesystem::path layoutDeviceLibraryPath(const std::string &pdk) {
     // Installed PDK packages own their device libraries. Keeping the library
     // inside the package lets the package version pin the PCell definitions,
     // defaults, and geometry together with the simulation models.
-    if (!pdk.empty() && pdk != ice::genericPdkId) {
-        const auto packageRoot = pdkPackageRoot(pdk);
-        if (!packageRoot.empty()) {
-            const auto candidate = packageRoot / "layout" / "devices" / "index.json";
-            if (regularFile(candidate))
-                return candidate;
-        }
-    }
-
-    // Source-tree and system fallbacks keep the bundled IHP library available
-    // for old projects and for running ICE without an installed package.
-    const auto appDir = QCoreApplication::applicationDirPath().toStdString();
-    const std::vector<std::filesystem::path> candidates = {
-        std::filesystem::path(appDir) / "assets" / "layout" / "ihp.sg13g2.json",
-        std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "layout" / "ihp.sg13g2.json",
-        std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "layout" / "ihp.sg13g2.json",
-#ifdef ICE_SOURCE_DIR
-        std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json",
-#endif
-        std::filesystem::path("assets") / "layout" / "ihp.sg13g2.json",
-        std::filesystem::path("/usr/share/ice/assets/layout/ihp.sg13g2.json"),
-    };
-    for (const auto &candidate : candidates) {
-        if (regularFile(candidate))
-            return candidate;
-    }
-    return {};
+    if (pdk.empty() || pdk == ice::genericPdkId)
+        return {};
+    const auto packageRoot = pdkPackageRoot(pdk);
+    if (packageRoot.empty())
+        return {};
+    const auto candidate = packageRoot / "layout" / "devices" / "index.json";
+    return regularFile(candidate) ? candidate : std::filesystem::path{};
 }
 
-std::string layoutDeviceCellPrefix(const ice::LayoutDeviceLibrary &library) {
-    if (!library.cellPrefix.empty())
-        return library.cellPrefix;
-    // The original bundled IHP library predates the cell_prefix field.
-    if (library.pdk == "ihp.sg13g2" || library.pdk == "ihp-sg13g2")
-        return "IHP ";
-    return {};
-}
+std::string layoutDeviceCellPrefix(const ice::LayoutDeviceLibrary &library) { return library.cellPrefix; }
 
 std::string stripLayoutDevicePrefix(const ice::LayoutDeviceLibrary &library, const std::string &cellName) {
     const auto prefix = layoutDeviceCellPrefix(library);

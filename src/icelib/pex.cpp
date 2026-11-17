@@ -4,6 +4,7 @@
 #include "icelib/extraction.hpp"
 #include "icelib/geometry.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
@@ -89,15 +90,42 @@ struct ParsedLayer {
     LayerKind kind = LayerKind::ignored;
     std::string base;
     std::string purpose;
+    double sheetResistance = 0.0;
 };
 
-ParsedLayer parseLayer(const std::string &name) {
+ParsedLayer parseLayer(const std::string &name, const PdkConnectivity *declared = nullptr) {
     ParsedLayer parsed;
     const auto dot = name.rfind('.');
     parsed.base = dot == std::string::npos ? name : name.substr(0, dot);
     parsed.purpose = dot == std::string::npos ? std::string{} : name.substr(dot + 1);
 
     const auto base = lowerCopy(parsed.base);
+    bool resolved = false;
+    if (declared) {
+        if (const auto role = declared->roleFor(name); !role.empty()) {
+            if (role == "via")
+                parsed.kind = LayerKind::via;
+            else if (role == "gate" || role == "poly")
+                parsed.kind = LayerKind::poly;
+            else if (role == "active" || role == "diffusion")
+                parsed.kind = LayerKind::diffusion;
+            else if (role == "conductor" || role == "metal" || role == "pad")
+                parsed.kind = LayerKind::metal;
+            if (role == "via" || role == "gate" || role == "poly" || role == "active" || role == "diffusion" ||
+                role == "conductor" || role == "metal" || role == "pad" || role == "marker" || role == "implant" ||
+                role == "well" || role == "boundary" || role == "label" || role == "text" || role == "ignored" ||
+                role == "insulator")
+                resolved = true;
+            for (const auto &entry : declared->layers) {
+                if (entry.name == lowerCopy(name) || entry.name == lowerCopy(parsed.base)) {
+                    parsed.sheetResistance = entry.sheetResistance;
+                    break;
+                }
+            }
+        }
+    }
+    if (resolved)
+        return parsed;
     if (containsAny(base, {"via", "contact", "licon", "mcon", "vmim"}))
         parsed.kind = LayerKind::via;
     else if (containsAny(base, {"well", "implant", "marker", "boundary", "keepout", "text", "label", "outline",
@@ -1255,6 +1283,8 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
 }
 
 double sheetResistanceFor(const ParsedLayer &layer, const PexOptions &options) {
+    if (layer.sheetResistance > 0.0)
+        return layer.sheetResistance;
     switch (layer.kind) {
     case LayerKind::poly:
         return options.polySheetResistance;
@@ -1296,6 +1326,8 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     const auto &layout = layoutIt->second;
     if (layout.library)
         throw ProjectError("pex.layout", "PEX extracts user layout cells, not read-only library cells");
+    const auto pdkConnectivity = pdkConnectivityFor(layout.pdk);
+    const auto *declaredLayers = pdkConnectivity ? &*pdkConnectivity : nullptr;
     if (options.metalSheetResistance < 0.0 || options.polySheetResistance < 0.0 ||
         options.diffusionSheetResistance < 0.0 || options.viaResistance < 0.0 || options.areaCapacitance < 0.0 ||
         options.perimeterCapacitance < 0.0)
@@ -1352,7 +1384,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
                 notes.push_back("Shape " + std::to_string(shapeId) + " references a missing layer");
                 continue;
             }
-            const auto layer = parseLayer(layerIt->second.name);
+            const auto layer = parseLayer(layerIt->second.name, declaredLayers);
             if (!isDrawingPurpose(layer))
                 continue;
             if (layer.kind == LayerKind::ignored) {
@@ -1394,7 +1426,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
         const auto layerIt = project.layers.find(shape.layer);
         if (layerIt == project.layers.end())
             continue;
-        const auto layer = parseLayer(layerIt->second.name);
+        const auto layer = parseLayer(layerIt->second.name, declaredLayers);
         if (isDrawingPurpose(layer) && layer.kind == LayerKind::ignored)
             skippedLayers.insert(layerIt->second.name);
     }
