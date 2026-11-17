@@ -272,7 +272,21 @@ ComponentPlacement addSchematicComponent(Project &project, ObjectId cellId, cons
         auto &target = project.schematicCells.at(cellId);
         const auto &symbol = target.symbols.at(symbolId);
         const auto instanceName = nextInstanceName(target, symbol.name, request.name);
+        // A repeated placement inherits the parameters of the instance that
+        // already uses this symbol, so the library defaults seeded on the first
+        // placement (model, W/L, value, ...) are not lost on the copies.
+        std::vector<Parameter> inherited;
+        for (const auto &[_, existing] : target.instances) {
+            if (existing.symbol != symbolId)
+                continue;
+            inherited = existing.parameters;
+            break;
+        }
         const auto instanceId = addSchematicInstance(project, cellId, symbolId, instanceName, request.x, request.y);
+        if (!inherited.empty()) {
+            auto &seeded = project.schematicCells.at(cellId);
+            seedDefaultParameters(project, seeded.instances.at(instanceId), inherited);
+        }
         for (const auto &parameter : request.parameters)
             setSchematicParameter(project, cellId, instanceId, parameter.name, parameter.value);
         auto &placed = project.schematicCells.at(cellId);

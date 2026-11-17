@@ -116,7 +116,8 @@ ObjectId Project::nextId() {
     }
     for (const auto &[id, _] : reports)
         update(id);
-    return highest + 1;
+    lastIssuedId_ = std::max(lastIssuedId_, highest) + 1;
+    return lastIssuedId_;
 }
 
 Coordinate Project::snap(Coordinate value) const {

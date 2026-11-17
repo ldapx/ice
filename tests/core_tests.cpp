@@ -1282,6 +1282,38 @@ TEST_CASE("symbol default parameters are seeded without duplicates") {
     CHECK(instance.parameters.size() == 2);
 }
 
+TEST_CASE("project ids stay unique when allocated before insertion") {
+    ice::Project project;
+    project.identity = "ids";
+    project.name = "ids";
+    const auto first = project.nextId();
+    CHECK(project.nextId() == first + 1);
+    CHECK(project.nextId() == first + 2);
+}
+
+TEST_CASE("repeated symbol instances get distinct symbol and pin ids") {
+    ice::Project project;
+    project.identity = "symbols";
+    project.name = "symbols";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto symbolId = ice::addSymbol(project, cellId, "Voltage Source");
+    auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+    symbol.pins.push_back({project.nextId(), "+", 0, 32, ice::PinDirection::up});
+    symbol.pins.push_back({project.nextId(), "-", 0, -32, ice::PinDirection::down});
+
+    ice::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
+    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "V2", 0, 100);
+
+    const auto &placed = project.schematicCells.at(cellId);
+    const auto &copy = placed.symbols.at(placed.instances.at(second).symbol);
+    CHECK(copy.id != symbolId);
+    CHECK(copy.pins.size() == 2);
+    if (copy.pins.size() != 2)
+        return;
+    CHECK(copy.pins[0].id != copy.pins[1].id);
+    CHECK(copy.pins[0].id != symbol.pins[0].id);
+}
+
 TEST_CASE("simulation graph axis limits are optional and survive serialization") {
     ice::Project project;
     project.identity = "graphs";
