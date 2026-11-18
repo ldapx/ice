@@ -114,11 +114,17 @@ std::vector<ice::Parameter> instanceDefaults(const SymbolDefinition &definition)
 // duplicate names when the same source or passive is placed more than once.
 std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &symbolName) {
     std::string prefix;
-    if (symbolName == "Input") {
+    switch (ice::schematicPortKindForSymbol(symbolName)) {
+    case ice::SchematicPortKind::input:
         prefix = "IN";
-    } else if (symbolName == "Output") {
+        break;
+    case ice::SchematicPortKind::output:
         prefix = "OUT";
-    } else {
+        break;
+    case ice::SchematicPortKind::inout:
+        prefix = "PIN";
+        break;
+    case ice::SchematicPortKind::none: {
         char elementPrefix = ice::spiceElementForSymbol(symbolName);
         if (elementPrefix == 0)
             elementPrefix = 'X';
@@ -127,6 +133,8 @@ std::string nextInstanceName(const ice::SchematicCell &cell, const std::string &
         if (!cell.pdk.empty() && cell.pdk != ice::genericPdkId && (elementPrefix == 'M' || elementPrefix == 'Q'))
             elementPrefix = 'X';
         prefix = std::string(1, elementPrefix);
+        break;
+    }
     }
     std::set<std::string> used;
     for (const auto &[_, instance] : cell.instances)

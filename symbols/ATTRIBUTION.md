@@ -3,8 +3,8 @@
 Most `*.svg` files in this directory are copies of artwork from the
 [SchematicSymbolsSVG](https://github.com/sjgallagher2/SchematicSymbolsSVG)
 collection, extracted from `Symbols-Inkscape.svg` (`<symbol>` elements). The
-pulse voltage, sine voltage, current source, and inductor symbols are original
-ICE artwork.
+pulse voltage, sine voltage, current source, inductor, and pin symbols are
+original ICE artwork.
 
 The directory is also the shared artwork library for package symbols. Some SVG
 files, such as `pmos.svg` and `npn_bjt.svg`, do not have a generic symbol
