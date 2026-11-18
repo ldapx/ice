@@ -879,7 +879,9 @@ own spdlog sink and logger:
 Messages are shown with time, severity, category, and text. The category and
 severity selectors filter the view without changing the stored messages; the
 severity selector shows that level and above. Severity colors distinguish
-warnings and errors. Simulation status, warnings, errors, and stored-run paths
+warnings and errors. The copy button copies the currently displayed
+(filtered) rows to the clipboard as tab-separated text; the trash button clears
+the stored message list. Simulation status, warnings, errors, and stored-run paths
 are written here instead of appearing below the netlist pane. Implementation
 stage output, DRC summaries/violations, LVS summaries/mismatches, and generic
 application messages use the same category-aware sinks.
