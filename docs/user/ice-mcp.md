@@ -109,6 +109,11 @@ and ask the user to rebuild/restart ICE.
 | `layout_set_parameter` | Set a procedural layout parameter value without regenerating. |
 | `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
+
+`layout_regenerate` returns `generation_log` from the Python process. Procedural
+scripts can print `layout.report(print_report=True)` to expose area,
+device-area utilization, and large-gap warnings to the agent. Use
+`ice_help(topic="analog-layout")` for the compact-layout workflow.
 | `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_text` | Add text to a layout cell on a layer. |
@@ -372,7 +377,7 @@ separate from physical-flow route DRC metrics in `implementation_status`.
 ## Agent authoring shortcuts
 
 `ice_help(topic)` exposes common workflows and exact tool names:
-`overview`, `project`, `schematic`, `mixed-signal`, `digital`,
+`overview`, `project`, `schematic`, `analog-layout`, `mixed-signal`, `digital`,
 `implementation`, `verification`, `simulation`, and `pdk`.
 
 `schematic_add_component` creates a primitive and returns its pin handles.

@@ -13,8 +13,10 @@ Coordinates are integer database units (one nanometer by default). Use
 The public script-facing API is documented on the
 :doc:`procedural layout API </user/procedural-layout>` page. Scripts should normally
 use :class:`Layout`, :class:`Layer`, :class:`Shape`,
-:class:`DevicePlacement`, and :class:`Route`; the remaining names in this
-module are runner internals.
+:class:`DevicePlacement`, and :class:`Route`; composition helpers return
+:class:`Group`, :class:`Row`, :class:`Column`, :class:`Grid`, :class:`Stack`,
+and :class:`Repeat` handles. The remaining names in this module are runner
+internals.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import traceback
 
 
 SCHEMA_VERSION = 2
+BUILDER_VERSION = 2
 
 
 def _coordinate(value, label):
@@ -76,6 +79,221 @@ def _shape_points(shape):
     return [(point["x"], point["y"]) for point in shape.get("polygon", [])]
 
 
+def _shape_record_bounds(record):
+    """Return ``(x, y, width, height)`` for one shape record."""
+    if not isinstance(record, dict):
+        return None
+    if "rectangle" in record:
+        rectangle = record["rectangle"]
+        return (
+            int(rectangle.get("x", 0)),
+            int(rectangle.get("y", 0)),
+            int(rectangle.get("width", 0)),
+            int(rectangle.get("height", 0)),
+        )
+    if "polygon" in record and record["polygon"]:
+        points = record["polygon"]
+        xs = [int(point.get("x", 0)) for point in points]
+        ys = [int(point.get("y", 0)) for point in points]
+        return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+    if "centerline" in record and record["centerline"]:
+        width = int(record.get("width", 0))
+        half = (width + 1) // 2
+        points = record["centerline"]
+        xs = [int(point.get("x", 0)) for point in points]
+        ys = [int(point.get("y", 0)) for point in points]
+        return (
+            min(xs) - half,
+            min(ys) - half,
+            max(xs) - min(xs) + 2 * half,
+            max(ys) - min(ys) + 2 * half,
+        )
+    if "boolean" in record:
+        boxes = [
+            _shape_record_bounds(operand)
+            for operand in record.get("boolean", {}).get("operands", [])
+        ]
+        boxes = [box for box in boxes if box is not None]
+        if boxes:
+            x0 = min(box[0] for box in boxes)
+            y0 = min(box[1] for box in boxes)
+            x1 = max(box[0] + box[2] for box in boxes)
+            y1 = max(box[1] + box[3] for box in boxes)
+            return (x0, y0, x1 - x0, y1 - y0)
+    return None
+
+
+def _translate_record(record, dx, dy):
+    """Translate one shape record in place."""
+    if not isinstance(record, dict):
+        return
+    if "rectangle" in record:
+        record["rectangle"]["x"] += dx
+        record["rectangle"]["y"] += dy
+    for point in record.get("polygon", []):
+        point["x"] += dx
+        point["y"] += dy
+    for hole in record.get("holes", []):
+        for point in hole:
+            point["x"] += dx
+            point["y"] += dy
+    for point in record.get("centerline", []):
+        point["x"] += dx
+        point["y"] += dy
+    if "boolean" in record:
+        for operand in record["boolean"].get("operands", []):
+            _translate_record(operand, dx, dy)
+
+
+def _mirror_record(record, flip_x, flip_y, low_x, high_x, low_y, high_y):
+    """Mirror one shape record in place within the given bounds."""
+    if not isinstance(record, dict):
+        return
+    if "rectangle" in record:
+        rectangle = record["rectangle"]
+        if flip_x:
+            rectangle["x"] = low_x + high_x - rectangle["x"] - rectangle["width"]
+        if flip_y:
+            rectangle["y"] = low_y + high_y - rectangle["y"] - rectangle["height"]
+    for point in record.get("polygon", []):
+        if flip_x:
+            point["x"] = low_x + high_x - point["x"]
+        if flip_y:
+            point["y"] = low_y + high_y - point["y"]
+    for hole in record.get("holes", []):
+        for point in hole:
+            if flip_x:
+                point["x"] = low_x + high_x - point["x"]
+            if flip_y:
+                point["y"] = low_y + high_y - point["y"]
+    for point in record.get("centerline", []):
+        if flip_x:
+            point["x"] = low_x + high_x - point["x"]
+        if flip_y:
+            point["y"] = low_y + high_y - point["y"]
+    if "boolean" in record:
+        for operand in record["boolean"].get("operands", []):
+            _mirror_record(operand, flip_x, flip_y, low_x, high_x, low_y, high_y)
+
+
+def _mirror_side(side, flip_x, flip_y):
+    if flip_x and side == "left":
+        return "right"
+    if flip_x and side == "right":
+        return "left"
+    if flip_y and side == "top":
+        return "bottom"
+    if flip_y and side == "bottom":
+        return "top"
+    return side
+
+
+def _mirror_orientation(orientation, flip_x, flip_y):
+    if flip_x and not flip_y:
+        return {
+            "r0": "mx",
+            "mx": "r0",
+            "r90": "m135",
+            "m135": "r90",
+            "r180": "my",
+            "my": "r180",
+            "r270": "m45",
+            "m45": "r270",
+        }.get(orientation, orientation)
+    if flip_y and not flip_x:
+        return {
+            "r0": "my",
+            "my": "r0",
+            "r90": "m45",
+            "m45": "r90",
+            "r180": "mx",
+            "mx": "r180",
+            "r270": "m135",
+            "m135": "r270",
+        }.get(orientation, orientation)
+    if flip_x and flip_y:
+        return {
+            "r0": "r180",
+            "r180": "r0",
+            "r90": "r270",
+            "r270": "r90",
+            "mx": "my",
+            "my": "mx",
+            "m45": "m135",
+            "m135": "m45",
+        }.get(orientation, orientation)
+    return orientation
+
+
+def _mirror_ports(ports, flip_x, flip_y, low_x, high_x, low_y, high_y):
+    for port in ports:
+        rectangle = port.get("rectangle")
+        if isinstance(rectangle, dict):
+            if flip_x:
+                rectangle["x"] = low_x + high_x - rectangle["x"] - rectangle["width"]
+            if flip_y:
+                rectangle["y"] = low_y + high_y - rectangle["y"] - rectangle["height"]
+        elif isinstance(rectangle, (list, tuple)) and len(rectangle) == 4:
+            x, y, width, height = rectangle
+            if flip_x:
+                x = low_x + high_x - x - width
+            if flip_y:
+                y = low_y + high_y - y - height
+            port["rectangle"] = (x, y, width, height)
+        if "side" in port:
+            port["side"] = _mirror_side(port["side"], flip_x, flip_y)
+
+
+def _bounds_of_records(shapes, ports=None):
+    min_x = math.inf
+    min_y = math.inf
+    max_x = -math.inf
+    max_y = -math.inf
+    for record in shapes:
+        box = _shape_record_bounds(record)
+        if box is None:
+            continue
+        x, y, width, height = box
+        min_x = min(min_x, x)
+        min_y = min(min_y, y)
+        max_x = max(max_x, x + width)
+        max_y = max(max_y, y + height)
+    for port in ports or []:
+        box = _shape_record_bounds({"rectangle": port.get("rectangle", {})})
+        if box is None:
+            continue
+        x, y, width, height = box
+        min_x = min(min_x, x)
+        min_y = min(min_y, y)
+        max_x = max(max_x, x + width)
+        max_y = max(max_y, y + height)
+    if not math.isfinite(min_x):
+        return None
+    return (int(min_x), int(min_y), int(max_x), int(max_y))
+
+
+def _json_safe(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(entry) for key, entry in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(entry) for entry in value]
+    return str(value)
+
+
+def _union_bounds(boxes):
+    boxes = [box for box in boxes if box is not None]
+    if not boxes:
+        return None
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+
+
 def _path_segment_polygon(start, end, width):
     x0, y0 = start
     x1, y1 = end
@@ -110,6 +328,69 @@ class Shape:
     def __init__(self, layout, record):
         self._layout = layout
         self._record = record
+
+    @property
+    def bounds(self):
+        """Axis-aligned ``(x0, y0, x1, y1)`` bounds, or ``None`` when empty."""
+        box = _shape_record_bounds(self._record)
+        if box is None:
+            return None
+        x, y, width, height = box
+        return (x, y, x + width, y + height)
+
+    @property
+    def width(self):
+        """Shape width in database units."""
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[2] - bounds[0]
+
+    @property
+    def height(self):
+        """Shape height in database units."""
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[3] - bounds[1]
+
+    @property
+    def is_empty(self):
+        """Whether the shape has no geometry."""
+        return self.bounds is None
+
+    @property
+    def ports(self):
+        """Shapes never expose named ports; provided for handle symmetry."""
+        return {}
+
+    def pin(self, name):
+        """Shapes have no device pins; raises ``KeyError``."""
+        raise KeyError(f"shape '{self.name}' has no pin '{name}'")
+
+    def anchor(self, name="center"):
+        """Return an anchor point on the shape bounds."""
+        return _anchor_point(self.bounds, name)
+
+    def move(self, dx, dy):
+        """Translate the shape in place and return ``self``."""
+        _translate_record(
+            self._record, _coordinate(dx, "move dx"), _coordinate(dy, "move dy")
+        )
+        return self
+
+    def mirror(self, axis="y"):
+        """Mirror the shape about its own ``x`` or ``y`` axis center."""
+        bounds = self.bounds
+        if bounds is None:
+            return self
+        flip_x, flip_y = _axis_flags(axis)
+        _mirror_record(
+            self._record,
+            flip_x,
+            flip_y,
+            bounds[0],
+            bounds[2],
+            bounds[1],
+            bounds[3],
+        )
+        return self
 
     @property
     def name(self):
@@ -164,7 +445,18 @@ class DevicePlacement:
     """
 
     def __init__(
-        self, name, device, model, parameters, shapes, ports, port_info, bounds
+        self,
+        name,
+        device,
+        model,
+        parameters,
+        shapes,
+        ports,
+        port_info,
+        bounds,
+        layout=None,
+        device_record=None,
+        port_records=None,
     ):
         self.name = name
         self.device = device
@@ -174,6 +466,182 @@ class DevicePlacement:
         self.ports = ports
         self.port_info = port_info
         self.bounds = bounds
+        self._layout = layout
+        self._device_record = device_record
+        self._port_records = list(port_records or [])
+
+    @property
+    def width(self):
+        """Device bounding-box width in database units."""
+        return 0 if not self.bounds else int(self.bounds.get("width", 0))
+
+    @property
+    def height(self):
+        """Device bounding-box height in database units."""
+        return 0 if not self.bounds else int(self.bounds.get("height", 0))
+
+    @property
+    def is_empty(self):
+        """Whether the device has no flattened shapes or pins."""
+        return not self.shapes and not self.ports
+
+    def pin(self, name):
+        """Return the absolute pin rectangle for ``name``."""
+        return self.ports[str(name)]
+
+    def anchor(self, name="center"):
+        """Return an anchor point on the device bounds."""
+        if not self.bounds:
+            return None
+        rectangle = (
+            self.bounds["x"],
+            self.bounds["y"],
+            self.bounds["width"],
+            self.bounds["height"],
+        )
+        return _anchor_point(
+            (
+                rectangle[0],
+                rectangle[1],
+                rectangle[0] + rectangle[2],
+                rectangle[1] + rectangle[3],
+            ),
+            name,
+        )
+
+    def move(self, dx, dy):
+        """Translate the device geometry, pins, and metadata in place."""
+        dx = _coordinate(dx, "move dx")
+        dy = _coordinate(dy, "move dy")
+        for shape in self.shapes:
+            shape.move(dx, dy)
+        for pin, rectangle in list(self.ports.items()):
+            self.ports[pin] = (
+                rectangle[0] + dx,
+                rectangle[1] + dy,
+                rectangle[2],
+                rectangle[3],
+            )
+        for info in self.port_info.values():
+            rectangle = info.get("rectangle")
+            if rectangle:
+                info["rectangle"] = (
+                    rectangle[0] + dx,
+                    rectangle[1] + dy,
+                    rectangle[2],
+                    rectangle[3],
+                )
+        if self.bounds:
+            self.bounds["x"] += dx
+            self.bounds["y"] += dy
+        for record in self._port_records:
+            rectangle = record.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] += dx
+                rectangle["y"] += dy
+        self._sync_device_record()
+        return self
+
+    def mirror(self, axis="y"):
+        """Mirror the device geometry and pin metadata in place."""
+        bounds = self.bounds
+        if not bounds:
+            return self
+        flip_x, flip_y = _axis_flags(axis)
+        low_x = bounds["x"]
+        low_y = bounds["y"]
+        high_x = low_x + bounds["width"]
+        high_y = low_y + bounds["height"]
+        for shape in self.shapes:
+            _mirror_record(shape._record, flip_x, flip_y, low_x, high_x, low_y, high_y)
+        mirrored_ports = {}
+        mirrored_info = {}
+        for pin, rectangle in self.ports.items():
+            x, y, width, height = rectangle
+            if flip_x:
+                x = low_x + high_x - x - width
+            if flip_y:
+                y = low_y + high_y - y - height
+            mirrored_ports[pin] = (x, y, width, height)
+            info = self.port_info.get(pin, {})
+            mirrored_info[pin] = info
+            info["rectangle"] = mirrored_ports[pin]
+            info["side"] = _mirror_side(info.get("side", "left"), flip_x, flip_y)
+        self.ports = mirrored_ports
+        self.port_info = mirrored_info
+        for record in self._port_records:
+            x, y, width, height = _route_rect(record.get("rectangle"))
+            if flip_x:
+                x = low_x + high_x - x - width
+            if flip_y:
+                y = low_y + high_y - y - height
+            record["rectangle"] = {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            }
+            record["side"] = _mirror_side(record.get("side", "left"), flip_x, flip_y)
+        self._sync_device_record()
+        return self
+
+    def refresh(self):
+        """Refresh pin/bounds caches after composition moved the records."""
+        record = self._device_record
+        if not isinstance(record, dict):
+            return self
+        bounds = record.get("bounds")
+        if isinstance(bounds, dict):
+            self.bounds = {
+                "x": bounds.get("x", 0),
+                "y": bounds.get("y", 0),
+                "width": bounds.get("width", 0),
+                "height": bounds.get("height", 0),
+            }
+        for port in record.get("ports", []):
+            pin = str(port.get("name", ""))
+            rectangle = port.get("rectangle")
+            if not pin or not isinstance(rectangle, dict):
+                continue
+            self.ports[pin] = (
+                rectangle.get("x", 0),
+                rectangle.get("y", 0),
+                rectangle.get("width", 0),
+                rectangle.get("height", 0),
+            )
+            info = self.port_info.setdefault(pin, {})
+            info["rectangle"] = self.ports[pin]
+            info.setdefault("layer", port.get("layer", ""))
+            info["side"] = port.get("side", info.get("side", "left"))
+            info["direction"] = port.get("direction", info.get("direction", "inout"))
+            if "net" in port:
+                info["net"] = port.get("net")
+        return self
+
+    def _sync_device_record(self):
+        record = self._device_record
+        if not isinstance(record, dict):
+            return
+        if self.bounds:
+            record["bounds"] = {
+                "x": self.bounds["x"],
+                "y": self.bounds["y"],
+                "width": self.bounds["width"],
+                "height": self.bounds["height"],
+            }
+        for pin_record in record.get("ports", []):
+            pin = str(pin_record.get("name", ""))
+            if pin in self.ports:
+                x, y, width, height = self.ports[pin]
+                pin_record["rectangle"] = {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                }
+                info = self.port_info.get(pin, {})
+                if info.get("side"):
+                    pin_record["side"] = info["side"]
 
     def __iter__(self):
         return iter(self.shapes)
@@ -251,6 +719,723 @@ class Route:
 
     def __len__(self):
         return len(self.shapes)
+
+    @property
+    def bounds(self):
+        """Axis-aligned ``(x0, y0, x1, y1)`` bounds of the route shapes."""
+        boxes = [
+            _shape_record_bounds(shape._record)
+            for shape in self.shapes
+            if isinstance(shape, Shape)
+        ]
+        boxes = [
+            (box[0], box[1], box[0] + box[2], box[1] + box[3])
+            for box in boxes
+            if box is not None
+        ]
+        return _union_bounds(boxes)
+
+    @property
+    def is_empty(self):
+        """Whether the route emitted no shapes."""
+        return not self.shapes
+
+    @property
+    def ports(self):
+        """Routes never expose named ports; provided for handle symmetry."""
+        return {}
+
+    def pin(self, name):
+        """Routes have no device pins; raises ``KeyError``."""
+        raise KeyError(f"route '{self.net or ''}' has no pin '{name}'")
+
+    def anchor(self, name="center"):
+        """Return an anchor point on the route bounds."""
+        return _anchor_point(self.bounds, name)
+
+    def move(self, dx, dy):
+        """Translate all route shapes and the planned path in place."""
+        dx = _coordinate(dx, "move dx")
+        dy = _coordinate(dy, "move dy")
+        for shape in self.shapes:
+            shape.move(dx, dy)
+        self.points = [(x + dx, y + dy) for x, y in self.points]
+        for segment in self.segments:
+            segment["start"] = (
+                segment["start"][0] + dx,
+                segment["start"][1] + dy,
+            )
+            segment["end"] = (segment["end"][0] + dx, segment["end"][1] + dy)
+        for via in self.vias:
+            via["x"] += dx
+            via["y"] += dy
+        self._owner = getattr(self, "_owner", None)
+        return self
+
+    def mirror(self, axis="y"):
+        """Mirror all route shapes and planned coordinates in place."""
+        bounds = self.bounds
+        if bounds is None:
+            return self
+        flip_x, flip_y = _axis_flags(axis)
+        low_x, low_y, high_x, high_y = bounds
+        for shape in self.shapes:
+            _mirror_record(shape._record, flip_x, flip_y, low_x, high_x, low_y, high_y)
+        _mirror_route_metadata(self, flip_x, flip_y, low_x, high_x, low_y, high_y)
+        return self
+
+
+class _GridValue(int):
+    """Integer project grid that is also callable as ``layout.grid(...)``."""
+
+    def __new__(cls, value, owner):
+        instance = int.__new__(cls, max(1, int(value)))
+        instance._owner = owner
+        return instance
+
+    def __call__(self, *args, **kwargs):
+        return self._owner._grid(*args, **kwargs)
+
+
+def _axis_flags(axis):
+    if axis is True:
+        return True, False
+    text = str(axis or "y").strip().lower()
+    if text in {"x", "horizontal", "h"}:
+        return False, True
+    if text in {"y", "vertical", "v"}:
+        return True, False
+    raise ValueError("mirror axis must be 'x' or 'y'")
+
+
+def _anchor_point(bounds, name="center"):
+    """Resolve an anchor name against ``(x0, y0, x1, y1)`` bounds."""
+    if bounds is None:
+        return None
+    x0, y0, x1, y1 = bounds
+    center_x = (x0 + x1) // 2
+    center_y = (y0 + y1) // 2
+    name = str(name or "center").strip().lower()
+    points = {
+        "c": (center_x, center_y),
+        "center": (center_x, center_y),
+        "n": (center_x, y1),
+        "north": (center_x, y1),
+        "s": (center_x, y0),
+        "south": (center_x, y0),
+        "e": (x1, center_y),
+        "east": (x1, center_y),
+        "w": (x0, center_y),
+        "west": (x0, center_y),
+        "nw": (x0, y1),
+        "ne": (x1, y1),
+        "sw": (x0, y0),
+        "se": (x1, y0),
+        "left": (x0, center_y),
+        "right": (x1, center_y),
+        "top": (center_x, y1),
+        "bottom": (center_x, y0),
+    }
+    if name not in points:
+        raise ValueError(
+            f"unknown anchor '{name}'; use c, n, s, e, w, nw, ne, sw, or se"
+        )
+    return points[name]
+
+
+class _RecordBlock:
+    """A detached group of layout records used by composition objects."""
+
+    def __init__(
+        self, shapes=None, ports=None, instances=None, devices=None, layers=None
+    ):
+        self.shapes = list(shapes or [])
+        self.ports = list(ports or [])
+        self.instances = list(instances or [])
+        self.devices = list(devices or [])
+        self.layers = dict(layers or {})
+        self.handles = []
+
+    @property
+    def bounds(self):
+        bounds = _bounds_of_records(self.shapes, self.ports)
+        instance_boxes = [
+            (
+                int(instance.get("x", 0)),
+                int(instance.get("y", 0)),
+                int(instance.get("x", 0)) + 1,
+                int(instance.get("y", 0)) + 1,
+            )
+            for instance in self.instances
+        ]
+        return _union_bounds([bounds] + instance_boxes)
+
+    @property
+    def width(self):
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[2] - bounds[0]
+
+    @property
+    def height(self):
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[3] - bounds[1]
+
+    @property
+    def is_empty(self):
+        return (
+            not self.shapes
+            and not self.ports
+            and not self.instances
+            and not self.devices
+        )
+
+    def clone(self):
+        return _RecordBlock(
+            copy.deepcopy(self.shapes),
+            copy.deepcopy(self.ports),
+            copy.deepcopy(self.instances),
+            copy.deepcopy(self.devices),
+            copy.deepcopy(self.layers),
+        )
+
+    def translate(self, dx, dy):
+        _translate_block(self, dx, dy)
+        return self
+
+    def mirror(self, axis="y"):
+        _mirror_block(self, axis)
+        return self
+
+    def append(self, other):
+        self.shapes.extend(other.shapes)
+        self.ports.extend(other.ports)
+        self.instances.extend(other.instances)
+        self.devices.extend(other.devices)
+        self.handles.extend(other.handles)
+        for name, spec in other.layers.items():
+            self.layers.setdefault(name, dict(spec))
+        return self
+
+
+def _block_from_layout(layout, deep=False):
+    selector = copy.deepcopy if deep else (lambda value: value)
+    return _RecordBlock(
+        selector(list(layout.shapes)),
+        selector(list(layout.ports)),
+        selector(list(layout.instances)),
+        selector(list(layout.devices)),
+        selector(dict(layout.layers)),
+    )
+
+
+def _detach_handle_records(item):
+    """Remove a concrete handle's records from its owning builder."""
+    owner = getattr(item, "_layout", None)
+    if isinstance(item, Shape):
+        if owner is not None and item._record in owner.shapes:
+            owner.shapes.remove(item._record)
+    elif isinstance(item, DevicePlacement):
+        if owner is not None:
+            for shape in item.shapes:
+                if shape._record in owner.shapes:
+                    owner.shapes.remove(shape._record)
+            for record in getattr(item, "_port_records", []):
+                if record in owner.ports:
+                    owner.ports.remove(record)
+            device_record = getattr(item, "_device_record", None)
+            if device_record in owner.devices:
+                owner.devices.remove(device_record)
+            if item in getattr(owner, "_device_handles", []):
+                owner._device_handles.remove(item)
+    elif isinstance(item, Route):
+        if owner is not None:
+            for shape in item.shapes:
+                if shape._record in owner.shapes:
+                    owner.shapes.remove(shape._record)
+            if item in getattr(owner, "_route_handles", []):
+                owner._route_handles.remove(item)
+
+
+def _copy_handle_block(item, detach=False):
+    """Return a detached copy of everything an item contributes."""
+    if item is None:
+        return _RecordBlock()
+    if isinstance(item, (list, tuple)):
+        block = _RecordBlock()
+        for entry in item:
+            block.append(_copy_handle_block(entry, detach=detach))
+        return block
+    if detach and isinstance(item, (Shape, DevicePlacement, Route)):
+        _detach_handle_records(item)
+    clone = (lambda value: value) if detach else copy.deepcopy
+    if isinstance(item, Shape):
+        block = _RecordBlock([clone(item._record)])
+        if detach:
+            block.handles.append(item)
+        return block
+    if isinstance(item, DevicePlacement):
+        block = _RecordBlock()
+        block.shapes = [clone(shape._record) for shape in item.shapes]
+        block.ports = clone(list(getattr(item, "_port_records", [])))
+        if not block.ports:
+            for pin, rectangle in item.ports.items():
+                info = item.port_info.get(pin, {})
+                block.ports.append(
+                    {
+                        "name": str(pin),
+                        "layer": info.get("layer", ""),
+                        "rectangle": {
+                            "x": rectangle[0],
+                            "y": rectangle[1],
+                            "width": rectangle[2],
+                            "height": rectangle[3],
+                        },
+                        "direction": info.get("direction", "inout"),
+                        "side": info.get("side", "left"),
+                        "net": info.get("net"),
+                        "label": str(pin),
+                        "visible": True,
+                        "locked": False,
+                        "internal": True,
+                    }
+                )
+        if isinstance(getattr(item, "_device_record", None), dict):
+            block.devices = [clone(item._device_record)]
+        else:
+            bounds = item.bounds or {"x": 0, "y": 0, "width": 1, "height": 1}
+            block.devices = [
+                {
+                    "name": item.name,
+                    "device": item.device,
+                    "model": item.model,
+                    "type": item.model or item.device,
+                    "parameters": [
+                        {"name": str(name), "value": str(value)}
+                        for name, value in item.parameters.items()
+                    ],
+                    "bounds": copy.deepcopy(bounds),
+                    "ports": [
+                        {
+                            "name": str(pin),
+                            "net": item.port_info.get(pin, {}).get("net"),
+                            "layer": item.port_info.get(pin, {}).get("layer", ""),
+                            "side": item.port_info.get(pin, {}).get("side", "left"),
+                            "direction": item.port_info.get(pin, {}).get(
+                                "direction", "inout"
+                            ),
+                            "rectangle": {
+                                "x": rectangle[0],
+                                "y": rectangle[1],
+                                "width": rectangle[2],
+                                "height": rectangle[3],
+                            },
+                        }
+                        for pin, rectangle in item.ports.items()
+                    ],
+                }
+            ]
+        if detach:
+            block.handles.append(item)
+        return block
+    if isinstance(item, Route):
+        block = _RecordBlock([clone(shape._record) for shape in item.shapes])
+        if detach:
+            block.handles.append(item)
+        return block
+    if isinstance(item, Layout):
+        return _block_from_layout(item, deep=True)
+    if isinstance(item, _Container):
+        return _RecordBlock(
+            copy.deepcopy(item.shapes),
+            copy.deepcopy(item.ports),
+            copy.deepcopy(item.instances),
+            copy.deepcopy(item.devices),
+            copy.deepcopy(item.layers),
+        )
+    raise TypeError(
+        "layout composition accepts shapes, devices, routes, groups, rows, "
+        "columns, grids, stacks, repeats, spacers, and stretches"
+    )
+
+
+def _translate_route_metadata(route, dx, dy):
+    route.points = [(x + dx, y + dy) for x, y in route.points]
+    for segment in route.segments:
+        segment["start"] = (segment["start"][0] + dx, segment["start"][1] + dy)
+        segment["end"] = (segment["end"][0] + dx, segment["end"][1] + dy)
+    for via in route.vias:
+        via["x"] += dx
+        via["y"] += dy
+
+
+def _mirror_route_metadata(route, flip_x, flip_y, low_x, high_x, low_y, high_y):
+    route.points = [
+        (
+            low_x + high_x - x if flip_x else x,
+            low_y + high_y - y if flip_y else y,
+        )
+        for x, y in route.points
+    ]
+    for segment in route.segments:
+        start = segment["start"]
+        end = segment["end"]
+        segment["start"] = (
+            low_x + high_x - start[0] if flip_x else start[0],
+            low_y + high_y - start[1] if flip_y else start[1],
+        )
+        segment["end"] = (
+            low_x + high_x - end[0] if flip_x else end[0],
+            low_y + high_y - end[1] if flip_y else end[1],
+        )
+    for via in route.vias:
+        if flip_x:
+            via["x"] = low_x + high_x - via["x"]
+        if flip_y:
+            via["y"] = low_y + high_y - via["y"]
+
+
+def _translate_block(block, dx, dy):
+    for record in block.shapes:
+        _translate_record(record, dx, dy)
+    for port in block.ports:
+        rectangle = port.get("rectangle")
+        if isinstance(rectangle, dict):
+            rectangle["x"] += dx
+            rectangle["y"] += dy
+        elif isinstance(rectangle, (list, tuple)) and len(rectangle) == 4:
+            port["rectangle"] = (
+                rectangle[0] + dx,
+                rectangle[1] + dy,
+                rectangle[2],
+                rectangle[3],
+            )
+    for instance in block.instances:
+        instance["x"] += dx
+        instance["y"] += dy
+    for device in block.devices:
+        bounds = device.get("bounds")
+        if isinstance(bounds, dict):
+            bounds["x"] += dx
+            bounds["y"] += dy
+        for port in device.get("ports", []):
+            rectangle = port.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] += dx
+                rectangle["y"] += dy
+    for handle in block.handles:
+        if isinstance(handle, DevicePlacement):
+            handle.refresh()
+        elif isinstance(handle, Route):
+            _translate_route_metadata(handle, dx, dy)
+    return block
+
+
+def _mirror_block(block, axis="y"):
+    bounds = block.bounds
+    if bounds is None:
+        return block
+    flip_x, flip_y = _axis_flags(axis)
+    low_x, low_y, high_x, high_y = bounds
+    for record in block.shapes:
+        _mirror_record(record, flip_x, flip_y, low_x, high_x, low_y, high_y)
+    _mirror_ports(block.ports, flip_x, flip_y, low_x, high_x, low_y, high_y)
+    for instance in block.instances:
+        if flip_x:
+            instance["x"] = low_x + high_x - instance["x"]
+        if flip_y:
+            instance["y"] = low_y + high_y - instance["y"]
+        instance["orientation"] = _mirror_orientation(
+            instance.get("orientation", "r0"), flip_x, flip_y
+        )
+    for device in block.devices:
+        bounds = device.get("bounds")
+        if not isinstance(bounds, dict):
+            continue
+        if flip_x:
+            bounds["x"] = low_x + high_x - bounds["x"] - bounds.get("width", 0)
+        if flip_y:
+            bounds["y"] = low_y + high_y - bounds["y"] - bounds.get("height", 0)
+        _mirror_ports(
+            device.get("ports", []),
+            flip_x,
+            flip_y,
+            low_x,
+            high_x,
+            low_y,
+            high_y,
+        )
+    for handle in block.handles:
+        if isinstance(handle, DevicePlacement):
+            handle.refresh()
+        elif isinstance(handle, Route):
+            _mirror_route_metadata(handle, flip_x, flip_y, low_x, high_x, low_y, high_y)
+    return block
+
+
+def _fragment_bounds(fragment):
+    value = fragment.bounds
+    return value() if callable(value) else value
+
+
+def _handle_bounds(item):
+    if item is None:
+        return None
+    if isinstance(item, (Shape, DevicePlacement, Route)):
+        bounds = item.bounds
+        if isinstance(bounds, dict):
+            return (
+                bounds.get("x", 0),
+                bounds.get("y", 0),
+                bounds.get("x", 0) + bounds.get("width", 0),
+                bounds.get("y", 0) + bounds.get("height", 0),
+            )
+        return bounds
+    if isinstance(item, Layout):
+        return _fragment_bounds(item)
+    if isinstance(item, _Container):
+        return item.bounds
+    if isinstance(item, _Spacer):
+        return (0, 0, item.width, item.height)
+    if isinstance(item, (list, tuple)):
+        return _union_bounds([_handle_bounds(entry) for entry in item])
+    raise TypeError(f"cannot measure {type(item).__name__}")
+
+
+def _handle_ports(item):
+    if isinstance(item, DevicePlacement):
+        return dict(item.ports)
+    if isinstance(item, (Layout, _Container)):
+        result = {}
+        for port in item.ports:
+            rectangle = port.get("rectangle", {})
+            result[str(port.get("name", ""))] = (
+                rectangle.get("x", 0),
+                rectangle.get("y", 0),
+                rectangle.get("width", 0),
+                rectangle.get("height", 0),
+            )
+        return result
+    return {}
+
+
+def _translate_handle(item, dx, dy):
+    if isinstance(item, (Shape, DevicePlacement, Route, Layout, _Container)):
+        item.move(dx, dy)
+        return
+    if isinstance(item, _Spacer):
+        return
+    if isinstance(item, (list, tuple)):
+        for entry in item:
+            _translate_handle(entry, dx, dy)
+        return
+    raise TypeError(f"cannot move {type(item).__name__}")
+
+
+def _mirror_handle(item, axis="y"):
+    if isinstance(item, (Shape, DevicePlacement, Route, Layout, _Container)):
+        item.mirror(axis)
+        return
+    if isinstance(item, _Spacer):
+        return
+    if isinstance(item, (list, tuple)):
+        for entry in item:
+            _mirror_handle(entry, axis)
+        return
+    raise TypeError(f"cannot mirror {type(item).__name__}")
+
+
+def _merge_block_into_layout(layout, block):
+    layout.shapes.extend(block.shapes)
+    layout.ports.extend(block.ports)
+    layout.instances.extend(block.instances)
+    layout.devices.extend(block.devices)
+    for name, spec in block.layers.items():
+        current = layout.layers.setdefault(name, {"number": None, "datatype": None})
+        if spec.get("number") is not None and current.get("number") is None:
+            current["number"] = spec["number"]
+        if spec.get("datatype") is not None and current.get("datatype") is None:
+            current["datatype"] = spec["datatype"]
+
+
+def _snap_value(value, pitch):
+    pitch = max(1, int(pitch))
+    return int(round(value / pitch)) * pitch
+
+
+def _snap_block(block, pitch):
+    pitch = max(1, int(pitch))
+    for record in block.shapes:
+        _snap_record(record, pitch)
+    for port in block.ports:
+        rectangle = port.get("rectangle")
+        if isinstance(rectangle, dict):
+            rectangle["x"] = _snap_value(rectangle["x"], pitch)
+            rectangle["y"] = _snap_value(rectangle["y"], pitch)
+            rectangle["width"] = max(pitch, _snap_value(rectangle["width"], pitch))
+            rectangle["height"] = max(pitch, _snap_value(rectangle["height"], pitch))
+    for instance in block.instances:
+        instance["x"] = _snap_value(instance["x"], pitch)
+        instance["y"] = _snap_value(instance["y"], pitch)
+    for device in block.devices:
+        bounds = device.get("bounds")
+        if isinstance(bounds, dict):
+            bounds["x"] = _snap_value(bounds["x"], pitch)
+            bounds["y"] = _snap_value(bounds["y"], pitch)
+            bounds["width"] = max(pitch, _snap_value(bounds["width"], pitch))
+            bounds["height"] = max(pitch, _snap_value(bounds["height"], pitch))
+        for port in device.get("ports", []):
+            rectangle = port.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] = _snap_value(rectangle["x"], pitch)
+                rectangle["y"] = _snap_value(rectangle["y"], pitch)
+                rectangle["width"] = max(pitch, _snap_value(rectangle["width"], pitch))
+                rectangle["height"] = max(
+                    pitch, _snap_value(rectangle["height"], pitch)
+                )
+    for handle in block.handles:
+        if isinstance(handle, DevicePlacement):
+            handle.refresh()
+    return block
+
+
+def _snap_record(record, pitch):
+    if "rectangle" in record:
+        rectangle = record["rectangle"]
+        rectangle["x"] = _snap_value(rectangle["x"], pitch)
+        rectangle["y"] = _snap_value(rectangle["y"], pitch)
+        rectangle["width"] = max(pitch, _snap_value(rectangle["width"], pitch))
+        rectangle["height"] = max(pitch, _snap_value(rectangle["height"], pitch))
+    for key in ("polygon", "centerline"):
+        for point in record.get(key, []):
+            point["x"] = _snap_value(point["x"], pitch)
+            point["y"] = _snap_value(point["y"], pitch)
+    for hole in record.get("holes", []):
+        for point in hole:
+            point["x"] = _snap_value(point["x"], pitch)
+            point["y"] = _snap_value(point["y"], pitch)
+    if "boolean" in record:
+        for operand in record["boolean"].get("operands", []):
+            _snap_record(operand, pitch)
+
+
+def _prefix_block(block, prefix):
+    prefix = str(prefix)
+    for record in block.shapes:
+        if record.get("name"):
+            record["name"] = f"{prefix}{record['name']}"
+    for port in block.ports:
+        if port.get("name"):
+            port["name"] = f"{prefix}{port['name']}"
+        if port.get("label"):
+            port["label"] = f"{prefix}{port['label']}"
+    for instance in block.instances:
+        if instance.get("name"):
+            instance["name"] = f"{prefix}{instance['name']}"
+    for device in block.devices:
+        old_name = str(device.get("name", ""))
+        if old_name:
+            device["name"] = f"{prefix}{old_name}"
+        for port in device.get("ports", []):
+            if port.get("name"):
+                port["name"] = f"{prefix}{port['name']}"
+    return block
+
+
+def _suffix_block(block, suffix):
+    suffix = str(suffix)
+    for record in block.shapes:
+        if record.get("name"):
+            record["name"] = f"{record['name']}{suffix}"
+    for port in block.ports:
+        if port.get("name"):
+            port["name"] = f"{port['name']}{suffix}"
+        if port.get("label"):
+            port["label"] = f"{port['label']}{suffix}"
+    for device in block.devices:
+        if device.get("name"):
+            device["name"] = f"{device['name']}{suffix}"
+    for instance in block.instances:
+        if instance.get("name"):
+            instance["name"] = f"{instance['name']}{suffix}"
+    return block
+
+
+def _snap_handle(item, pitch):
+    if isinstance(item, Shape):
+        _snap_record(item._record, pitch)
+    elif isinstance(item, DevicePlacement):
+        for shape in item.shapes:
+            _snap_record(shape._record, pitch)
+        for pin, rectangle in list(item.ports.items()):
+            item.ports[pin] = (
+                _snap_value(rectangle[0], pitch),
+                _snap_value(rectangle[1], pitch),
+                max(pitch, _snap_value(rectangle[2], pitch)),
+                max(pitch, _snap_value(rectangle[3], pitch)),
+            )
+        for info in item.port_info.values():
+            rectangle = info.get("rectangle")
+            if rectangle:
+                info["rectangle"] = (
+                    _snap_value(rectangle[0], pitch),
+                    _snap_value(rectangle[1], pitch),
+                    max(pitch, _snap_value(rectangle[2], pitch)),
+                    max(pitch, _snap_value(rectangle[3], pitch)),
+                )
+        if item.bounds:
+            item.bounds["x"] = _snap_value(item.bounds["x"], pitch)
+            item.bounds["y"] = _snap_value(item.bounds["y"], pitch)
+            item.bounds["width"] = max(pitch, _snap_value(item.bounds["width"], pitch))
+            item.bounds["height"] = max(
+                pitch, _snap_value(item.bounds["height"], pitch)
+            )
+        for record in getattr(item, "_port_records", []):
+            rectangle = record.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] = _snap_value(rectangle["x"], pitch)
+                rectangle["y"] = _snap_value(rectangle["y"], pitch)
+                rectangle["width"] = max(pitch, _snap_value(rectangle["width"], pitch))
+                rectangle["height"] = max(
+                    pitch, _snap_value(rectangle["height"], pitch)
+                )
+        item._sync_device_record()
+    elif isinstance(item, Route):
+        for shape in item.shapes:
+            _snap_record(shape._record, pitch)
+        item.points = [
+            (_snap_value(x, pitch), _snap_value(y, pitch)) for x, y in item.points
+        ]
+        item.vias = [
+            dict(via, x=_snap_value(via["x"], pitch), y=_snap_value(via["y"], pitch))
+            for via in item.vias
+        ]
+    elif isinstance(item, Layout):
+        for record in item.shapes:
+            _snap_record(record, pitch)
+        for port in item.ports:
+            rectangle = port.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] = _snap_value(rectangle["x"], pitch)
+                rectangle["y"] = _snap_value(rectangle["y"], pitch)
+                rectangle["width"] = max(pitch, _snap_value(rectangle["width"], pitch))
+                rectangle["height"] = max(
+                    pitch, _snap_value(rectangle["height"], pitch)
+                )
+        for instance in item.instances:
+            instance["x"] = _snap_value(instance["x"], pitch)
+            instance["y"] = _snap_value(instance["y"], pitch)
+        for device in item.devices:
+            bounds = device.get("bounds")
+            if isinstance(bounds, dict):
+                bounds["x"] = _snap_value(bounds["x"], pitch)
+                bounds["y"] = _snap_value(bounds["y"], pitch)
+                bounds["width"] = max(pitch, _snap_value(bounds["width"], pitch))
+                bounds["height"] = max(pitch, _snap_value(bounds["height"], pitch))
+    elif isinstance(item, _Container):
+        _snap_block(item, pitch)
+    elif isinstance(item, (list, tuple)):
+        for entry in item:
+            _snap_handle(entry, pitch)
 
 
 def _route_rect(value):
@@ -737,7 +1922,7 @@ class Layout:
         self.pdk = pdk
         self.pdk_root = pdk_root
         self.db_unit_nm = float(db_unit_nm)
-        self.grid = max(1, _coordinate(grid, "grid"))
+        self.grid = _GridValue(_coordinate(grid, "grid"), self)
         self.params = {
             str(name): "" if value is None else str(value)
             for name, value in (parameters or {}).items()
@@ -755,6 +1940,13 @@ class Layout:
         self._device_geometry_cache = {}
         self._device_count = 0
         self._route_count = 0
+        self._generators = {}
+        self._generator_metadata = {}
+        self._used_generators = {}
+        self._constraint_records = []
+        self._builtin_generators = None
+        self._device_handles = []
+        self._route_handles = []
 
     def _layer_spec(self, name, number=None, datatype=None):
         if not isinstance(name, str) or not name.strip():
@@ -1215,6 +2407,19 @@ class Layout:
             }
         )
 
+    def pin(self, name):
+        """Return a port rectangle ``(x, y, width, height)`` by name."""
+        for port in self.ports:
+            if str(port.get("name")) == str(name):
+                rectangle = port["rectangle"]
+                return (
+                    rectangle["x"],
+                    rectangle["y"],
+                    rectangle["width"],
+                    rectangle["height"],
+                )
+        raise KeyError(f"layout has no port '{name}'")
+
     def instance(self, cell, x, y, orientation="r0", name=None):
         """Place an instance of an existing layout cell.
 
@@ -1539,6 +2744,7 @@ class Layout:
             shapes.append(self._add_shape(record))
         port_rectangles = {}
         port_records = []
+        layout_port_records = []
         port_info = {}
         for source in geometry.get("ports", []):
             rect = source.get("rectangle", {})
@@ -1576,20 +2782,20 @@ class Layout:
             )
             side = self._device_side(str(source.get("side", "left")), orientation)
             direction = str(source.get("direction", "inout"))
-            self.ports.append(
-                {
-                    "name": port_name,
-                    "layer": layer_name,
-                    "rectangle": rectangle,
-                    "direction": direction,
-                    "side": side,
-                    "net": net,
-                    "label": port_name,
-                    "visible": bool(source.get("visible", True)),
-                    "locked": bool(source.get("locked", False)),
-                    "internal": True,
-                }
-            )
+            layout_port = {
+                "name": port_name,
+                "layer": layer_name,
+                "rectangle": rectangle,
+                "direction": direction,
+                "side": side,
+                "net": net,
+                "label": port_name,
+                "visible": bool(source.get("visible", True)),
+                "locked": bool(source.get("locked", False)),
+                "internal": True,
+            }
+            self.ports.append(layout_port)
+            layout_port_records.append(layout_port)
             port_rectangles[pin] = (
                 rectangle["x"],
                 rectangle["y"],
@@ -1610,7 +2816,7 @@ class Layout:
                     "layer": layer_name,
                     "side": side,
                     "direction": direction,
-                    "rectangle": rectangle,
+                    "rectangle": dict(rectangle),
                 }
             )
         # Propagate pin nets to the device geometry that carries each pin.
@@ -1658,7 +2864,7 @@ class Layout:
             "port_info": port_info,
         }
         self.devices.append(device_record)
-        return DevicePlacement(
+        placement = DevicePlacement(
             instance_name,
             str(cell.get("name", device_name)),
             model,
@@ -1667,7 +2873,12 @@ class Layout:
             port_rectangles,
             port_info,
             bounds,
+            self,
+            device_record,
+            layout_port_records,
         )
+        self._device_handles.append(placement)
+        return placement
 
     def _normalize_route_layers(self, layer, layers):
         if layers is None:
@@ -2420,7 +3631,7 @@ class Layout:
                 continue
             if (before[0] == current[0]) != (current[0] == after[0]):
                 bends += 1
-        return Route(
+        route = Route(
             net,
             layer_names[start_layer_index],
             width,
@@ -2433,6 +3644,9 @@ class Layout:
             bends,
             layer_names,
         )
+        route._owner = self
+        self._route_handles.append(route)
+        return route
 
     def connect(
         self,
@@ -2573,6 +3787,909 @@ class Layout:
             start_layer=start_layer_name,
             end_layer=end_layer_name,
         )
+
+    # -- composition and inspection --------------------------------------
+    @property
+    def constraints(self):
+        """Constraint metadata recorded by :meth:`constraint` and helpers."""
+        return list(self._constraint_records)
+
+    @property
+    def generator_metadata(self):
+        """Metadata for generators instantiated by this builder."""
+        return [_json_safe(dict(entry)) for entry in self._used_generators.values()]
+
+    @property
+    def is_empty(self):
+        """Whether this builder or group contains no records."""
+        return (
+            not self.shapes
+            and not self.ports
+            and not self.instances
+            and not self.devices
+        )
+
+    @property
+    def width(self):
+        """Bounding-box width of the builder or group."""
+        bounds = _fragment_bounds(self)
+        return 0 if bounds is None else bounds[2] - bounds[0]
+
+    @property
+    def height(self):
+        """Bounding-box height of the builder or group."""
+        bounds = _fragment_bounds(self)
+        return 0 if bounds is None else bounds[3] - bounds[1]
+
+    def move(self, dx, dy):
+        """Translate every record in this builder and return ``self``."""
+        dx = _coordinate(dx, "move dx")
+        dy = _coordinate(dy, "move dy")
+        for record in self.shapes:
+            _translate_record(record, dx, dy)
+        for port in self.ports:
+            rectangle = port.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] += dx
+                rectangle["y"] += dy
+        for instance in self.instances:
+            instance["x"] += dx
+            instance["y"] += dy
+        for device in self.devices:
+            bounds = device.get("bounds")
+            if isinstance(bounds, dict):
+                bounds["x"] += dx
+                bounds["y"] += dy
+            for port in device.get("ports", []):
+                rectangle = port.get("rectangle")
+                if isinstance(rectangle, dict):
+                    rectangle["x"] += dx
+                    rectangle["y"] += dy
+        for handle in self._device_handles:
+            handle.refresh()
+        for route in self._route_handles:
+            _translate_route_metadata(route, dx, dy)
+        return self
+
+    def mirror(self, axis="y"):
+        """Mirror every record about its own bounds center."""
+        bounds = _fragment_bounds(self)
+        _mirror_block(_block_from_layout(self), axis)
+        for handle in self._device_handles:
+            handle.refresh()
+        if bounds is not None:
+            flip_x, flip_y = _axis_flags(axis)
+            low_x, low_y, high_x, high_y = bounds
+            for route in self._route_handles:
+                _mirror_route_metadata(
+                    route, flip_x, flip_y, low_x, high_x, low_y, high_y
+                )
+        return self
+
+    def add(self, item, x=0, y=0, mirror=None, prefix=None):
+        """Place a composed fragment into this builder.
+
+        Shapes, devices, routes, groups, rows, columns, grids, stacks, and
+        repeats are accepted. Placement copies the item's records; the source
+        handle remains valid and can be placed again.
+        """
+        detach = not isinstance(item, (Layout, _Container))
+        block = _copy_handle_block(item, detach=detach)
+        if mirror:
+            _mirror_block(block, mirror)
+        if prefix:
+            _prefix_block(block, prefix)
+        bounds = block.bounds
+        if bounds is not None:
+            _translate_block(
+                block,
+                _coordinate(x, "add x") - bounds[0],
+                _coordinate(y, "add y") - bounds[1],
+            )
+        existing = {str(port.get("name", "")) for port in self.ports}
+        names = [str(port.get("name", "")) for port in block.ports]
+        conflicts = sorted(name for name in names if name and name in existing)
+        duplicates = sorted(
+            name for name in set(names) if name and names.count(name) > 1
+        )
+        if conflicts or duplicates:
+            raise ValueError(
+                "duplicate port name(s) while adding layout fragment: "
+                + ", ".join(sorted(set(conflicts + duplicates)))
+                + "; use add(..., prefix=...) to rename them"
+            )
+        _merge_block_into_layout(self, block)
+        for handle in block.handles:
+            if (
+                isinstance(handle, DevicePlacement)
+                and handle not in self._device_handles
+            ):
+                self._device_handles.append(handle)
+            elif isinstance(handle, Route) and handle not in self._route_handles:
+                self._route_handles.append(handle)
+        return item
+
+    def group(self, name=None):
+        """Create a local-coordinate layout fragment."""
+        return Group(self, name=name)
+
+    def row(self, gap=0, align="bottom", distribute="fixed", width=None, name=None):
+        """Create a horizontal composition."""
+        return Row(
+            self, gap=gap, align=align, distribute=distribute, width=width, name=name
+        )
+
+    def column(self, gap=0, align="left", distribute="fixed", height=None, name=None):
+        """Create a vertical composition."""
+        return Column(
+            self, gap=gap, align=align, distribute=distribute, height=height, name=name
+        )
+
+    def _grid(self, items=None, columns=1, x_gap=0, y_gap=0, align="center", name=None):
+        """Create a fixed-column grid composition."""
+        grid = Grid(
+            self, columns=columns, x_gap=x_gap, y_gap=y_gap, align=align, name=name
+        )
+        for item in items or []:
+            grid.add(item)
+        return grid
+
+    def stack(self, items=None, align="center", name=None):
+        """Create an overlay composition."""
+        stack = Stack(self, align=align, name=name)
+        for item in items or []:
+            stack.add(item)
+        return stack
+
+    def repeat(
+        self,
+        unit=None,
+        count=1,
+        axis="x",
+        pitch="abut",
+        mirror=False,
+        alternate=False,
+        name=None,
+    ):
+        """Repeat a layout fragment along one axis."""
+        return Repeat(
+            self,
+            unit=unit,
+            count=count,
+            axis=axis,
+            pitch=pitch,
+            mirror=mirror,
+            alternate=alternate,
+            name=name,
+        )
+
+    def spacer(self, distance=0, height=None):
+        """Reserve a fixed gap inside a row or column."""
+        return _Spacer(distance, height=height)
+
+    def stretch(self, weight=1):
+        """Consume slack inside a row or column with an explicit size."""
+        return _Spacer(0, stretch=True, weight=weight)
+
+    def extents(self, *items):
+        """Return the union bounds of handles, or ``None`` when empty."""
+        values = (
+            items[0]
+            if len(items) == 1 and isinstance(items[0], (list, tuple))
+            else items
+        )
+        return _union_bounds([_handle_bounds(item) for item in values])
+
+    def clearance(self, first, second):
+        """Return the edge-to-edge gap between two handles.
+
+        The result is negative when the bounding boxes overlap.
+        """
+        a = _handle_bounds(first)
+        b = _handle_bounds(second)
+        if a is None or b is None:
+            raise ValueError("clearance requires non-empty handles")
+        dx = max(a[0] - b[2], b[0] - a[2])
+        dy = max(a[1] - b[3], b[1] - a[3])
+        if dx >= 0 or dy >= 0:
+            return max(dx, dy)
+        return max(dx, dy)
+
+    def overlaps(self, first, second):
+        """Whether two handle bounds overlap with positive area."""
+        a = _handle_bounds(first)
+        b = _handle_bounds(second)
+        if a is None or b is None:
+            return False
+        return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+    def contains(self, outer, inner):
+        """Whether ``outer`` fully contains ``inner``."""
+        a = _handle_bounds(outer)
+        b = _handle_bounds(inner)
+        if a is None or b is None:
+            return False
+        return a[0] <= b[0] and a[1] <= b[1] and a[2] >= b[2] and a[3] >= b[3]
+
+    def distance(self, first, second, axis="x"):
+        """Return the center-to-center distance along ``axis``."""
+        a = _handle_bounds(first)
+        b = _handle_bounds(second)
+        if a is None or b is None:
+            raise ValueError("distance requires non-empty handles")
+        if str(axis).lower() in {"x", "horizontal"}:
+            return ((a[0] + a[2]) - (b[0] + b[2])) // 2
+        return ((a[1] + a[3]) - (b[1] + b[3])) // 2
+
+    def measure(self, *items):
+        """Return a dictionary describing the bounds of the given items."""
+        bounds = self.extents(*items)
+        if bounds is None:
+            return {"bounds": None, "width": 0, "height": 0, "area": 0}
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        return {
+            "bounds": bounds,
+            "width": width,
+            "height": height,
+            "area": width * height,
+        }
+
+    def report(self, gap_threshold=None, print_report=False):
+        """Summarize layout area, device utilization, and obvious empty gaps.
+
+        The report is intended as an agent-facing quality check. A low
+        device-area utilization or a large horizontal gap between devices that
+        share a row usually means fixed spacing was used where rows, columns,
+        abutment, or constraints would pack the layout more tightly.
+
+        :param gap_threshold: Horizontal gap in database units that counts as
+            large. Defaults to 10 micrometers.
+        :param print_report: Print the report as JSON so it appears in the
+            procedural-run log.
+        :returns: A JSON-compatible dictionary.
+        """
+        bounds = _bounds_of_records(self.shapes, self.ports)
+        if bounds is None:
+            bounds = _fragment_bounds(self)
+        if bounds is None:
+            report = {
+                "bounds": None,
+                "width": 0,
+                "height": 0,
+                "cell_area_um2": 0.0,
+                "device_area_um2": 0.0,
+                "utilization": 0.0,
+                "shape_count": 0,
+                "port_count": 0,
+                "device_count": 0,
+                "max_horizontal_gap_um": 0.0,
+                "large_gaps": [],
+                "warnings": ["layout contains no geometry"],
+            }
+        else:
+            width = bounds[2] - bounds[0]
+            height = bounds[3] - bounds[1]
+            area = width * height
+            area_scale = (self.db_unit_nm * self.db_unit_nm) / 1_000_000.0
+            device_boxes = []
+            for device in self.devices:
+                device_bounds = device.get("bounds")
+                if not isinstance(device_bounds, dict):
+                    continue
+                device_boxes.append(
+                    (
+                        str(device.get("name", "")),
+                        int(device_bounds.get("x", 0)),
+                        int(device_bounds.get("y", 0)),
+                        int(device_bounds.get("width", 0)),
+                        int(device_bounds.get("height", 0)),
+                    )
+                )
+            device_area = sum(box[3] * box[4] for box in device_boxes)
+            threshold = (
+                self.um(10)
+                if gap_threshold is None
+                else _coordinate(gap_threshold, "gap threshold")
+            )
+            large_gaps = []
+            maximum_gap = 0
+            for first_index, first in enumerate(device_boxes):
+                _, first_x, first_y, first_width, first_height = first
+                for second in device_boxes[first_index + 1 :]:
+                    _, second_x, second_y, second_width, second_height = second
+                    overlap = min(
+                        first_y + first_height, second_y + second_height
+                    ) - max(first_y, second_y)
+                    if overlap <= 0.5 * min(first_height, second_height):
+                        continue
+                    if first_x <= second_x:
+                        gap = second_x - (first_x + first_width)
+                        left, right = first[0], second[0]
+                    else:
+                        gap = first_x - (second_x + second_width)
+                        left, right = second[0], first[0]
+                    maximum_gap = max(maximum_gap, gap)
+                    if gap > threshold:
+                        large_gaps.append(
+                            {
+                                "left": left,
+                                "right": right,
+                                "gap_um": round(gap * self.db_unit_nm / 1000.0, 3),
+                            }
+                        )
+            utilization = device_area / area if area else 0.0
+            warnings = []
+            if device_boxes and utilization < 0.20:
+                warnings.append(
+                    f"device area is only {utilization * 100:.1f}% of cell area; "
+                    "compact rows/columns and remove fixed routing channels"
+                )
+            if maximum_gap > threshold:
+                warnings.append(
+                    f"largest horizontal gap between overlapping-row devices is "
+                    f"{maximum_gap * self.db_unit_nm / 1000.0:.1f} um; use "
+                    "row/column composition with gap=0 and let the router space pins"
+                )
+            report = {
+                "bounds": bounds,
+                "width": width,
+                "height": height,
+                "width_um": round(width * self.db_unit_nm / 1000.0, 3),
+                "height_um": round(height * self.db_unit_nm / 1000.0, 3),
+                "cell_area_um2": round(area * area_scale, 3),
+                "device_area_um2": round(device_area * area_scale, 3),
+                "utilization": round(utilization, 4),
+                "shape_count": len(self.shapes),
+                "port_count": len(self.ports),
+                "device_count": len(device_boxes),
+                "max_horizontal_gap_um": round(
+                    maximum_gap * self.db_unit_nm / 1000.0, 3
+                ),
+                "large_gaps": large_gaps,
+                "warnings": warnings,
+            }
+        if print_report:
+            print(json.dumps(report, indent=2))
+        return report
+
+    def abut(self, first, second, edge="right", gap=0):
+        """Move ``second`` against one edge of ``first``."""
+        a = _handle_bounds(first)
+        b = _handle_bounds(second)
+        if a is None or b is None:
+            raise ValueError("abut requires non-empty handles")
+        edge = str(edge).lower()
+        gap = _coordinate(gap, "abut gap")
+        if edge in {"right", "east", "e"}:
+            dx, dy = a[2] + gap - b[0], a[1] - b[1]
+        elif edge in {"left", "west", "w"}:
+            dx, dy = a[0] - gap - b[2], a[1] - b[1]
+        elif edge in {"top", "north", "n"}:
+            dx, dy = a[0] - b[0], a[3] + gap - b[1]
+        elif edge in {"bottom", "south", "s"}:
+            dx, dy = a[0] - b[0], a[1] - gap - b[3]
+        else:
+            raise ValueError("abut edge must be left, right, top, or bottom")
+        _translate_handle(second, dx, dy)
+        self._constraint_records.append({"type": "Abut", "edge": edge, "gap": gap})
+        return second
+
+    def distribute(self, items, axis="x", mode="equal"):
+        """Distribute item centers evenly between the first and last item."""
+        items = list(items)
+        if len(items) < 2:
+            return items
+        boxes = [_handle_bounds(item) for item in items]
+        if any(box is None for box in boxes):
+            raise ValueError("distribute requires non-empty handles")
+        horizontal = str(axis).lower() in {"x", "horizontal"}
+        first_center = (
+            (boxes[0][0] + boxes[0][2]) // 2
+            if horizontal
+            else (boxes[0][1] + boxes[0][3]) // 2
+        )
+        last_box = boxes[-1]
+        last_center = (
+            (last_box[0] + last_box[2]) // 2
+            if horizontal
+            else (last_box[1] + last_box[3]) // 2
+        )
+        step = (last_center - first_center) // (len(items) - 1)
+        for index, item in enumerate(items[1:-1], start=1):
+            target = first_center + step * index
+            box = _handle_bounds(item)
+            center = (box[0] + box[2]) // 2 if horizontal else (box[1] + box[3]) // 2
+            delta = target - center
+            _translate_handle(
+                item, delta if horizontal else 0, 0 if horizontal else delta
+            )
+        self._constraint_records.append(
+            {"type": "Distribute", "axis": str(axis), "mode": str(mode)}
+        )
+        return items
+
+    def constraint(self, kind, **options):
+        """Apply a deterministic, local layout constraint.
+
+        Supported constraints are ``Align``, ``AlignInOrder``, ``Order``,
+        ``Symmetric``, ``Group``, ``Boundary``, ``AspectRatio``, ``Spread``,
+        ``Grid``, ``PortLocation``, and ``Generator``.
+        """
+        name = str(kind).strip()
+        items = options.pop("items", None)
+        if items is None:
+            items = []
+        elif not isinstance(items, (list, tuple)):
+            items = [items]
+        items = list(items)
+        record = {"type": name}
+        for key, value in options.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                record[key] = value
+            elif isinstance(value, list) and all(
+                isinstance(entry, (str, int, float, bool)) for entry in value
+            ):
+                record[key] = value
+        self._constraint_records.append(record)
+        normalized = name.lower().replace("_", "")
+        if normalized == "align":
+            self._constraint_align(items, options.get("line", "h_any"))
+        elif normalized == "aligninorder":
+            self._constraint_order(
+                items,
+                options.get("direction", "left_to_right"),
+                bool(options.get("abut", False)),
+                options.get("gap", 0),
+            )
+            self._constraint_align(items, options.get("line", "h_any"))
+        elif normalized == "order":
+            self._constraint_order(
+                items,
+                options.get("direction", "left_to_right"),
+                bool(options.get("abut", False)),
+                options.get("gap", 0),
+            )
+        elif normalized == "symmetric":
+            self._constraint_symmetric(
+                items, options.get("pairs", []), options.get("axis", "vertical")
+            )
+        elif normalized == "group":
+            return self._constraint_group(items, options.get("name"))
+        elif normalized == "boundary":
+            self._constraint_boundary(
+                items,
+                options.get("max_width"),
+                options.get("max_height"),
+                options.get("halo", 0),
+            )
+        elif normalized == "aspectratio":
+            self._constraint_aspect_ratio(
+                items,
+                options.get("minimum", options.get("ratio_low")),
+                options.get("maximum", options.get("ratio_high")),
+            )
+        elif normalized == "spread":
+            self._constraint_spread(
+                items,
+                options.get("direction", "horizontal"),
+                options.get("distance", 0),
+            )
+        elif normalized == "grid":
+            self._constraint_grid(items or self, options.get("pitch", self.grid))
+        elif normalized == "portlocation":
+            self._constraint_port_location(
+                options.get("port"),
+                options.get("side", "left"),
+                options.get("align", "center"),
+            )
+        elif normalized == "generator":
+            pass
+        else:
+            raise ValueError(f"unknown layout constraint '{kind}'")
+        return None
+
+    def align(self, *items, line="h_any"):
+        """Convenience wrapper for the ``Align`` constraint."""
+        return self.constraint("Align", items=list(items), line=line)
+
+    def order(self, items, direction="left_to_right", abut=False, gap=0):
+        """Convenience wrapper for the ``Order`` constraint."""
+        return self.constraint(
+            "Order", items=list(items), direction=direction, abut=abut, gap=gap
+        )
+
+    def symmetric(self, pairs, axis="vertical"):
+        """Convenience wrapper for the ``Symmetric`` constraint."""
+        return self.constraint("Symmetric", pairs=pairs, axis=axis)
+
+    def boundary(self, max_width=None, max_height=None, halo=0, items=None):
+        """Validate that current geometry fits the requested boundary."""
+        return self.constraint(
+            "Boundary",
+            items=list(items or []),
+            max_width=max_width,
+            max_height=max_height,
+            halo=halo,
+        )
+
+    def _constraint_align(self, items, line):
+        pairs = [(item, _handle_bounds(item)) for item in items]
+        boxes = [box for _, box in pairs if box is not None]
+        if len(boxes) < 2:
+            return
+        line = str(line).lower()
+        valid_lines = {
+            "h_top",
+            "h_bottom",
+            "h_center",
+            "h_any",
+            "top",
+            "bottom",
+            "center",
+            "v_left",
+            "v_right",
+            "v_center",
+            "v_any",
+            "left",
+            "right",
+        }
+        if line not in valid_lines:
+            raise ValueError(
+                "Align line must be h_top, h_bottom, h_center, v_left, "
+                "v_right, v_center, or an any/edge alias"
+            )
+        horizontal = line in {
+            "h_top",
+            "h_bottom",
+            "h_center",
+            "h_any",
+            "top",
+            "bottom",
+            "center",
+        }
+        if horizontal:
+            if line in {"h_top", "top"}:
+                target = max(box[3] for box in boxes)
+            elif line in {"h_bottom", "bottom"}:
+                target = min(box[1] for box in boxes)
+            else:
+                target = (
+                    min(box[1] for box in boxes) + max(box[3] for box in boxes)
+                ) // 2
+        else:
+            if line in {"v_left", "left"}:
+                target = min(box[0] for box in boxes)
+            elif line in {"v_right", "right"}:
+                target = max(box[2] for box in boxes)
+            else:
+                target = (
+                    min(box[0] for box in boxes) + max(box[2] for box in boxes)
+                ) // 2
+        for item, box in pairs:
+            if box is None:
+                continue
+            if horizontal:
+                if line in {"h_top", "top"}:
+                    delta = target - box[3]
+                elif line in {"h_bottom", "bottom"}:
+                    delta = target - box[1]
+                else:
+                    delta = target - (box[1] + box[3]) // 2
+                _translate_handle(item, 0, delta)
+            else:
+                if line in {"v_left", "left"}:
+                    delta = target - box[0]
+                elif line in {"v_right", "right"}:
+                    delta = target - box[2]
+                else:
+                    delta = target - (box[0] + box[2]) // 2
+                _translate_handle(item, delta, 0)
+
+    def _constraint_order(self, items, direction, abut=False, gap=0):
+        boxes = [_handle_bounds(item) for item in items]
+        if any(box is None for box in boxes):
+            return
+        gap = 0 if abut else max(0, _coordinate(gap, "order gap"))
+        direction = str(direction).lower()
+        if direction in {"left_to_right", "horizontal", "ltr"}:
+            cursor = min(box[0] for box in boxes)
+            for item, box in zip(items, boxes):
+                _translate_handle(item, cursor - box[0], 0)
+                cursor += (box[2] - box[0]) + gap
+        elif direction in {"right_to_left", "rtl"}:
+            cursor = max(box[2] for box in boxes)
+            for item, box in zip(items, boxes):
+                _translate_handle(item, cursor - box[2], 0)
+                cursor -= (box[2] - box[0]) + gap
+        elif direction in {"bottom_to_top", "vertical", "btt"}:
+            cursor = min(box[1] for box in boxes)
+            for item, box in zip(items, boxes):
+                _translate_handle(item, 0, cursor - box[1])
+                cursor += (box[3] - box[1]) + gap
+        elif direction in {"top_to_bottom", "ttb"}:
+            cursor = max(box[3] for box in boxes)
+            for item, box in zip(items, boxes):
+                _translate_handle(item, 0, cursor - box[3])
+                cursor -= (box[3] - box[1]) + gap
+        else:
+            raise ValueError(
+                "order direction must be left_to_right, right_to_left, "
+                "bottom_to_top, or top_to_bottom"
+            )
+
+    def _constraint_symmetric(self, items, pairs, axis):
+        if pairs and len(pairs) == 2 and not isinstance(pairs[0], (list, tuple)):
+            pairs = [pairs]
+        if not pairs and len(items) >= 2:
+            pairs = [
+                [items[index], items[index + 1]]
+                for index in range(0, len(items) - 1, 2)
+            ]
+        flip_x = str(axis).lower() in {"vertical", "v", "y"}
+        for pair in pairs:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise ValueError("Symmetric pairs must contain two items")
+            first = _handle_bounds(pair[0])
+            second = _handle_bounds(pair[1])
+            if first is None or second is None:
+                continue
+            first_center = ((first[0] + first[2]) // 2, (first[1] + first[3]) // 2)
+            second_center = ((second[0] + second[2]) // 2, (second[1] + second[3]) // 2)
+            if flip_x:
+                axis_coordinate = (first_center[0] + second_center[0]) // 2
+                _mirror_handle(pair[1], "y")
+                moved = _handle_bounds(pair[1])
+                target = 2 * axis_coordinate - first_center[0]
+                _translate_handle(pair[1], target - (moved[0] + moved[2]) // 2, 0)
+                moved = _handle_bounds(pair[1])
+                _translate_handle(
+                    pair[1], 0, first_center[1] - (moved[1] + moved[3]) // 2
+                )
+            else:
+                axis_coordinate = (first_center[1] + second_center[1]) // 2
+                _mirror_handle(pair[1], "x")
+                moved = _handle_bounds(pair[1])
+                target = 2 * axis_coordinate - first_center[1]
+                _translate_handle(pair[1], 0, target - (moved[1] + moved[3]) // 2)
+                moved = _handle_bounds(pair[1])
+                _translate_handle(
+                    pair[1], first_center[0] - (moved[0] + moved[2]) // 2, 0
+                )
+
+    def _constraint_group(self, items, name):
+        group = Group(self, name=name)
+        block = _RecordBlock()
+        for item in items:
+            block.append(_copy_handle_block(item, detach=False))
+        _merge_block_into_layout(group, block)
+        return group
+
+    def _constraint_boundary(self, items, max_width, max_height, halo=0):
+        bounds = self.extents(items) if items else _fragment_bounds(self)
+        if bounds is None:
+            return
+        halo = _coordinate(halo, "boundary halo")
+        width = bounds[2] - bounds[0] + 2 * halo
+        height = bounds[3] - bounds[1] + 2 * halo
+        if max_width is not None and width > _coordinate(max_width, "max_width"):
+            raise ValueError(
+                f"Boundary constraint failed: width {width} exceeds "
+                f"max_width {int(max_width)}"
+            )
+        if max_height is not None and height > _coordinate(max_height, "max_height"):
+            raise ValueError(
+                f"Boundary constraint failed: height {height} exceeds "
+                f"max_height {int(max_height)}"
+            )
+
+    def _constraint_aspect_ratio(self, items, minimum, maximum):
+        bounds = self.extents(items) if items else _fragment_bounds(self)
+        if bounds is None:
+            return
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        ratio = width / height if height else math.inf
+        if minimum is not None and ratio < float(minimum):
+            raise ValueError(
+                f"AspectRatio constraint failed: {ratio:.3f} is below {minimum}"
+            )
+        if maximum is not None and ratio > float(maximum):
+            raise ValueError(
+                f"AspectRatio constraint failed: {ratio:.3f} is above {maximum}"
+            )
+
+    def _constraint_spread(self, items, direction, distance):
+        boxes = [_handle_bounds(item) for item in items]
+        if any(box is None for box in boxes):
+            return
+        distance = max(0, _coordinate(distance, "spread distance"))
+        direction = str(direction).lower()
+        if direction not in {"horizontal", "x", "vertical", "y"}:
+            raise ValueError("Spread direction must be horizontal or vertical")
+        horizontal = direction in {"horizontal", "x"}
+        for index in range(1, len(items)):
+            previous = boxes[index - 1]
+            current = _handle_bounds(items[index])
+            if horizontal:
+                if current[1] < previous[3] and previous[1] < current[3]:
+                    if current[0] < previous[2] + distance:
+                        _translate_handle(
+                            items[index], previous[2] + distance - current[0], 0
+                        )
+            else:
+                if current[0] < previous[2] and previous[0] < current[2]:
+                    if current[1] < previous[3] + distance:
+                        _translate_handle(
+                            items[index], 0, previous[3] + distance - current[1]
+                        )
+            boxes[index] = _handle_bounds(items[index])
+
+    def _constraint_grid(self, items, pitch):
+        pitch = max(1, _coordinate(pitch, "grid pitch"))
+        for item in items:
+            _snap_handle(item, pitch)
+
+    def _constraint_port_location(self, name, side, align):
+        if not name:
+            raise ValueError("PortLocation requires a port name")
+        for port in self.ports:
+            if str(port.get("name")) != str(name):
+                continue
+            rectangle = port["rectangle"]
+            bounds = _fragment_bounds(self)
+            side = str(side).lower()
+            if side not in {"left", "right", "top", "bottom"}:
+                raise ValueError(
+                    "PortLocation side must be left, right, top, or bottom"
+                )
+            if side in {"left", "right"}:
+                rectangle["x"] = (
+                    bounds[0] if side == "left" else bounds[2] - rectangle["width"]
+                )
+                if str(align).lower() == "center":
+                    rectangle["y"] = (bounds[1] + bounds[3]) // 2 - rectangle[
+                        "height"
+                    ] // 2
+            else:
+                rectangle["y"] = (
+                    bounds[1] if side == "bottom" else bounds[3] - rectangle["height"]
+                )
+                if str(align).lower() == "center":
+                    rectangle["x"] = (bounds[0] + bounds[2]) // 2 - rectangle[
+                        "width"
+                    ] // 2
+            port["side"] = side
+            return
+        raise ValueError(f"PortLocation references unknown port '{name}'")
+
+    # -- generators ------------------------------------------------------
+    def generator(self, **metadata):
+        """Register a cell generator declared in the current script."""
+
+        def decorator(function):
+            name = str(metadata.get("name") or function.__name__)
+            spec = dict(metadata)
+            spec.setdefault("name", name)
+            spec.setdefault("description", (function.__doc__ or "").strip())
+            spec.setdefault("parameters", {})
+            spec.setdefault("ports", [])
+            spec["source"] = "script"
+            self._generators[name] = function
+            self._generator_metadata[name] = spec
+            return function
+
+        return decorator
+
+    def generate(self, generator, **options):
+        """Instantiate a registered or built-in cell generator."""
+        generator = str(generator)
+        function = self._generators.get(generator)
+        metadata = self._generator_metadata.get(generator, {})
+        if function is None:
+            builtins = self._load_builtin_generators()
+            entry = builtins.get(generator)
+            if entry is None:
+                raise ValueError(
+                    f"unknown layout generator '{generator}'; register it with "
+                    "@layout.generator or install a built-in/package generator"
+                )
+            function, metadata = entry
+        params = copy.deepcopy(metadata.get("parameters", {}))
+        params.update(options)
+        context = Group(self, name=f"generator_{generator}")
+        result = function(context, **params)
+        if result is None:
+            result = context
+        self._used_generators[generator] = _json_safe(dict(metadata))
+        return result
+
+    def _load_builtin_generators(self):
+        if self._builtin_generators is not None:
+            return self._builtin_generators
+        path = Path(__file__).resolve().parent / "generators" / "__init__.py"
+        if not path.is_file():
+            self._builtin_generators = {}
+            return self._builtin_generators
+        module_name = "ice_builtin_procedural_generators"
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                self._builtin_generators = {}
+                return self._builtin_generators
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        generators = module.generators()
+        if self.pdk_root:
+            generators.update(self._load_package_generators(Path(self.pdk_root)))
+        self._builtin_generators = generators
+        return self._builtin_generators
+
+    def _load_package_generators(self, pdk_root):
+        """Load optional ``<pdk>/layout/generators/index.json`` entries."""
+        index_path = pdk_root / "layout" / "generators" / "index.json"
+        if not index_path.is_file():
+            return {}
+        try:
+            entries = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"Unable to read package generator index {index_path}: {error}"
+            ) from error
+        if not isinstance(entries, list):
+            raise RuntimeError(f"Package generator index {index_path} must be a list")
+        loaded = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"Package generator index {index_path} entries must be objects"
+                )
+            name = str(entry.get("name", "")).strip()
+            module_name = str(entry.get("module", "")).strip()
+            symbol = str(entry.get("function") or entry.get("class") or name).strip()
+            if not name or not module_name or not symbol:
+                raise RuntimeError(
+                    f"Package generator entry in {index_path} needs name, module, and function"
+                )
+            module_path = index_path.parent / module_name
+            spec = importlib.util.spec_from_file_location(
+                f"ice_package_generator_{name}", module_path
+            )
+            if spec is None or spec.loader is None:
+                raise RuntimeError(
+                    f"Unable to load package generator module {module_path}"
+                )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            module_directory = str(module_path.parent)
+            if module_directory not in sys.path:
+                sys.path.insert(0, module_directory)
+            spec.loader.exec_module(module)
+            function = getattr(module, symbol, None)
+            if isinstance(function, type):
+                try:
+                    instance = function()
+                except TypeError as error:
+                    raise RuntimeError(
+                        f"Package generator class {name} must be constructible "
+                        f"without arguments: {error}"
+                    ) from error
+                function = getattr(instance, "generate", instance)
+            if not callable(function):
+                raise RuntimeError(
+                    f"Package generator {name} has no callable '{symbol}' in {module_path}"
+                )
+            metadata = dict(entry)
+            metadata.setdefault("name", name)
+            metadata.setdefault("description", (function.__doc__ or "").strip())
+            metadata.setdefault("parameters", {})
+            metadata.setdefault("ports", [])
+            metadata["source"] = "package"
+            metadata.setdefault("version", 1)
+            loaded[name] = (function, metadata)
+        return loaded
 
     def add_dummy_fill(
         self, layers=None, density=None, deviation=None, area=None, **options
@@ -2716,8 +4833,11 @@ class Layout:
         return {
             "format": "ice-procedural-layout",
             "schema_version": SCHEMA_VERSION,
+            "builder_version": BUILDER_VERSION,
             "db_unit_nm": self.db_unit_nm,
             "grid": self.grid,
+            "generator_metadata": self.generator_metadata,
+            "constraints": self.constraints,
             "layers": [
                 {
                     "name": name,
@@ -2732,6 +4852,603 @@ class Layout:
             "instances": self.instances,
             "devices": self.devices,
         }
+
+
+class Group(Layout):
+    """Local-coordinate layout fragment.
+
+    A group has the same geometry, device, routing, and generator API as the
+    root builder. Adding the group to a layout or composition copies its
+    records, so one group can be instanced more than once.
+    """
+
+    def __init__(self, parent, name=None):
+        super().__init__(
+            parent.pdk,
+            parent.pdk_root,
+            parent.db_unit_nm,
+            parent.grid,
+            parent.params,
+        )
+        self.name = str(name) if name is not None else ""
+        self._parent = parent
+        self._generators = parent._generators
+        self._generator_metadata = parent._generator_metadata
+        self._used_generators = parent._used_generators
+        self._constraint_records = parent._constraint_records
+        self._builtin_generators = parent._builtin_generators
+
+    @property
+    def bounds(self):
+        """Axis-aligned bounds of the group fragment."""
+        bounds = Layout.bounds(self)
+        instance_boxes = [
+            (instance["x"], instance["y"], instance["x"] + 1, instance["y"] + 1)
+            for instance in self.instances
+        ]
+        return _union_bounds([bounds] + instance_boxes)
+
+    def __repr__(self):
+        return f"Group({self.name or 'unnamed'}, {len(self.shapes)} shapes)"
+
+
+class _Spacer:
+    """Fixed or stretchable gap inside a row or column."""
+
+    def __init__(self, distance=0, height=None, stretch=False, weight=1):
+        self.distance = max(0, _coordinate(distance, "spacer distance"))
+        self.height = (
+            None if height is None else max(0, _coordinate(height, "spacer height"))
+        )
+        self.stretch = bool(stretch)
+        self.weight = max(1, int(weight))
+
+    @property
+    def width(self):
+        return 0 if self.stretch else self.distance
+
+    @property
+    def is_empty(self):
+        return True
+
+    @property
+    def bounds(self):
+        return (0, 0, self.width, self.height or 0)
+
+    def move(self, dx, dy):
+        return self
+
+    def mirror(self, axis="y"):
+        return self
+
+
+class _Item:
+    def __init__(self, block=None, kind="block", size=0, height=0, weight=1):
+        self.block = block or _RecordBlock()
+        self.kind = kind
+        self.size = max(0, int(size))
+        self._height = max(0, int(height))
+        self.weight = max(1, int(weight))
+        self.allocated = 0
+
+    @property
+    def bounds(self):
+        if self.kind in {"spacer", "stretch"}:
+            return (0, 0, self.size, self.height)
+        return self.block.bounds
+
+    @property
+    def width(self):
+        if self.kind in {"spacer", "stretch"}:
+            return self.size
+        return self.block.width
+
+    @property
+    def height(self):
+        if self.kind in {"spacer", "stretch"}:
+            return self._height
+        return self.block.height
+
+
+class _Container:
+    """Base class for row, column, grid, stack, and repeat compositions."""
+
+    def __init__(self, layout, name=None):
+        self._layout = layout
+        self.name = str(name) if name is not None else ""
+        self._items = []
+        self.shapes = []
+        self.ports = []
+        self.instances = []
+        self.devices = []
+        self.layers = {}
+        self._extra_ports = []
+        self._width = 0
+        self._height = 0
+
+    # Builder helpers used by units in scripts.
+    def db(self, value):
+        return self._layout.db(value)
+
+    def nm(self, value):
+        return self._layout.nm(value)
+
+    def um(self, value):
+        return self._layout.um(value)
+
+    def snap(self, value):
+        return self._layout.snap(value)
+
+    def length(self, value):
+        return self._layout.length(value)
+
+    @property
+    def bounds(self):
+        return _union_bounds([item.bounds for item in self._items])
+
+    @property
+    def width(self):
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[2] - bounds[0]
+
+    @property
+    def height(self):
+        bounds = self.bounds
+        return 0 if bounds is None else bounds[3] - bounds[1]
+
+    @property
+    def is_empty(self):
+        return not self._items
+
+    def port(
+        self,
+        name,
+        layer,
+        x,
+        y,
+        width,
+        height,
+        direction="inout",
+        side="left",
+        net=None,
+        label=None,
+        visible=True,
+        locked=False,
+    ):
+        """Add a port to the composed fragment."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Port name must be a non-empty string")
+        if direction not in {"input", "output", "inout", "power", "ground"}:
+            raise ValueError(
+                "Port direction must be input, output, inout, power, or ground"
+            )
+        if side not in {"left", "right", "top", "bottom"}:
+            raise ValueError("Port side must be left, right, top, or bottom")
+        layer_name = layer.name if isinstance(layer, Layer) else str(layer).strip()
+        if not layer_name:
+            raise ValueError("Port layer must be a non-empty string")
+        self.layers.setdefault(layer_name, {"number": None, "datatype": None})
+        record = {
+            "name": name.strip(),
+            "layer": layer_name,
+            "rectangle": {
+                "x": _coordinate(x, "port x"),
+                "y": _coordinate(y, "port y"),
+                "width": _positive(width, "port width"),
+                "height": _positive(height, "port height"),
+            },
+            "direction": direction,
+            "side": side,
+            "net": str(net).strip() if isinstance(net, str) and net.strip() else None,
+            "label": str(label or name).strip(),
+            "visible": bool(visible),
+            "locked": bool(locked),
+        }
+        self._extra_ports.append(record)
+        self.ports.append(record)
+        return record
+
+    def pin(self, name):
+        for port in self.ports:
+            if str(port.get("name")) == str(name):
+                rectangle = port["rectangle"]
+                return (
+                    rectangle["x"],
+                    rectangle["y"],
+                    rectangle["width"],
+                    rectangle["height"],
+                )
+        raise KeyError(f"composition has no port '{name}'")
+
+    def anchor(self, name="center"):
+        return _anchor_point(self.bounds, name)
+
+    def add(self, item):
+        """Add an item and reflow the composition."""
+        if isinstance(item, _Spacer):
+            kind = "stretch" if item.stretch else "spacer"
+            self._items.append(
+                _Item(
+                    kind=kind,
+                    size=item.distance,
+                    height=item.height or 0,
+                    weight=item.weight,
+                )
+            )
+        else:
+            detach = not isinstance(item, (Layout, _Container))
+            self._items.append(_Item(block=_copy_handle_block(item, detach=detach)))
+        self._reflow()
+        return item
+
+    def move(self, dx, dy):
+        for item in self._items:
+            if item.kind == "block":
+                _translate_block(item.block, dx, dy)
+        for port in self._extra_ports:
+            rectangle = port.get("rectangle")
+            if isinstance(rectangle, dict):
+                rectangle["x"] += dx
+                rectangle["y"] += dy
+        self._refresh()
+        return self
+
+    def mirror(self, axis="y"):
+        bounds = self.bounds
+        for item in self._items:
+            if item.kind == "block":
+                _mirror_block(item.block, axis)
+        if bounds is not None and self._extra_ports:
+            flip_x, flip_y = _axis_flags(axis)
+            _mirror_ports(
+                self._extra_ports,
+                flip_x,
+                flip_y,
+                bounds[0],
+                bounds[2],
+                bounds[1],
+                bounds[3],
+            )
+        self._reflow()
+        return self
+
+    def _refresh(self):
+        self.shapes = []
+        self.ports = []
+        self.instances = []
+        self.devices = []
+        self.layers = {}
+        for item in self._items:
+            if item.kind != "block":
+                continue
+            self.shapes.extend(item.block.shapes)
+            self.ports.extend(item.block.ports)
+            self.instances.extend(item.block.instances)
+            self.devices.extend(item.block.devices)
+            for name, spec in item.block.layers.items():
+                self.layers.setdefault(name, dict(spec))
+        self.ports.extend(self._extra_ports)
+        for port in self._extra_ports:
+            self.layers.setdefault(
+                port.get("layer", ""), {"number": None, "datatype": None}
+            )
+        bounds = self.bounds
+        self._width = 0 if bounds is None else bounds[2] - bounds[0]
+        self._height = 0 if bounds is None else bounds[3] - bounds[1]
+
+    def _reflow(self):
+        self._refresh()
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+
+class Row(_Container):
+    """Horizontal composition with optional abutment and slack distribution."""
+
+    def __init__(
+        self, layout, gap=0, align="bottom", distribute="fixed", width=None, name=None
+    ):
+        super().__init__(layout, name=name)
+        self.gap = max(0, _coordinate(gap, "row gap"))
+        self.align = str(align).lower()
+        self.distribute = str(distribute).lower()
+        self.target_width = (
+            None if width is None else max(0, _coordinate(width, "row width"))
+        )
+
+    def _reflow(self):
+        blocks = self._items
+        if not blocks:
+            self._refresh()
+            return
+        widths = [item.width for item in blocks]
+        total = sum(widths) + self.gap * max(0, len(blocks) - 1)
+        slack = max(0, (self.target_width or 0) - total)
+        flex = [item for item in blocks if item.kind == "stretch"]
+        gap_extra = 0
+        if flex:
+            share = slack // max(1, sum(item.weight for item in flex))
+            for item in flex:
+                item.allocated = share * item.weight
+                item.size = item.allocated
+        elif (
+            slack and self.distribute in {"space-between", "equal"} and len(blocks) > 1
+        ):
+            gap_extra = slack // (len(blocks) - 1)
+        cursor = 0
+        for item in blocks:
+            if item.kind in {"spacer", "stretch"}:
+                cursor += item.width
+                if item.kind != "stretch":
+                    cursor += self.gap + gap_extra
+                else:
+                    cursor += self.gap
+                continue
+            box = item.block.bounds
+            if box is None:
+                cursor += self.gap
+                continue
+            _translate_block(item.block, cursor - box[0], 0)
+            cursor += (box[2] - box[0]) + self.gap + gap_extra
+        boxes = []
+        for item in blocks:
+            if item.kind == "block":
+                box = item.block.bounds
+                boxes.append(box)
+        max_height = max((box[3] - box[1] for box in boxes if box), default=0)
+        for item in blocks:
+            if item.kind != "block":
+                continue
+            box = item.block.bounds
+            if box is None:
+                continue
+            if self.align in {"top", "north", "n"}:
+                delta = max_height - box[3]
+            elif self.align in {"center", "middle", "c"}:
+                delta = (max_height - (box[3] - box[1])) // 2 - box[1]
+            else:
+                delta = -box[1]
+            _translate_block(item.block, 0, delta)
+        self._refresh()
+
+
+class Column(_Container):
+    """Vertical composition with optional abutment and slack distribution."""
+
+    def __init__(
+        self, layout, gap=0, align="left", distribute="fixed", height=None, name=None
+    ):
+        super().__init__(layout, name=name)
+        self.gap = max(0, _coordinate(gap, "column gap"))
+        self.align = str(align).lower()
+        self.distribute = str(distribute).lower()
+        self.target_height = (
+            None if height is None else max(0, _coordinate(height, "column height"))
+        )
+
+    def add(self, item):
+        if isinstance(item, _Spacer):
+            item.height = item.distance
+        return super().add(item)
+
+    def _reflow(self):
+        blocks = self._items
+        if not blocks:
+            self._refresh()
+            return
+        heights = [
+            item.size if item.kind in {"spacer", "stretch"} else item.height
+            for item in blocks
+        ]
+        total = sum(heights) + self.gap * max(0, len(blocks) - 1)
+        slack = max(0, (self.target_height or 0) - total)
+        flex = [item for item in blocks if item.kind == "stretch"]
+        gap_extra = 0
+        if flex:
+            share = slack // max(1, sum(item.weight for item in flex))
+            for item in flex:
+                item.allocated = share * item.weight
+                item.size = item.allocated
+        elif (
+            slack and self.distribute in {"space-between", "equal"} and len(blocks) > 1
+        ):
+            gap_extra = slack // (len(blocks) - 1)
+        cursor = 0
+        for item in blocks:
+            if item.kind in {"spacer", "stretch"}:
+                cursor += item.size
+                cursor += self.gap + gap_extra
+                continue
+            box = item.block.bounds
+            if box is None:
+                cursor += self.gap
+                continue
+            _translate_block(item.block, 0, cursor - box[1])
+            cursor += (box[3] - box[1]) + self.gap + gap_extra
+        boxes = [item.block.bounds for item in blocks if item.kind == "block"]
+        max_width = max((box[2] - box[0] for box in boxes if box), default=0)
+        for item in blocks:
+            if item.kind != "block":
+                continue
+            box = item.block.bounds
+            if box is None:
+                continue
+            if self.align in {"right", "east", "e"}:
+                delta = max_width - box[2]
+            elif self.align in {"center", "middle", "c"}:
+                delta = (max_width - (box[2] - box[0])) // 2 - box[0]
+            else:
+                delta = -box[0]
+            _translate_block(item.block, delta, 0)
+        self._refresh()
+
+
+class Grid(_Container):
+    """Fixed-column grid of layout items."""
+
+    def __init__(self, layout, columns=1, x_gap=0, y_gap=0, align="center", name=None):
+        super().__init__(layout, name=name)
+        self.columns = max(1, int(columns))
+        self.x_gap = max(0, _coordinate(x_gap, "grid x gap"))
+        self.y_gap = max(0, _coordinate(y_gap, "grid y gap"))
+        self.align = str(align).lower()
+
+    def _reflow(self):
+        blocks = [item for item in self._items if item.kind == "block"]
+        if not blocks:
+            self._refresh()
+            return
+        rows = [
+            blocks[index : index + self.columns]
+            for index in range(0, len(blocks), self.columns)
+        ]
+        # Column widths are the maxima across rows.
+        columns = self.columns
+        column_widths = [0] * columns
+        for row in rows:
+            for index, item in enumerate(row):
+                column_widths[index] = max(column_widths[index], item.width)
+        row_heights = [max((item.height for item in row), default=0) for row in rows]
+        y_cursor = 0
+        for row_index, row in enumerate(rows):
+            x_cursor = 0
+            for column_index, item in enumerate(row):
+                box = item.block.bounds
+                if box is not None:
+                    width = box[2] - box[0]
+                    height = box[3] - box[1]
+                    if self.align in {"center", "middle", "c"}:
+                        x = (column_widths[column_index] - width) // 2
+                        y = (row_heights[row_index] - height) // 2
+                    elif self.align in {"top", "north", "n"}:
+                        x, y = 0, row_heights[row_index] - height
+                    elif self.align in {"right", "east", "e"}:
+                        x, y = column_widths[column_index] - width, 0
+                    else:
+                        x, y = 0, 0
+                    _translate_block(
+                        item.block, x_cursor + x - box[0], y_cursor + y - box[1]
+                    )
+                x_cursor += column_widths[column_index] + self.x_gap
+            y_cursor += row_heights[row_index] + self.y_gap
+        self._refresh()
+
+
+class Stack(_Container):
+    """Overlay items on a common origin without merging geometry."""
+
+    def __init__(self, layout, align="center", name=None):
+        super().__init__(layout, name=name)
+        self.align = str(align).lower()
+
+    def _reflow(self):
+        blocks = [item for item in self._items if item.kind == "block"]
+        if not blocks:
+            self._refresh()
+            return
+        for item in blocks:
+            box = item.block.bounds
+            if box is not None:
+                _translate_block(item.block, -box[0], -box[1])
+        extent = _union_bounds([item.block.bounds for item in blocks])
+        if extent is None:
+            self._refresh()
+            return
+        width = extent[2] - extent[0]
+        height = extent[3] - extent[1]
+        for item in blocks:
+            box = item.block.bounds
+            if box is None:
+                continue
+            item_width = box[2] - box[0]
+            item_height = box[3] - box[1]
+            if self.align in {"center", "middle", "c"}:
+                dx = (width - item_width) // 2
+                dy = (height - item_height) // 2
+            elif self.align in {"top", "north", "n"}:
+                dx, dy = 0, height - item_height
+            elif self.align in {"bottom", "south", "s"}:
+                dx, dy = 0, 0
+            elif self.align in {"left", "west", "w"}:
+                dx, dy = 0, 0
+            elif self.align in {"right", "east", "e"}:
+                dx, dy = width - item_width, 0
+            else:
+                dx, dy = 0, 0
+            _translate_block(item.block, dx, dy)
+        self._refresh()
+
+
+class Repeat(_Container):
+    """Repeated, optionally mirrored copies of a layout fragment."""
+
+    def __init__(
+        self,
+        layout,
+        unit=None,
+        count=1,
+        axis="x",
+        pitch="abut",
+        mirror=False,
+        alternate=False,
+        name=None,
+    ):
+        super().__init__(layout, name=name)
+        self.axis = str(axis).lower()
+        self.pitch = pitch
+        self.mirror_copies = bool(mirror)
+        self.alternate = bool(alternate)
+        self.count = max(0, int(count))
+        self._unit = unit
+        if unit is not None:
+            self._build()
+
+    def add(self, item):
+        if self._unit is not None:
+            raise ValueError("repeat already has a unit; create another repeat")
+        self._unit = item
+        self._build()
+        return item
+
+    def _build(self):
+        self._items = []
+        if self._unit is None:
+            self._refresh()
+            return
+        if isinstance(self._unit, (Shape, DevicePlacement, Route)):
+            _detach_handle_records(self._unit)
+        horizontal = self.axis in {"x", "horizontal", "h"}
+        pitch_text = str(self.pitch).lower()
+        numeric_pitch = None
+        if pitch_text != "abut":
+            numeric_pitch = _coordinate(self.pitch, "repeat pitch")
+        cursor = 0
+        for index in range(self.count):
+            block = _copy_handle_block(self._unit)
+            if index:
+                _suffix_block(block, f"_{index + 1}")
+            if self.mirror_copies and (not self.alternate or index % 2 == 1):
+                _mirror_block(block, "y" if horizontal else "x")
+            box = block.bounds
+            if box is not None:
+                if horizontal:
+                    target = cursor if numeric_pitch is None else index * numeric_pitch
+                    _translate_block(block, target - box[0], -box[1])
+                    cursor = (
+                        target
+                        + (box[2] - box[0])
+                        + (0 if numeric_pitch is not None else 0)
+                    )
+                else:
+                    target = cursor if numeric_pitch is None else index * numeric_pitch
+                    _translate_block(block, -box[0], target - box[1])
+                    cursor = target + (box[3] - box[1])
+            self._items.append(_Item(block=block))
+        self._refresh()
 
 
 def _load_dummy_fill_extension(layout):
@@ -2775,10 +5492,13 @@ def _apply_dummy_fill_requests(layout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--script", help="Procedural layout Python script")
+    parser.add_argument("--output", help="Generated geometry JSON path")
     parser.add_argument(
-        "--script", required=True, help="Procedural layout Python script"
+        "--list-generators",
+        action="store_true",
+        help="Print built-in generator metadata as JSON and exit",
     )
-    parser.add_argument("--output", required=True, help="Generated geometry JSON path")
     parser.add_argument(
         "--params-file", help="Optional procedural parameter values (JSON object)"
     )
@@ -2797,6 +5517,22 @@ def main():
         help="Project grid in database units",
     )
     args = parser.parse_args()
+
+    if args.list_generators:
+        builder = Layout(args.pdk, args.pdk_root)
+        entries = builder._load_builtin_generators()
+        metadata = [
+            dict(entry[1])
+            for entry in sorted(entries.values(), key=lambda item: item[1]["name"])
+        ]
+        json.dump(metadata, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    if not args.script or not args.output:
+        parser.error(
+            "--script and --output are required unless --list-generators is used"
+        )
 
     parameters = {}
     if args.params_file:

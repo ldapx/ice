@@ -470,6 +470,41 @@ definitions with `layout/devices/build.py`. Parameterized cells are written as
 PCell index entries without geometry; only fixed cells are written as
 `layout/devices/fixed/*.icelay`.
 
+### Procedural cell generators
+
+Packages may add reusable procedural-layout generators under
+`<pdk-root>/layout/generators/`:
+
+```text
+<pdk-root>/layout/generators/index.json   # generator metadata
+<pdk-root>/layout/generators/<module>.py  # generator functions
+```
+
+Example index entry:
+
+```json
+{
+  "name": "mos_pair",
+  "module": "analog.py",
+  "function": "mos_pair",
+  "description": "Matched MOS pair",
+  "version": 1,
+  "parameters": {"device": "nfet", "pattern": "cc"},
+  "ports": ["D1", "G1", "S", "D2", "G2", "B"]
+}
+```
+
+Generator functions receive the builder group as their first argument and
+return any composable handle. They run in the same external Python process as
+procedural layouts, so they can use `ctx.device`, `ctx.row`, `ctx.port`, and
+the rest of the public builder API, but they cannot mutate the project
+database. Package entries override built-in generators with the same name.
+The package version and the ICE builder/built-in generator sources participate
+in regeneration detection; a package generator change should bump the package
+version.
+
+### DRC decks
+
 `technology/drc.json` declares how ICE runs DRC for the package. It can point
 at a KLayout `.lydrc`/`.drc` deck (with `{deck}`, `{input}`, `{report}`,
 `{top_cell}`, `{suite}`, and `{workdir}` placeholders) or a gdscheck process,

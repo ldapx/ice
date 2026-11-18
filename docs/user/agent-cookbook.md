@@ -118,6 +118,51 @@ A top-level cell parameter becomes `.param name=value`. CLI equivalents are
 `schematic-set-parameter <project> <cell> <instance> <name> <value>`.
 `schematic-remove-cell-parameter` removes a declaration.
 
+## Compact analog procedural layout
+
+Use composition and constraints rather than manual `move` loops with fixed
+gaps. A compact two-row floorplan looks like this:
+
+```text
+layout_create_procedural(name="ota", pdk="sky130A")
+layout_set_script(layout="ota", script='''
+M1 = layout.device("nfet", name="M1", w="3u", l="2u",
+                   nets={"G": "INN", "D": "N1", "S": "TAIL", "B": "VSS"})
+M2 = layout.device("nfet", name="M2", w="3u", l="2u",
+                   nets={"G": "INP", "D": "N2", "S": "TAIL", "B": "VSS"})
+M3 = layout.device("pfet", name="M3", w="5u", l="2u",
+                   nets={"G": "N1", "D": "N1", "S": "VDD", "B": "VDD"})
+M4 = layout.device("pfet", name="M4", w="5u", l="2u",
+                   nets={"G": "N1", "D": "N2", "S": "VDD", "B": "VDD"})
+
+top = layout.row(gap=0, align="bottom")
+top.add(M3)
+top.add(M4)
+
+bottom = layout.row(gap=0, align="top")
+bottom.add(M1)
+bottom.add(M2)
+
+core = layout.column(gap=layout.um(2), align="center")
+core.add(top)
+core.add(layout.generate("rail", layer="met1.drawing",
+                         width=top.width, height=layout.um(2), net="VSS"))
+core.add(bottom)
+layout.add(core)
+
+layout.constraint("Boundary", max_width=layout.um(120), max_height=layout.um(120))
+layout.report(print_report=True)
+''')
+layout_regenerate(layout="ota")
+```
+
+Then use `generation_log` from `layout_regenerate` to read the report. If
+`utilization` is low or `large_gaps` contains unexplained rows, compact the
+floorplan before routing. Add spacing only after a router/DRC failure, not
+between every device by default. Use `layout.repeat` and `layout.symmetric` for
+matched pairs, `layout.grid` for unit arrays, and `layout.generate("mos_pair")`
+or `layout.generate("cap_array")` where they fit.
+
 ## Text SPICE for simple analog circuits
 
 Use text SPICE when the circuit is flat and you do not need a drawn canvas:

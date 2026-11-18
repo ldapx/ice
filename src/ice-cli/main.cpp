@@ -862,8 +862,7 @@ json schematicInfo(const ice::SchematicCell &cell) {
                    {"instances", json::array()},
                    {"nets", json::array()}};
     for (const auto &parameter : cell.parameters)
-        result["parameters"].push_back(
-            {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+        result["parameters"].push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
     for (const auto &[id, symbol] : cell.symbols) {
         json pins = json::array();
         for (const auto &pin : symbol.pins)
@@ -2406,7 +2405,8 @@ int main(int argc, char **argv) {
                        {"ok", true},
                        {"script_hash", run.scriptHash},
                        {"output_hash", run.outputHash},
-                       {"pdk_version", run.pdkVersion}});
+                       {"pdk_version", run.pdkVersion},
+                       {"log", run.log}});
             return 0;
         }
 
