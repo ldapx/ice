@@ -71,6 +71,11 @@ class SymbolLibrary {
                                         const std::filesystem::path &genericArtworkDirectory);
 };
 
+// Validates inline symbol artwork: the markup must be an SVG document without
+// scripts or external resource references. `source` names the origin of the
+// markup in error messages. Throws ProjectError when the artwork is rejected.
+void validateSymbolArtwork(const std::string &svg, const std::string &source = {});
+
 // Locates the built-in primitive symbol directory and loads it. `availableSymbols`
 // merges the built-in library with symbols from an installed ICE PDK package.
 std::filesystem::path builtinSymbolDirectory();

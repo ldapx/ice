@@ -37,6 +37,7 @@ class PropertiesPanel : public QWidget {
     using LayoutPortChanged = std::function<void(const ice::Port &port, const std::string &netName)>;
     using GridSpacingChanged = std::function<void(int spacing)>;
     using LayoutShapeSizeChanged = std::function<void(ice::ObjectId shapeId, int width, int height)>;
+    using SymbolIconEditRequested = std::function<void(ice::ObjectId instanceId)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr);
 
@@ -49,14 +50,17 @@ class PropertiesPanel : public QWidget {
     void setOnLayoutPortChanged(LayoutPortChanged callback);
     void setOnGridSpacingChanged(GridSpacingChanged callback);
     void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
+    void setOnSymbolIconEditRequested(SymbolIconEditRequested callback);
 
     void refreshAppearance();
-    // Shows the pencil button in the panel heading. It is a placeholder until
-    // the properties editor lands, so it intentionally has no action yet.
+    // Shows the pencil button in the panel heading. The button is enabled only
+    // for user-created schematic devices and opens the icon editor.
     void setEditButtonVisible(bool visible);
     void clearSelection();
+    // `iconEditable` is true for instances whose symbol represents a drawn
+    // schematic cell (a user-created block), not a primitive library device.
     void setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
-                     const std::string &symbolSvg);
+                     const std::string &symbolSvg, bool iconEditable = false);
     void setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg);
     void setLayoutPreviewStyles(const ice::LayoutRenderer::LayerStyleMap &styles,
                                 const ice::LayoutRenderer::DeviceStyleMap &deviceStyles);
@@ -118,4 +122,7 @@ class PropertiesPanel : public QWidget {
     LayoutPortChanged onLayoutPortChanged_;
     GridSpacingChanged onGridSpacingChanged_;
     LayoutShapeSizeChanged onLayoutShapeSizeChanged_;
+    SymbolIconEditRequested onSymbolIconEditRequested_;
+    bool editButtonVisible_ = false;
+    bool symbolIconEditable_ = false;
 };

@@ -34,10 +34,9 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     headerRow->addStretch();
     editButton_ = new QPushButton;
     editButton_->setFixedWidth(24);
-    editButton_->setToolTip(QStringLiteral("Edit properties"));
-    editButton_->setAccessibleName(QStringLiteral("Edit properties"));
+    editButton_->setToolTip(QStringLiteral("Change schematic icon"));
+    editButton_->setAccessibleName(QStringLiteral("Change schematic icon"));
     setLucideIcon(editButton_, QStringLiteral("pencil"), 14);
-    // Placeholder action: enabled by the schematic properties panel only.
     editButton_->setVisible(false);
     headerRow->addWidget(editButton_);
     layout->addLayout(headerRow);
@@ -122,6 +121,10 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     connect(parameters_, &QTableWidget::itemSelectionChanged, this, [this] { updateParameterButtons(); });
     connect(addParameterButton_, &QPushButton::clicked, this, [this] { addParameter(); });
     connect(removeParameterButton_, &QPushButton::clicked, this, [this] { removeParameters(); });
+    connect(editButton_, &QPushButton::clicked, this, [this] {
+        if (instanceId_ != 0 && onSymbolIconEditRequested_)
+            onSymbolIconEditRequested_(instanceId_);
+    });
     connect(gridSpacingSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int spacing) {
         if (onGridSpacingChanged_)
             onGridSpacingChanged_(spacing);
@@ -131,6 +134,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
 }
 
 void PropertiesPanel::setEditButtonVisible(bool visible) {
+    editButtonVisible_ = visible;
     if (editButton_)
         editButton_->setVisible(visible);
 }
@@ -167,6 +171,11 @@ void PropertiesPanel::setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callbac
     onLayoutShapeSizeChanged_ = std::move(callback);
 }
 
+void PropertiesPanel::setOnSymbolIconEditRequested(SymbolIconEditRequested callback) {
+    onSymbolIconEditRequested_ = std::move(callback);
+    updateParameterButtons();
+}
+
 void PropertiesPanel::refreshAppearance() {
     previewFrame_->setStyleSheet(
         QStringLiteral("#propertiesSymbolPreview { background: %1; border: 1px solid %2; border-radius: 4px; }")
@@ -175,6 +184,7 @@ void PropertiesPanel::refreshAppearance() {
 
 void PropertiesPanel::clearSelection() {
     instanceId_ = 0;
+    symbolIconEditable_ = false;
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
@@ -193,9 +203,10 @@ void PropertiesPanel::clearSelection() {
 }
 
 void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
-                                  const std::string &symbolSvg) {
+                                  const std::string &symbolSvg, bool iconEditable) {
     (void)symbolName;
     instanceId_ = instance.id;
+    symbolIconEditable_ = iconEditable;
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
@@ -615,6 +626,20 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
 }
 
 void PropertiesPanel::updateParameterButtons() {
+    // The pencil only edits the icon of a user-created schematic device. It has
+    // no meaning for primitive devices, cells, layout objects, ports, or an
+    // empty selection.
+    if (editButton_) {
+        editButton_->setVisible(editButtonVisible_);
+        const bool editable = instanceId_ != 0 && symbolIconEditable_ && onSymbolIconEditRequested_;
+        editButton_->setEnabled(editable);
+        if (editable)
+            editButton_->setToolTip(QStringLiteral("Change schematic icon"));
+        else if (instanceId_ != 0)
+            editButton_->setToolTip(QStringLiteral("Only user-created schematics can have a custom icon"));
+        else
+            editButton_->setToolTip(QStringLiteral("Select a schematic device to change its icon"));
+    }
     const bool schematicMode = cellId_ != 0 && instanceId_ == 0;
     if (addParameterButton_)
         addParameterButton_->setEnabled(schematicMode);

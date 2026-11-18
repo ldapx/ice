@@ -37,6 +37,7 @@
 #include "package_ui.hpp"
 #include "procedural_layout.hpp"
 #include "simulation_plot.hpp"
+#include "symbol_artwork_editor.hpp"
 #include "symbol_ui.hpp"
 #include "text_document_editor.hpp"
 #include "text_geometry.hpp"
@@ -7393,10 +7394,17 @@ class DocumentWindow : public QMainWindow {
             const auto symbol = cell.symbols.find(instance->second.symbol);
             const auto symbolName = symbol == cell.symbols.end() ? std::string() : symbol->second.name;
             const auto symbolSvg = symbol == cell.symbols.end() ? std::string() : symbol->second.artwork;
+            // Only symbols generated for a drawn schematic cell represent a
+            // user-created block; primitive devices keep the library artwork.
+            bool iconEditable = false;
+            if (symbol != cell.symbols.end() && symbol->second.sourceCell != 0) {
+                const auto source = project_->project().schematicCells.find(symbol->second.sourceCell);
+                iconEditable = source != project_->project().schematicCells.end() && !source->second.isTextSource();
+            }
             const auto type = symbolName.empty() ? QStringLiteral("Schematic") : QString::fromStdString(symbolName);
             selectionStatus_->setText(
                 QStringLiteral("Selection: %1 (%2)").arg(QString::fromStdString(instance->second.name), type));
-            schematicPropertiesPanel_->setInstance(instance->second, symbolName, symbolSvg);
+            schematicPropertiesPanel_->setInstance(instance->second, symbolName, symbolSvg, iconEditable);
             return;
         }
         selectionStatus_->setText(QStringLiteral("Selection: none"));
@@ -7416,6 +7424,54 @@ class DocumentWindow : public QMainWindow {
             cell = cells.begin();
         if (cell != cells.end())
             schematicNetlistPanel_->setCell(project_->project(), &cell->second);
+    }
+
+    // Opens the icon editor for an instance of a user-created schematic block.
+    // The icon is copied onto every instance of that block in this schematic;
+    // the source schematic cell and other schematics are left unchanged.
+    void editSchematicSymbolArtwork(ice::ObjectId instanceId) {
+        if (!project_)
+            return;
+        ice::ObjectId cellId = 0;
+        ice::ObjectId symbolId = 0;
+        std::string symbolName;
+        std::string artwork;
+        for (const auto &[id, cell] : project_->project().schematicCells) {
+            const auto instance = cell.instances.find(instanceId);
+            if (instance == cell.instances.end())
+                continue;
+            const auto symbol = cell.symbols.find(instance->second.symbol);
+            if (symbol == cell.symbols.end() || symbol->second.sourceCell == 0)
+                continue;
+            const auto source = project_->project().schematicCells.find(symbol->second.sourceCell);
+            if (source == project_->project().schematicCells.end() || source->second.isTextSource())
+                continue;
+            cellId = id;
+            symbolId = symbol->second.id;
+            symbolName = symbol->second.name;
+            artwork = symbol->second.artwork;
+            break;
+        }
+        if (cellId == 0)
+            return;
+        SymbolArtworkDialog dialog(QString::fromStdString(symbolName), QString::fromStdString(artwork), this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto edited = dialog.artwork().toStdString();
+        if (edited == artwork)
+            return;
+        try {
+            project_->execute("change schematic icon", [&](ice::Project &project) {
+                ice::setSchematicSymbolArtwork(project, cellId, symbolId, edited);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Change Schematic Icon"),
+                                  QString::fromStdString(error.what()));
+            return;
+        }
+        refreshSchematic();
+        statusBar()->showMessage(
+            QStringLiteral("Updated the %1 icon in this schematic").arg(QString::fromStdString(symbolName)));
     }
 
     void updateInstanceParameter(ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name,
@@ -12515,6 +12571,8 @@ class DocumentWindow : public QMainWindow {
             [this](ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds) {
                 removeSchematicParameters(cellId, parameterIds);
             });
+        schematicPropertiesPanel_->setOnSymbolIconEditRequested(
+            [this](ice::ObjectId instanceId) { editSchematicSymbolArtwork(instanceId); });
         schematicProperties->addTab(schematicPropertiesPanel_, QStringLiteral("Properties"));
         schematicNetlistPanel_ = new SchematicNetlistPanel;
         schematicProperties->addTab(schematicNetlistPanel_, QStringLiteral("Netlist"));

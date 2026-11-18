@@ -262,11 +262,26 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
         throw ProjectError("implementation.import", "Implementation run has no build directory");
 
     const auto stream = findImplementationStream(projectRoot / run.directory);
-    if (stream.empty())
-        throw ProjectError("implementation.reference",
-                           "No final GDS/OASIS stream exists for run '" + run.name +
-                               "'. The final stage did not produce one. Check the PDK GDS decks, KLayout, and "
-                               "the final-stage log, then run implementation-export-gds.");
+    if (stream.empty()) {
+        auto message = "No final GDS/OASIS stream exists for run '" + run.name +
+                       "'. The final stage did not produce one. Check the PDK GDS decks, KLayout, and "
+                       "the final-stage log, then run implementation-export-gds.";
+        // The final stage treats a failed stream export as a warning, so the
+        // recorded reason is the only way to tell the user what to fix.
+        std::ifstream log(projectRoot / run.directory / "logs" / "06-gds.log", std::ios::binary);
+        if (log) {
+            std::ostringstream text;
+            text << log.rdbuf();
+            auto details = text.str();
+            while (!details.empty() && (details.back() == '\n' || details.back() == '\r' || details.back() == ' '))
+                details.pop_back();
+            if (details.size() > 1200)
+                details.erase(0, details.size() - 1200);
+            if (!details.empty())
+                message += "\n\nLast GDS export:\n" + details;
+        }
+        throw ProjectError("implementation.reference", message);
+    }
 
     const auto format = referenceFormatForPath(stream);
     if (format.empty())

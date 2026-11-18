@@ -2,6 +2,7 @@
 
 #include "icelib/hdl.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/symbols.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -364,6 +365,26 @@ ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::str
     ObjectId id = project.nextId();
     cell.symbols.emplace(id, Symbol{id, std::move(name), std::move(artwork), sourceCell});
     return id;
+}
+void setSchematicSymbolArtwork(Project &project, ObjectId cellId, ObjectId symbolId, std::string artwork) {
+    validateSymbolArtwork(artwork);
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    const auto symbol = cell.symbols.find(symbolId);
+    if (symbol == cell.symbols.end())
+        throw ProjectError("schematic.symbol", "Symbol does not exist");
+    const auto sourceCellId = symbol->second.sourceCell;
+    if (sourceCellId == 0)
+        throw ProjectError("schematic.symbol.artwork",
+                           "Only symbols created from a schematic cell can have a custom icon");
+    const auto source = project.schematicCells.find(sourceCellId);
+    if (source == project.schematicCells.end() || source->second.isTextSource())
+        throw ProjectError("schematic.symbol.artwork",
+                           "The symbol does not reference a drawn schematic cell");
+    // Placed instances own private copies of the block symbol, so match the
+    // source schematic instead of the symbol id or a suffixed symbol name.
+    for (auto &entry : cell.symbols)
+        if (entry.second.sourceCell == sourceCellId)
+            entry.second.artwork = artwork;
 }
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y) {
