@@ -398,7 +398,17 @@ ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-info <project> <simulation> <graph>
-ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
+ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
+  [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n] \
+  [--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]] \
+  [--clear-derived] [--clear-overlays] [--clear-markers]
+ice-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
+ice-cli simulation-graph-derive-remove <project> <simulation> <graph> <name>
+ice-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
+ice-cli simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>
+ice-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
+ice-cli simulation-graph-marker-remove <project> <simulation> <graph> <label>
+ice-cli simulation-runs <project> [simulation]
 ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
 ice-cli simulation-graph-delete <project> <simulation> <graph>
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
@@ -487,6 +497,15 @@ Simulation graphs are presentation definitions over captured signals.
 captured signals on Y. In `simulation-graph-update`, `-` keeps a field unchanged.
 In `simulation-graph-limits`, `-` clears a limit. Deleting the last graph is
 rejected.
+
+Graphs can also be analyzed without rerunning the circuit. `--view db` and
+`--view phase` transform the Y axis, `--fft on` switches to a spectrum, and
+`--derived name=expression` adds a math channel such as `out - in`,
+`db(v(out))`, or `derivative(i(v1))`. `simulation-runs` lists stored run ids
+for `--overlay`/`simulation-graph-overlay`, which compares corners or Monte
+Carlo samples on the same axes. `simulation-graph-marker-add` stores a labelled
+point annotation. All settings live on the graph in the project, so the GUI,
+CLI, and MCP display the same analysis.
 
 ## Simulation scripts
 

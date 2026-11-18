@@ -128,6 +128,8 @@ Provide one complete, scriptable simulation workflow.
 - corner, parameter sweep, and Monte Carlo experiment abstraction.
 - declarative gain, bandwidth, phase-margin, slew-rate, settling-time, and
   power measurements.
+- interactive waveform analysis: cursors, zoom/pan, dB/phase/FFT views,
+  derived traces, stored-run overlays, and plot annotations.
 
 ### Acceptance criteria
 

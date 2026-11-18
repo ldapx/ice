@@ -230,6 +230,38 @@ for point in experiment["points"]:
 `metric="slew_rate"`, `"bandwidth"`, `"phase_margin"`, or `"power"` without
 storing a new measurement on the simulation.
 
+## Waveform analysis
+
+Graphs are interactive and store presentation analysis in the project:
+`simulation_graph_update` accepts `view="db"`/`"phase"`, `fft`, math channels,
+and overlays. Use `simulation_runs` to find comparison runs and
+`simulation_waveform` to read the analyzed data:
+
+```python
+runs = simulation_runs(simulation="rc_tran")
+simulation_graph_update(
+    simulation="rc_tran",
+    graph="Graph 1",
+    view="db",
+    fft={"enabled": True, "window": "hann", "points": 1024},
+    derived_traces=[{"name": "slope", "expression": "derivative(out)"}],
+    overlays=[{"run_id": runs["runs"][0]["run_id"], "label": "tt"}],
+    markers=[{"label": "M1", "signal": "out", "x": 1e-6, "y": 0.5}],
+)
+wave = simulation_waveform(
+    simulation="rc_tran",
+    signals="out",
+    view="db",
+    fft={"enabled": True, "window": "hann", "points": 1024},
+    derived=[{"name": "slope", "expression": "derivative(out)"}],
+)
+```
+
+Expressions support arithmetic and `abs`, `sqrt`, `exp`, `ln`, `log10`, `db`,
+`mag`, `phase`, `derivative`, `integral`, `min`, and `max`. Internally the GUI
+adds cursors A/B with delta readout, wheel/box zoom and pan, and measurement
+annotations on the plot.
+
 ## PDK setup matrix
 
 ICE applies the package PDK setup automatically. `pdk_info` is authoritative;

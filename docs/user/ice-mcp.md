@@ -149,11 +149,13 @@ and ask the user to rebuild/restart ICE.
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
 | `simulation_signals` | List available signals and trace sizes from the latest stored run. |
 | `simulation_measure` | Measure crossings, frequency, amplitude, RMS, settling time, or evaluate `gain`, `bandwidth`, `phase_margin`, `slew_rate`, `settling_time`, and `power`. |
-| `simulation_graph_create` | Add a graph definition to a simulation. |
+| `simulation_graph_create` | Add a graph definition to a simulation; accepts view, derived traces, overlays, and markers. |
 | `simulation_graph_list` | List graph definitions. |
 | `simulation_graph_info` | Read one graph definition. |
-| `simulation_graph_update` | Update axes, signals, or limits. |
+| `simulation_graph_update` | Update axes, signals, limits, FFT/dB/phase view, derived traces, run overlays, or markers. |
 | `simulation_graph_delete` | Delete a graph while keeping the last one. |
+| `simulation_runs` | List stored runs with run id, variant, and creation time for overlay selection. |
+| `simulation_waveform` | Return analyzed series for a stored run, including derived expressions, dB/phase view, or FFT spectra. |
 | `simulation_delete` | Delete a simulation and all its graph definitions. |
 | `simulation_script_create` | Create a simulation script from a template or supplied source. |
 | `simulation_script_list` | List project-level simulation scripts. |
@@ -195,8 +197,13 @@ trace statistics, declarative measurement results, and available signal names.
 Configure AC/DC/noise/TF analysis fields, corners, sweeps, Monte Carlo, and
 measurements with `simulation_update`, then use `simulation_experiment` to run
 every variant. `simulation_corner_defaults` reads the active PDK's declared
-TT/FF/SS sections. A simulation that points at a SystemVerilog cell uses the
-`iverilog` simulator and `digital` analysis automatically; the result
+TT/FF/SS sections. `simulation_runs` lists stored run ids for comparison;
+`simulation_graph_update` can set `view` (`linear`, `db`, `phase`), `fft`,
+`derived_traces`, `overlays`, and `markers` on a graph. `simulation_waveform`
+returns the same analysis numerically, including FFT magnitude/phase and
+derived math channels, without rerunning the circuit. A simulation that points
+at a SystemVerilog cell uses the `iverilog` simulator and `digital` analysis
+automatically; the result
 traces come from the generated VCD, and empty capture/graph selections are
 filled from the first traces and saved. If ngspice or a PDK library cannot initialize, run
 `ice_doctor` with the schematic or simulation name to validate model includes

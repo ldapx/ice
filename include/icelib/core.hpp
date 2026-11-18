@@ -470,6 +470,30 @@ struct ImplementationRun {
     std::string updatedAt;
 };
 
+// A derived trace defined by a waveform expression, for example
+// "out - in", "db(out)", or "derivative(i(v1))". Expressions only affect how
+// stored runs are displayed; the simulator output is never rewritten.
+struct SimulationDerivedTrace {
+    std::string name;
+    std::string expression;
+};
+
+// One additional stored run drawn on the same graph. `runId` is the identifier
+// written by the simulation store; the label defaults to the run variant.
+struct SimulationOverlayRun {
+    std::string runId;
+    std::string label;
+};
+
+// Persistent point annotation placed by the user on a plot.
+struct SimulationGraphMarker {
+    std::string label;
+    std::string signal;
+    double x = 0.0;
+    double y = 0.0;
+    bool hasY = false;
+};
+
 struct SimulationGraph {
     ObjectId id = 0;
     std::string name;
@@ -492,6 +516,16 @@ struct SimulationGraph {
     std::optional<double> xMax;
     std::optional<double> yMin;
     std::optional<double> yMax;
+    // Display transform: "linear", "db", or "phase".
+    std::string view = "linear";
+    // Frequency-domain view of the selected traces.
+    bool fft = false;
+    std::string fftWindow = "hann";
+    int fftPoints = 0; // 0 selects the next power of two.
+    bool showMeasurements = true;
+    std::vector<SimulationDerivedTrace> derivedTraces;
+    std::vector<SimulationOverlayRun> overlays;
+    std::vector<SimulationGraphMarker> markers;
 };
 
 // One process/temperature/supply corner for a simulation experiment. Empty

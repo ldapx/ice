@@ -14,6 +14,7 @@
 #include "icelib/simulation_store.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
+#include "icelib/waveform.hpp"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -116,6 +117,24 @@ std::pair<std::string, double> parseAssignment(const std::string &text, const ch
     if (separator == std::string::npos || separator == 0)
         argumentError(std::string("Invalid ") + what + " (expected name=value): " + text);
     return {text.substr(0, separator), parseDouble(text.substr(separator + 1), what)};
+}
+
+std::pair<std::string, std::string> parseTextAssignment(const std::string &text, const char *what) {
+    const auto separator = text.find('=');
+    if (separator == std::string::npos || separator == 0)
+        argumentError(std::string("Invalid ") + what + " (expected name=value): " + text);
+    return {text.substr(0, separator), text.substr(separator + 1)};
+}
+
+bool parseToggle(const std::string &text, const char *what) {
+    auto normalized = text;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "on" || normalized == "true" || normalized == "yes" || normalized == "1")
+        return true;
+    if (normalized == "off" || normalized == "false" || normalized == "no" || normalized == "0")
+        return false;
+    argumentError(std::string("Invalid boolean for ") + what + ": " + text);
 }
 
 std::optional<ice::ObjectId> parseUnsigned(const std::string &text) {
@@ -711,7 +730,23 @@ json simulationGraphJson(const ice::SimulationGraph &graph) {
                    {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
                    {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
                    {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
-                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)},
+                   {"view", graph.view},
+                   {"fft", {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}}},
+                   {"show_measurements", graph.showMeasurements},
+                   {"derived_traces", json::array()},
+                   {"overlays", json::array()},
+                   {"markers", json::array()}};
+    for (const auto &trace : graph.derivedTraces)
+        result["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+    for (const auto &overlay : graph.overlays)
+        result["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+    for (const auto &marker : graph.markers) {
+        json entry = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+        if (marker.hasY)
+            entry["y"] = marker.y;
+        result["markers"].push_back(std::move(entry));
+    }
     return result;
 }
 
@@ -1277,6 +1312,16 @@ void printHelp() {
               << "  simulation-graph-list <project> <simulation>\n"
               << "  simulation-graph-info <project> <simulation> <graph>\n"
               << "  simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]\n"
+                 "      [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n]\n"
+                 "      [--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]]\n"
+                 "      [--clear-derived] [--clear-overlays] [--clear-markers]\n"
+              << "  simulation-graph-derive <project> <simulation> <graph> <name> <expression>\n"
+              << "  simulation-graph-derive-remove <project> <simulation> <graph> <name>\n"
+              << "  simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]\n"
+              << "  simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>\n"
+              << "  simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]\n"
+              << "  simulation-graph-marker-remove <project> <simulation> <graph> <label>\n"
+              << "  simulation-runs <project> [simulation]\n"
               << "  simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]\n"
               << "  simulation-graph-delete <project> <simulation> <graph>\n"
               << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
@@ -3883,7 +3928,8 @@ int main(int argc, char **argv) {
                 measurements.push_back(measurementJson(ice::measureSignal(trace, stored->result.time, threshold)));
             }
             json declarative = json::array();
-            if (const auto simulation = project.simulations.find(simulationId); simulation != project.simulations.end()) {
+            if (const auto simulation = project.simulations.find(simulationId);
+                simulation != project.simulations.end()) {
                 for (const auto &measurement :
                      ice::evaluateMeasurements(simulation->second.measurements, stored->result))
                     declarative.push_back(measurementResultJson(measurement));
@@ -3952,18 +3998,80 @@ int main(int argc, char **argv) {
         }
 
         if (command == "simulation-graph-update") {
-            expectArguments(args, 4, 7,
-                            "simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]");
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] "
+                            "[--view linear|db|phase] [--fft on|off] [--fft-window window] [--fft-points n] "
+                            "[--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]] "
+                            "[--clear-derived] [--clear-overlays] [--clear-markers]");
             const auto project = ice::Project::load(args[1]);
             const auto simulationId = resolveSimulation(project, args[2]);
             const auto &current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
             auto updated = current;
-            if (args.size() >= 5 && !args[4].empty() && args[4] != "-")
-                updated.name = args[4];
-            if (args.size() >= 6 && !args[5].empty() && args[5] != "-")
-                updated.xAxis = args[5];
-            if (args.size() >= 7 && args[6] != "-")
-                updated.ySignals = splitSignals(args[6]);
+            std::size_t positional = 0;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--view") {
+                    const auto text = value();
+                    const auto parsed = ice::parseWaveformView(text);
+                    if (!parsed)
+                        argumentError("Unknown waveform view: " + text);
+                    updated.view = ice::waveformViewName(*parsed);
+                } else if (option == "--fft") {
+                    updated.fft = parseToggle(value(), "--fft");
+                } else if (option == "--fft-window") {
+                    updated.fftWindow = value();
+                } else if (option == "--fft-points") {
+                    updated.fftPoints = static_cast<int>(parseInteger(value(), "FFT points"));
+                } else if (option == "--show-measurements") {
+                    updated.showMeasurements = parseToggle(value(), "--show-measurements");
+                } else if (option == "--derived") {
+                    const auto [derivedName, expression] = parseTextAssignment(value(), "derived trace");
+                    const auto found = std::find_if(
+                        updated.derivedTraces.begin(), updated.derivedTraces.end(),
+                        [&](const ice::SimulationDerivedTrace &trace) { return trace.name == derivedName; });
+                    if (found == updated.derivedTraces.end())
+                        updated.derivedTraces.push_back({derivedName, expression});
+                    else
+                        found->expression = expression;
+                } else if (option == "--overlay") {
+                    const auto text = value();
+                    const auto separator = text.find('=');
+                    const auto runId = separator == std::string::npos ? text : text.substr(0, separator);
+                    const auto label = separator == std::string::npos ? std::string{} : text.substr(separator + 1);
+                    if (runId.empty())
+                        argumentError("Overlay run id must not be empty");
+                    const auto found =
+                        std::find_if(updated.overlays.begin(), updated.overlays.end(),
+                                     [&](const ice::SimulationOverlayRun &overlay) { return overlay.runId == runId; });
+                    ice::SimulationOverlayRun overlay{runId, label};
+                    if (found == updated.overlays.end())
+                        updated.overlays.push_back(std::move(overlay));
+                    else
+                        *found = std::move(overlay);
+                } else if (option == "--clear-derived") {
+                    updated.derivedTraces.clear();
+                } else if (option == "--clear-overlays") {
+                    updated.overlays.clear();
+                } else if (option == "--clear-markers") {
+                    updated.markers.clear();
+                } else if (option.starts_with("--")) {
+                    argumentError("Unknown simulation-graph-update option: " + option);
+                } else if (positional++ == 0) {
+                    if (!option.empty() && option != "-")
+                        updated.name = option;
+                } else if (positional == 2) {
+                    if (!option.empty() && option != "-")
+                        updated.xAxis = option;
+                } else if (positional == 3) {
+                    if (option != "-")
+                        updated.ySignals = splitSignals(option);
+                }
+            }
             ice::ProjectSession session(project);
             const auto graphId = updated.id;
             session.execute("simulation-graph-update",
@@ -3976,6 +4084,136 @@ int main(int argc, char **argv) {
                     break;
                 }
             }
+            return 0;
+        }
+
+        if (command == "simulation-graph-derive" || command == "simulation-graph-derive-remove") {
+            expectArguments(args, 5, 6, "simulation-graph-derive <project> <simulation> <graph> <name> [expression]");
+            const auto remove = command == "simulation-graph-derive-remove";
+            if (!remove && args.size() < 6)
+                argumentError("simulation-graph-derive needs a waveform expression");
+            auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            if (remove) {
+                std::erase_if(updated.derivedTraces,
+                              [&](const ice::SimulationDerivedTrace &trace) { return trace.name == args[4]; });
+            } else {
+                const auto found =
+                    std::find_if(updated.derivedTraces.begin(), updated.derivedTraces.end(),
+                                 [&](const ice::SimulationDerivedTrace &trace) { return trace.name == args[4]; });
+                if (found == updated.derivedTraces.end())
+                    updated.derivedTraces.push_back({args[4], args[5]});
+                else
+                    found->expression = args[5];
+            }
+            ice::ProjectSession session(project);
+            session.execute(remove ? "remove graph derived trace" : "add graph derived trace",
+                            [&](ice::Project &p) { ice::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-graph-overlay" || command == "simulation-graph-overlay-remove") {
+            expectArguments(args, 5, 6, "simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]");
+            auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto remove = command == "simulation-graph-overlay-remove";
+            if (remove) {
+                std::erase_if(updated.overlays,
+                              [&](const ice::SimulationOverlayRun &overlay) { return overlay.runId == args[4]; });
+            } else {
+                ice::SimulationOverlayRun overlay;
+                overlay.runId = args[4];
+                overlay.label = args.size() >= 6 ? args[5] : std::string{};
+                if (overlay.label.empty()) {
+                    if (const auto stored = ice::findSimulationRun(projectRootForCli(args[1]), overlay.runId);
+                        stored && !stored->variant.empty())
+                        overlay.label = stored->variant;
+                }
+                const auto found =
+                    std::find_if(updated.overlays.begin(), updated.overlays.end(),
+                                 [&](const ice::SimulationOverlayRun &entry) { return entry.runId == overlay.runId; });
+                if (found == updated.overlays.end())
+                    updated.overlays.push_back(std::move(overlay));
+                else
+                    *found = std::move(overlay);
+            }
+            ice::ProjectSession session(project);
+            session.execute(remove ? "remove graph overlay" : "add graph overlay",
+                            [&](ice::Project &p) { ice::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-graph-marker-add" || command == "simulation-graph-marker-remove") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-graph-marker-add <project> <simulation> <graph> <label> <x> "
+                            "[--y value] [--signal name]");
+            auto project = ice::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto remove = command == "simulation-graph-marker-remove";
+            if (!remove && args.size() < 6)
+                argumentError("simulation-graph-marker-add needs a marker label and X value");
+            if (remove) {
+                std::erase_if(updated.markers,
+                              [&](const ice::SimulationGraphMarker &marker) { return marker.label == args[4]; });
+            } else {
+                ice::SimulationGraphMarker marker;
+                marker.label = args[4];
+                marker.x = parseDouble(args[5], "marker X");
+                for (std::size_t index = 6; index < args.size(); ++index) {
+                    const auto &option = args[index];
+                    const auto value = [&]() -> const std::string & {
+                        if (index + 1 >= args.size())
+                            argumentError("Missing value for " + option);
+                        return args[++index];
+                    };
+                    if (option == "--y") {
+                        marker.y = parseDouble(value(), "marker Y");
+                        marker.hasY = true;
+                    } else if (option == "--signal") {
+                        marker.signal = value();
+                    } else {
+                        argumentError("Unknown marker option: " + option);
+                    }
+                }
+                std::erase_if(updated.markers,
+                              [&](const ice::SimulationGraphMarker &entry) { return entry.label == marker.label; });
+                updated.markers.push_back(std::move(marker));
+            }
+            ice::ProjectSession session(project);
+            session.execute(remove ? "remove graph marker" : "add graph marker",
+                            [&](ice::Project &p) { ice::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-runs") {
+            expectArguments(args, 2, 3, "simulation-runs <project> [simulation]");
+            const auto project = ice::Project::load(args[1]);
+            std::optional<ice::ObjectId> simulationId;
+            if (args.size() >= 3)
+                simulationId = resolveSimulation(project, args[2]);
+            json runs = json::array();
+            for (const auto &run : ice::listSimulationRunSummaries(projectRootForCli(args[1]), simulationId)) {
+                runs.push_back({{"run_id", run.runId},
+                                {"variant", run.variant},
+                                {"created_at", run.createdAt},
+                                {"simulation", run.simulationId},
+                                {"simulation_name", run.simulationName},
+                                {"schematic", run.schematicId},
+                                {"path", run.path.string()}});
+            }
+            printJson({{"runs", std::move(runs)}});
             return 0;
         }
 

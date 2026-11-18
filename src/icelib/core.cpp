@@ -788,6 +788,31 @@ std::string Project::serialize() const {
                 graphJson["y_min"] = *graph.yMin;
             if (graph.yMax)
                 graphJson["y_max"] = *graph.yMax;
+            if (graph.view != "linear")
+                graphJson["view"] = graph.view;
+            if (graph.fft || graph.fftWindow != "hann" || graph.fftPoints != 0)
+                graphJson["fft"] = {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}};
+            if (!graph.showMeasurements)
+                graphJson["show_measurements"] = false;
+            if (!graph.derivedTraces.empty()) {
+                graphJson["derived_traces"] = json::array();
+                for (const auto &trace : graph.derivedTraces)
+                    graphJson["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+            }
+            if (!graph.overlays.empty()) {
+                graphJson["overlays"] = json::array();
+                for (const auto &overlay : graph.overlays)
+                    graphJson["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+            }
+            if (!graph.markers.empty()) {
+                graphJson["markers"] = json::array();
+                for (const auto &marker : graph.markers) {
+                    json markerJson = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+                    if (marker.hasY)
+                        markerJson["y"] = marker.y;
+                    graphJson["markers"].push_back(std::move(markerJson));
+                }
+            }
             s["graphs"].push_back(std::move(graphJson));
         }
         j["simulations"].push_back(s);
@@ -1272,6 +1297,50 @@ Project Project::deserialize(const std::string &text) {
                             graph.yMin = g.at("y_min").get<double>();
                         if (g.contains("y_max") && !g.at("y_max").is_null())
                             graph.yMax = g.at("y_max").get<double>();
+                        graph.view = g.value("view", std::string{"linear"});
+                        if (const auto fft = g.find("fft"); fft != g.end() && fft->is_object()) {
+                            graph.fft = fft->value("enabled", false);
+                            graph.fftWindow = fft->value("window", std::string{"hann"});
+                            graph.fftPoints = fft->value("points", 0);
+                        }
+                        graph.showMeasurements = g.value("show_measurements", true);
+                        if (const auto derived = g.find("derived_traces"); derived != g.end() && derived->is_array()) {
+                            for (const auto &entry : *derived) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationDerivedTrace trace;
+                                trace.name = entry.value("name", std::string{});
+                                trace.expression = entry.value("expression", std::string{});
+                                if (!trace.expression.empty())
+                                    graph.derivedTraces.push_back(std::move(trace));
+                            }
+                        }
+                        if (const auto overlays = g.find("overlays"); overlays != g.end() && overlays->is_array()) {
+                            for (const auto &entry : *overlays) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationOverlayRun overlay;
+                                overlay.runId = entry.value("run_id", std::string{});
+                                overlay.label = entry.value("label", std::string{});
+                                if (!overlay.runId.empty())
+                                    graph.overlays.push_back(std::move(overlay));
+                            }
+                        }
+                        if (const auto markers = g.find("markers"); markers != g.end() && markers->is_array()) {
+                            for (const auto &entry : *markers) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationGraphMarker marker;
+                                marker.label = entry.value("label", std::string{});
+                                marker.signal = entry.value("signal", std::string{});
+                                marker.x = entry.value("x", 0.0);
+                                if (entry.contains("y") && entry.at("y").is_number()) {
+                                    marker.y = entry.at("y").get<double>();
+                                    marker.hasY = true;
+                                }
+                                graph.markers.push_back(std::move(marker));
+                            }
+                        }
                         sim.graphs.push_back(std::move(graph));
                     }
                 }
@@ -1512,7 +1581,7 @@ std::string generatedAgentsGuidance() {
            << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
               "that the features you need are present. If `project_repair`, `simulation_measure`, "
               "`simulation_analyses`, `simulation_experiments`, `simulation_measurements`, "
-              "text-schematic support, `digital_hdl`, `mixed_signal`, or "
+              "`waveform_analysis`, text-schematic support, `digital_hdl`, `mixed_signal`, or "
               "`implementation_runs` is missing, stop and ask the user to "
               "rebuild and restart ICE instead of working around the missing tools. Restart a "
               "long-lived MCP server after installing a new build.\n\n"
@@ -2128,6 +2197,7 @@ BuildInfo buildInfo() {
                      "simulation_analyses",
                      "simulation_experiments",
                      "simulation_measurements",
+                     "waveform_analysis",
                      "pdk_status",
                      "pdk_build",
                      "save_revision_guard",

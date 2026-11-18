@@ -54,6 +54,32 @@ std::optional<StoredSimulationRun> latestSimulationRun(const std::filesystem::pa
                                                        std::optional<ObjectId> simulationId = std::nullopt,
                                                        std::optional<ObjectId> schematicId = std::nullopt);
 
+// Metadata for one stored run. Cheap to read because trace samples are not
+// decoded; used by plot overlays and run pickers.
+struct SimulationRunSummary {
+    std::filesystem::path path;
+    std::string runId;
+    std::string createdAt;
+    ObjectId simulationId = 0;
+    std::string simulationName;
+    std::string variant;
+    ObjectId schematicId = 0;
+    std::string schematicName;
+};
+
+std::vector<SimulationRunSummary> listSimulationRunSummaries(const std::filesystem::path &projectRoot,
+                                                             std::optional<ObjectId> simulationId = std::nullopt);
+
+// Loads one stored run by its run id (the file stem), searching the project
+// build tree. Returns nullopt when the id is unknown or the file is invalid.
+std::optional<StoredSimulationRun> findSimulationRun(const std::filesystem::path &projectRoot,
+                                                     const std::string &runId);
+
+// Lists stored runs newest first. `simulationId` limits the result to one
+// simulation; omit it for the whole project. Malformed files are skipped.
+std::vector<StoredSimulationRun> listSimulationRuns(const std::filesystem::path &projectRoot,
+                                                    std::optional<ObjectId> simulationId = std::nullopt);
+
 // Serialize a result using the stored-run schema. The format is deliberately
 // new-only: report tooling is not expected to understand the old bare result
 // JSON.

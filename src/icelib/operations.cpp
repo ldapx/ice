@@ -1657,15 +1657,9 @@ bool updateSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
         return false;
     if (graph.name.empty())
         throw ProjectError("simulation.graph.name", "Graph name is required");
-    found->name = graph.name;
-    found->xAxis = graph.xAxis;
-    found->ySignals = graph.ySignals;
-    found->signalLabels = graph.signalLabels;
-    found->yAxisLabel = graph.yAxisLabel;
-    found->xMin = graph.xMin;
-    found->xMax = graph.xMax;
-    found->yMin = graph.yMin;
-    found->yMax = graph.yMax;
+    auto updated = graph;
+    updated.id = graphId;
+    *found = std::move(updated);
     return true;
 }
 

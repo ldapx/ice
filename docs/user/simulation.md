@@ -139,11 +139,39 @@ emitted recursively before the parent body.
 
 Graphs are presentation-only views over a result. Each graph selects a captured
 signal or the result's primary x axis (time, frequency, source sweep, or
-operating point) for its X axis and one or more captured signals for its Y axis. It can also define optional axis limits; blank
-limits auto-scale from the returned data. Axis selections and limits change
-only how the plot is drawn and never alter the simulation parameters, netlist,
-or data acquisition. Plots draw labelled axis ticks and a light grid by
-default; the **Grid** button in the graph header toggles the grid on and off.
+operating point) for its X axis and one or more captured signals for its Y axis.
+It can also define optional axis limits; blank limits auto-scale from the
+returned data. Axis selections and limits change only how the plot is drawn and
+never alter the simulation parameters, netlist, or data acquisition. Plots draw
+labelled axis ticks and a light grid by default; the **Grid** button in the
+graph header toggles the grid on and off.
+
+Graphs also store waveform-analysis settings:
+
+| Setting | Meaning |
+| --- | --- |
+| `view` | `linear`, `db` (20·log10 magnitude), or `phase` |
+| `fft` | Frequency-domain view of the selected traces (`window`, `points`) |
+| `derived_traces` | Named expressions such as `out - in`, `db(out)`, `derivative(i(v1))` |
+| `overlays` | Stored run ids drawn on the same graph with variant labels |
+| `markers` | Persistent point annotations with a signal, X, and optional Y |
+| `show_measurements` | Draw declarative measurement values inside the frame |
+
+Expressions support `+ - * /`, parentheses, and `abs`, `sqrt`, `exp`, `ln`,
+`log10`, `db`, `mag`, `phase`, `derivative`, `integral`, `min`, and `max`.
+Trace lookup is case-insensitive, ignores whitespace, and accepts a bare node or
+`v(node)`. FFT analysis resamples non-uniform transient output onto a uniform
+grid, applies a Hann, Hamming, Blackman, or rectangular window, and reports
+amplitude (and phase) versus frequency. FFT phase is referenced to a cosine, so
+a pure sine with phase φ appears at `φ - 90°`. View and derived traces are
+display only, so stored run files remain untouched.
+
+Interactive plot controls are described in the GUI documentation: wheel zoom,
+pan, box zoom, cursors A/B with delta readout, marker placement, and measurement
+annotations. These settings persist in the project and are available to the CLI
+and MCP through `simulation-graph-update`, `simulation-graph-derive`,
+`simulation-graph-overlay`, and `simulation-graph-marker-add`.
+
 
 `runAsync` executes through a worker future and reports progress through a
 callback. Callers crossing into a GUI event loop must queue those progress
@@ -330,7 +358,13 @@ ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
   [--signal s] [--input s] [--voltage v] [--tolerance v]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
-ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
+ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
+  [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n] \
+  [--derived name=expr] [--overlay run-id[=label]]
+ice-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
+ice-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
+ice-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
+ice-cli simulation-runs <project> [simulation]
 ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
 ice-cli simulation-graph-delete <project> <simulation> <graph>
 ice-cli script-add <project> <name> [source-file]

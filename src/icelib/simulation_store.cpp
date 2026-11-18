@@ -163,6 +163,31 @@ static std::string serializeSimulationRunWithIdentity(const SimulationRunContext
             entry["y_min"] = *graph.yMin;
         if (graph.yMax)
             entry["y_max"] = *graph.yMax;
+        if (graph.view != "linear")
+            entry["view"] = graph.view;
+        if (graph.fft || graph.fftWindow != "hann" || graph.fftPoints != 0)
+            entry["fft"] = {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}};
+        if (!graph.showMeasurements)
+            entry["show_measurements"] = false;
+        if (!graph.derivedTraces.empty()) {
+            entry["derived_traces"] = json::array();
+            for (const auto &trace : graph.derivedTraces)
+                entry["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+        }
+        if (!graph.overlays.empty()) {
+            entry["overlays"] = json::array();
+            for (const auto &overlay : graph.overlays)
+                entry["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+        }
+        if (!graph.markers.empty()) {
+            entry["markers"] = json::array();
+            for (const auto &marker : graph.markers) {
+                json markerJson = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+                if (marker.hasY)
+                    markerJson["y"] = marker.y;
+                entry["markers"].push_back(std::move(markerJson));
+            }
+        }
         output["graphs"].push_back(std::move(entry));
     }
     return output.dump(2) + "\n";
@@ -321,6 +346,117 @@ std::optional<StoredSimulationRun> latestSimulationRun(const std::filesystem::pa
         }
     }
     return std::nullopt;
+}
+
+namespace {
+
+std::vector<std::filesystem::path> storedRunFiles(const std::filesystem::path &projectRoot) {
+    std::vector<std::filesystem::path> files;
+    const auto base = projectRoot / "build" / "simulations";
+    std::error_code status;
+    if (!std::filesystem::is_directory(base, status) || status)
+        return files;
+    for (std::filesystem::directory_iterator simulations(base, status), end; !status && simulations != end;
+         simulations.increment(status)) {
+        if (!simulations->is_directory(status) || status)
+            continue;
+        const auto runs = simulations->path() / "runs";
+        if (!std::filesystem::is_directory(runs, status) || status)
+            continue;
+        for (std::filesystem::directory_iterator entries(runs, status), runEnd; !status && entries != runEnd;
+             entries.increment(status)) {
+            if (entries->is_regular_file(status) && !status && entries->path().extension() == ".json")
+                files.push_back(entries->path());
+        }
+    }
+    return files;
+}
+
+} // namespace
+
+std::vector<SimulationRunSummary> listSimulationRunSummaries(const std::filesystem::path &projectRoot,
+                                                             std::optional<ObjectId> simulationId) {
+    auto files = storedRunFiles(normalizedProjectRoot(projectRoot));
+    std::sort(files.begin(), files.end(), [](const std::filesystem::path &left, const std::filesystem::path &right) {
+        const auto leftName = left.filename().string();
+        const auto rightName = right.filename().string();
+        if (leftName != rightName)
+            return leftName < rightName;
+        return left < right;
+    });
+    std::vector<SimulationRunSummary> runs;
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+        try {
+            std::ifstream input(*it, std::ios::binary);
+            if (!input)
+                continue;
+            const auto document = json::parse(input);
+            if (document.value("format", std::string{}) != "ice-simulation-result")
+                continue;
+            const auto run = document.find("run");
+            if (run == document.end() || !run->is_object())
+                continue;
+            SimulationRunSummary summary;
+            summary.path = *it;
+            summary.runId = run->value("id", std::string{});
+            summary.createdAt = run->value("created_at", std::string{});
+            if (const auto simulation = run->find("simulation"); simulation != run->end() && simulation->is_object()) {
+                summary.simulationId = simulation->value("id", ObjectId{0});
+                summary.simulationName = simulation->value("name", std::string{});
+            }
+            if (simulationId && summary.simulationId != *simulationId)
+                continue;
+            summary.variant = run->value("variant", std::string{});
+            if (const auto schematic = run->find("schematic"); schematic != run->end() && schematic->is_object()) {
+                summary.schematicId = schematic->value("id", ObjectId{0});
+                summary.schematicName = schematic->value("name", std::string{});
+            }
+            runs.push_back(std::move(summary));
+        } catch (const std::exception &) {
+            // Skip malformed or partially written files.
+        }
+    }
+    return runs;
+}
+
+std::optional<StoredSimulationRun> findSimulationRun(const std::filesystem::path &projectRoot,
+                                                     const std::string &runId) {
+    if (runId.empty())
+        return std::nullopt;
+    const auto files = storedRunFiles(normalizedProjectRoot(projectRoot));
+    for (const auto &path : files) {
+        if (path.stem().string() != runId)
+            continue;
+        try {
+            return readSimulationRun(path);
+        } catch (const ProjectError &) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<StoredSimulationRun> listSimulationRuns(const std::filesystem::path &projectRoot,
+                                                    std::optional<ObjectId> simulationId) {
+    auto files = storedRunFiles(normalizedProjectRoot(projectRoot));
+    std::sort(files.begin(), files.end(), [](const std::filesystem::path &left, const std::filesystem::path &right) {
+        const auto leftName = left.filename().string();
+        const auto rightName = right.filename().string();
+        if (leftName != rightName)
+            return leftName < rightName;
+        return left < right;
+    });
+    std::vector<StoredSimulationRun> runs;
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+        try {
+            auto stored = readSimulationRun(*it);
+            if (simulationId && stored.simulationId != *simulationId)
+                continue;
+            runs.push_back(std::move(stored));
+        } catch (const ProjectError &) {
+        }
+    }
+    return runs;
 }
 
 } // namespace ice

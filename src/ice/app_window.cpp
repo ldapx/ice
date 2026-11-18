@@ -28,6 +28,7 @@
 #include "shortcuts.hpp"
 #include "side_panels.hpp"
 #include "simulation_experiment_ui.hpp"
+#include "waveform_analysis_ui.hpp"
 
 #include "appearance.hpp"
 #include "file_labels.hpp"
@@ -7743,7 +7744,135 @@ class DocumentWindow : public QMainWindow {
         });
         plot->setYAxisLabelEditCallback(
             [this](ice::ObjectId graphId, const QString &label) { renameGraphYAxisLabel(graphId, label); });
+        plot->setStatusCallback([this](const QString &message) {
+            if (!message.isEmpty())
+                statusBar()->showMessage(message, 6000);
+        });
+        plot->setMarkerCallback(
+            [this, plot](const ice::SimulationGraphMarker &marker) { persistGraphMarker(plot, marker); });
+        plot->setClearMarkersCallback([this, plot] {
+            const auto graphId = plot->graph().id;
+            clearGraphMarkers(graphId);
+            auto updated = plot->graph();
+            updated.markers.clear();
+            plot->setGraph(updated);
+        });
         return plot;
+    }
+
+    void persistGraphMarker(SimulationPlot *plot, const ice::SimulationGraphMarker &marker) {
+        if (!project_ || activeSimulationId_ == 0 || !plot)
+            return;
+        const auto simId = activeSimulationId_;
+        const auto graphId = plot->graph().id;
+        if (graphId == 0)
+            return;
+        ice::SimulationGraph stored;
+        project_->execute("add graph marker", [&](ice::Project &project) {
+            auto simulation = project.simulations.find(simId);
+            if (simulation == project.simulations.end())
+                return;
+            for (auto &graph : simulation->second.graphs) {
+                if (graph.id != graphId)
+                    continue;
+                graph.markers.push_back(marker);
+                stored = graph;
+                break;
+            }
+        });
+        if (stored.id != 0)
+            plot->setGraph(stored);
+    }
+
+    void clearGraphMarkers(ice::ObjectId graphId) {
+        if (!project_ || activeSimulationId_ == 0 || graphId == 0)
+            return;
+        const auto simId = activeSimulationId_;
+        project_->execute("clear graph markers", [&](ice::Project &project) {
+            auto simulation = project.simulations.find(simId);
+            if (simulation == project.simulations.end())
+                return;
+            for (auto &graph : simulation->second.graphs) {
+                if (graph.id == graphId)
+                    graph.markers.clear();
+            }
+        });
+    }
+
+    // Resolves stored-run overlays for one plot. Results are cached by run id
+    // so switching graph tabs does not re-read the same JSON file.
+    void applyGraphOverlays(SimulationPlot *plot, const ice::SimulationGraph &graph) {
+        if (!plot)
+            return;
+        std::vector<SimulationPlot::Overlay> overlays;
+        if (!projectPath_.isEmpty()) {
+            const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+            for (const auto &overlay : graph.overlays) {
+                if (overlay.runId.empty())
+                    continue;
+                std::shared_ptr<const ice::SimulationResult> result;
+                std::string variant;
+                if (const auto cached = overlayResults_.find(overlay.runId); cached != overlayResults_.end()) {
+                    result = cached->second.result;
+                    variant = cached->second.variant;
+                } else {
+                    auto stored = ice::findSimulationRun(root, overlay.runId);
+                    if (!stored)
+                        continue;
+                    variant = stored->variant;
+                    result = std::make_shared<ice::SimulationResult>(std::move(stored->result));
+                    overlayResults_[overlay.runId] = {result, variant};
+                }
+                auto label = overlay.label;
+                if (label.empty())
+                    label = variant.empty() ? overlay.runId : variant;
+                overlays.push_back({label, std::move(result)});
+            }
+        }
+        plot->setOverlays(std::move(overlays));
+    }
+
+    void openWaveformAnalysisDialog() {
+        if (!project_ || activeSimulationId_ == 0 || !graphTabs_ || graphTabs_->currentIndex() < 0)
+            return;
+        const auto tabIndex = graphTabs_->currentIndex();
+        const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIndex).toULongLong());
+        const auto simId = activeSimulationId_;
+        const auto simulation = project_->project().simulations.find(simId);
+        if (simulation == project_->project().simulations.end() || graphId == 0)
+            return;
+        const auto graphIt = std::find_if(simulation->second.graphs.begin(), simulation->second.graphs.end(),
+                                          [graphId](const ice::SimulationGraph &graph) { return graph.id == graphId; });
+        if (graphIt == simulation->second.graphs.end())
+            return;
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        WaveformAnalysisDialog dialog(*graphIt, root, simId, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto updated = dialog.graph();
+        project_->execute("configure graph analysis", [&](ice::Project &project) {
+            auto target = project.simulations.find(simId);
+            if (target == project.simulations.end())
+                return;
+            for (auto &graph : target->second.graphs) {
+                if (graph.id == graphId) {
+                    graph = updated;
+                    break;
+                }
+            }
+        });
+        const auto &storedSimulation = project_->project().simulations.at(simId);
+        rebuildGraphTabs(storedSimulation.graphs);
+        simulationPanel_->setProject(project_->project());
+        for (int index = 0; index < graphTabs_->count(); ++index) {
+            if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
+                graphTabs_->setCurrentIndex(index);
+                break;
+            }
+        }
+        statusBar()->showMessage(QStringLiteral("Waveform analysis settings saved"));
     }
 
     void renameGraphSignalLabel(ice::ObjectId graphId, const std::string &signal, const QString &label) {
@@ -7843,6 +7972,7 @@ class DocumentWindow : public QMainWindow {
             // Show a single empty plot labelled "Graph 1".
             simulationPlot_->clear();
             simulationPlot_->setGraph({});
+            simulationPlot_->setOverlays({});
             simulationPlot_->setGridVisible(graphGridVisible_);
             graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
             return;
@@ -7865,6 +7995,7 @@ class DocumentWindow : public QMainWindow {
             plot->setGridVisible(graphGridVisible_);
             if (const auto previous = previousPlots.find(graphs[i].id); previous != previousPlots.end())
                 plot->setResult(previous->second.result);
+            applyGraphOverlays(plot, displayGraph);
             const auto tabName = QString::fromStdString(graphs[i].name);
             const auto idx = graphTabs_->addTab(plot, tabName);
             graphTabs_->tabBar()->setTabData(idx, QVariant::fromValue<qulonglong>(graphs[i].id));
@@ -7877,8 +8008,10 @@ class DocumentWindow : public QMainWindow {
         if (!graphTabs_)
             return;
         for (int index = 0; index < graphTabs_->count(); ++index) {
-            if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
+            if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index))) {
                 plot->setResult(result);
+                applyGraphOverlays(plot, plot->graph());
+            }
         }
     }
 
@@ -9698,6 +9831,8 @@ class DocumentWindow : public QMainWindow {
             simulationGridButton_->setEnabled(hasSimulation);
         if (simulationLoadVcdButton_)
             simulationLoadVcdButton_->setEnabled(hasSimulation);
+        if (simulationAnalyzeButton_)
+            simulationAnalyzeButton_->setEnabled(hasSimulation);
         if (simulationTestbenchRunButton_)
             simulationTestbenchRunButton_->setEnabled(hasSimulation && hasSchematic && hdl);
         updateSimulationTestbenchTab();
@@ -12841,11 +12976,19 @@ class DocumentWindow : public QMainWindow {
         simulationLoadVcdButton_->setFixedWidth(32);
         simulationLoadVcdButton_->setEnabled(false);
         setLucideIcon(simulationLoadVcdButton_, QStringLiteral("notebook-text"), 16);
+        simulationAnalyzeButton_ = new QPushButton;
+        simulationAnalyzeButton_->setToolTip(
+            QStringLiteral("Waveform analysis: FFT, dB/phase views, derived traces, run overlays, markers"));
+        simulationAnalyzeButton_->setAccessibleName(QStringLiteral("Waveform analysis"));
+        simulationAnalyzeButton_->setFixedWidth(32);
+        simulationAnalyzeButton_->setEnabled(false);
+        setLucideIcon(simulationAnalyzeButton_, QStringLiteral("chart-spline"), 16);
         graphControlsLayout->addStretch(1);
         graphControlsLayout->addWidget(simulationAddGraphButton_);
         graphControlsLayout->addWidget(simulationDeleteGraphButton_);
         graphControlsLayout->addWidget(simulationEditGraphButton_);
         graphControlsLayout->addWidget(simulationGridButton_);
+        graphControlsLayout->addWidget(simulationAnalyzeButton_);
         graphControlsLayout->addWidget(simulationLoadVcdButton_);
         graphControlsLayout->addStretch(1);
 
@@ -13110,6 +13253,7 @@ class DocumentWindow : public QMainWindow {
                     plot->setGridVisible(visible);
         });
         connect(simulationLoadVcdButton_, &QPushButton::clicked, this, [this] { loadVcdGraphs(); });
+        connect(simulationAnalyzeButton_, &QPushButton::clicked, this, [this] { openWaveformAnalysisDialog(); });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
         connect(simulationTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (simulationTabs_ && simulationGraphsPage_ && simulationTabs_->widget(index) == simulationGraphsPage_)
@@ -14712,6 +14856,12 @@ class DocumentWindow : public QMainWindow {
     QPushButton *simulationEditGraphButton_ = nullptr;
     QPushButton *simulationGridButton_ = nullptr;
     QPushButton *simulationLoadVcdButton_ = nullptr;
+    QPushButton *simulationAnalyzeButton_ = nullptr;
+    struct OverlayResult {
+        std::shared_ptr<const ice::SimulationResult> result;
+        std::string variant;
+    };
+    std::map<std::string, OverlayResult> overlayResults_;
     QString currentSimulationNetlist_;
     QString builtSimulationNetlist_;
     ice::ObjectId builtSimulationNetlistSchematicId_ = 0;
