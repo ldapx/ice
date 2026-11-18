@@ -6,6 +6,7 @@ Run after building ice-mcp and ice-cli:
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,13 @@ class MCP:
                 f"Invalid JSON from {tool_name}: {error}: {text[:500]!r}"
             ) from error
 
+    def tool_error(self, tool_name: str, **arguments) -> str:
+        """Call a tool that is expected to fail and return its error text."""
+        result = self.call("tools/call", {"name": tool_name, "arguments": arguments})
+        if not result.get("isError"):
+            raise RuntimeError(f"{tool_name} unexpectedly succeeded")
+        return result["content"][0]["text"]
+
     def close(self):
         self.process.terminate()
         try:
@@ -119,6 +127,8 @@ def main() -> int:
                 "simulation_result",
                 "simulation_signals",
                 "simulation_measure",
+                "simulation_corner_defaults",
+                "simulation_experiment",
                 "pdk_info",
                 "pdk_build",
                 "schematic_create_systemverilog",
@@ -132,6 +142,8 @@ def main() -> int:
                 "schematic_validate",
                 "schematic_import_spice",
                 "simulation_trace",
+                "simulation_runs",
+                "simulation_waveform",
                 "ice_help",
                 "layout_add_instance",
                 "layout_add_port",
@@ -259,6 +271,24 @@ def main() -> int:
             assert regenerated["ok"] is True, regenerated
             procedural_info = mcp.tool("layout_info", cell="proc_test")
             assert procedural_info["needs_regeneration"] is False, procedural_info
+            route_script = (
+                'metal1 = layout.layer("Metal1", 1)\n'
+                'metal1.rectangle(0, 0, 100, 100, net="A")\n'
+                'metal1.rectangle(1000, 0, 100, 100, net="A")\n'
+                "layout.route((0, 0, 100, 100), (1000, 0, 100, 100),\n"
+                '             "Metal1", 50, net="A",\n'
+                '             start_side="right", end_side="left")\n'
+            )
+            mcp.tool("layout_set_script", layout="proc_test", script=route_script)
+            regenerated = mcp.tool("layout_regenerate", layout="proc_test")
+            assert regenerated["ok"] is True, regenerated
+            connectivity = mcp.tool(
+                "layout_connectivity", cell=str(procedural["generated_cell"])
+            )
+            assert any(
+                net["name"] == "A" and len(net["shapes"]) >= 3
+                for net in connectivity["nets"]
+            ), connectivity
             mcp.tool("layout_add_layer", name="Metal1", number=8)
             mcp.tool("layout_add_net", cell="pin_test", name="VIN")
             mcp.tool(
@@ -725,6 +755,83 @@ def main() -> int:
             assert measured["measurements"], measured
             assert "zero_crossings" in measured["measurements"][0], measured
             assert "amplitude" in measured["measurements"][0], measured
+            slew = mcp.tool(
+                "simulation_measure",
+                simulation="rc_sim",
+                metric="slew_rate",
+                signal="out",
+            )
+            assert slew["valid"] is True, slew
+            configured = mcp.tool(
+                "simulation_update",
+                simulation="rc_sim",
+                temperature=27,
+                corners=[
+                    {"name": "tt", "temperature": 27},
+                    {"name": "ff", "temperature": 85, "source_overrides": {"V1": 1.1}},
+                ],
+                measurements=[
+                    {"name": "slew", "metric": "slew_rate", "signal": "out"},
+                ],
+            )
+            assert len(configured["corners"]) == 2, configured
+            experiment = mcp.tool(
+                "simulation_experiment",
+                simulation="rc_sim",
+                timeout_ms=30000,
+                store=False,
+            )
+            assert len(experiment["points"]) == 2, experiment
+            assert experiment["points"][0]["state"] == "succeeded", experiment
+            assert experiment["points"][0]["measurements"], experiment
+
+            graphs = mcp.tool("simulation_graph_list", simulation="rc_sim")
+            assert graphs, graphs
+            graph_id = graphs[0]["id"]
+            analyzed = mcp.tool(
+                "simulation_graph_update",
+                simulation="rc_sim",
+                graph=graph_id,
+                view="db",
+                fft={"enabled": True, "window": "hann", "points": 512},
+                derived_traces=[{"name": "slope", "expression": "derivative(out)"}],
+                markers=[{"label": "M1", "signal": "out", "x": 1e-7, "y": 0.1}],
+            )
+            assert analyzed["view"] == "db", analyzed
+            assert analyzed["fft"]["enabled"] is True, analyzed
+            assert analyzed["derived_traces"][0]["name"] == "slope", analyzed
+            assert analyzed["markers"][0]["label"] == "M1", analyzed
+
+            runs = mcp.tool("simulation_runs", simulation="rc_sim")
+            assert runs["runs"], runs
+            overlaid = mcp.tool(
+                "simulation_graph_update",
+                simulation="rc_sim",
+                graph=graph_id,
+                overlays=[{"run_id": runs["runs"][0]["run_id"], "label": "tt"}],
+            )
+            assert overlaid["overlays"], overlaid
+
+            waveform = mcp.tool(
+                "simulation_waveform",
+                simulation="rc_sim",
+                signals="out",
+                view="db",
+                derived=[{"name": "slope", "expression": "derivative(out)"}],
+                max_points=64,
+            )
+            names = [series["name"] for series in waveform["series"]]
+            assert "slope" in names, waveform
+            assert all(len(series["x"]) <= 65 for series in waveform["series"]), (
+                waveform
+            )
+            spectrum = mcp.tool(
+                "simulation_waveform",
+                simulation="rc_sim",
+                signals="out",
+                fft={"enabled": True, "window": "hann", "points": 512},
+            )
+            assert spectrum["series"][0]["x_unit"] == "Hz", spectrum
 
             pdk = mcp.tool("pdk_info")
             assert "pdks" in pdk, pdk
@@ -764,6 +871,56 @@ def main() -> int:
             bad_doctor = mcp.tool("ice_doctor", simulation="bad_sim")
             assert bad_doctor["model_paths_ok"] is False, bad_doctor
             assert any(not check["exists"] for check in bad_doctor["model_checks"])
+
+            # A drawn cell netlist must expose its subcircuit port order.
+            mcp.tool("schematic_create", name="ports_test")
+            mcp.tool(
+                "schematic_add_component",
+                cell="ports_test",
+                symbol="Input",
+                name="A",
+                x=0,
+                y=0,
+            )
+            mcp.tool(
+                "schematic_add_component",
+                cell="ports_test",
+                symbol="Output",
+                name="Y",
+                x=200,
+                y=0,
+            )
+            netlist = mcp.tool("schematic_netlist", schematic="ports_test")
+            assert netlist["ports"] == ["A", "Y"], netlist
+
+            # A mutation whose automatic save fails must be reported and rolled
+            # back instead of leaving the server unable to save anything.
+            locked = [
+                project,
+                project / "sch",
+                project / "lay",
+                project / "sim",
+                project / "impl",
+            ]
+            try:
+                for path in locked:
+                    if path.is_dir():
+                        os.chmod(path, 0o555)
+                error = mcp.tool_error(
+                    "schematic_add_component",
+                    cell="ring_test",
+                    symbol="Output",
+                    name="LOCKED",
+                )
+                assert "discarded" in error, error
+                summary = mcp.tool("project_summary")
+                assert summary.get("schematics") is not None, summary
+            finally:
+                for path in locked:
+                    if path.is_dir():
+                        os.chmod(path, 0o755)
+            reloaded = mcp.tool("project_reload", discard=True)
+            assert reloaded.get("schematics") is not None, reloaded
 
             # A server started without --project can discover and open the
             # project in its working directory.

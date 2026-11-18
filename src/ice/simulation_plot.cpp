@@ -1,14 +1,20 @@
 #include "simulation_plot.hpp"
 
+#include "icelib/waveform.hpp"
 #include "ui_colors.hpp"
 
+#include <QClipboard>
+#include <QContextMenuEvent>
+#include <QGuiApplication>
 #include <QInputDialog>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
 #include <QString>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cctype>
@@ -34,6 +40,33 @@ std::string normalizedSignalName(const std::string &signal) {
 
 bool isTimeSignal(const std::string &normalized) {
     return normalized.empty() || normalized == "time" || normalized == "time(s)" || normalized == "t";
+}
+
+bool sameSignal(const std::string &left, const std::string &right) {
+    const auto normalizedLeft = normalizedSignalName(left);
+    const auto normalizedRight = normalizedSignalName(right);
+    if (normalizedLeft == normalizedRight)
+        return true;
+    if (normalizedLeft.size() > 2 && normalizedLeft.back() == ')' &&
+        (normalizedLeft.rfind("v(", 0) == 0 || normalizedLeft.rfind("i(", 0) == 0))
+        return normalizedLeft.substr(2, normalizedLeft.size() - 3) == normalizedRight;
+    if (normalizedRight.size() > 2 && normalizedRight.back() == ')' &&
+        (normalizedRight.rfind("v(", 0) == 0 || normalizedRight.rfind("i(", 0) == 0))
+        return normalizedRight.substr(2, normalizedRight.size() - 3) == normalizedLeft;
+    return false;
+}
+
+const std::vector<double> *valuesForSignalInResult(const ice::SimulationResult &result, const std::string &signal) {
+    if (signal.empty())
+        return nullptr;
+    if (isTimeSignal(normalizedSignalName(signal)) ||
+        (!result.xAxis.empty() && normalizedSignalName(signal) == normalizedSignalName(result.xAxis)))
+        return &result.time;
+    for (const auto &trace : result.traces) {
+        if (sameSignal(trace.name, signal))
+            return &trace.values;
+    }
+    return nullptr;
 }
 
 // Chooses a 1/2/5 x 10^n step so tick labels stay readable.
@@ -81,6 +114,42 @@ QColor traceColor(std::size_t index) {
     return colors[index % 5];
 }
 
+std::optional<double> interpolateValue(const std::vector<double> &x, const std::vector<double> &y, double target) {
+    const auto count = std::min(x.size(), y.size());
+    if (count == 0)
+        return std::nullopt;
+    if (count == 1)
+        return std::isfinite(y.front()) ? std::optional<double>(y.front()) : std::nullopt;
+    if (std::is_sorted(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(count))) {
+        const auto lower = std::lower_bound(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(count), target);
+        if (lower == x.begin())
+            return std::isfinite(y.front()) ? std::optional<double>(y.front()) : std::nullopt;
+        if (lower == x.begin() + static_cast<std::ptrdiff_t>(count))
+            return std::isfinite(y.back()) ? std::optional<double>(y.back()) : std::nullopt;
+        const auto upperIndex = static_cast<std::size_t>(lower - x.begin());
+        const auto lowerIndex = upperIndex - 1;
+        const auto span = x[upperIndex] - x[lowerIndex];
+        if (std::abs(span) <= 1e-30)
+            return y[upperIndex];
+        const auto fraction = (target - x[lowerIndex]) / span;
+        const auto value = y[lowerIndex] + (y[upperIndex] - y[lowerIndex]) * fraction;
+        return std::isfinite(value) ? std::optional<double>(value) : std::nullopt;
+    }
+    // Unsorted axes (for example a hysteresis loop) use the nearest sample.
+    std::size_t nearest = 0;
+    double best = std::numeric_limits<double>::max();
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto distance = std::abs(x[index] - target);
+        if (distance < best) {
+            best = distance;
+            nearest = index;
+        }
+    }
+    return std::isfinite(y[nearest]) ? std::optional<double>(y[nearest]) : std::nullopt;
+}
+
+double decibelToLinear(double decibels) { return std::pow(10.0, decibels / 20.0); }
+
 constexpr qreal plotLeft = 82.0;
 constexpr qreal plotRightMargin = 20.0;
 constexpr qreal plotBottomMargin = 56.0;
@@ -98,11 +167,21 @@ constexpr qreal legendSwatchGap = 6.0;
 SimulationPlot::SimulationPlot(QWidget *parent) : QWidget(parent) {
     setMinimumHeight(260);
     setAutoFillBackground(true);
-    setToolTip(QStringLiteral("Simulation traces. Double-click an axis title or legend label to rename it."));
+    setMouseTracking(true);
+    setFocusPolicy(Qt::ClickFocus);
+    setToolTip(QStringLiteral("Simulation traces. Drag to pan, Shift+drag to box zoom, wheel to zoom, "
+                              "click for cursor A, Shift+click for cursor B. Double-click an axis title or "
+                              "legend label to rename it; right-click for markers and view actions."));
 }
 
 void SimulationPlot::setResult(std::shared_ptr<const ice::SimulationResult> result) {
     result_ = std::move(result);
+    // A new run invalidates any previously zoomed window. Cursors are kept so
+    // they can be used to compare the new result against the same x values.
+    viewXMin_.reset();
+    viewXMax_.reset();
+    viewYMin_.reset();
+    viewYMax_.reset();
     invalidateDisplayCache();
     update();
 }
@@ -112,7 +191,23 @@ const ice::SimulationResult &SimulationPlot::result() const {
     return result_ ? *result_ : empty;
 }
 
+void SimulationPlot::setOverlays(std::vector<Overlay> overlays) {
+    overlays_ = std::move(overlays);
+    invalidateDisplayCache();
+    update();
+}
+
 void SimulationPlot::setGraph(const ice::SimulationGraph &graph) {
+    // Changing the transform invalidates a zoom window expressed on the old
+    // axis (time zoom cannot be reused for a frequency view).
+    if (graph.view != graph_.view || graph.fft != graph_.fft || graph.xAxis != graph_.xAxis) {
+        viewXMin_.reset();
+        viewXMax_.reset();
+        viewYMin_.reset();
+        viewYMax_.reset();
+        boxZooming_ = false;
+        boxZoomRect_ = {};
+    }
     graph_ = graph;
     invalidateDisplayCache();
     update();
@@ -120,6 +215,12 @@ void SimulationPlot::setGraph(const ice::SimulationGraph &graph) {
 
 void SimulationPlot::setGridVisible(bool visible) {
     gridVisible_ = visible;
+    update();
+}
+
+void SimulationPlot::setTool(Tool tool) {
+    tool_ = tool;
+    QWidget::setCursor(tool == Tool::marker ? Qt::CrossCursor : Qt::ArrowCursor);
     update();
 }
 
@@ -132,9 +233,55 @@ void SimulationPlot::setYAxisLabelEditCallback(std::function<void(ice::ObjectId,
     yAxisLabelEditCallback_ = std::move(callback);
 }
 
+void SimulationPlot::setMarkerCallback(std::function<void(const ice::SimulationGraphMarker &)> callback) {
+    markerCallback_ = std::move(callback);
+}
+
+void SimulationPlot::setClearMarkersCallback(std::function<void()> callback) {
+    clearMarkersCallback_ = std::move(callback);
+}
+
+void SimulationPlot::setStatusCallback(std::function<void(const QString &)> callback) {
+    statusCallback_ = std::move(callback);
+}
+
 void SimulationPlot::clear() {
     result_.reset();
+    overlays_.clear();
     invalidateDisplayCache();
+    update();
+}
+
+bool SimulationPlot::hasZoom() const {
+    return viewXMin_.has_value() && viewXMax_.has_value() && viewYMin_.has_value() && viewYMax_.has_value();
+}
+
+void SimulationPlot::resetView() {
+    viewXMin_.reset();
+    viewXMax_.reset();
+    viewYMin_.reset();
+    viewYMax_.reset();
+    boxZooming_ = false;
+    boxZoomRect_ = {};
+    dragging_ = false;
+    invalidateDisplayCache();
+    update();
+    emitStatus(QStringLiteral("Zoom reset"));
+}
+
+void SimulationPlot::setCursorPosition(std::size_t which, std::optional<double> x) {
+    if (which == 0)
+        cursorA_ = x;
+    else
+        cursorB_ = x;
+    update();
+}
+
+std::optional<double> SimulationPlot::cursor(std::size_t which) const { return which == 0 ? cursorA_ : cursorB_; }
+
+void SimulationPlot::clearCursors() {
+    cursorA_.reset();
+    cursorB_.reset();
     update();
 }
 
@@ -158,6 +305,10 @@ void SimulationPlot::editLabel(const std::string &signal, const QString &current
 void SimulationPlot::mouseDoubleClickEvent(QMouseEvent *event) {
     ensureDisplayCache();
     const auto position = event->position();
+    if (inTraceArea(position)) {
+        resetView();
+        return;
+    }
     if (labelEditCallback_) {
         for (std::size_t index = 0; index < cache_.legendChips.size() && index < cache_.legendSignals.size(); ++index) {
             if (!cache_.legendChips[index].contains(position))
@@ -181,22 +332,310 @@ void SimulationPlot::mouseDoubleClickEvent(QMouseEvent *event) {
     QWidget::mouseDoubleClickEvent(event);
 }
 
+void SimulationPlot::mousePressEvent(QMouseEvent *event) {
+    ensureDisplayCache();
+    if (event->button() == Qt::MiddleButton && inTraceArea(event->position())) {
+        resetView();
+        return;
+    }
+    if (event->button() != Qt::LeftButton || !inTraceArea(event->position())) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    const auto position = event->position();
+    // Grab a cursor if the press starts on its line.
+    for (std::size_t index = 0; index < 2; ++index) {
+        const auto cursorValue = cursor(index);
+        if (!cursorValue)
+            continue;
+        const auto cursorX = positionAt(*cursorValue, cache_.yMin).x();
+        if (std::abs(cursorX - position.x()) <= 5.0) {
+            movingCursor_ = true;
+            movingCursorIndex_ = index;
+            return;
+        }
+    }
+    if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+        boxZooming_ = true;
+        boxZoomRect_ = QRectF(position, position);
+        update();
+        return;
+    }
+    if (tool_ == Tool::marker) {
+        placeMarker(position);
+        return;
+    }
+    dragging_ = true;
+    dragStart_ = position;
+    dragStartXMin_ = cache_.xMin;
+    dragStartXMax_ = cache_.xMax;
+    dragStartYMin_ = cache_.yMin;
+    dragStartYMax_ = cache_.yMax;
+}
+
+void SimulationPlot::mouseMoveEvent(QMouseEvent *event) {
+    ensureDisplayCache();
+    const auto position = event->position();
+    hover_ = position;
+    if (movingCursor_) {
+        const auto value = xAtPosition(position.x());
+        if (movingCursorIndex_ == 0)
+            cursorA_ = value;
+        else
+            cursorB_ = value;
+        update();
+        return;
+    }
+    if (boxZooming_) {
+        boxZoomRect_ = QRectF(dragStart_, position).normalized();
+        update();
+        return;
+    }
+    if (dragging_) {
+        if (!dragStartXMin_ || !dragStartXMax_ || !dragStartYMin_ || !dragStartYMax_)
+            return;
+        const auto width = std::max<qreal>(1.0, cache_.traceArea.width());
+        const auto height = std::max<qreal>(1.0, cache_.traceArea.height());
+        const auto dx = (position.x() - dragStart_.x()) / width;
+        const auto dy = (position.y() - dragStart_.y()) / height;
+        const auto xRange = *dragStartXMax_ - *dragStartXMin_;
+        const auto yRange = *dragStartYMax_ - *dragStartYMin_;
+        viewXMin_ = *dragStartXMin_ - dx * xRange;
+        viewXMax_ = *dragStartXMax_ - dx * xRange;
+        viewYMin_ = *dragStartYMin_ + dy * yRange;
+        viewYMax_ = *dragStartYMax_ + dy * yRange;
+        invalidateDisplayCache();
+        update();
+        return;
+    }
+    update();
+}
+
+void SimulationPlot::mouseReleaseEvent(QMouseEvent *event) {
+    ensureDisplayCache();
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+    if (movingCursor_) {
+        movingCursor_ = false;
+        emitStatus(readoutText());
+        return;
+    }
+    if (boxZooming_) {
+        applyBoxZoom();
+        return;
+    }
+    if (dragging_) {
+        const auto moved = (event->position() - dragStart_).manhattanLength();
+        dragging_ = false;
+        if (moved < 3.0 && inTraceArea(event->position())) {
+            const auto value = xAtPosition(event->position().x());
+            if (event->modifiers().testFlag(Qt::ShiftModifier))
+                cursorB_ = value;
+            else
+                cursorA_ = value;
+            update();
+            emitStatus(readoutText());
+        }
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
+}
+
+void SimulationPlot::leaveEvent(QEvent *event) {
+    hover_.reset();
+    update();
+    QWidget::leaveEvent(event);
+}
+
+void SimulationPlot::wheelEvent(QWheelEvent *event) {
+    ensureDisplayCache();
+    if (!inTraceArea(event->position()) || cache_.xMax <= cache_.xMin) {
+        QWidget::wheelEvent(event);
+        return;
+    }
+    const auto steps = event->angleDelta().y();
+    if (steps == 0) {
+        QWidget::wheelEvent(event);
+        return;
+    }
+    const auto factor = steps > 0 ? 0.8 : 1.25;
+    const auto anchorX = xAtPosition(event->position().x());
+    const auto anchorY = yAtPosition(event->position().y());
+    viewXMin_ = anchorX - (anchorX - cache_.xMin) * factor;
+    viewXMax_ = anchorX + (cache_.xMax - anchorX) * factor;
+    if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::MetaModifier)) {
+        viewYMin_ = anchorY - (anchorY - cache_.yMin) * factor;
+        viewYMax_ = anchorY + (cache_.yMax - anchorY) * factor;
+    } else {
+        viewYMin_ = cache_.yMin;
+        viewYMax_ = cache_.yMax;
+    }
+    if (std::abs(*viewXMax_ - *viewXMin_) <= 1e-15 || std::abs(*viewYMax_ - *viewYMin_) <= 1e-15)
+        resetView();
+    else {
+        invalidateDisplayCache();
+        update();
+    }
+    event->accept();
+}
+
+void SimulationPlot::contextMenuEvent(QContextMenuEvent *event) {
+    ensureDisplayCache();
+    showContextMenu(event->pos());
+}
+
+void SimulationPlot::showContextMenu(const QPointF &position) {
+    QMenu menu(this);
+    auto *reset = menu.addAction(QStringLiteral("Reset Zoom"));
+    reset->setEnabled(hasZoom());
+    connect(reset, &QAction::triggered, this, [this] { resetView(); });
+    menu.addSeparator();
+    const auto inPlot = inTraceArea(position);
+    auto *setA = menu.addAction(QStringLiteral("Set Cursor A Here"));
+    setA->setEnabled(inPlot);
+    connect(setA, &QAction::triggered, this, [this, position] {
+        cursorA_ = xAtPosition(position.x());
+        update();
+        emitStatus(readoutText());
+    });
+    auto *setB = menu.addAction(QStringLiteral("Set Cursor B Here"));
+    setB->setEnabled(inPlot);
+    connect(setB, &QAction::triggered, this, [this, position] {
+        cursorB_ = xAtPosition(position.x());
+        update();
+        emitStatus(readoutText());
+    });
+    auto *clearCursorsAction = menu.addAction(QStringLiteral("Clear Cursors"));
+    clearCursorsAction->setEnabled(cursorA_.has_value() || cursorB_.has_value());
+    connect(clearCursorsAction, &QAction::triggered, this, [this] {
+        clearCursors();
+        emitStatus(QString());
+    });
+    menu.addSeparator();
+    auto *markerMode = menu.addAction(QStringLiteral("Marker Mode"));
+    markerMode->setCheckable(true);
+    markerMode->setChecked(tool_ == Tool::marker);
+    connect(markerMode, &QAction::triggered, this,
+            [this](bool checked) { setTool(checked ? Tool::marker : Tool::pan); });
+    auto *addMarker = menu.addAction(QStringLiteral("Add Marker Here"));
+    addMarker->setEnabled(inPlot);
+    connect(addMarker, &QAction::triggered, this, [this, position] { placeMarker(position); });
+    auto *clearMarkersAction = menu.addAction(QStringLiteral("Clear Markers"));
+    clearMarkersAction->setEnabled(!graph_.markers.empty());
+    connect(clearMarkersAction, &QAction::triggered, this, [this] {
+        graph_.markers.clear();
+        invalidateDisplayCache();
+        update();
+        if (clearMarkersCallback_)
+            clearMarkersCallback_();
+    });
+    menu.addSeparator();
+    auto *copy = menu.addAction(QStringLiteral("Copy Cursor Readout"));
+    copy->setEnabled(cursorA_.has_value() || cursorB_.has_value());
+    connect(copy, &QAction::triggered, this, [this] {
+        const auto text = readoutText();
+        if (!text.isEmpty())
+            QGuiApplication::clipboard()->setText(text);
+        emitStatus(QStringLiteral("Cursor readout copied"));
+    });
+    menu.exec(mapToGlobal(position.toPoint()));
+}
+
+void SimulationPlot::placeMarker(const QPointF &position) {
+    ensureDisplayCache();
+    if (!inTraceArea(position))
+        return;
+    ice::SimulationGraphMarker marker;
+    marker.label = "M" + std::to_string(graph_.markers.size() + 1);
+    marker.x = xAtPosition(position.x());
+    const auto view = ice::parseWaveformView(graph_.view).value_or(ice::WaveformView::linear);
+    for (const auto &trace : cache_.traces) {
+        if (trace.y.empty())
+            continue;
+        const auto value = interpolateValue(trace.x, trace.y, marker.x);
+        if (!value)
+            continue;
+        marker.signal = trace.signal;
+        marker.y = view == ice::WaveformView::decibel ? decibelToLinear(*value) : *value;
+        marker.hasY = true;
+        break;
+    }
+    graph_.markers.push_back(marker);
+    invalidateDisplayCache();
+    update();
+    if (markerCallback_)
+        markerCallback_(marker);
+    emitStatus(
+        QStringLiteral("Marker '%1' added at %2").arg(QString::fromStdString(marker.label), formatValue(marker.x)));
+}
+
+void SimulationPlot::applyBoxZoom() {
+    boxZooming_ = false;
+    const auto rect = boxZoomRect_.normalized();
+    boxZoomRect_ = {};
+    if (rect.width() < 5.0 || rect.height() < 5.0) {
+        update();
+        return;
+    }
+    viewXMin_ = xAtPosition(rect.left());
+    viewXMax_ = xAtPosition(rect.right());
+    // Y increases upward, so the top edge is the maximum.
+    viewYMax_ = yAtPosition(rect.top());
+    viewYMin_ = yAtPosition(rect.bottom());
+    if (std::abs(*viewXMax_ - *viewXMin_) <= 1e-15 || std::abs(*viewYMax_ - *viewYMin_) <= 1e-15)
+        resetView();
+    else {
+        invalidateDisplayCache();
+        update();
+        emitStatus(QStringLiteral("Zoomed to selection"));
+    }
+}
+
+bool SimulationPlot::inTraceArea(const QPointF &position) const { return cache_.traceArea.contains(position); }
+
+double SimulationPlot::xAtPosition(double x) const {
+    if (cache_.traceArea.width() <= 1.0)
+        return cache_.xMin;
+    const auto fraction = (x - cache_.traceArea.left()) / cache_.traceArea.width();
+    return cache_.xMin + fraction * (cache_.xMax - cache_.xMin);
+}
+
+double SimulationPlot::yAtPosition(double y) const {
+    if (cache_.traceArea.height() <= 1.0)
+        return cache_.yMin;
+    const auto fraction = (cache_.traceArea.bottom() - y) / cache_.traceArea.height();
+    return cache_.yMin + fraction * (cache_.yMax - cache_.yMin);
+}
+
+QPointF SimulationPlot::positionAt(double x, double y) const {
+    const auto xSpan = std::max(1e-300, cache_.xMax - cache_.xMin);
+    const auto ySpan = std::max(1e-300, cache_.yMax - cache_.yMin);
+    return QPointF(cache_.traceArea.left() + (x - cache_.xMin) / xSpan * cache_.traceArea.width(),
+                   cache_.traceArea.bottom() - (y - cache_.yMin) / ySpan * cache_.traceArea.height());
+}
+
+void SimulationPlot::emitStatus(const QString &message) {
+    if (statusCallback_)
+        statusCallback_(message);
+}
+
+QString SimulationPlot::formatValue(double value, const QString &unit) const {
+    if (!std::isfinite(value))
+        return QStringLiteral("—");
+    auto text = QString::number(value, 'g', 6);
+    if (!unit.isEmpty())
+        text += QLatin1Char(' ') + unit;
+    return text;
+}
+
 void SimulationPlot::invalidateDisplayCache() { cache_.valid = false; }
 
 const std::vector<double> *SimulationPlot::valuesForSignal(const std::string &signal) const {
     if (!result_)
         return nullptr;
-    const auto &result = *result_;
-    const auto normalized = normalizedSignalName(signal);
-    if (normalized.empty())
-        return nullptr;
-    if (isTimeSignal(normalized))
-        return &result.time;
-    for (const auto &trace : result.traces) {
-        if (normalizedSignalName(trace.name) == normalized)
-            return &trace.values;
-    }
-    return nullptr;
+    return valuesForSignalInResult(*result_, signal);
 }
 
 void SimulationPlot::ensureDisplayCache() const {
@@ -205,16 +644,102 @@ void SimulationPlot::ensureDisplayCache() const {
     cache_ = {};
     cache_.size = size();
     static const ice::SimulationResult emptyResult;
-    const auto &result = result_ ? *result_ : emptyResult;
+    const auto &base = result_ ? *result_ : emptyResult;
+    const auto view = ice::parseWaveformView(graph_.view).value_or(ice::WaveformView::linear);
+    ice::WaveformFftOptions fftOptions;
+    fftOptions.window = graph_.fftWindow;
+    fftOptions.points = graph_.fftPoints > 0 ? static_cast<std::size_t>(graph_.fftPoints) : 0;
+    std::vector<QString> warnings;
 
     // Display labels fall back to the signal name. They are stored per signal
     // on the graph, so a renamed axis or legend entry survives project reloads.
-    const auto labelFor = [this](const std::string &signal) {
+    const auto labelFor = [this, &base](const std::string &signal) -> QString {
         const auto override = graph_.signalLabels.find(signal);
         if (override != graph_.signalLabels.end() && !override->second.empty())
             return QString::fromStdString(override->second);
-        return isTimeSignal(normalizedSignalName(signal)) ? QStringLiteral("Time (s)") : QString::fromStdString(signal);
+        if (isTimeSignal(normalizedSignalName(signal)) ||
+            (!base.xAxis.empty() && normalizedSignalName(signal) == normalizedSignalName(base.xAxis))) {
+            if (base.xAxis.empty() || base.xAxis == "time")
+                return QStringLiteral("Time (s)");
+            if (base.xUnit.empty())
+                return QString::fromStdString(base.xAxis);
+            return QStringLiteral("%1 (%2)").arg(QString::fromStdString(base.xAxis),
+                                                 QString::fromStdString(base.xUnit));
+        }
+        return QString::fromStdString(signal);
     };
+
+    struct RawTrace {
+        std::string signal;
+        QString label;
+        QString xUnit;
+        QString yUnit;
+        std::vector<double> x;
+        std::vector<double> y;
+        bool dashed = false;
+        int colorIndex = 0;
+    };
+    std::vector<RawTrace> rawTraces;
+    const auto appendRun = [&](const ice::SimulationResult &run, const QString &overlayLabel, bool baseRun) {
+        std::vector<std::string> runWarnings;
+        auto series = ice::buildWaveformSeries(run, graph_.ySignals, graph_.derivedTraces, view, graph_.fft, fftOptions,
+                                               &runWarnings);
+        if (series.empty() && !run.traces.empty()) {
+            // Older projects that selected a signal missing from this run still
+            // show all returned traces instead of an empty plot.
+            runWarnings.clear();
+            series =
+                ice::buildWaveformSeries(run, {}, graph_.derivedTraces, view, graph_.fft, fftOptions, &runWarnings);
+        }
+        for (const auto &warning : runWarnings) {
+            const auto text = overlayLabel.isEmpty()
+                                  ? QString::fromStdString(warning)
+                                  : QStringLiteral("[%1] %2").arg(overlayLabel, QString::fromStdString(warning));
+            if (std::find(warnings.begin(), warnings.end(), text) == warnings.end())
+                warnings.push_back(text);
+        }
+        // A graph can plot one captured signal against another, preserving the
+        // X/Y curve workflow from the original widget.
+        const std::vector<double> *customX = nullptr;
+        if (!graph_.fft && !graph_.xAxis.empty() && !isTimeSignal(normalizedSignalName(graph_.xAxis)) &&
+            normalizedSignalName(graph_.xAxis) != normalizedSignalName(run.xAxis))
+            customX = valuesForSignalInResult(run, graph_.xAxis);
+        for (std::size_t index = 0; index < series.size(); ++index) {
+            RawTrace trace;
+            trace.signal = series[index].name;
+            trace.x = customX ? *customX : series[index].x;
+            trace.y = std::move(series[index].y);
+            const auto count = std::min(trace.x.size(), trace.y.size());
+            if (count == 0)
+                continue;
+            trace.x.resize(count);
+            trace.y.resize(count);
+            auto label = labelFor(series[index].name);
+            if (label == QString::fromStdString(series[index].name) && !series[index].label.empty() && graph_.fft)
+                label = QString::fromStdString(series[index].label);
+            if (!overlayLabel.isEmpty())
+                label += QStringLiteral(" [%1]").arg(overlayLabel);
+            trace.label = label;
+            trace.xUnit = QString::fromStdString(series[index].xUnit);
+            trace.yUnit = QString::fromStdString(series[index].yUnit);
+            trace.dashed = !baseRun;
+            trace.colorIndex = static_cast<int>(index);
+            rawTraces.push_back(std::move(trace));
+        }
+    };
+
+    if (result_)
+        appendRun(base, {}, true);
+    for (const auto &overlay : overlays_) {
+        if (!overlay.result)
+            continue;
+        QString label = QString::fromStdString(overlay.label);
+        if (label.isEmpty())
+            label = QStringLiteral("overlay");
+        appendRun(*overlay.result, label, false);
+    }
+    cache_.warnings = std::move(warnings);
+
     const QFontMetricsF metrics(font());
     const qreal legendWidth = std::max<qreal>(40.0, rect().width() - plotLeft - plotRightMargin);
     qreal cursorX = plotLeft;
@@ -230,48 +755,40 @@ void SimulationPlot::ensureDisplayCache() const {
         cache_.legendChips.emplace_back(cursorX, cursorY, width, legendChipHeight);
         cursorX += width + legendChipGap;
     };
-
-    // Resolve the selected axes to result vectors. Time is always available;
-    // missing signals fall back to time on X and the first returned trace on Y,
-    // which keeps older projects readable after signals are renamed.
-    std::string effectiveX = graph_.xAxis;
-    const auto *xValues = valuesForSignal(effectiveX);
-    if (!xValues || xValues->empty()) {
-        effectiveX = "time";
-        xValues = &result.time;
-    }
-
-    struct YTrace {
-        std::string signal;
-        const std::vector<double> *values = nullptr;
-    };
-    std::vector<YTrace> yTraces;
-    for (const auto &signal : graph_.ySignals) {
-        const auto *values = valuesForSignal(signal);
-        if (values && !values->empty())
-            yTraces.push_back({signal, values});
-    }
-    if (yTraces.empty()) {
-        if (!result.traces.empty())
-            yTraces.push_back({result.traces.front().name, &result.traces.front().values});
-        else
-            yTraces.push_back({"time", &result.time});
-    }
-
-    cache_.xLabel = labelFor(effectiveX);
-    cache_.xSignal = effectiveX;
-    for (const auto &trace : yTraces) {
-        const auto label = labelFor(trace.signal);
-        cache_.traceLabels.push_back(label);
+    for (const auto &trace : rawTraces) {
+        cache_.traceLabels.push_back(trace.label);
         cache_.legendSignals.push_back(trace.signal);
-        placeChip(label);
+        placeChip(trace.label);
     }
-    // The Y axis shows the unit-less caption "Signals" unless the graph was
-    // given an explicit title; individual signal names live in the legend.
-    cache_.yLabel = graph_.yAxisLabel.empty() ? QStringLiteral("Signals") : QString::fromStdString(graph_.yAxisLabel);
-    cache_.title = graph_.name.empty() ? (result.traces.empty() ? QStringLiteral("No simulation trace")
-                                                                : QStringLiteral("Simulation traces"))
+
+    std::string axisSignal = graph_.xAxis;
+    if (!graph_.fft) {
+        if (axisSignal.empty() || axisSignal == "time" ||
+            (!base.xAxis.empty() && normalizedSignalName(axisSignal) == normalizedSignalName(base.xAxis)))
+            axisSignal = base.xAxis.empty() ? "time" : base.xAxis;
+    }
+    cache_.xSignal = axisSignal;
+    if (graph_.fft)
+        cache_.xLabel = QStringLiteral("Frequency (Hz)");
+    else
+        cache_.xLabel = labelFor(axisSignal);
+    cache_.yLabel = graph_.yAxisLabel.empty()
+                        ? (graph_.fft ? (view == ice::WaveformView::decibel ? QStringLiteral("Magnitude (dB)")
+                                         : view == ice::WaveformView::phase ? QStringLiteral("Phase (deg)")
+                                                                            : QStringLiteral("Magnitude"))
+                                      : (view == ice::WaveformView::decibel ? QStringLiteral("Magnitude (dB)")
+                                         : view == ice::WaveformView::phase ? QStringLiteral("Phase (deg)")
+                                                                            : QStringLiteral("Signals")))
+                        : QString::fromStdString(graph_.yAxisLabel);
+    cache_.title = graph_.name.empty() ? (base.traces.empty() ? QStringLiteral("No simulation trace")
+                                                              : QStringLiteral("Simulation traces"))
                                        : QString::fromStdString(graph_.name);
+    if (graph_.fft)
+        cache_.title += QStringLiteral(" · FFT");
+    if (view == ice::WaveformView::decibel)
+        cache_.title += QStringLiteral(" · dB");
+    else if (view == ice::WaveformView::phase)
+        cache_.title += QStringLiteral(" · Phase");
 
     // The plot starts below the legend band so the chips sit outside the frame.
     const qreal plotTop = cursorY + legendChipHeight + legendRowGap + 4.0;
@@ -286,22 +803,28 @@ void SimulationPlot::ensureDisplayCache() const {
     cache_.yTickLabelRect = QRectF(plot.left() - 58, 0, 52, 0);
     cache_.yLabelRect = QRectF(4, plot.center().y() - plot.height() / 2.0, 16, plot.height());
 
-    std::size_t maxCount = 0;
-    for (const auto &trace : yTraces)
-        maxCount = std::max(maxCount, std::min(xValues->size(), trace.values->size()));
-    if (maxCount == 0 || traceArea.width() <= 1.0 || traceArea.height() <= 1.0) {
+    if (rawTraces.empty() || traceArea.width() <= 1.0 || traceArea.height() <= 1.0) {
         cache_.valid = true;
         return;
     }
 
     double dataXMin = std::numeric_limits<double>::max();
     double dataXMax = std::numeric_limits<double>::lowest();
-    for (std::size_t index = 0; index < maxCount; ++index) {
-        const auto value = (*xValues)[index];
-        if (!std::isfinite(value))
-            continue;
-        dataXMin = std::min(dataXMin, value);
-        dataXMax = std::max(dataXMax, value);
+    double dataYMin = std::numeric_limits<double>::max();
+    double dataYMax = std::numeric_limits<double>::lowest();
+    for (const auto &trace : rawTraces) {
+        for (const double value : trace.x) {
+            if (!std::isfinite(value))
+                continue;
+            dataXMin = std::min(dataXMin, value);
+            dataXMax = std::max(dataXMax, value);
+        }
+        for (const double value : trace.y) {
+            if (!std::isfinite(value))
+                continue;
+            dataYMin = std::min(dataYMin, value);
+            dataYMax = std::max(dataYMax, value);
+        }
     }
     if (dataXMin > dataXMax) {
         dataXMin = 0.0;
@@ -309,39 +832,30 @@ void SimulationPlot::ensureDisplayCache() const {
     }
     if (dataXMax <= dataXMin)
         dataXMax = dataXMin + 1.0;
-    double dataYMin = std::numeric_limits<double>::max();
-    double dataYMax = std::numeric_limits<double>::lowest();
-    for (const auto &trace : yTraces) {
-        const auto count = std::min(xValues->size(), trace.values->size());
-        for (std::size_t index = 0; index < count; ++index) {
-            const auto value = (*trace.values)[index];
-            if (!std::isfinite(value))
-                continue;
-            dataYMin = std::min(dataYMin, value);
-            dataYMax = std::max(dataYMax, value);
-        }
-    }
     if (dataYMin > dataYMax) {
         dataYMin = 0.0;
         dataYMax = 1.0;
     }
-    // Keep zero visible for the common time-vs-voltage view. Signal-vs-signal
-    // plots auto-scale tightly instead of wasting space around the origin.
-    if (isTimeSignal(normalizedSignalName(effectiveX))) {
+    // Keep zero visible for the common time-vs-voltage linear view.
+    // Signal-vs-signal plots auto-scale tightly instead of wasting space
+    // around the origin; dB and phase views use their own tight ranges.
+    if (view == ice::WaveformView::linear && !graph_.fft && isTimeSignal(normalizedSignalName(cache_.xSignal))) {
         dataYMin = std::min(dataYMin, 0.0);
         dataYMax = std::max(dataYMax, 0.0);
     }
 
-    const auto resolveRange = [](const std::optional<double> &fixedMin, const std::optional<double> &fixedMax,
+    const auto resolveRange = [](const std::optional<double> &viewMin, const std::optional<double> &viewMax,
+                                 const std::optional<double> &fixedMin, const std::optional<double> &fixedMax,
                                  double autoMin, double autoMax) {
         if (!std::isfinite(autoMin))
             autoMin = 0.0;
         if (!std::isfinite(autoMax) || autoMax <= autoMin)
             autoMax = autoMin + 1.0;
-        const bool hasMin = fixedMin && std::isfinite(*fixedMin);
-        const bool hasMax = fixedMax && std::isfinite(*fixedMax);
-        double minimum = hasMin ? *fixedMin : autoMin;
-        double maximum = hasMax ? *fixedMax : autoMax;
+        const bool zoomed = viewMin && viewMax;
+        const bool hasMin = zoomed ? true : fixedMin && std::isfinite(*fixedMin);
+        const bool hasMax = zoomed ? true : fixedMax && std::isfinite(*fixedMax);
+        double minimum = zoomed ? *viewMin : (hasMin ? *fixedMin : autoMin);
+        double maximum = zoomed ? *viewMax : (hasMax ? *fixedMax : autoMax);
         if (maximum <= minimum) {
             if (hasMin && hasMax)
                 std::swap(minimum, maximum);
@@ -354,8 +868,8 @@ void SimulationPlot::ensureDisplayCache() const {
         }
         return std::pair<double, double>{minimum, maximum};
     };
-    const auto [xMin, xMax] = resolveRange(graph_.xMin, graph_.xMax, dataXMin, dataXMax);
-    const auto [yMin, yMax] = resolveRange(graph_.yMin, graph_.yMax, dataYMin, dataYMax);
+    const auto [xMin, xMax] = resolveRange(viewXMin_, viewXMax_, graph_.xMin, graph_.xMax, dataXMin, dataXMax);
+    const auto [yMin, yMax] = resolveRange(viewYMin_, viewYMax_, graph_.yMin, graph_.yMax, dataYMin, dataYMax);
     cache_.xMin = xMin;
     cache_.xMax = xMax;
     cache_.yMin = yMin;
@@ -392,14 +906,23 @@ void SimulationPlot::ensureDisplayCache() const {
     // min/max envelope preserves short spikes while making the painter path
     // independent of the number of stored simulation samples.
     const int columns = std::clamp(static_cast<int>(std::ceil(traceArea.width())), 64, 4096);
-    for (const auto &trace : yTraces) {
+    for (auto &raw : rawTraces) {
+        DisplayTrace trace;
+        trace.signal = std::move(raw.signal);
+        trace.label = std::move(raw.label);
+        trace.xUnit = std::move(raw.xUnit);
+        trace.yUnit = std::move(raw.yUnit);
+        trace.dashed = raw.dashed;
+        trace.colorIndex = raw.colorIndex;
+        trace.x = std::move(raw.x);
+        trace.y = std::move(raw.y);
         std::vector<double> columnMin(static_cast<std::size_t>(columns), std::numeric_limits<double>::max());
         std::vector<double> columnMax(static_cast<std::size_t>(columns), std::numeric_limits<double>::lowest());
         bool havePoint = false;
-        const auto count = std::min(xValues->size(), trace.values->size());
+        const auto count = std::min(trace.x.size(), trace.y.size());
         for (std::size_t index = 0; index < count; ++index) {
-            const auto x = (*xValues)[index];
-            const auto y = (*trace.values)[index];
+            const auto x = trace.x[index];
+            const auto y = trace.y[index];
             if (!std::isfinite(x) || !std::isfinite(y))
                 continue;
             const auto screenX = mapX(x);
@@ -433,7 +956,8 @@ void SimulationPlot::ensureDisplayCache() const {
                 havePrevious = true;
             }
         }
-        cache_.paths.push_back(std::move(path));
+        trace.path = std::move(path);
+        cache_.traces.push_back(std::move(trace));
     }
     cache_.valid = true;
 }
@@ -463,6 +987,7 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
     // labels never overlap the traces. Each entry is a white-outlined box
     // holding a short line in the signal colour followed by the signal name.
     const auto legendBorder = QColor(Qt::white);
+    const QFontMetricsF metrics(font());
     for (std::size_t index = 0; index < cache_.legendChips.size() && index < cache_.traceLabels.size(); ++index) {
         const auto &chip = cache_.legendChips[index];
         painter.setPen(QPen(legendBorder, 1));
@@ -470,7 +995,13 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawRoundedRect(chip.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2);
         const auto lineY = chip.center().y();
         const auto lineLeft = chip.left() + legendChipPadding;
-        painter.setPen(QPen(traceColor(index), 2));
+        const auto colorIndex =
+            index < cache_.traces.size() ? cache_.traces[index].colorIndex : static_cast<int>(index);
+        const bool dashed = index < cache_.traces.size() && cache_.traces[index].dashed;
+        auto pen = QPen(traceColor(static_cast<std::size_t>(colorIndex)), dashed ? 1.5 : 2);
+        if (dashed)
+            pen.setStyle(Qt::DashLine);
+        painter.setPen(pen);
         painter.drawLine(QPointF(lineLeft, lineY), QPointF(lineLeft + legendSwatchWidth, lineY));
         painter.setPen(QPen(axisText, 1));
         painter.drawText(QRectF(lineLeft + legendSwatchWidth + legendSwatchGap, chip.top(),
@@ -489,9 +1020,6 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
                      Qt::AlignCenter, cache_.yLabel);
     painter.restore();
     painter.drawText(cache_.xLabelRect, Qt::AlignHCenter, cache_.xLabel);
-
-    if (cache_.paths.empty())
-        return;
 
     const auto mapX = [&](double value) {
         return traceArea.left() + ((value - cache_.xMin) / (cache_.xMax - cache_.xMin)) * traceArea.width();
@@ -541,11 +1069,232 @@ void SimulationPlot::paintEvent(QPaintEvent *) {
         painter.drawLine(QPointF(plot.left(), zeroY), QPointF(plot.right(), zeroY));
     }
 
+    // Shade the region between cursors A and B before drawing traces.
+    if (cursorA_ && cursorB_) {
+        auto shade = ice::uiColor(ice::UiColor::Accent3);
+        shade.setAlpha(28);
+        const auto left = mapX(std::min(*cursorA_, *cursorB_));
+        const auto right = mapX(std::max(*cursorA_, *cursorB_));
+        painter.fillRect(QRectF(QPointF(left, plot.top()), QPointF(right, plot.bottom())), shade);
+    }
+
     painter.save();
     painter.setClipRect(plot.adjusted(1, 1, -1, -1));
-    for (std::size_t traceIndex = 0; traceIndex < cache_.paths.size(); ++traceIndex) {
-        painter.setPen(QPen(traceColor(traceIndex), 2));
-        painter.drawPath(cache_.paths[traceIndex]);
+    for (const auto &trace : cache_.traces) {
+        auto pen = QPen(traceColor(static_cast<std::size_t>(trace.colorIndex)), trace.dashed ? 1.5 : 2);
+        if (trace.dashed)
+            pen.setStyle(Qt::DashLine);
+        painter.setPen(pen);
+        painter.drawPath(trace.path);
     }
     painter.restore();
+
+    // Persisted point markers. Their Y is stored in linear units so changing
+    // the graph view does not move them.
+    const auto view = ice::parseWaveformView(graph_.view).value_or(ice::WaveformView::linear);
+    auto markerPen = ice::uiColor(ice::UiColor::Accent2);
+    markerPen.setAlpha(200);
+    qreal markerTextY = plot.top() + 8.0;
+    for (const auto &marker : graph_.markers) {
+        if (marker.x < cache_.xMin || marker.x > cache_.xMax)
+            continue;
+        const auto x = mapX(marker.x);
+        painter.setPen(QPen(markerPen, 1, Qt::DotLine));
+        painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+        if (marker.hasY) {
+            auto displayY = marker.y;
+            if (view == ice::WaveformView::decibel)
+                displayY = 20.0 * std::log10(std::max(std::abs(marker.y), 1e-30));
+            if (displayY >= cache_.yMin && displayY <= cache_.yMax) {
+                const auto y = mapY(displayY);
+                painter.setBrush(markerPen);
+                painter.setPen(QPen(markerPen, 1));
+                painter.drawEllipse(QPointF(x, y), 3.0, 3.0);
+                painter.setBrush(Qt::NoBrush);
+                const auto xUnit = cache_.traces.empty() ? QString() : cache_.traces.front().xUnit;
+                const auto yUnit = cache_.traces.empty() ? QString() : cache_.traces.front().yUnit;
+                const auto label = QStringLiteral("%1  %2, %3")
+                                       .arg(QString::fromStdString(marker.label), formatValue(marker.x, xUnit),
+                                            formatValue(displayY, yUnit));
+                const auto width = metrics.horizontalAdvance(label) + 8.0;
+                const auto labelX = std::min(x + 6.0, plot.right() - width - 2.0);
+                painter.setPen(QPen(axisText, 1));
+                painter.drawText(QRectF(labelX, markerTextY, width, 14.0), Qt::AlignLeft | Qt::AlignVCenter, label);
+            }
+        }
+        markerTextY += 14.0;
+    }
+
+    // Measurement annotations: declared metrics are printed inside the frame
+    // so the plot is self-describing when exported or screenshotted. Overlay
+    // results contribute their own measurements with the overlay label.
+    if (graph_.showMeasurements) {
+        std::vector<QString> lines;
+        const auto appendMeasurements = [&](const ice::SimulationResult &run, const QString &prefix) {
+            for (const auto &measurement : run.measurements) {
+                const auto name = QString::fromStdString(measurement.name);
+                const auto label = prefix.isEmpty() ? name : QStringLiteral("%1: %2").arg(prefix, name);
+                if (measurement.valid) {
+                    lines.push_back(QStringLiteral("%1 = %2").arg(
+                        label, formatValue(measurement.value, QString::fromStdString(measurement.unit))));
+                } else {
+                    lines.push_back(QStringLiteral("%1 = —").arg(label));
+                }
+            }
+        };
+        if (result_)
+            appendMeasurements(*result_, {});
+        for (const auto &overlay : overlays_) {
+            if (!overlay.result)
+                continue;
+            const auto label =
+                overlay.label.empty() ? QStringLiteral("overlay") : QString::fromStdString(overlay.label);
+            appendMeasurements(*overlay.result, label);
+        }
+        if (!lines.empty()) {
+            QStringList rows;
+            rows << QStringLiteral("Measurements");
+            constexpr std::size_t maximum = 8;
+            for (std::size_t index = 0; index < std::min(maximum, lines.size()); ++index)
+                rows << lines[index];
+            if (lines.size() > maximum)
+                rows << QStringLiteral("+%1 more").arg(lines.size() - maximum);
+            qreal width = 0.0;
+            for (const auto &line : rows)
+                width = std::max(width, metrics.horizontalAdvance(line));
+            width += 16.0;
+            const auto height = static_cast<qreal>(rows.size()) * 14.0 + 10.0;
+            const QRectF box(plot.right() - width - 8.0, plot.top() + 8.0, width, height);
+            auto background = canvasBackground;
+            background.setAlpha(225);
+            painter.setPen(QPen(ice::uiColor(ice::UiColor::Grid1), 1));
+            painter.setBrush(background);
+            painter.drawRoundedRect(box, 3, 3);
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(axisText, 1));
+            qreal lineY = box.top() + 5.0;
+            for (const auto &line : rows) {
+                painter.drawText(QRectF(box.left() + 8.0, lineY, box.width() - 16.0, 14.0),
+                                 Qt::AlignLeft | Qt::AlignVCenter, line);
+                lineY += 14.0;
+            }
+        }
+    }
+
+    // Cursors and their readout.
+    const auto drawCursor = [&](double value, const QString &name, const QColor &color) {
+        const auto x = mapX(value);
+        if (x < plot.left() - 1.0 || x > plot.right() + 1.0)
+            return;
+        painter.setPen(QPen(color, 1, Qt::DashLine));
+        painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+        painter.setBrush(color);
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(QRectF(x - 8.0, plot.top() - 1.0, 16.0, 12.0), 2, 2);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(canvasBackground, 1));
+        painter.drawText(QRectF(x - 8.0, plot.top() - 1.0, 16.0, 12.0), Qt::AlignCenter, name);
+    };
+    auto cursorAColor = ice::uiColor(ice::UiColor::Accent2);
+    auto cursorBColor = ice::uiColor(ice::UiColor::Accent4);
+    if (cursorA_)
+        drawCursor(*cursorA_, QStringLiteral("A"), cursorAColor);
+    if (cursorB_)
+        drawCursor(*cursorB_, QStringLiteral("B"), cursorBColor);
+
+    const auto readout = readoutText();
+    if (!readout.isEmpty()) {
+        const auto lines = readout.split(QLatin1Char('\n'));
+        qreal width = 0.0;
+        for (const auto &line : lines)
+            width = std::max(width, metrics.horizontalAdvance(line));
+        width += 16.0;
+        const auto height = static_cast<qreal>(lines.size()) * 14.0 + 10.0;
+        QRectF box(traceArea.left() + 8.0, traceArea.bottom() - height - 8.0, width, height);
+        if (box.right() > traceArea.right() - 8.0)
+            box.moveRight(traceArea.right() - 8.0);
+        auto background = canvasBackground;
+        background.setAlpha(225);
+        painter.setPen(QPen(ice::uiColor(ice::UiColor::Grid1), 1));
+        painter.setBrush(background);
+        painter.drawRoundedRect(box, 3, 3);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(axisText, 1));
+        qreal lineY = box.top() + 5.0;
+        for (const auto &line : lines) {
+            painter.drawText(QRectF(box.left() + 8.0, lineY, box.width() - 16.0, 14.0),
+                             Qt::AlignLeft | Qt::AlignVCenter, line);
+            lineY += 14.0;
+        }
+    }
+
+    if (!cache_.warnings.empty()) {
+        auto warningColor = QColor(190, 132, 0);
+        warningColor.setAlpha(220);
+        painter.setPen(QPen(warningColor, 1));
+        auto text = QStringLiteral("⚠ %1 warning%2")
+                        .arg(cache_.warnings.size())
+                        .arg(cache_.warnings.size() == 1 ? QString() : QStringLiteral("s"));
+        const auto width = std::min<qreal>(plot.width() / 2.0, metrics.horizontalAdvance(text) + 12.0);
+        painter.drawText(QRectF(plot.right() - width - 8.0, plot.bottom() - 18.0, width, 14.0),
+                         Qt::AlignRight | Qt::AlignVCenter,
+                         metrics.elidedText(text, Qt::ElideRight, static_cast<int>(width - 4.0)));
+        setToolTip(QStringList(cache_.warnings.begin(), cache_.warnings.end()).join(QLatin1Char('\n')));
+    }
+
+    // Box zoom selection overlay.
+    if (boxZooming_ && boxZoomRect_.width() > 0.0 && boxZoomRect_.height() > 0.0) {
+        auto selection = ice::uiColor(ice::UiColor::Accent3);
+        selection.setAlpha(35);
+        painter.fillRect(boxZoomRect_, selection);
+        painter.setPen(QPen(selection.darker(120), 1, Qt::DashLine));
+        painter.drawRect(boxZoomRect_);
+    }
 }
+
+QString SimulationPlot::readoutText() const {
+    ensureDisplayCache();
+    std::optional<double> primary;
+    if (cursorA_)
+        primary = cursorA_;
+    else if (cursorB_)
+        primary = cursorB_;
+    else if (hover_ && inTraceArea(*hover_))
+        primary = xAtPosition(hover_->x());
+    if (!primary)
+        return {};
+    const auto xUnit = cache_.traces.empty() ? QString() : cache_.traces.front().xUnit;
+    QStringList lines;
+    if (cursorA_ && cursorB_) {
+        lines << QStringLiteral("A %1   B %2   Δ %3")
+                     .arg(formatValue(*cursorA_, xUnit), formatValue(*cursorB_, xUnit),
+                          formatValue(std::abs(*cursorB_ - *cursorA_), xUnit));
+    } else {
+        lines << QStringLiteral("%1 = %2").arg(cache_.xLabel, formatValue(*primary, xUnit));
+    }
+    const auto maximum = cursorA_ && cursorB_ ? std::size_t{4} : std::size_t{6};
+    std::size_t shown = 0;
+    for (const auto &trace : cache_.traces) {
+        if (shown >= maximum)
+            break;
+        const auto first = interpolateValue(trace.x, trace.y, *primary);
+        if (!first)
+            continue;
+        if (cursorA_ && cursorB_) {
+            const auto second = interpolateValue(trace.x, trace.y, *cursorB_);
+            if (!second)
+                continue;
+            lines << QStringLiteral("%1: %2 / %3  (Δ %4)")
+                         .arg(trace.label, formatValue(*first, trace.yUnit), formatValue(*second, trace.yUnit),
+                              formatValue(*second - *first, trace.yUnit));
+        } else {
+            lines << QStringLiteral("%1: %2").arg(trace.label, formatValue(*first, trace.yUnit));
+        }
+        ++shown;
+    }
+    if (cache_.traces.size() > shown)
+        lines << QStringLiteral("+%1 more traces").arg(cache_.traces.size() - shown);
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString SimulationPlot::cursorReadout() const { return readoutText(); }

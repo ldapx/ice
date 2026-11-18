@@ -196,6 +196,72 @@ and antenna metrics; use `implementation_log` for the failing stage first.
 `implementation_update(from="floorplan", utilization=0.5)` changes settings and
 invalidates the affected checkpoints.
 
+## Corners, sweeps, and measurements
+
+`simulation_update` accepts analysis settings, corners, sweeps, Monte Carlo
+options, and declarative measurements. Use `simulation_corner_defaults` first
+to load the PDK's TT/FF/SS sections, then add any supply or parameter overrides:
+
+```python
+simulation_corner_defaults(simulation="rc_tran")
+simulation_update(
+    simulation="rc_tran",
+    temperature=27,
+    corners=[
+        {"name": "tt", "temperature": 27},
+        {"name": "ff", "temperature": 85, "source_overrides": {"V1": 1.1}},
+    ],
+    sweeps=[{"parameter": "temperature", "values": [27, 85]}],
+    monte_carlo={"enabled": True, "samples": 20, "temperature_sigma": 2.0,
+                 "supply_sigma_percent": 5.0, "supply_source": "V1",
+                 "supply_nominal": 1.0, "seed": 7},
+    measurements=[
+        {"name": "gain", "metric": "gain", "signal": "out", "input": "in"},
+        {"name": "settling", "metric": "settling_time", "signal": "out"},
+        {"name": "power", "metric": "power", "signal": "i(v1)", "voltage": 1.0},
+    ],
+)
+experiment = simulation_experiment(simulation="rc_tran", store=False)
+for point in experiment["points"]:
+    print(point["variant"], point["state"], point["measurements"])
+```
+
+`simulation_measure` also evaluates a one-off metric with
+`metric="slew_rate"`, `"bandwidth"`, `"phase_margin"`, or `"power"` without
+storing a new measurement on the simulation.
+
+## Waveform analysis
+
+Graphs are interactive and store presentation analysis in the project:
+`simulation_graph_update` accepts `view="db"`/`"phase"`, `fft`, math channels,
+and overlays. Use `simulation_runs` to find comparison runs and
+`simulation_waveform` to read the analyzed data:
+
+```python
+runs = simulation_runs(simulation="rc_tran")
+simulation_graph_update(
+    simulation="rc_tran",
+    graph="Graph 1",
+    view="db",
+    fft={"enabled": True, "window": "hann", "points": 1024},
+    derived_traces=[{"name": "slope", "expression": "derivative(out)"}],
+    overlays=[{"run_id": runs["runs"][0]["run_id"], "label": "tt"}],
+    markers=[{"label": "M1", "signal": "out", "x": 1e-6, "y": 0.5}],
+)
+wave = simulation_waveform(
+    simulation="rc_tran",
+    signals="out",
+    view="db",
+    fft={"enabled": True, "window": "hann", "points": 1024},
+    derived=[{"name": "slope", "expression": "derivative(out)"}],
+)
+```
+
+Expressions support arithmetic and `abs`, `sqrt`, `exp`, `ln`, `log10`, `db`,
+`mag`, `phase`, `derivative`, `integral`, `min`, and `max`. Internally the GUI
+adds cursors A/B with delta readout, wheel/box zoom and pan, and measurement
+annotations on the plot.
+
 ## PDK setup matrix
 
 ICE applies the package PDK setup automatically. `pdk_info` is authoritative;

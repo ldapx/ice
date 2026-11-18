@@ -264,7 +264,11 @@ std::vector<std::string> splitLines(const std::string &text) {
 
 SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, const CancellationToken &token,
                                            const ProgressCallback &progress) {
-    SimulationResult result{1, JobState::running, "mixed", {}, {}, "mixed", "ngspice + Icarus Verilog", {}, {}};
+    SimulationResult result;
+    result.state = JobState::running;
+    result.analysis = "mixed";
+    result.simulator = "mixed";
+    result.simulator_version = "ngspice + Icarus Verilog";
     result.input_fingerprint = fingerprintMixedRequest(request);
     if (request.mixedSignal.blocks.empty()) {
         result.state = JobState::failed;

@@ -6,7 +6,8 @@
 <div class="ice-hero-text">A programmable integrated-circuit design environment</div>
 <div class="ice-hero-tagline">Schematic, layout, simulation, and AI-assisted automation on one canonical core — <code>icelib</code>.</div>
 <div class="ice-hero-actions">
-<a class="ice-btn-brand" href="getting-started.html">Get Started →</a>
+<a class="ice-btn-brand" href="user/index.html">User Guide →</a>
+<a class="ice-btn-alt" href="developer/index.html">Developer Guide</a>
 <a class="ice-btn-alt" href="https://github.com/ldapx">GitHub</a>
 </div>
 </div>
@@ -17,48 +18,33 @@
 <div class="ice-feature"><div class="ice-feature-title">🤖 Programmable</div>Manual editing, Python scripting, package installation, verification, and AI agents operate on the same layout database.</div>
 </div>
 
-## Documentation guide
+## Documentation
 
-New here? Start with {doc}`getting-started`, then read {doc}`vision` for
-product intent and {doc}`architecture` for technical contracts. {doc}`roadmap`
-lists capabilities and acceptance criteria; {doc}`plan` explains how these
-pages relate.
+The documentation is split by audience so each page has one job:
+
+- **{doc}`/user/index`** — create projects, draw schematics and layouts, run
+  simulations, use the CLI, install PDKs, and automate with Python or agents.
+- **{doc}`/developer/index`** — build and test ICE, understand the architecture,
+  extend the package/plugin system, and contribute to the project.
+- **{doc}`/project/index`** — product vision and the implementation roadmap.
 
 ```{toctree}
-:maxdepth: 2
-:caption: Getting Started
+:maxdepth: 1
+:caption: User Guide
 
-getting-started
+user/index
 ```
 
 ```{toctree}
-:maxdepth: 2
-:caption: Concepts
+:maxdepth: 1
+:caption: Developer Guide
 
-vision
-architecture
-roadmap
-capabilities
-```
-
-```{toctree}
-:maxdepth: 2
-:caption: Working with ICE
-
-gui
-symbols
-simulation
-packages
-cli
-icepy
-ice-mcp
-agent-cookbook
-plugins
+developer/index
 ```
 
 ```{toctree}
 :maxdepth: 1
 :caption: Project
 
-plan
+project/index
 ```

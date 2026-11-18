@@ -140,3 +140,56 @@ TEST_CASE("agent pin resolver supports instance pin names") {
     const auto resolved = ice::resolveSchematicPin(project.schematicCells.at(cell), "R1.1");
     CHECK(resolved == placement.pins.front().id);
 }
+
+TEST_CASE("repeated component placement keeps unique pins and symbol defaults") {
+    ice::Project project;
+    project.identity = "agent-repeat";
+    project.name = "agent-repeat";
+    const auto cell = ice::createSchematicCell(project, "pulses");
+
+    ice::ComponentRequest first;
+    first.type = "pulse voltage source";
+    first.name = "V1";
+    first.parameters.push_back({0, "delay_time", "5n"});
+    const auto v1 = ice::addSchematicComponent(project, cell, first);
+
+    // Adding the same library symbol again copies it; the copy must get its own
+    // pin ids and keep the defaults that were seeded on the first placement.
+    ice::ComponentRequest second;
+    second.type = "pulse voltage source";
+    second.name = "V2";
+    const auto v2 = ice::addSchematicComponent(project, cell, second);
+
+    const auto &placed = project.schematicCells.at(cell);
+    CHECK(v1.instance != v2.instance);
+    CHECK(v1.symbol != v2.symbol);
+
+    std::vector<ice::ObjectId> pinIds;
+    for (const auto &[_, symbol] : placed.symbols)
+        for (const auto &pin : symbol.pins)
+            pinIds.push_back(pin.id);
+    CHECK(pinIds.size() == 4);
+    std::sort(pinIds.begin(), pinIds.end());
+    CHECK(std::adjacent_find(pinIds.begin(), pinIds.end()) == pinIds.end());
+
+    const auto parameterValue = [](const ice::SchematicInstance &instance, const std::string &name) {
+        for (const auto &parameter : instance.parameters) {
+            if (parameter.name == name)
+                return parameter.value;
+        }
+        return std::string{};
+    };
+    const auto &firstInstance = placed.instances.at(v1.instance);
+    const auto &secondInstance = placed.instances.at(v2.instance);
+    CHECK(parameterValue(firstInstance, "delay_time") == "5n");
+    CHECK(parameterValue(secondInstance, "delay_time") == "5n");
+    CHECK(parameterValue(secondInstance, "period") == "1");
+    CHECK(parameterValue(secondInstance, "rise_time") == "1u");
+
+    // Both sources netlist with a pulse expression, so the copy kept its defaults.
+    const auto netlist = ice::buildSchematicNetlist(project, cell);
+    const auto pulseLines = std::count_if(netlist.begin(), netlist.end(), [](const std::string &line) {
+        return line.find("PULSE(") != std::string::npos;
+    });
+    CHECK(pulseLines == 2);
+}
