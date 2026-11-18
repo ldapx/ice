@@ -142,6 +142,8 @@ def main() -> int:
                 "schematic_validate",
                 "schematic_import_spice",
                 "simulation_trace",
+                "simulation_runs",
+                "simulation_waveform",
                 "ice_help",
                 "layout_add_instance",
                 "layout_add_port",
@@ -782,6 +784,54 @@ def main() -> int:
             assert len(experiment["points"]) == 2, experiment
             assert experiment["points"][0]["state"] == "succeeded", experiment
             assert experiment["points"][0]["measurements"], experiment
+
+            graphs = mcp.tool("simulation_graph_list", simulation="rc_sim")
+            assert graphs, graphs
+            graph_id = graphs[0]["id"]
+            analyzed = mcp.tool(
+                "simulation_graph_update",
+                simulation="rc_sim",
+                graph=graph_id,
+                view="db",
+                fft={"enabled": True, "window": "hann", "points": 512},
+                derived_traces=[{"name": "slope", "expression": "derivative(out)"}],
+                markers=[{"label": "M1", "signal": "out", "x": 1e-7, "y": 0.1}],
+            )
+            assert analyzed["view"] == "db", analyzed
+            assert analyzed["fft"]["enabled"] is True, analyzed
+            assert analyzed["derived_traces"][0]["name"] == "slope", analyzed
+            assert analyzed["markers"][0]["label"] == "M1", analyzed
+
+            runs = mcp.tool("simulation_runs", simulation="rc_sim")
+            assert runs["runs"], runs
+            overlaid = mcp.tool(
+                "simulation_graph_update",
+                simulation="rc_sim",
+                graph=graph_id,
+                overlays=[{"run_id": runs["runs"][0]["run_id"], "label": "tt"}],
+            )
+            assert overlaid["overlays"], overlaid
+
+            waveform = mcp.tool(
+                "simulation_waveform",
+                simulation="rc_sim",
+                signals="out",
+                view="db",
+                derived=[{"name": "slope", "expression": "derivative(out)"}],
+                max_points=64,
+            )
+            names = [series["name"] for series in waveform["series"]]
+            assert "slope" in names, waveform
+            assert all(len(series["x"]) <= 65 for series in waveform["series"]), (
+                waveform
+            )
+            spectrum = mcp.tool(
+                "simulation_waveform",
+                simulation="rc_sim",
+                signals="out",
+                fft={"enabled": True, "window": "hann", "points": 512},
+            )
+            assert spectrum["series"][0]["x_unit"] == "Hz", spectrum
 
             pdk = mcp.tool("pdk_info")
             assert "pdks" in pdk, pdk

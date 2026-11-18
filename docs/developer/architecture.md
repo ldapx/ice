@@ -875,6 +875,14 @@ MCP tools (`simulation_update`, `simulation_corner_defaults`,
 `simulation_experiment`) all use the same `Experiment`/`SimulationRunner`
 contract.
 
+Waveform analysis is presentation-only and lives in `icelib/waveform.*`.
+`computeSpectrum` resamples onto a uniform grid and returns amplitude/phase
+spectra; `evaluateDerivedTrace` evaluates safe arithmetic/function expressions
+over captured traces; `buildWaveformSeries` applies a graph's view, derived
+traces, and optional FFT. The Qt plot consumes those series but never mutates
+stored runs. Graph-level analysis settings, stored-run overlay ids, and point
+markers are serialized on `SimulationGraph` so the GUI, CLI, and MCP agree.
+
 ---
 
 ## 19. Model Analysis

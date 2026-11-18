@@ -14,6 +14,7 @@
 #include "icelib/simulation_store.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
+#include "icelib/waveform.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -580,12 +581,14 @@ json helpJson(const std::string &requestedTopic) {
         {"simulation",
          {{"tools", json::array({"simulation_create", "simulation_update", "simulation_run", "simulation_experiment",
                                  "simulation_corner_defaults", "simulation_result", "simulation_signals",
-                                 "simulation_trace", "simulation_measure", "simulation_graph_create",
-                                 "simulation_graph_list", "simulation_graph_update"})},
+                                 "simulation_trace", "simulation_measure", "simulation_runs", "simulation_waveform",
+                                 "simulation_graph_create", "simulation_graph_list", "simulation_graph_update"})},
           {"notes",
            json::array({"simulation_update accepts analysis fields, corners, sweeps, Monte Carlo, and measurements.",
                         "Use simulation_corner_defaults to load the PDK TT/FF/SS sections.",
-                        "Use simulation_experiment to run every corner/sweep/Monte Carlo variant."})},
+                        "Use simulation_experiment to run every corner/sweep/Monte Carlo variant.",
+                        "simulation_graph_update accepts view (linear/db/phase), fft, derived_traces, overlays, "
+                        "and markers. simulation_waveform returns the analyzed series for a stored run."})},
           {"example",
            {{"tool", "simulation_create"},
             {"arguments",
@@ -1369,14 +1372,119 @@ json drcReportJson(const ice::VerificationReport &report) {
 }
 
 json graphJson(const ice::SimulationGraph &graph) {
-    return {{"id", graph.id},
-            {"name", graph.name},
-            {"x_axis", graph.xAxis},
-            {"y_signals", graph.ySignals},
-            {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
-            {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
-            {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
-            {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+    json result = {{"id", graph.id},
+                   {"name", graph.name},
+                   {"x_axis", graph.xAxis},
+                   {"y_signals", graph.ySignals},
+                   {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
+                   {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
+                   {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
+                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)},
+                   {"view", graph.view},
+                   {"fft", {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}}},
+                   {"show_measurements", graph.showMeasurements},
+                   {"derived_traces", json::array()},
+                   {"overlays", json::array()},
+                   {"markers", json::array()}};
+    for (const auto &trace : graph.derivedTraces)
+        result["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+    for (const auto &overlay : graph.overlays)
+        result["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+    for (const auto &marker : graph.markers) {
+        json entry = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+        if (marker.hasY)
+            entry["y"] = marker.y;
+        result["markers"].push_back(std::move(entry));
+    }
+    return result;
+}
+
+void applyGraphArguments(ice::SimulationGraph &graph, const json &arguments) {
+    if (arguments.contains("view")) {
+        const auto text = requiredString(arguments, "view");
+        const auto view = ice::parseWaveformView(text);
+        if (!view)
+            throw ToolError("Unknown waveform view: " + text);
+        graph.view = ice::waveformViewName(*view);
+    }
+    if (const auto fft = arguments.find("fft"); fft != arguments.end()) {
+        if (fft->is_boolean()) {
+            graph.fft = fft->get<bool>();
+        } else if (fft->is_object()) {
+            graph.fft = fft->value("enabled", true);
+            graph.fftWindow = fft->value("window", graph.fftWindow);
+            graph.fftPoints = fft->value("points", graph.fftPoints);
+        } else {
+            throw ToolError("Argument 'fft' must be a boolean or an object.");
+        }
+    }
+    if (arguments.contains("fft_window"))
+        graph.fftWindow = requiredString(arguments, "fft_window");
+    if (arguments.contains("fft_points"))
+        graph.fftPoints = static_cast<int>(numberValue(arguments.at("fft_points"), "fft_points"));
+    if (arguments.contains("show_measurements"))
+        graph.showMeasurements = optionalBoolean(arguments, "show_measurements", graph.showMeasurements);
+    if (optionalBoolean(arguments, "clear_derived", false))
+        graph.derivedTraces.clear();
+    if (arguments.contains("derived_traces")) {
+        if (!arguments.at("derived_traces").is_array())
+            throw ToolError("Argument 'derived_traces' must be an array.");
+        for (const auto &entry : arguments.at("derived_traces")) {
+            if (!entry.is_object())
+                throw ToolError("Each derived trace must be an object.");
+            ice::SimulationDerivedTrace trace;
+            trace.name = requiredString(entry, "name");
+            trace.expression = requiredString(entry, "expression");
+            const auto found =
+                std::find_if(graph.derivedTraces.begin(), graph.derivedTraces.end(),
+                             [&](const ice::SimulationDerivedTrace &existing) { return existing.name == trace.name; });
+            if (found == graph.derivedTraces.end())
+                graph.derivedTraces.push_back(std::move(trace));
+            else
+                *found = std::move(trace);
+        }
+    }
+    if (optionalBoolean(arguments, "clear_overlays", false))
+        graph.overlays.clear();
+    if (arguments.contains("overlays")) {
+        if (!arguments.at("overlays").is_array())
+            throw ToolError("Argument 'overlays' must be an array.");
+        for (const auto &entry : arguments.at("overlays")) {
+            if (!entry.is_object())
+                throw ToolError("Each overlay must be an object.");
+            ice::SimulationOverlayRun overlay;
+            overlay.runId = requiredString(entry, "run_id");
+            overlay.label = entry.value("label", std::string{});
+            const auto found = std::find_if(
+                graph.overlays.begin(), graph.overlays.end(),
+                [&](const ice::SimulationOverlayRun &existing) { return existing.runId == overlay.runId; });
+            if (found == graph.overlays.end())
+                graph.overlays.push_back(std::move(overlay));
+            else
+                *found = std::move(overlay);
+        }
+    }
+    if (optionalBoolean(arguments, "clear_markers", false))
+        graph.markers.clear();
+    if (arguments.contains("markers")) {
+        if (!arguments.at("markers").is_array())
+            throw ToolError("Argument 'markers' must be an array.");
+        for (const auto &entry : arguments.at("markers")) {
+            if (!entry.is_object())
+                throw ToolError("Each marker must be an object.");
+            ice::SimulationGraphMarker marker;
+            marker.label = entry.value("label", std::string{});
+            marker.signal = entry.value("signal", std::string{});
+            marker.x = numberValue(requiredValue(entry, "x"), "marker x");
+            if (entry.contains("y") && entry.at("y").is_number()) {
+                marker.y = entry.at("y").get<double>();
+                marker.hasY = true;
+            }
+            std::erase_if(graph.markers,
+                          [&](const ice::SimulationGraphMarker &existing) { return existing.label == marker.label; });
+            graph.markers.push_back(std::move(marker));
+        }
+    }
 }
 
 json graphWithSimulation(const ice::SimulationItem &simulation, const ice::SimulationGraph &graph) {
@@ -1794,6 +1902,7 @@ class IceMcpServer {
             result["features"].push_back("simulation_measure");
             result["features"].push_back("simulation_experiment");
             result["features"].push_back("simulation_corner_defaults");
+            result["features"].push_back("waveform_analysis");
             result["features"].push_back("pdk_info");
             if (!startupWarning_.empty())
                 result["startup_warning"] = startupWarning_;
@@ -2390,6 +2499,7 @@ class IceMcpServer {
             applyLimit("x_max", graph.xMax);
             applyLimit("y_min", graph.yMin);
             applyLimit("y_max", graph.yMax);
+            applyGraphArguments(graph, arguments);
             ice::ObjectId graphId = 0;
             session.execute("mcp simulation-graph-create", [&](ice::Project &project) {
                 graphId = ice::addSimulationGraph(project, simulationId, graph);
@@ -2464,6 +2574,7 @@ class IceMcpServer {
             applyLimit("x_max", updated.xMax);
             applyLimit("y_min", updated.yMin);
             applyLimit("y_max", updated.yMax);
+            applyGraphArguments(updated, arguments);
             session.execute("mcp simulation-graph-update", [&](ice::Project &project) {
                 ice::updateSimulationGraph(project, simulationId, updated.id, updated);
             });
@@ -2485,6 +2596,102 @@ class IceMcpServer {
                 ice::removeSimulationGraph(project, simulationId, graph.id);
             });
             return {{"id", graph.id}, {"name", graph.name}, {"simulation", simulationId}, {"deleted", true}};
+        }
+
+        if (name == "simulation_runs") {
+            const auto simulationValue = arguments.find("simulation");
+            const std::optional<ice::ObjectId> simulationId =
+                simulationValue != arguments.end() && !simulationValue->is_null()
+                    ? std::optional<ice::ObjectId>(resolveSimulation(session.project(), *simulationValue))
+                    : std::nullopt;
+            json runs = json::array();
+            for (const auto &run : ice::listSimulationRunSummaries(projectRootPath(), simulationId)) {
+                runs.push_back({{"run_id", run.runId},
+                                {"variant", run.variant},
+                                {"created_at", run.createdAt},
+                                {"simulation", run.simulationId},
+                                {"simulation_name", run.simulationName},
+                                {"schematic", run.schematicId},
+                                {"path", run.path.string()}});
+            }
+            return {{"runs", std::move(runs)}};
+        }
+
+        if (name == "simulation_waveform") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            std::optional<ice::StoredSimulationRun> stored;
+            const auto runId = optionalString(arguments, "run_id");
+            if (!runId.empty())
+                stored = ice::findSimulationRun(projectRootPath(), runId);
+            else
+                stored = ice::latestSimulationRun(projectRootPath(), id);
+            if (!stored)
+                throw ToolError("No stored simulation run was found for this simulation.");
+            std::vector<std::string> signals;
+            if (arguments.contains("signals"))
+                signals = parseSignalListValue(arguments.at("signals"), "signals");
+            std::vector<ice::SimulationDerivedTrace> derived;
+            if (const auto value = arguments.find("derived"); value != arguments.end()) {
+                if (!value->is_array())
+                    throw ToolError("Argument 'derived' must be an array.");
+                for (const auto &entry : *value) {
+                    if (!entry.is_object())
+                        throw ToolError("Each derived trace must be an object.");
+                    derived.push_back({requiredString(entry, "name"), requiredString(entry, "expression")});
+                }
+            }
+            const auto viewText = optionalString(arguments, "view", "linear");
+            const auto view = ice::parseWaveformView(viewText);
+            if (!view)
+                throw ToolError("Unknown waveform view: " + viewText);
+            bool fft = false;
+            ice::WaveformFftOptions fftOptions;
+            if (const auto value = arguments.find("fft"); value != arguments.end()) {
+                if (value->is_boolean()) {
+                    fft = value->get<bool>();
+                } else if (value->is_object()) {
+                    fft = value->value("enabled", true);
+                    fftOptions.window = value->value("window", fftOptions.window);
+                    fftOptions.points = value->value("points", 0);
+                } else {
+                    throw ToolError("Argument 'fft' must be a boolean or an object.");
+                }
+            }
+            std::vector<std::string> warnings;
+            const auto series =
+                ice::buildWaveformSeries(stored->result, signals, derived, *view, fft, fftOptions, &warnings);
+            const auto maxPoints = std::max<std::int64_t>(2, optionalInteger(arguments, "max_points").value_or(2000));
+            json outputSeries = json::array();
+            for (const auto &entry : series) {
+                const auto count = std::min(entry.x.size(), entry.y.size());
+                const auto limit = static_cast<std::size_t>(maxPoints);
+                const auto step = std::max<std::size_t>(1, (count + limit - 1) / limit);
+                json x = json::array();
+                json y = json::array();
+                for (std::size_t index = 0; index < count; index += step) {
+                    x.push_back(entry.x[index]);
+                    y.push_back(entry.y[index]);
+                }
+                if (count > 0 && (count - 1) % step != 0) {
+                    x.push_back(entry.x[count - 1]);
+                    y.push_back(entry.y[count - 1]);
+                }
+                outputSeries.push_back({{"name", entry.name},
+                                        {"label", entry.label},
+                                        {"x_unit", entry.xUnit},
+                                        {"y_unit", entry.yUnit},
+                                        {"source_points", count},
+                                        {"points", x.size()},
+                                        {"x", std::move(x)},
+                                        {"y", std::move(y)}});
+            }
+            return {{"simulation", stored->simulationName},
+                    {"run_id", stored->runId},
+                    {"analysis", stored->result.analysis},
+                    {"view", ice::waveformViewName(*view)},
+                    {"fft", fft},
+                    {"series", std::move(outputSeries)},
+                    {"warnings", std::move(warnings)}};
         }
 
         if (name == "simulation_delete") {
@@ -4108,10 +4315,9 @@ class IceMcpServer {
     std::vector<agentsdk::mcp::tool> listTools() const {
         const auto withSimulationConfigSchema = [](agentsdk::mcp::tool tool) {
             auto schema = json::parse(tool.input_schema);
-            schema["properties"]["parameters"] = {
-                {"type", "object"}, {"additionalProperties", {{"type", "number"}}}};
-            schema["properties"]["source_overrides"] = {
-                {"type", "object"}, {"additionalProperties", {{"type", "number"}}}};
+            schema["properties"]["parameters"] = {{"type", "object"}, {"additionalProperties", {{"type", "number"}}}};
+            schema["properties"]["source_overrides"] = {{"type", "object"},
+                                                        {"additionalProperties", {{"type", "number"}}}};
             schema["properties"]["corners"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
             schema["properties"]["sweeps"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
             schema["properties"]["monte_carlo"] = {{"type", "object"}};
@@ -4185,62 +4391,64 @@ class IceMcpServer {
                 .with_string_param("simulation", "Optional simulation whose schematic includes to validate", false)
                 .with_boolean_param("probe", "Run a minimal transistor load check for the project PDK", false)
                 .build());
-        tools.push_back(withSimulationConfigSchema(tool_builder("simulation_create")
-                            .with_description("Create a simulation and its first graph.")
-                            .with_string_param("name", "Simulation name")
-                            .with_string_param("schematic", "Schematic name or id")
-                            .with_string_param("template", "tran, mixed, pwm_dac, or digital", false)
-                            .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
-                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
-                            .with_number_param("start", "Transient start time", false)
-                            .with_number_param("stop", "Transient stop time", false)
-                            .with_number_param("step", "Transient step", false)
-                            .with_number_param("temperature", "Simulation temperature in C", false)
-                            .with_string_param("model_section", "Override the .lib model section", false)
-                            .with_string_param("dc_source", "DC sweep source", false)
-                            .with_number_param("dc_start", "DC sweep start", false)
-                            .with_number_param("dc_stop", "DC sweep stop", false)
-                            .with_number_param("dc_step", "DC sweep step", false)
-                            .with_number_param("ac_points", "AC points per decade/octave", false)
-                            .with_number_param("ac_start", "AC start frequency", false)
-                            .with_number_param("ac_stop", "AC stop frequency", false)
-                            .with_string_param("noise_output", "Noise output node", false)
-                            .with_string_param("noise_input", "Noise input source", false)
-                            .with_number_param("noise_points", "Noise points per decade/octave", false)
-                            .with_number_param("noise_start", "Noise start frequency", false)
-                            .with_number_param("noise_stop", "Noise stop frequency", false)
-                            .with_string_param("tf_output", "Transfer-function output node", false)
-                            .with_string_param("tf_source", "Transfer-function input source", false)
-                            .with_string_param("signals", "Signals to capture", false)
-                            .with_string_param("graph_name", "Initial graph name", false)
-                            .build()));
-        tools.push_back(withSimulationConfigSchema(tool_builder("simulation_update")
-                            .with_description("Update simulation analysis settings, corners, sweeps, Monte Carlo, "
-                                              "and declarative measurements.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
-                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
-                            .with_number_param("start", "Transient start time", false)
-                            .with_number_param("stop", "Transient stop time", false)
-                            .with_number_param("step", "Transient step", false)
-                            .with_number_param("temperature", "Simulation temperature in C", false)
-                            .with_string_param("model_section", "Override the .lib model section", false)
-                            .with_string_param("dc_source", "DC sweep source", false)
-                            .with_number_param("dc_start", "DC sweep start", false)
-                            .with_number_param("dc_stop", "DC sweep stop", false)
-                            .with_number_param("dc_step", "DC sweep step", false)
-                            .with_number_param("ac_points", "AC points per decade/octave", false)
-                            .with_number_param("ac_start", "AC start frequency", false)
-                            .with_number_param("ac_stop", "AC stop frequency", false)
-                            .with_string_param("noise_output", "Noise output node", false)
-                            .with_string_param("noise_input", "Noise input source", false)
-                            .with_number_param("noise_points", "Noise points per decade/octave", false)
-                            .with_number_param("noise_start", "Noise start frequency", false)
-                            .with_number_param("noise_stop", "Noise stop frequency", false)
-                            .with_string_param("tf_output", "Transfer-function output node", false)
-                            .with_string_param("tf_source", "Transfer-function input source", false)
-                            .with_string_param("signals", "Signals to capture", false)
-                            .build()));
+        tools.push_back(withSimulationConfigSchema(
+            tool_builder("simulation_create")
+                .with_description("Create a simulation and its first graph.")
+                .with_string_param("name", "Simulation name")
+                .with_string_param("schematic", "Schematic name or id")
+                .with_string_param("template", "tran, mixed, pwm_dac, or digital", false)
+                .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
+                .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
+                .with_number_param("start", "Transient start time", false)
+                .with_number_param("stop", "Transient stop time", false)
+                .with_number_param("step", "Transient step", false)
+                .with_number_param("temperature", "Simulation temperature in C", false)
+                .with_string_param("model_section", "Override the .lib model section", false)
+                .with_string_param("dc_source", "DC sweep source", false)
+                .with_number_param("dc_start", "DC sweep start", false)
+                .with_number_param("dc_stop", "DC sweep stop", false)
+                .with_number_param("dc_step", "DC sweep step", false)
+                .with_number_param("ac_points", "AC points per decade/octave", false)
+                .with_number_param("ac_start", "AC start frequency", false)
+                .with_number_param("ac_stop", "AC stop frequency", false)
+                .with_string_param("noise_output", "Noise output node", false)
+                .with_string_param("noise_input", "Noise input source", false)
+                .with_number_param("noise_points", "Noise points per decade/octave", false)
+                .with_number_param("noise_start", "Noise start frequency", false)
+                .with_number_param("noise_stop", "Noise stop frequency", false)
+                .with_string_param("tf_output", "Transfer-function output node", false)
+                .with_string_param("tf_source", "Transfer-function input source", false)
+                .with_string_param("signals", "Signals to capture", false)
+                .with_string_param("graph_name", "Initial graph name", false)
+                .build()));
+        tools.push_back(withSimulationConfigSchema(
+            tool_builder("simulation_update")
+                .with_description("Update simulation analysis settings, corners, sweeps, Monte Carlo, "
+                                  "and declarative measurements.")
+                .with_string_param("simulation", "Simulation name or id")
+                .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
+                .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
+                .with_number_param("start", "Transient start time", false)
+                .with_number_param("stop", "Transient stop time", false)
+                .with_number_param("step", "Transient step", false)
+                .with_number_param("temperature", "Simulation temperature in C", false)
+                .with_string_param("model_section", "Override the .lib model section", false)
+                .with_string_param("dc_source", "DC sweep source", false)
+                .with_number_param("dc_start", "DC sweep start", false)
+                .with_number_param("dc_stop", "DC sweep stop", false)
+                .with_number_param("dc_step", "DC sweep step", false)
+                .with_number_param("ac_points", "AC points per decade/octave", false)
+                .with_number_param("ac_start", "AC start frequency", false)
+                .with_number_param("ac_stop", "AC stop frequency", false)
+                .with_string_param("noise_output", "Noise output node", false)
+                .with_string_param("noise_input", "Noise input source", false)
+                .with_number_param("noise_points", "Noise points per decade/octave", false)
+                .with_number_param("noise_start", "Noise start frequency", false)
+                .with_number_param("noise_stop", "Noise stop frequency", false)
+                .with_string_param("tf_output", "Transfer-function output node", false)
+                .with_string_param("tf_source", "Transfer-function input source", false)
+                .with_string_param("signals", "Signals to capture", false)
+                .build()));
         tools.push_back(tool_builder("simulation_run")
                             .with_description("Run a simulation and store a compact run artifact.")
                             .with_string_param("simulation", "Simulation name or id")
@@ -4288,17 +4496,34 @@ class IceMcpServer {
                             .with_description("List available signals and trace sizes from the latest stored run.")
                             .with_string_param("simulation", "Simulation name or id")
                             .build());
-        tools.push_back(tool_builder("simulation_graph_create")
-                            .with_description("Add a graph definition to a simulation.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("name", "Graph name")
-                            .with_string_param("x_axis", "Optional X-axis signal or time", false)
-                            .with_string_param("y_signals", "Optional comma-separated Y signals", false)
-                            .with_number_param("x_min", "Optional X minimum", false)
-                            .with_number_param("x_max", "Optional X maximum", false)
-                            .with_number_param("y_min", "Optional Y minimum", false)
-                            .with_number_param("y_max", "Optional Y maximum", false)
-                            .build());
+        const auto withGraphAnalysisSchema = [](agentsdk::mcp::tool tool) {
+            auto schema = json::parse(tool.input_schema);
+            schema["properties"]["view"] = {{"type", "string"}, {"enum", {"linear", "db", "phase"}}};
+            schema["properties"]["fft"] = {{"type", "boolean"}};
+            schema["properties"]["fft_window"] = {{"type", "string"}};
+            schema["properties"]["fft_points"] = {{"type", "integer"}};
+            schema["properties"]["show_measurements"] = {{"type", "boolean"}};
+            schema["properties"]["derived_traces"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["overlays"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["markers"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["clear_derived"] = {{"type", "boolean"}};
+            schema["properties"]["clear_overlays"] = {{"type", "boolean"}};
+            schema["properties"]["clear_markers"] = {{"type", "boolean"}};
+            tool.input_schema = schema.dump();
+            return tool;
+        };
+        tools.push_back(
+            withGraphAnalysisSchema(tool_builder("simulation_graph_create")
+                                        .with_description("Add a graph definition to a simulation.")
+                                        .with_string_param("simulation", "Simulation name or id")
+                                        .with_string_param("name", "Graph name")
+                                        .with_string_param("x_axis", "Optional X-axis signal or time", false)
+                                        .with_string_param("y_signals", "Optional comma-separated Y signals", false)
+                                        .with_number_param("x_min", "Optional X minimum", false)
+                                        .with_number_param("x_max", "Optional X maximum", false)
+                                        .with_number_param("y_min", "Optional Y minimum", false)
+                                        .with_number_param("y_max", "Optional Y maximum", false)
+                                        .build()));
         tools.push_back(tool_builder("simulation_graph_list")
                             .with_description("List simulation graph definitions.")
                             .with_string_param("simulation", "Optional simulation name or id", false)
@@ -4308,19 +4533,42 @@ class IceMcpServer {
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("graph", "Graph name or id")
                             .build());
-        tools.push_back(tool_builder("simulation_graph_update")
-                            .with_description("Update a simulation graph definition.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("graph", "Graph name or id")
-                            .with_string_param("name", "Optional new graph name", false)
-                            .with_string_param("x_axis", "Optional new X-axis signal or time", false)
-                            .with_string_param("y_signals", "Optional new comma-separated Y signals", false)
-                            .with_number_param("x_min", "Optional X minimum", false)
-                            .with_number_param("x_max", "Optional X maximum", false)
-                            .with_number_param("y_min", "Optional Y minimum", false)
-                            .with_number_param("y_max", "Optional Y maximum", false)
-                            .with_boolean_param("clear_limits", "Clear all axis limits before applying new ones", false)
+        tools.push_back(withGraphAnalysisSchema(
+            tool_builder("simulation_graph_update")
+                .with_description("Update a graph definition, including FFT/dB/phase view, derived "
+                                  "traces, stored-run overlays, and point markers.")
+                .with_string_param("simulation", "Simulation name or id")
+                .with_string_param("graph", "Graph name or id")
+                .with_string_param("name", "Optional new graph name", false)
+                .with_string_param("x_axis", "Optional new X-axis signal or time", false)
+                .with_string_param("y_signals", "Optional new comma-separated Y signals", false)
+                .with_number_param("x_min", "Optional X minimum", false)
+                .with_number_param("x_max", "Optional X maximum", false)
+                .with_number_param("y_min", "Optional Y minimum", false)
+                .with_number_param("y_max", "Optional Y maximum", false)
+                .with_boolean_param("clear_limits", "Clear all axis limits before applying new ones", false)
+                .build()));
+        tools.push_back(tool_builder("simulation_runs")
+                            .with_description("List stored simulation runs for overlay selection.")
+                            .with_string_param("simulation", "Optional simulation name or id", false)
                             .build());
+        const auto withWaveformSchema = [](agentsdk::mcp::tool tool) {
+            auto schema = json::parse(tool.input_schema);
+            schema["properties"]["fft"] = {{"type", "boolean"}};
+            schema["properties"]["derived"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            tool.input_schema = schema.dump();
+            return tool;
+        };
+        tools.push_back(
+            withWaveformSchema(tool_builder("simulation_waveform")
+                                   .with_description("Return analyzed waveform series for a stored run: derived "
+                                                     "expressions, dB/phase view, or FFT spectra.")
+                                   .with_string_param("simulation", "Simulation name or id")
+                                   .with_string_param("run_id", "Optional stored run id; defaults to the latest", false)
+                                   .with_string_param("signals", "Optional comma-separated signals", false)
+                                   .with_string_param("view", "Optional linear, db, or phase view", false)
+                                   .with_integer_param("max_points", "Maximum points per series (default 2000)", false)
+                                   .build()));
         tools.push_back(tool_builder("simulation_graph_delete")
                             .with_description("Delete a simulation graph; one graph must remain.")
                             .with_string_param("simulation", "Simulation name or id")

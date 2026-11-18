@@ -370,6 +370,35 @@ The graph toolbar has a **Load VCD** action that imports an external VCD file
 into the current simulation. Its traces replace the capture list, populate
 empty graphs, and are shown immediately without running a simulator.
 
+### Waveform analysis
+
+The plot is interactive. Drag to pan, use the mouse wheel to zoom the time or
+frequency axis, Ctrl+wheel to zoom both axes, and Shift+drag to box-zoom.
+Double-click inside the plot to reset the zoom. Click once to place cursor A
+and Shift+click to place cursor B. Drag either cursor line to move it. The
+readout inside the plot shows each trace value at the cursor and the A/B delta.
+Right-click offers reset zoom, cursor placement/clearing, marker mode, marker
+placement/clearing, and copying the cursor readout.
+
+The **chart** button next to the graph controls opens **Waveform Analysis**:
+
+- **View** switches the Y axis between linear, magnitude in dB, and phase.
+  Phase view reads the companion `<signal>.phase` traces emitted by AC
+  analyses. The FFT group transforms the selected traces to amplitude and phase
+  spectra; non-uniform transient samples are resampled to a uniform grid, and
+  the FFT window/size are configurable. Measurement annotations can be hidden.
+- **Derived traces** add math channels such as `out - in`, `db(v(out))`,
+  `derivative(i(v1))`, and `phase(out)`.
+- **Overlays** draw stored runs on the same graph. Corner, sweep, and Monte
+  Carlo runs appear with their variant labels and use dashed lines; runs from
+  other simulations can be overlaid when they expose compatible signals.
+- **Markers** lists the persistent point annotations that can also be placed
+  from the plot context menu.
+
+All of these settings are saved on the `SimulationGraph` in the project and are
+also available through the CLI and MCP. Derived traces, view transforms, FFT,
+overlays, and markers never modify the stored simulation samples.
+
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.
 

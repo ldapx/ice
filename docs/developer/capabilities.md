@@ -19,6 +19,7 @@ CLI invokes the same operations through `ProjectSession`.
 | SPICE analyses (DC, AC, transient, OP, noise, TF) | Yes | Analysis selector + experiment dialog | `simulation-configure`, `simulation-run` | Core API |
 | Corners, sweeps, and Monte Carlo | Yes | Experiment dialog | `simulation-corner-*`, `simulation-sweep-*`, `simulation-monte-carlo`, `simulation-experiment` | Core API |
 | Declarative measurements | Yes | Experiment dialog + Messages | `simulation-measure-add`, `simulation-measure` | Core API |
+| Interactive waveform analysis | Yes | Graph zoom/pan, cursors, FFT/dB/phase, derived traces, run overlays, markers | `simulation-graph-update`, `simulation-graph-derive`, `simulation-graph-overlay`, `simulation-graph-marker-add`, `simulation-runs` | `buildWaveformSeries`, `computeSpectrum` |
 | High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
 | SPICE import | Yes | Schematic import | `schematic-import-spice` | Core API |
