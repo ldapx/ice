@@ -81,7 +81,9 @@ and ask the user to rebuild/restart ICE.
 | `ice_doctor` | Inspect Python, ngspice, PDK readiness, model libraries, and optional schematic/simulation model includes. |
 | `schematic_create` | Create a schematic cell; use `kind="text"` for SPICE text or `kind="systemverilog"` for a digital source cell. |
 | `schematic_list` | List schematic cells and their symbol/instance/net counts. |
-| `schematic_info` | Read symbols, pins, instances, parameters, and nets. |
+| `schematic_info` | Read cell parameters, symbols, pins, instances, instance parameters, and nets. |
+| `schematic_set_cell_parameter` | Set or create a drawn-schematic parameter used by `{name}` component values and subcircuit `params:` defaults. |
+| `schematic_remove_cell_parameter` | Remove a schematic cell parameter by name. |
 | `schematic_create_text` | Create a text SPICE schematic. |
 | `schematic_create_systemverilog` | Create a SystemVerilog source cell for digital HDL simulation. |
 | `schematic_hdl_ports` | Parse a SystemVerilog cell and return its module name, port directions, widths, and real flags. |
@@ -285,7 +287,19 @@ auto-generates pins and artwork when it is given a SystemVerilog `source_cell`
 without an explicit `pins` array. Connect pins with readable names such as
 `U1.in` and `U1.out` via `schematic_add_net`. Set analog instance values with
 `schematic_set_parameter`, for example `resistance="1k"` or
-`value="PULSE(0 1 5n 1n 1n 20n 40n)"`.
+`value="PULSE(0 1 5n 1n 1n 20n 40n)"`. A drawn cell can also declare parameters
+with `schematic_set_cell_parameter`; components use them as `{R}` values. When
+the cell is placed as a hierarchical block, its parameters become subcircuit
+`params:` defaults and matching parameters on the block instance override them:
+
+```python
+schematic_set_cell_parameter(cell="divider", name="R", value="1k")
+schematic_set_parameter(cell="divider", instance="R1", name="resistance", value="{R}")
+schematic_set_parameter(cell="top", instance="X1", name="R", value="2k")
+```
+
+`schematic_info` returns both `parameters` on the cell and each instance's
+`parameters`.
 
 Call `schematic_hdl_ports` to inspect the parsed module and
 `schematic_validate_hierarchy` to check pin/port names, missing nets, bus
@@ -363,10 +377,12 @@ separate from physical-flow route DRC metrics in `implementation_status`.
 
 `schematic_add_component` creates a primitive and returns its pin handles.
 `schematic_add_circuit` accepts components and nets in one atomic call.
-`schematic_list_symbols` shows valid PDK symbols, pin names, and defaults.
-`schematic_validate` returns diagnostics with suggested calls, and
-`schematic_delete(dry_run=true)` lists simulation and hierarchy dependencies
-before deletion.
+`schematic_list_symbols` shows valid PDK symbols, pin names, and defaults; the
+generic Ports category includes `Input`, `Output`, and the bidirectional `Pin`.
+Place a bidirectional port marker with `schematic_add_component(type="pin")`
+and connect its `PIN` pin. `schematic_validate` returns diagnostics with
+suggested calls, and `schematic_delete(dry_run=true)` lists simulation and
+hierarchy dependencies before deletion.
 
 `schematic_add_symbol` with a known library name (`RES`, `NMOS`, `VDD`, `GND`,
 `IDC`, ...) auto-loads real artwork and pins. If a symbol is unknown and no pins

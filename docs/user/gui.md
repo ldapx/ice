@@ -307,6 +307,11 @@ The schematic editor should initially provide:
 The view renders schematic database objects. Symbols remain semantic objects
 with artwork and pin metadata; Qt graphics items are projections of that data.
 Scroll the mouse wheel to zoom around the cursor.
+The **Ports** symbol category provides `Input`, `Output`, and `Pin`. `Pin` is a
+single-terminal bidirectional port marker: place it in a child schematic to
+expose an `inout` port in the generated `.subckt` and hierarchical block
+symbol. Connectors attach to its `PIN` pin. It is skipped by device netlisting
+just like `Input` and `Output`, and LVS treats it as an `inout` schematic pin.
 Connecting two pins merges their nets, and schematic wire routes are cached per
 net and branch. Editing a connection re-routes only the affected net, while
 moving or rotating a symbol re-routes nets attached to it or whose wires
@@ -398,6 +403,21 @@ The **chart** button next to the graph controls opens **Waveform Analysis**:
 All of these settings are saved on the `SimulationGraph` in the project and are
 also available through the CLI and MCP. Derived traces, view transforms, FFT,
 overlays, and markers never modify the stored simulation samples.
+
+A drawn schematic cell can declare parameters in its **Properties** panel when
+no instance is selected. Component values may reference those parameters with
+SPICE brace expressions such as `{R}`, `{C}`, or `{W}`. When the cell is placed
+as a hierarchical block, ICE emits the declarations as `.subckt ... params:`
+defaults and passes matching instance parameters from the parent as per-instance
+overrides. Selecting the block instance in the parent and editing `R` therefore
+produces `X1 ... block R=2k` while other parameters keep their defaults. A
+cell used as the top-level simulation also emits its parameters as `.param`
+cards, so `{R}` resolves without an enclosing subcircuit. Names are matched
+case-insensitively and must be valid SPICE identifiers; empty defaults are not
+declared. Changing a cell default updates already placed block instances that
+still hold the previous default, while explicit overrides are preserved.
+Parameters that a block instance does not declare on the child cell are
+reported in the netlist notes and are not emitted.
 
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.
@@ -709,12 +729,13 @@ exchange is available through `ice-cli` and `ice-mcp`.
 
 Select a planned device box to highlight it. Double-click it, or right-click it,
 to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
-sources, ground symbols, and `Input`/`Output` port symbols instead offer
+sources, ground symbols, and `Input`/`Output`/`Pin` port symbols instead offer
 **Convert to Pin**: a dialog lets you choose the pin
 layer, then the block is replaced by a single layout pin (an existing pin on the
 connection's net is reused when there is only one net), and all planned
-connections from the block are retargeted to that pin. Converted `Input` and
-`Output` pins keep the corresponding port direction and name. The placement
+connections from the block are retargeted to that pin. Converted `Input`,
+`Output`, and `Pin` symbols keep the corresponding input, output, or inout
+direction and name. The placement
 dialog lists the active PDK's PCells, suggests
 devices by model and pin compatibility, and lets you edit the PCell parameters
 before placement. Placing the device replaces the planned box with a layout
@@ -756,7 +777,7 @@ values, so `0.15u` and `150n` are equivalent. If the layout has no planned
 connectivity, LVS reports a warning and compares devices only. Primitive
 sources and ground symbols are treated as external references rather than
 layout devices, and pins converted from them are not compared as schematic
-ports. Top-level schematic ports created with `Input`/`Output` symbols are
+ports. Top-level schematic ports created with `Input`/`Output`/`Pin` symbols are
 matched to layout pins by name, including pins produced by **Convert to Pin**;
 missing pins, extra pins, direction changes, and net-binding changes are
 reported. Results appear in the **Reports** tab with **LVS** selected, showing
@@ -811,7 +832,7 @@ Common defaults:
 - **Snap to grid**: Shift+G
 - **Hierarchy up / down**: Alt+Up / Alt+Down
 - **Schematic rotate / flip**: Shift+R / H
-- **Schematic place device**: R resistor, X NMOS, I input, O output, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
+- **Schematic place device**: R resistor, X NMOS, I input, O output, B pin, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
 - **Schematic comment**: Shift+C
 - **Layout rotate / flips**: Shift+R / H / J
 - **Layout rectangle / polygon / path / comment (text label) / text polygon / pin / ruler**: R / G / W / Shift+C / Shift+T / N / L
@@ -858,7 +879,9 @@ own spdlog sink and logger:
 Messages are shown with time, severity, category, and text. The category and
 severity selectors filter the view without changing the stored messages; the
 severity selector shows that level and above. Severity colors distinguish
-warnings and errors. Simulation status, warnings, errors, and stored-run paths
+warnings and errors. The copy button copies the currently displayed
+(filtered) rows to the clipboard as tab-separated text; the trash button clears
+the stored message list. Simulation status, warnings, errors, and stored-run paths
 are written here instead of appearing below the netlist pane. Implementation
 stage output, DRC summaries/violations, LVS summaries/mismatches, and generic
 application messages use the same category-aware sinks.

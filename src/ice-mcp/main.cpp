@@ -470,9 +470,12 @@ json schematicJson(const ice::SchematicCell &cell) {
                    {"text", cell.textSchematic},
                    {"systemverilog", cell.systemVerilogSchematic},
                    {"source", cell.sourceText()},
+                   {"parameters", json::array()},
                    {"symbols", json::array()},
                    {"instances", json::array()},
                    {"nets", json::array()}};
+    for (const auto &parameter : cell.parameters)
+        result["parameters"].push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
     for (const auto &[_, symbol] : cell.symbols)
         result["symbols"].push_back(symbolJson(symbol));
     for (const auto &[id, instance] : cell.instances) {
@@ -513,6 +516,7 @@ json helpJson(const std::string &requestedTopic) {
         {"schematic",
          {{"tools", json::array({"schematic_create", "schematic_add_component", "schematic_list_symbols",
                                  "schematic_add_circuit", "schematic_add_net", "schematic_set_parameter",
+                                 "schematic_set_cell_parameter", "schematic_remove_cell_parameter",
                                  "schematic_validate", "schematic_info", "schematic_netlist"})},
           {"example",
            {{"tool", "schematic_add_component"},
@@ -3190,8 +3194,9 @@ class IceMcpServer {
                 } else if (!sourceCellRef.textSchematic) {
                     // Drawn sub-cell: build the symbol from its ports in the
                     // same order the netlister emits the .subckt port list
-                    // (inputs top-down, then outputs), inputs on the left and
-                    // outputs on the right.
+                    // (inputs/inouts top-down, then outputs), directional
+                    // inputs and bidirectional pins on the left, outputs on
+                    // the right.
                     const auto ports = ice::schematicPortInstances(sourceCellRef);
                     if (!ports.empty()) {
                         const auto lowerType = [](std::string text) {
@@ -3446,6 +3451,24 @@ class IceMcpServer {
                 ice::setSchematicParameter(project, cellId, instanceId, parameterName, value);
             });
             return {{"cell", cellId}, {"instance", instanceId}, {"name", parameterName}, {"value", value}};
+        }
+        if (name == "schematic_set_cell_parameter") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto parameterName = requiredString(arguments, "name");
+            const auto value = requiredStringAllowEmpty(arguments, "value");
+            session.execute("mcp schematic-set-cell-parameter", [&](ice::Project &project) {
+                ice::setSchematicCellParameter(project, cellId, parameterName, value);
+            });
+            return {{"cell", cellId}, {"name", parameterName}, {"value", value}};
+        }
+        if (name == "schematic_remove_cell_parameter") {
+            const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto parameterName = requiredString(arguments, "name");
+            bool removed = false;
+            session.execute("mcp schematic-remove-cell-parameter", [&](ice::Project &project) {
+                removed = ice::removeSchematicCellParameter(project, cellId, parameterName);
+            });
+            return {{"cell", cellId}, {"name", parameterName}, {"removed", removed}};
         }
         if (name == "schematic_add_hdl_instance") {
             const auto parentCell = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
@@ -4739,6 +4762,18 @@ class IceMcpServer {
                             .with_string_param("instance", "Instance name or id")
                             .with_string_param("name", "Parameter name")
                             .with_string_param("value", "Parameter value")
+                            .build());
+        tools.push_back(tool_builder("schematic_set_cell_parameter")
+                            .with_description("Set or create a drawn-schematic parameter used by {name} component "
+                                              "values and subcircuit params defaults.")
+                            .with_string_param("cell", "Schematic name or id")
+                            .with_string_param("name", "Parameter name")
+                            .with_string_param("value", "Default value or expression")
+                            .build());
+        tools.push_back(tool_builder("schematic_remove_cell_parameter")
+                            .with_description("Remove a cell parameter by name.")
+                            .with_string_param("cell", "Schematic name or id")
+                            .with_string_param("name", "Parameter name")
                             .build());
         tools.push_back(tool_builder("layout_create")
                             .with_description("Create a static layout cell.")

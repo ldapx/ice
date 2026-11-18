@@ -1,0 +1,12 @@
+[symbol]
+name = "Pin"
+artwork = "pin.svg"
+category = "Ports"
+label_x = 0
+label_y = -42
+
+[[pin]]
+name = "PIN"
+x = 40
+y = 0
+direction = "inout"

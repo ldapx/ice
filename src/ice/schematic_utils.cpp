@@ -1,5 +1,6 @@
 #include "schematic_utils.hpp"
 
+#include "icelib/operations.hpp"
 #include "symbol_ui.hpp"
 
 #include <QGraphicsItem>
@@ -20,11 +21,17 @@ SymbolDefinition generatedSchematicSymbol(const ice::SchematicCell &cell) {
         const auto symbol = cell.symbols.find(instance.symbol);
         if (symbol == cell.symbols.end())
             continue;
-        const auto type = QString::fromStdString(symbol->second.name);
-        if (type.compare(QStringLiteral("Input"), Qt::CaseInsensitive) == 0)
+        switch (ice::schematicPortKindForSymbol(symbol->second.name)) {
+        case ice::SchematicPortKind::input:
+        case ice::SchematicPortKind::inout:
             inputs.push_back({QString::fromStdString(instance.name), instance.y});
-        else if (type.compare(QStringLiteral("Output"), Qt::CaseInsensitive) == 0)
+            break;
+        case ice::SchematicPortKind::output:
             outputs.push_back({QString::fromStdString(instance.name), instance.y});
+            break;
+        case ice::SchematicPortKind::none:
+            break;
+        }
     }
     const auto sortPorts = [](std::vector<Port> &ports) {
         std::sort(ports.begin(), ports.end(), [](const Port &left, const Port &right) {

@@ -1581,7 +1581,8 @@ std::string generatedAgentsGuidance() {
            << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
               "that the features you need are present. If `project_repair`, `simulation_measure`, "
               "`simulation_analyses`, `simulation_experiments`, `simulation_measurements`, "
-              "`waveform_analysis`, text-schematic support, `digital_hdl`, `mixed_signal`, or "
+              "`waveform_analysis`, `schematic_cell_parameters`, text-schematic support, `digital_hdl`, "
+              "`mixed_signal`, or "
               "`implementation_runs` is missing, stop and ask the user to "
               "rebuild and restart ICE instead of working around the missing tools. Restart a "
               "long-lived MCP server after installing a new build.\n\n"
@@ -1619,7 +1620,10 @@ std::string generatedAgentsGuidance() {
               "`schematic_add_hdl_instance` to place it in a drawn schematic; a symbol with matching "
               "pins is generated automatically. Set analog values with `schematic_set_parameter`, wire "
               "HDL pins with names such as `U1.in`, and run `schematic_validate_hierarchy` before "
-              "simulating. Use text SPICE or SystemVerilog when the user explicitly asks for it, "
+              "simulating. For reusable parameterized blocks, declare parameters with "
+              "`schematic_set_cell_parameter`, use `{R}`-style expressions in component values, and "
+              "override them on a placed block with `schematic_set_parameter`. "
+              "Use text SPICE or SystemVerilog when the user explicitly asks for it, "
               "provides existing source, or the canvas tools are unavailable; state the reason. "
               "Canvas schematics keep connectivity, layout, LVS, and simulation workflows available.\n"
            << "4. Create the simulation with `simulation_create` and optionally a `template` such as "
@@ -2192,6 +2196,7 @@ BuildInfo buildInfo() {
                      "project_recovery",
                      "schematic_add_pin",
                      "text_schematic",
+                     "schematic_cell_parameters",
                      "ngspice_log_capture",
                      "simulation_metrics",
                      "simulation_analyses",

@@ -377,7 +377,7 @@ char plannedDeviceSpiceElement(const ice::Project &project, const ice::PlannedDe
                                [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
                 if (symbolName == "gnd" || symbolName == "gnd!" || symbolName == "0")
                     return 'G';
-                if (symbolName == "input" || symbolName == "output")
+                if (ice::schematicPortKindForSymbol(symbol->second.name) != ice::SchematicPortKind::none)
                     return 'P';
                 if (symbol->second.sourceCell != 0)
                     return 'X';
@@ -391,39 +391,38 @@ char plannedDeviceSpiceElement(const ice::Project &project, const ice::PlannedDe
                    [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
     if (name == "gnd" || name == "gnd!" || name == "0")
         return 'G';
-    if (name == "input" || name == "output")
+    if (ice::schematicPortKindForSymbol(device.name) != ice::SchematicPortKind::none)
         return 'P';
     return ice::spiceElementForSymbol(device.name);
 }
 
 std::optional<ice::PortDirection> plannedDevicePortDirection(const ice::Project &project,
                                                              const ice::PlannedDevice &device) {
+    const auto portDirection = [](ice::SchematicPortKind kind) -> std::optional<ice::PortDirection> {
+        switch (kind) {
+        case ice::SchematicPortKind::input:
+            return ice::PortDirection::input;
+        case ice::SchematicPortKind::output:
+            return ice::PortDirection::output;
+        case ice::SchematicPortKind::inout:
+            return ice::PortDirection::inout;
+        case ice::SchematicPortKind::none:
+            return std::nullopt;
+        }
+        return std::nullopt;
+    };
     if (device.schematicInstance != 0) {
         for (const auto &[_, schematic] : project.schematicCells) {
             const auto instance = schematic.instances.find(device.schematicInstance);
             if (instance == schematic.instances.end())
                 continue;
             const auto symbol = schematic.symbols.find(instance->second.symbol);
-            if (symbol != schematic.symbols.end()) {
-                auto symbolName = symbol->second.name;
-                std::transform(symbolName.begin(), symbolName.end(), symbolName.begin(),
-                               [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
-                if (symbolName == "input")
-                    return ice::PortDirection::input;
-                if (symbolName == "output")
-                    return ice::PortDirection::output;
-            }
+            if (symbol != schematic.symbols.end())
+                return portDirection(ice::schematicPortKindForSymbol(symbol->second.name));
             break;
         }
     }
-    auto name = device.name;
-    std::transform(name.begin(), name.end(), name.begin(),
-                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
-    if (name == "input")
-        return ice::PortDirection::input;
-    if (name == "output")
-        return ice::PortDirection::output;
-    return std::nullopt;
+    return portDirection(ice::schematicPortKindForSymbol(device.name));
 }
 
 ice::ObjectId layoutPortForSchematicPin(const ice::LayoutCell &child, const std::string &pin) {
@@ -7508,22 +7507,13 @@ class DocumentWindow : public QMainWindow {
         });
     }
 
-    void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
+    void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId, const std::string &name,
                                   const std::string &value) {
         if (!project_)
             return;
         try {
             project_->execute("edit schematic parameter", [&](ice::Project &project) {
-                const auto cell = project.schematicCells.find(cellId);
-                if (cell == project.schematicCells.end())
-                    return;
-                for (auto &parameter : cell->second.parameters) {
-                    if ((parameterId != 0 && parameter.id == parameterId) ||
-                        (parameterId == 0 && parameter.name == name)) {
-                        parameter.value = value;
-                        return;
-                    }
-                }
+                ice::setSchematicCellParameter(project, cellId, name, value);
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
@@ -7685,12 +7675,21 @@ class DocumentWindow : public QMainWindow {
     void addSchematicParameter(ice::ObjectId cellId, const std::string &name) {
         if (!project_)
             return;
-        project_->execute("add schematic parameter", [&](ice::Project &project) {
-            const auto cell = project.schematicCells.find(cellId);
-            if (cell == project.schematicCells.end())
-                return;
-            cell->second.parameters.push_back({project.nextId(), name, ""});
-        });
+        try {
+            project_->execute("add schematic parameter", [&](ice::Project &project) {
+                const auto cell = project.schematicCells.find(cellId);
+                if (cell != project.schematicCells.end()) {
+                    const auto wanted = QString::fromStdString(name);
+                    for (const auto &parameter : cell->second.parameters) {
+                        if (QString::fromStdString(parameter.name).compare(wanted, Qt::CaseInsensitive) == 0)
+                            return;
+                    }
+                }
+                ice::setSchematicCellParameter(project, cellId, name, "");
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Add Parameter"), QString::fromStdString(error.what()));
+        }
         updateSelectionStatus();
     }
 
@@ -14478,6 +14477,8 @@ class DocumentWindow : public QMainWindow {
                           QStringLiteral("Input"), QStringLiteral("I"));
         addDeviceShortcut(QStringLiteral("schematic.place-output"), QStringLiteral("Place Output"),
                           QStringLiteral("Output"), QStringLiteral("O"));
+        addDeviceShortcut(QStringLiteral("schematic.place-pin"), QStringLiteral("Place Pin"), QStringLiteral("Pin"),
+                          QStringLiteral("B"));
         addDeviceShortcut(QStringLiteral("schematic.place-capacitor"), QStringLiteral("Place Capacitor"),
                           QStringLiteral("Capacitor"), QStringLiteral("C"));
         addDeviceShortcut(QStringLiteral("schematic.place-diode"), QStringLiteral("Place Diode"),

@@ -161,6 +161,7 @@ class ActivityPanel : public QWidget {
     QComboBox *messageCategoryFilter_ = nullptr;
     QComboBox *messageSeverityFilter_ = nullptr;
     QLabel *messagesCount_ = nullptr;
+    QPushButton *copyMessagesButton_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
     QPlainTextEdit *lvsReport_ = nullptr;
     QTableWidget *timingTable_ = nullptr;
