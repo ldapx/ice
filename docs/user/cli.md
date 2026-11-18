@@ -56,6 +56,8 @@ ice-cli schematic-add-component <project> <cell> <type> [name] [x] [y] [param=va
 ice-cli schematic-list-symbols [pdk] [query]
 ice-cli schematic-add-circuit <project> <cell> <json-file|->
 ice-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
+ice-cli schematic-set-cell-parameter <project> <cell> <name> <value>
+ice-cli schematic-remove-cell-parameter <project> <cell> <name>
 ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
 ice-cli schematic-validate <project> <cell>
 ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
@@ -69,7 +71,20 @@ Cells, symbols, pins, and instances may be referenced by name or id. Pins can
 use the `<instance>.<pin>` or `<symbol>.<pin>` form. `schematic-add-pin` adds a
 pin to an existing symbol; direction accepts `left`, `right`, `up`, or `down`.
 `schematic-set-parameter` creates or updates an instance parameter such as
-`resistance`, `capacitance`, or a source `value`. `schematic-add-symbol` loads
+`resistance`, `capacitance`, or a source `value`. `schematic-set-cell-parameter`
+declares a parameter on the schematic cell itself; component values can then use
+SPICE brace expressions, and hierarchical instances can override the value:
+
+```sh
+ice-cli schematic-set-cell-parameter project divider R 1k
+ice-cli schematic-set-parameter project divider R1 resistance '{R}'
+ice-cli schematic-set-parameter project top X1 R 2k
+```
+
+The child subcircuit is emitted with `params: R=1k`, and the parent instance is
+emitted as `X1 ... divider R=2k`. A top-level cell's parameters are emitted as
+`.param` cards. `schematic-remove-cell-parameter` removes a declaration.
+`schematic-add-symbol` loads
 real artwork and pins for known library names (`RES`, `NMOS`, `VDD`, `GND`,
 `IDC`, ...). Use `--blank` only for a custom symbol whose pins you will add with
 `schematic-add-pin`.
@@ -97,6 +112,8 @@ The MCP equivalent is `schematic_create` with `kind: "text"` or
 `schematic-add-sv` creates a SystemVerilog source cell. The optional file is stored as its source; without a
 file, ICE inserts a small digital block template. `schematic-info` and
 `schematic-list` report the `systemverilog` flag for these cells.
+`schematic-info` also includes each cell's `parameters` array and every
+instance's `parameters` array, including hierarchical block overrides.
 
 `schematic-hdl-ports` parses a SystemVerilog cell and returns its module name,
 port directions, and widths. `schematic-add-hdl-instance` generates a symbol

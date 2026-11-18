@@ -78,6 +78,44 @@ ice-cli simulation-trace design rc_tran v(out) 2000
 }
 ```
 
+## Parameterized schematic cells
+
+A drawn schematic cell can declare parameters. Component values use SPICE
+`{name}` expressions, and a hierarchical block instance overrides matching
+parameters:
+
+```python
+schematic_create(name="divider")
+schematic_add_circuit(
+    cell="divider",
+    components=[
+        {"type": "input", "name": "A"},
+        {"type": "output", "name": "Y"},
+        {"type": "resistor", "name": "R1", "parameters": {"resistance": "{R}"}},
+        {"type": "capacitor", "name": "C1", "parameters": {"capacitance": "{C}"}},
+    ],
+    nets=[
+        {"name": "in", "pins": ["A.IN", "R1.1", "C1.2"]},
+        {"name": "out", "pins": ["R1.2", "C1.1", "Y.OUT"]},
+    ],
+)
+schematic_set_cell_parameter(cell="divider", name="R", value="1k")
+schematic_set_cell_parameter(cell="divider", name="C", value="1n")
+
+schematic_create(name="top")
+schematic_add_symbol(cell="top", name="divider", source_cell="divider")
+schematic_add_instance(cell="top", symbol="divider", name="X1", x=0, y=0)
+schematic_set_parameter(cell="top", instance="X1", name="R", value="2k")
+```
+
+The child netlist is emitted with `.subckt divider A Y params: R=1k C=1n` and
+`R1 A Y {R}`. The parent instance is emitted as
+`X1 in out divider R=2k C=1n`; parameters not overridden keep their defaults.
+A top-level cell parameter becomes `.param name=value`. CLI equivalents are
+`schematic-set-cell-parameter <project> <cell> <name> <value>` and
+`schematic-set-parameter <project> <cell> <instance> <name> <value>`.
+`schematic-remove-cell-parameter` removes a declaration.
+
 ## Text SPICE for simple analog circuits
 
 Use text SPICE when the circuit is flat and you do not need a drawn canvas:
