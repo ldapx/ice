@@ -777,10 +777,32 @@ TEST_CASE("implementation import creates a native digital device") {
     }
 
     std::filesystem::remove(root / "build" / "impl" / "counter-1" / "final" / "6_final.gds");
+    std::filesystem::create_directories(runDirectory / "def");
+    {
+        std::ofstream def(runDirectory / "def" / "6_final.def", std::ios::binary | std::ios::trunc);
+        def << "VERSION 5.8 ;\n";
+    }
+    // A failed export only warns inside the final stage, so the reason must be
+    // recorded for the later import to explain the missing stream.
+    ice::ImplementationPlatform platform;
+    platform.pdk = "example.pdk";
+    const auto exported = ice::exportImplementationGds(run, platform, root);
+    CHECK(!exported.success);
+    CHECK(exported.error.find("does not provide standard-cell GDS decks") != std::string::npos);
+    CHECK(std::filesystem::is_regular_file(runDirectory / "logs" / "06-gds.log"));
+
     ice::Project missing;
     missing.identity = "reference-missing";
     missing.name = "reference-missing";
     CHECK_THROWS_AS(ice::importImplementationLayout(missing, run, package, root), ice::ProjectError);
+    bool reportedReason = false;
+    try {
+        ice::importImplementationLayout(missing, run, package, root);
+    } catch (const ice::ProjectError &error) {
+        reportedReason =
+            std::string(error.what()).find("does not provide standard-cell GDS decks") != std::string::npos;
+    }
+    CHECK(reportedReason);
 
     std::filesystem::remove_all(root);
 }
@@ -1195,6 +1217,45 @@ TEST_CASE("schematic instance parameters survive serialization") {
     CHECK(restored.size() == 1);
     CHECK(restored.front().name == "r");
     CHECK(restored.front().value == "1k");
+}
+
+TEST_CASE("schematic icons update user schematic blocks in one schematic") {
+    ice::Project project;
+    project.identity = "schematic-icons";
+    project.name = "schematic-icons";
+    const auto top = ice::createSchematicCell(project, "top");
+    const auto child = ice::createSchematicCell(project, "schematic01");
+    const auto otherChild = ice::createSchematicCell(project, "schematic02");
+    const auto other = ice::createSchematicCell(project, "other");
+    const auto textCell = ice::createTextSchematicCell(project, "netlist");
+
+    const auto block = ice::addSymbol(project, top, "schematic01", {}, child);
+    const auto blockCopy = ice::addSymbol(project, top, "schematic01 2", {}, child);
+    const auto otherBlock = ice::addSymbol(project, top, "schematic02", {}, otherChild);
+    const auto textBlock = ice::addSymbol(project, top, "netlist", {}, textCell);
+    const auto capacitor = ice::addSymbol(project, top, "Capacitor");
+    const auto remoteBlock = ice::addSymbol(project, other, "schematic01", {}, child);
+
+    const auto icon = std::string("<svg viewBox='0 0 10 10'><path d='M0 0h10'/></svg>");
+    ice::setSchematicSymbolArtwork(project, top, block, icon);
+    CHECK(project.schematicCells.at(top).symbols.at(block).artwork == icon);
+    CHECK(project.schematicCells.at(top).symbols.at(blockCopy).artwork == icon);
+    CHECK(project.schematicCells.at(top).symbols.at(otherBlock).artwork.empty());
+    CHECK(project.schematicCells.at(top).symbols.at(capacitor).artwork.empty());
+    CHECK(project.schematicCells.at(other).symbols.at(remoteBlock).artwork.empty());
+
+    // Primitive devices and text-only cells cannot receive a custom icon.
+    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, capacitor, icon), ice::ProjectError);
+    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, textBlock, icon), ice::ProjectError);
+
+    // Namespace URIs are not external references, including with single quotes.
+    const auto quotedIcon = std::string("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'/>");
+    ice::setSchematicSymbolArtwork(project, top, block, quotedIcon);
+    CHECK(project.schematicCells.at(top).symbols.at(block).artwork == quotedIcon);
+
+    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, block, "<svg><script>x</script></svg>"),
+                    ice::ProjectError);
+    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, 999999, icon), ice::ProjectError);
 }
 
 TEST_CASE("hierarchical symbols keep their source schematic") {

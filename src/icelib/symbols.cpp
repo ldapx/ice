@@ -13,6 +13,32 @@
 #include <toml++/toml.h>
 
 namespace ice {
+
+void validateSymbolArtwork(const std::string &svg, const std::string &source) {
+    const auto where = source.empty() ? std::string{} : ": " + source;
+    if (svg.find("<svg") == std::string::npos)
+        throw ProjectError("symbol.artwork", "Symbol artwork is not an SVG document" + where);
+    if (svg.find("<script") != std::string::npos)
+        throw ProjectError("symbol.artwork", "Symbol artwork must not contain scripts" + where);
+    // Namespace declarations legitimately contain http(s) URIs, so ignore
+    // them when looking for external resource references.
+    std::string scrubbed = svg;
+    for (std::string::size_type at = scrubbed.find("xmlns"); at != std::string::npos;
+         at = scrubbed.find("xmlns", at)) {
+        const auto quote = scrubbed.find_first_of("\"'", at);
+        if (quote == std::string::npos)
+            break;
+        const auto end = scrubbed.find(scrubbed[quote], quote + 1);
+        if (end == std::string::npos)
+            break;
+        scrubbed.erase(at, end - at + 1);
+    }
+    for (const char *marker : {"http://", "https://"})
+        if (scrubbed.find(marker) != std::string::npos)
+            throw ProjectError("symbol.artwork",
+                               "Symbol artwork must not reference external resources" + where);
+}
+
 namespace {
 bool hasInteger(toml::node_view<const toml::node> node, std::int64_t &value) {
     if (node.type() != toml::node_type::integer)
@@ -35,28 +61,6 @@ std::string readTextFile(const std::filesystem::path &path, const char *code, co
     return content.str();
 }
 
-void rejectUnsafeArtwork(const std::string &svg, const std::filesystem::path &path) {
-    if (svg.find("<svg") == std::string::npos)
-        throw ProjectError("symbol.artwork", "Symbol artwork is not an SVG document: " + path.string());
-    if (svg.find("<script") != std::string::npos)
-        throw ProjectError("symbol.artwork", "Symbol artwork must not contain scripts: " + path.string());
-    // Namespace declarations legitimately contain http(s) URIs, so ignore
-    // them when looking for external resource references.
-    std::string scrubbed = svg;
-    for (std::string::size_type at = scrubbed.find("xmlns"); at != std::string::npos; at = scrubbed.find("xmlns")) {
-        const auto quote = scrubbed.find('"', at);
-        if (quote == std::string::npos)
-            break;
-        const auto end = scrubbed.find('"', quote + 1);
-        if (end == std::string::npos)
-            break;
-        scrubbed.erase(at, end - at + 1);
-    }
-    for (const char *marker : {"http://", "https://"})
-        if (scrubbed.find(marker) != std::string::npos)
-            throw ProjectError("symbol.artwork",
-                               "Symbol artwork must not reference external resources: " + path.string());
-}
 } // namespace
 
 PinDirection pinSideFromPosition(Coordinate x, Coordinate y) {
@@ -186,7 +190,7 @@ std::vector<FileSymbol> loadSymbols(const std::filesystem::path &directory,
             artworkPath = sidecar.parent_path() / artworkFile;
         }
         symbol.svg = readTextFile(artworkPath, "symbol.artwork", "Symbol artwork file is missing");
-        rejectUnsafeArtwork(symbol.svg, artworkPath);
+        validateSymbolArtwork(symbol.svg, artworkPath.string());
         symbol.label = std::move(label);
         symbol.pins = std::move(pins);
         symbol.defaultParameters = std::move(defaultParameters);

@@ -20,6 +20,12 @@ ObjectId createSystemVerilogCell(Project &project, std::string name, std::string
                                  std::string source = {});
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {},
                    ObjectId sourceCell = 0);
+// Replaces the icon of a user-created schematic block symbol. Every symbol in
+// the given schematic that was generated from the same source cell receives
+// the new artwork, so all instances of that block change together. Other
+// schematics are never modified. Throws when the symbol is a primitive device
+// or does not reference a drawn schematic cell.
+void setSchematicSymbolArtwork(Project &project, ObjectId cellId, ObjectId symbolId, std::string artwork);
 ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbolId, std::string name, Coordinate x,
                               Coordinate y);
 // Sets or creates an instance parameter. Names are matched case-insensitively.

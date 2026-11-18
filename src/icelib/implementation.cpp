@@ -1554,14 +1554,26 @@ ImplementationGdsExport exportImplementationGds(ImplementationRun &run, const Im
                                                 const std::filesystem::path &projectRoot,
                                                 const std::filesystem::path &output) {
     ImplementationGdsExport result;
+    if (run.directory.empty()) {
+        result.error = "Implementation run has no build directory";
+        addDiagnostic(result.diagnostics, Diagnostic::Severity::error, "implementation.gds", result.error);
+        return result;
+    }
+    const auto runDirectory = projectRoot / run.directory;
+    result.logPath = runDirectory / "logs" / "06-gds.log";
     const auto fail = [&](std::string message) {
         result.error = std::move(message);
+        // The final stage only warns when no stream can be produced, so keep
+        // the reason on disk: a later "Import final as device" reads this log
+        // to explain why the stream is missing.
+        std::error_code status;
+        std::filesystem::create_directories(result.logPath.parent_path(), status);
+        std::ofstream log(result.logPath, std::ios::binary | std::ios::app);
+        if (log)
+            log << "error: " << result.error << "\n";
         addDiagnostic(result.diagnostics, Diagnostic::Severity::error, "implementation.gds", result.error);
         return result;
     };
-    if (run.directory.empty())
-        return fail("Implementation run has no build directory");
-    const auto runDirectory = projectRoot / run.directory;
     for (const auto *candidate :
          {"def/6_final.def", "def/5_route.def", "def/4_cts.def", "def/3_place.def", "def/2_floorplan.def"}) {
         const auto path = runDirectory / candidate;
@@ -1584,7 +1596,6 @@ ImplementationGdsExport exportImplementationGds(ImplementationRun &run, const Im
     const auto scriptPath = runDirectory / "scripts" / "06-gds.py";
     const auto configPath = runDirectory / "config" / "gds.json";
     const auto summaryPath = runDirectory / "reports" / "gds.json";
-    result.logPath = runDirectory / "logs" / "06-gds.log";
     writeText(scriptPath, kKlayoutGdsScript);
     json config = {{"def", result.defPath.generic_string()},
                    {"design", run.config.top},
