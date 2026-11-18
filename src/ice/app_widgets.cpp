@@ -493,6 +493,13 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     messagesCount_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     messagesHeader->addWidget(messagesCount_, 0, Qt::AlignVCenter);
     messagesHeader->addStretch(1);
+    copyMessagesButton_ = new QPushButton;
+    copyMessagesButton_->setAccessibleName(QStringLiteral("Copy displayed messages"));
+    copyMessagesButton_->setToolTip(QStringLiteral("Copy the displayed messages to the clipboard (tab-separated)"));
+    setLucideIcon(copyMessagesButton_, QStringLiteral("copy"), 14);
+    copyMessagesButton_->setFixedSize(24, 24);
+    copyMessagesButton_->setEnabled(false);
+    messagesHeader->addWidget(copyMessagesButton_, 0, Qt::AlignTop);
     auto *clearMessagesButton = new QPushButton;
     clearMessagesButton->setAccessibleName(QStringLiteral("Clear messages"));
     clearMessagesButton->setToolTip(QStringLiteral("Clear messages"));
@@ -517,6 +524,22 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     messagesTable_->setTextElideMode(Qt::ElideRight);
     messagesLayout->addWidget(messagesTable_, 1);
     messagesTabIndex_ = tabs->addTab(messagesPage, QStringLiteral("Messages"));
+    connect(copyMessagesButton_, &QPushButton::clicked, this, [this] {
+        if (!messagesTable_)
+            return;
+        QStringList lines;
+        lines.reserve(messagesTable_->rowCount());
+        for (int row = 0; row < messagesTable_->rowCount(); ++row) {
+            QStringList fields;
+            fields.reserve(messagesTable_->columnCount());
+            for (int column = 0; column < messagesTable_->columnCount(); ++column) {
+                const auto *item = messagesTable_->item(row, column);
+                fields.push_back(item ? item->text() : QString());
+            }
+            lines.push_back(fields.join(QLatin1Char('\t')));
+        }
+        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+    });
     connect(clearMessagesButton, &QPushButton::clicked, this, [this] {
         messageEntries_.clear();
         rebuildMessageView();
@@ -2584,6 +2607,8 @@ void ActivityPanel::appendLogEntry(const QString &time, int level, const QString
     }
     if (atBottom)
         messagesTable_->scrollToBottom();
+    if (copyMessagesButton_)
+        copyMessagesButton_->setEnabled(messagesTable_->rowCount() > 0);
     if (messagesCount_) {
         const auto shown = messagesTable_->rowCount();
         const auto total = static_cast<int>(messageEntries_.size());
@@ -2618,6 +2643,8 @@ void ActivityPanel::rebuildMessageView() {
         messagesTable_->setItem(row, 3, messageItem);
     }
     messagesTable_->scrollToBottom();
+    if (copyMessagesButton_)
+        copyMessagesButton_->setEnabled(messagesTable_->rowCount() > 0);
     if (messagesCount_) {
         const auto shown = messagesTable_->rowCount();
         const auto total = static_cast<int>(messageEntries_.size());
