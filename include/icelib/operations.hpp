@@ -24,6 +24,12 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
                               Coordinate y);
 // Sets or creates an instance parameter. Names are matched case-insensitively.
 void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name, std::string value);
+// Sets or creates a parameter on a drawn schematic cell. Cell parameters are
+// emitted as subcircuit `params:` defaults and as top-level `.param` cards, so
+// component values can reference them with SPICE `{name}` expressions.
+void setSchematicCellParameter(Project &project, ObjectId cellId, std::string name, std::string value);
+// Removes a cell parameter by name. Returns true when one was removed.
+bool removeSchematicCellParameter(Project &project, ObjectId cellId, const std::string &name);
 // Creates a symbol whose pins come from the SystemVerilog module ports and
 // places one instance in the parent schematic. A fresh symbol is created per
 // instance so net names remain unambiguous.

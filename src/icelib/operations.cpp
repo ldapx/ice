@@ -236,7 +236,8 @@ ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId
                                  "Source schematic cell does not exist");
     if (source.textSchematic)
         throw ProjectError("schematic.symbol.source", "A text SPICE cell cannot be used as a hierarchical block");
-    const auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    const auto &parent =
+        require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
     if (parent.isTextSource())
         throw ProjectError("schematic.symbol.source", "Symbols can only be added to a drawn schematic");
     if (name.empty())
@@ -395,6 +396,23 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
 
     ObjectId id = project.nextId();
     cell.instances.emplace(id, SchematicInstance{id, instanceSymbol, std::move(name), x, y});
+    // A hierarchical block starts with the child cell's parameter defaults so
+    // they are visible and editable in the parent. Netlisting still treats
+    // them as optional overrides over the subcircuit defaults.
+    const auto &placedSymbol = cell.symbols.at(instanceSymbol);
+    if (placedSymbol.sourceCell != 0) {
+        if (const auto child = project.schematicCells.find(placedSymbol.sourceCell);
+            child != project.schematicCells.end()) {
+            auto &placed = cell.instances.at(id);
+            std::set<std::string> names;
+            for (auto parameter : child->second.parameters) {
+                if (parameter.name.empty() || !names.insert(lower(parameter.name)).second)
+                    continue;
+                parameter.id = project.nextId();
+                placed.parameters.push_back(std::move(parameter));
+            }
+        }
+    }
     return id;
 }
 void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name,
@@ -412,6 +430,55 @@ void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceI
         }
     }
     instance->second.parameters.push_back({project.nextId(), std::move(name), std::move(value)});
+}
+
+void setSchematicCellParameter(Project &project, ObjectId cellId, std::string name, std::string value) {
+    if (name.empty())
+        throw ProjectError("schematic.parameter.name", "Parameter name must not be empty");
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    std::string previousValue;
+    bool existingParameter = false;
+    for (auto &parameter : cell.parameters) {
+        if (lower(parameter.name) == lower(name)) {
+            previousValue = parameter.value;
+            parameter.value = value;
+            existingParameter = true;
+            break;
+        }
+    }
+    if (!existingParameter)
+        cell.parameters.push_back({project.nextId(), name, value});
+
+    // Keep already-placed hierarchical instances in sync with the child
+    // declaration. Instances whose value still matches the previous default
+    // are treated as unmodified and follow the new default; explicit
+    // overrides are preserved.
+    for (auto &[otherId, otherCell] : project.schematicCells) {
+        if (otherId == cellId)
+            continue;
+        for (const auto &[symbolId, symbol] : otherCell.symbols) {
+            if (symbol.sourceCell != cellId)
+                continue;
+            for (auto &[instanceId, instance] : otherCell.instances) {
+                if (instance.symbol != symbolId)
+                    continue;
+                auto parameter =
+                    std::find_if(instance.parameters.begin(), instance.parameters.end(),
+                                 [&](const Parameter &candidate) { return lower(candidate.name) == lower(name); });
+                if (parameter == instance.parameters.end())
+                    instance.parameters.push_back({project.nextId(), name, value});
+                else if (existingParameter && parameter->value == previousValue)
+                    parameter->value = value;
+            }
+        }
+    }
+}
+
+bool removeSchematicCellParameter(Project &project, ObjectId cellId, const std::string &name) {
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    const auto before = cell.parameters.size();
+    std::erase_if(cell.parameters, [&](const Parameter &parameter) { return lower(parameter.name) == lower(name); });
+    return cell.parameters.size() != before;
 }
 
 ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
@@ -1166,6 +1233,49 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         return result;
     };
 
+    // Cell parameters become SPICE subcircuit defaults. Components reference
+    // them as `{name}` values, and a hierarchical instance may override them
+    // with its own instance parameters of the same name.
+    struct CellParameter {
+        std::string name;
+        std::string value;
+    };
+    std::map<ObjectId, std::vector<CellParameter>> parameterCache;
+    const auto parametersFor = [&](const SchematicCell &cell) -> const std::vector<CellParameter> & {
+        if (const auto cached = parameterCache.find(cell.id); cached != parameterCache.end())
+            return cached->second;
+        std::vector<CellParameter> parameters;
+        std::set<std::string> seen;
+        for (const auto &parameter : cell.parameters) {
+            if (parameter.name.empty()) {
+                note("schematic '" + cell.name + "' has a parameter with an empty name; it is ignored");
+                continue;
+            }
+            auto name = spiceIdentifier(parameter.name);
+            if (name != parameter.name)
+                note("schematic parameter '" + parameter.name + "' is not a valid SPICE name; using '" + name + "'");
+            if (!seen.insert(lower(name)).second) {
+                note("schematic '" + cell.name + "' declares duplicate parameter '" + name +
+                     "'; the first value is used");
+                continue;
+            }
+            if (parameter.value.empty()) {
+                note("schematic parameter '" + name + "' has no default value; its components cannot resolve {" + name +
+                     "} unless an enclosing scope defines it");
+                continue;
+            }
+            parameters.push_back({std::move(name), parameter.value});
+        }
+        return parameterCache.emplace(cell.id, std::move(parameters)).first->second;
+    };
+    const auto instanceParameterValue = [&](const SchematicInstance &instance, const std::string &name) {
+        for (const auto &parameter : instance.parameters) {
+            if (lower(parameter.name) == lower(name) || lower(spiceIdentifier(parameter.name)) == lower(name))
+                return parameter.value;
+        }
+        return std::string{};
+    };
+
     std::ostringstream out;
     out << "* ICE schematic netlist: " << topCell.name << "\n";
     std::ostringstream subcircuits;
@@ -1331,7 +1441,24 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     note("hierarchical symbol '" + symbol->second.name + "' declares " +
                          std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name + "' has " +
                          std::to_string(childPorts.size()) + " ports; extra pins are ignored");
-                body << spiceIdentifier(child->second.name) << "\n";
+                body << spiceIdentifier(child->second.name);
+                // Pass matching instance parameters as subcircuit overrides.
+                const auto &childParameters = parametersFor(child->second);
+                std::set<std::string> declaredNames;
+                for (const auto &parameter : childParameters) {
+                    declaredNames.insert(lower(parameter.name));
+                    const auto overrideValue = instanceParameterValue(instance, parameter.name);
+                    if (!overrideValue.empty())
+                        body << " " << parameter.name << "=" << overrideValue;
+                }
+                for (const auto &parameter : instance.parameters) {
+                    if (parameter.name.empty() || declaredNames.contains(lower(parameter.name)) ||
+                        declaredNames.contains(lower(spiceIdentifier(parameter.name))))
+                        continue;
+                    note("hierarchical instance '" + instance.name + "' parameter '" + parameter.name +
+                         "' is not declared by schematic '" + child->second.name + "'; it is ignored");
+                }
+                body << "\n";
                 continue;
             }
 
@@ -1382,8 +1509,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             const auto firstConnectedNode =
                 [&](std::initializer_list<std::string_view> names) -> std::optional<std::string> {
                 for (const auto name : names) {
-                    if (const auto node = pinNameToNode.find(lower(std::string(name)));
-                        node != pinNameToNode.end())
+                    if (const auto node = pinNameToNode.find(lower(std::string(name))); node != pinNameToNode.end())
                         return node->second;
                 }
                 return std::nullopt;
@@ -1436,8 +1562,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     if (expected == 4) {
                         nodes.push_back(substrate ? *substrate : "0");
                         if (!substrate)
-                            note("BJT symbol '" + symbol->second.name + "' has no substrate pin; '" +
-                                 configuredModel + "' expects one, so the substrate is grounded");
+                            note("BJT symbol '" + symbol->second.name + "' has no substrate pin; '" + configuredModel +
+                                 "' expects one, so the substrate is grounded");
                     } else if (expected == 3) {
                         if (substrate)
                             note("BJT symbol '" + symbol->second.name + "' declares a substrate pin but '" +
@@ -1445,9 +1571,8 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     } else if (substrate) {
                         nodes.push_back(*substrate);
                     } else {
-                        note("BJT symbol '" + symbol->second.name +
-                             "' has no substrate pin; instantiating '" + configuredModel +
-                             "' with collector/base/emitter only");
+                        note("BJT symbol '" + symbol->second.name + "' has no substrate pin; instantiating '" +
+                             configuredModel + "' with collector/base/emitter only");
                     }
                 }
             } else if (element == 'X') {
@@ -1594,6 +1719,12 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         definition << ".subckt " << spiceIdentifier(child->second.name);
         for (const auto *port : ports)
             definition << " " << spiceIdentifier(port->name);
+        const auto &childParameters = parametersFor(child->second);
+        if (!childParameters.empty()) {
+            definition << " params:";
+            for (const auto &parameter : childParameters)
+                definition << " " << parameter.name << "=" << parameter.value;
+        }
         definition << "\n" << body << ".ends " << spiceIdentifier(child->second.name) << "\n";
         visiting.erase(childId);
         emittedSubcircuits.insert(childId);
@@ -1603,7 +1734,10 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
     visiting.insert(cellId);
     const auto topBody = emitBody(topCell, {}, true);
     visiting.erase(cellId);
-    out << subcircuits.str() << topBody;
+    std::ostringstream topParameters;
+    for (const auto &parameter : parametersFor(topCell))
+        topParameters << ".param " << parameter.name << "=" << parameter.value << "\n";
+    out << topParameters.str() << subcircuits.str() << topBody;
 
     std::vector<std::string> lines;
     std::istringstream stream(out.str());

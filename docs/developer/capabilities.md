@@ -21,6 +21,7 @@ CLI invokes the same operations through `ProjectSession`.
 | Declarative measurements | Yes | Experiment dialog + Messages | `simulation-measure-add`, `simulation-measure` | Core API |
 | Interactive waveform analysis | Yes | Graph zoom/pan, cursors, FFT/dB/phase, derived traces, run overlays, markers | `simulation-graph-update`, `simulation-graph-derive`, `simulation-graph-overlay`, `simulation-graph-marker-add`, `simulation-runs` | `buildWaveformSeries`, `computeSpectrum` |
 | High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
+| Parameterized schematic cells | Yes | Schematic Properties parameters | `schematic-set-cell-parameter`, `schematic-remove-cell-parameter`, `schematic-set-parameter` | `setSchematicCellParameter`, `setSchematicParameter` |
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
 | SPICE import | Yes | Schematic import | `schematic-import-spice` | Core API |
 | Stored waveform sampling | Yes | Graph/result inspection | `simulation-trace` | Core API |

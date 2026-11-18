@@ -7452,22 +7452,13 @@ class DocumentWindow : public QMainWindow {
         });
     }
 
-    void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name,
+    void updateSchematicParameter(ice::ObjectId cellId, ice::ObjectId, const std::string &name,
                                   const std::string &value) {
         if (!project_)
             return;
         try {
             project_->execute("edit schematic parameter", [&](ice::Project &project) {
-                const auto cell = project.schematicCells.find(cellId);
-                if (cell == project.schematicCells.end())
-                    return;
-                for (auto &parameter : cell->second.parameters) {
-                    if ((parameterId != 0 && parameter.id == parameterId) ||
-                        (parameterId == 0 && parameter.name == name)) {
-                        parameter.value = value;
-                        return;
-                    }
-                }
+                ice::setSchematicCellParameter(project, cellId, name, value);
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
@@ -7629,12 +7620,21 @@ class DocumentWindow : public QMainWindow {
     void addSchematicParameter(ice::ObjectId cellId, const std::string &name) {
         if (!project_)
             return;
-        project_->execute("add schematic parameter", [&](ice::Project &project) {
-            const auto cell = project.schematicCells.find(cellId);
-            if (cell == project.schematicCells.end())
-                return;
-            cell->second.parameters.push_back({project.nextId(), name, ""});
-        });
+        try {
+            project_->execute("add schematic parameter", [&](ice::Project &project) {
+                const auto cell = project.schematicCells.find(cellId);
+                if (cell != project.schematicCells.end()) {
+                    const auto wanted = QString::fromStdString(name);
+                    for (const auto &parameter : cell->second.parameters) {
+                        if (QString::fromStdString(parameter.name).compare(wanted, Qt::CaseInsensitive) == 0)
+                            return;
+                    }
+                }
+                ice::setSchematicCellParameter(project, cellId, name, "");
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Add Parameter"), QString::fromStdString(error.what()));
+        }
         updateSelectionStatus();
     }
 

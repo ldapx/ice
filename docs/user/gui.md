@@ -399,6 +399,21 @@ All of these settings are saved on the `SimulationGraph` in the project and are
 also available through the CLI and MCP. Derived traces, view transforms, FFT,
 overlays, and markers never modify the stored simulation samples.
 
+A drawn schematic cell can declare parameters in its **Properties** panel when
+no instance is selected. Component values may reference those parameters with
+SPICE brace expressions such as `{R}`, `{C}`, or `{W}`. When the cell is placed
+as a hierarchical block, ICE emits the declarations as `.subckt ... params:`
+defaults and passes matching instance parameters from the parent as per-instance
+overrides. Selecting the block instance in the parent and editing `R` therefore
+produces `X1 ... block R=2k` while other parameters keep their defaults. A
+cell used as the top-level simulation also emits its parameters as `.param`
+cards, so `{R}` resolves without an enclosing subcircuit. Names are matched
+case-insensitively and must be valid SPICE identifiers; empty defaults are not
+declared. Changing a cell default updates already placed block instances that
+still hold the previous default, while explicit overrides are preserved.
+Parameters that a block instance does not declare on the child cell are
+reported in the netlist notes and are not emitted.
+
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.
 

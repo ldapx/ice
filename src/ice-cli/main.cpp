@@ -857,9 +857,13 @@ json schematicInfo(const ice::SchematicCell &cell) {
                    {"text", cell.textSchematic},
                    {"systemverilog", cell.systemVerilogSchematic},
                    {"source", cell.sourceText()},
+                   {"parameters", json::array()},
                    {"symbols", json::array()},
                    {"instances", json::array()},
                    {"nets", json::array()}};
+    for (const auto &parameter : cell.parameters)
+        result["parameters"].push_back(
+            {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
     for (const auto &[id, symbol] : cell.symbols) {
         json pins = json::array();
         for (const auto &pin : symbol.pins)
@@ -874,12 +878,16 @@ json schematicInfo(const ice::SchematicCell &cell) {
             {{"id", id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}});
     }
     for (const auto &[id, instance] : cell.instances) {
+        json parameters = json::array();
+        for (const auto &parameter : instance.parameters)
+            parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
         result["instances"].push_back({{"id", id},
                                        {"name", instance.name},
                                        {"symbol", instance.symbol},
                                        {"x", instance.x},
                                        {"y", instance.y},
-                                       {"orientation", ice::orientationName(instance.orientation)}});
+                                       {"orientation", ice::orientationName(instance.orientation)},
+                                       {"parameters", std::move(parameters)}});
     }
     for (const auto &[id, net] : cell.nets) {
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
@@ -1219,6 +1227,8 @@ void printHelp() {
               << "  schematic-list-symbols [pdk] [query]\n"
               << "  schematic-add-circuit <project> <cell> <json-file|->\n"
               << "  schematic-set-parameter <project> <cell> <instance> <name> <value>\n"
+              << "  schematic-set-cell-parameter <project> <cell> <name> <value>\n"
+              << "  schematic-remove-cell-parameter <project> <cell> <name>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
               << "  schematic-validate <project> <cell>\n"
               << "  schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->\n"
@@ -2248,6 +2258,31 @@ int main(int argc, char **argv) {
             });
             session.save(args[1]);
             printJson({{"cell", cell}, {"instance", instanceId}, {"name", args[4]}, {"value", args[5]}});
+            return 0;
+        }
+
+        if (command == "schematic-set-cell-parameter") {
+            expectArguments(args, 5, 5, "schematic-set-cell-parameter <project> <cell> <name> <value>");
+            auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            ice::ProjectSession session(project);
+            session.execute("schematic-set-cell-parameter",
+                            [&](ice::Project &p) { ice::setSchematicCellParameter(p, cell, args[3], args[4]); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"name", args[3]}, {"value", args[4]}});
+            return 0;
+        }
+
+        if (command == "schematic-remove-cell-parameter") {
+            expectArguments(args, 4, 4, "schematic-remove-cell-parameter <project> <cell> <name>");
+            auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            ice::ProjectSession session(project);
+            bool removed = false;
+            session.execute("schematic-remove-cell-parameter",
+                            [&](ice::Project &p) { removed = ice::removeSchematicCellParameter(p, cell, args[3]); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"name", args[3]}, {"removed", removed}});
             return 0;
         }
 
