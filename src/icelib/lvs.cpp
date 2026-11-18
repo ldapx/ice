@@ -183,12 +183,12 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
         device.object = id;
         const auto symbol = cell.symbols.find(instance.symbol);
         std::string symbolName;
-        std::string symbolType;
+        auto symbolKind = SchematicPortKind::none;
         if (symbol != cell.symbols.end()) {
             symbolName = symbolTypeName(symbol->second.name);
-            symbolType = normalizedIdentifier(symbolName);
+            symbolKind = schematicPortKindForSymbol(symbolName);
         }
-        const bool isPort = symbolType == "input" || symbolType == "output";
+        const bool isPort = symbolKind != SchematicPortKind::none;
         bool sourceOrGround = false;
         if (symbol != cell.symbols.end()) {
             device.sourceCell = symbol->second.sourceCell;
@@ -202,7 +202,9 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
                 port.id = id;
                 port.symbol = instance.symbol;
                 port.name = instance.name.empty() ? symbolName : instance.name;
-                port.direction = symbolType;
+                port.direction = symbolKind == SchematicPortKind::input    ? "input"
+                                 : symbolKind == SchematicPortKind::output ? "output"
+                                                                           : "inout";
                 for (const auto &pin : symbol->second.pins)
                     port.pins.push_back(pin.id);
                 portInstances.push_back(std::move(port));
@@ -553,8 +555,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         const auto symbol = schematic.symbols.find(instance->second.symbol);
         if (symbol == schematic.symbols.end())
             return true;
-        const auto type = normalizedIdentifier(symbol->second.name);
-        return type != "input" && type != "output";
+        return schematicPortKindForSymbol(symbol->second.name) == SchematicPortKind::none;
     };
     for (const auto &[_, port] : cell.ports) {
         if (!port.visible || port.internal || isConvertedSupplyPin(port))

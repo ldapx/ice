@@ -97,6 +97,7 @@ TEST_CASE("agent symbol library exposes primitive components") {
     CHECK(has("Capacitor"));
     CHECK(has("Voltage Source"));
     CHECK(has("Ground"));
+    CHECK(has("Pin"));
 }
 
 TEST_CASE("agent deletion plans expose dependencies and cascade safely") {

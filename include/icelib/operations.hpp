@@ -30,6 +30,12 @@ ObjectId addSchematicInstance(Project &project, ObjectId cellId, ObjectId symbol
                               Coordinate y);
 // Sets or creates an instance parameter. Names are matched case-insensitively.
 void setSchematicParameter(Project &project, ObjectId cellId, ObjectId instanceId, std::string name, std::string value);
+// Sets or creates a parameter on a drawn schematic cell. Cell parameters are
+// emitted as subcircuit `params:` defaults and as top-level `.param` cards, so
+// component values can reference them with SPICE `{name}` expressions.
+void setSchematicCellParameter(Project &project, ObjectId cellId, std::string name, std::string value);
+// Removes a cell parameter by name. Returns true when one was removed.
+bool removeSchematicCellParameter(Project &project, ObjectId cellId, const std::string &name);
 // Creates a symbol whose pins come from the SystemVerilog module ports and
 // places one instance in the parent schematic. A fresh symbol is created per
 // instance so net names remain unambiguous.
@@ -166,11 +172,18 @@ std::string symbolTypeName(std::string name);
 // `.subckt` port list, so hierarchical instance node lists must follow it too.
 std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell);
 
+// Classifies the symbol used for a hierarchical schematic port. Input and
+// Output are directional ports; Pin is a bidirectional inout port. Returns
+// `none` for ordinary devices. Trailing instance disambiguators such as
+// "Input 2" and "Pin 3" are ignored.
+enum class SchematicPortKind { none, input, output, inout };
+SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
+
 // Creates a symbol in `parentCellId` for the drawn sub-cell `sourceCellId`, with
 // one pin per port in subcircuit port order (inputs on the left, outputs on the
 // right). Returns the new symbol id.
-ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
-                               std::string name = {}, std::string artwork = {});
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
+                               std::string artwork = {});
 
 // Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
 // them from the project. Useful for tools that build their own symbol.

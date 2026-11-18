@@ -1971,6 +1971,166 @@ TEST_CASE("hierarchical schematic instances become subcircuits") {
     CHECK(notes.empty());
 }
 
+TEST_CASE("schematic cell parameters flow into subcircuit params and instance overrides") {
+    ice::Project project;
+    project.identity = "hierarchy-params";
+    project.name = "hierarchy-params";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    const auto childId = ice::createSchematicCell(project, "divider");
+    const auto inputId = addSymbol(childId, "Input", {"A"});
+    const auto outputId = addSymbol(childId, "Output", {"Y"});
+    const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
+    const auto capacitorId = addSymbol(childId, "Capacitor", {"1", "2"});
+    ice::addSchematicInstance(project, childId, inputId, "A", 0, 0);
+    ice::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
+    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    const auto childCapacitor = ice::addSchematicInstance(project, childId, capacitorId, "C1", 0, 0);
+    ice::setSchematicParameter(project, childId, childResistor, "resistance", "{R}");
+    ice::setSchematicParameter(project, childId, childCapacitor, "capacitance", "{C}");
+    ice::setSchematicCellParameter(project, childId, "R", "1k");
+    ice::setSchematicCellParameter(project, childId, "C", "1n");
+    ice::addNet(project, childId, "",
+                {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0), pinIdOf(childId, capacitorId, 1)});
+    ice::addNet(project, childId, "",
+                {pinIdOf(childId, resistorId, 1), pinIdOf(childId, capacitorId, 0), pinIdOf(childId, outputId, 0)});
+
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockId = addSymbol(parentId, "divider", {"A", "Y"});
+    project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
+    const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
+    const auto block = ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    REQUIRE(project.schematicCells.at(parentId).instances.at(block).parameters.size() == 2);
+    CHECK(project.schematicCells.at(parentId).instances.at(block).parameters.front().name == "R");
+    const auto instanceParameter = [&](const char *name) {
+        for (const auto &parameter : project.schematicCells.at(parentId).instances.at(block).parameters)
+            if (parameter.name == name)
+                return parameter.value;
+        return std::string{};
+    };
+    // Unmodified seeded values follow later cell-default changes; explicit
+    // overrides are preserved.
+    ice::setSchematicCellParameter(project, childId, "R", "3k");
+    CHECK(instanceParameter("R") == "3k");
+    ice::setSchematicCellParameter(project, childId, "R", "1k");
+    CHECK(instanceParameter("R") == "1k");
+    ice::setSchematicParameter(project, parentId, source, "value", "{VDD}");
+    // The block starts with the child defaults; R is then overridden and C is
+    // passed through unchanged.
+    ice::setSchematicParameter(project, parentId, block, "r", "2k");
+    ice::setSchematicCellParameter(project, childId, "R", "5k");
+    CHECK(instanceParameter("R") == "2k");
+    ice::setSchematicCellParameter(project, childId, "R", "1k");
+    CHECK(instanceParameter("R") == "2k");
+    ice::setSchematicCellParameter(project, parentId, "VDD", "1.8");
+    ice::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
+    ice::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+
+    CHECK(joined.find("params: R=1k C=1n") != std::string::npos);
+    CHECK(joined.find("R1 A Y {R}") != std::string::npos);
+    CHECK(joined.find("C1 Y A {C}") != std::string::npos);
+    CHECK(joined.find("X1 in out divider R=2k C=1n\n") != std::string::npos);
+    CHECK(joined.find(".param VDD=1.8") != std::string::npos);
+    CHECK(joined.find("V1 in out {VDD}") != std::string::npos);
+    CHECK(notes.empty());
+
+    // Extra parameters that a child does not declare are reported instead of
+    // being silently emitted as invalid subcircuit arguments.
+    ice::setSchematicParameter(project, parentId, block, "bogus", "1");
+    notes.clear();
+    const auto rejected = ice::buildSchematicNetlist(project, parentId, &notes);
+    joined.clear();
+    for (const auto &line : rejected)
+        joined += line + "\n";
+    CHECK(joined.find("bogus") == std::string::npos);
+    CHECK(std::any_of(notes.begin(), notes.end(), [](const std::string &note) {
+        return note.find("not declared by schematic") != std::string::npos;
+    }));
+
+    CHECK(ice::removeSchematicCellParameter(project, childId, "C"));
+    CHECK(!ice::removeSchematicCellParameter(project, childId, "C"));
+}
+
+TEST_CASE("Pin symbols define bidirectional schematic ports") {
+    ice::Project project;
+    project.identity = "pin-port";
+    project.name = "pin-port";
+
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
+        const auto symbolId = ice::addSymbol(project, cellId, name);
+        auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+        for (const auto *pinName : pins)
+            symbol.pins.push_back({project.nextId(), pinName, 0, 0});
+        return symbolId;
+    };
+    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+        return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
+    };
+
+    CHECK(ice::schematicPortKindForSymbol("Pin") == ice::SchematicPortKind::inout);
+    CHECK(ice::schematicPortKindForSymbol("Pin 2") == ice::SchematicPortKind::inout);
+    CHECK(ice::schematicPortKindForSymbol("Inout") == ice::SchematicPortKind::inout);
+    CHECK(ice::schematicPortKindForSymbol("Resistor") == ice::SchematicPortKind::none);
+
+    const auto cellId = ice::createSchematicCell(project, "pin_block");
+    const auto pinSymbol = addSymbol(cellId, "Pin", {"PIN"});
+    const auto resistorSymbol = addSymbol(cellId, "Resistor", {"1", "2"});
+    const auto pin = ice::addSchematicInstance(project, cellId, pinSymbol, "P1", 0, 0);
+    const auto resistor = ice::addSchematicInstance(project, cellId, resistorSymbol, "R1", 0, 0);
+    ice::setSchematicParameter(project, cellId, resistor, "resistance", "1k");
+    ice::addNet(
+        project, cellId, "io",
+        {pinIdOf(cellId, pinSymbol, 0), pinIdOf(cellId, resistorSymbol, 0), pinIdOf(cellId, resistorSymbol, 1)});
+    CHECK(pin != 0);
+
+    const auto ports = ice::schematicPortInstances(project.schematicCells.at(cellId));
+    REQUIRE(ports.size() == 1);
+    CHECK(ports.front()->name == "P1");
+    const auto hierarchyPins = ice::hierarchicalSymbolPins(project.schematicCells.at(cellId));
+    REQUIRE(hierarchyPins.size() == 1);
+    CHECK(hierarchyPins.front().name == "P1");
+    CHECK(hierarchyPins.front().direction == ice::PinDirection::left);
+
+    std::vector<std::string> notes;
+    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    std::string joined;
+    for (const auto &line : netlist)
+        joined += line + "\n";
+    CHECK(joined.find("R1 io io 1k") != std::string::npos);
+    CHECK(joined.find("unsupported") == std::string::npos);
+    CHECK(notes.empty());
+
+    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto blockSymbol = ice::addHierarchicalSymbol(project, parentId, cellId);
+    ice::addSchematicInstance(project, parentId, blockSymbol, "X1", 0, 0);
+    const auto parentNetlist = ice::buildSchematicNetlist(project, parentId);
+    joined.clear();
+    for (const auto &line : parentNetlist)
+        joined += line + "\n";
+    CHECK(joined.find(".subckt pin_block P1") != std::string::npos);
+    CHECK(joined.find("R1 P1 P1 1k") != std::string::npos);
+    CHECK(joined.find("X1 0 pin_block") != std::string::npos);
+}
+
 TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
     ice::Project project;
     project.identity = "hierarchy-order";
@@ -2232,6 +2392,19 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
     const auto current = run({"I1 0 out 1m", "R1 out 0 1k"}, "out");
     CHECK(current.state == ice::JobState::succeeded);
     CHECK(current.traces.size() == 1);
+
+    // Cell parameters are emitted as subcircuit `params:` defaults, `{name}`
+    // values, and per-instance overrides.
+    const auto parameterized =
+        run({".param VDD=1.8", ".subckt divider A Y params: R=1k C=1n", "R1 A Y {R}", "C1 Y A {C}", ".ends divider",
+             "V1 in 0 {VDD}", "X1 in out divider R=2k", "R2 out 0 1k"},
+            "out");
+    CHECK(parameterized.state == ice::JobState::succeeded);
+    CHECK(parameterized.traces.size() == 1);
+    if (!parameterized.traces.empty() && !parameterized.traces.front().values.empty()) {
+        const auto settled = parameterized.traces.front().values.back();
+        CHECK(std::abs(settled - 0.6) < 0.05);
+    }
 }
 
 TEST_CASE("package manifests and lockfiles are reproducible") {
@@ -2487,7 +2660,7 @@ TEST_CASE("symbols can reference built-in generic artwork") {
 TEST_CASE("shipped file symbol library loads") {
     const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
     const auto symbols = ice::SymbolLibrary::load(libraryRoot);
-    CHECK(symbols.size() == 13);
+    CHECK(symbols.size() == 14);
     std::map<std::string, std::size_t> pinCounts;
     std::map<std::string, std::map<std::string, std::string>> defaults;
     for (const auto &symbol : symbols) {
@@ -2510,6 +2683,7 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(pinCounts["NMOS"] == 4);
     CHECK(pinCounts["Inductor"] == 2);
     CHECK(pinCounts["Input"] == 1);
+    CHECK(pinCounts["Pin"] == 1);
     CHECK(pinCounts["Output"] == 1);
     // Passive and source symbols seed their editable default parameters.
     CHECK(defaults["Resistor"]["resistance"] == "1k");

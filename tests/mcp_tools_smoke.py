@@ -140,6 +140,8 @@ def main() -> int:
                 "schematic_list_symbols",
                 "schematic_add_circuit",
                 "schematic_validate",
+                "schematic_set_cell_parameter",
+                "schematic_remove_cell_parameter",
                 "schematic_import_spice",
                 "simulation_trace",
                 "simulation_runs",
@@ -892,6 +894,32 @@ def main() -> int:
             )
             netlist = mcp.tool("schematic_netlist", schematic="ports_test")
             assert netlist["ports"] == ["A", "Y"], netlist
+            parameter = mcp.tool(
+                "schematic_set_cell_parameter",
+                cell="ports_test",
+                name="R",
+                value="1k",
+            )
+            assert parameter["value"] == "1k", parameter
+            info = mcp.tool("schematic_info", cell="ports_test")
+            assert any(entry["name"] == "R" for entry in info["parameters"]), info
+            removed = mcp.tool(
+                "schematic_remove_cell_parameter", cell="ports_test", name="R"
+            )
+            assert removed["removed"] is True, removed
+
+            mcp.tool("schematic_create", name="pin_test")
+            pin = mcp.tool(
+                "schematic_add_component",
+                cell="pin_test",
+                type="pin",
+                name="P1",
+                x=0,
+                y=0,
+            )
+            assert pin["pins"], pin
+            pin_netlist = mcp.tool("schematic_netlist", schematic="pin_test")
+            assert pin_netlist["ports"] == ["P1"], pin_netlist
 
             # A mutation whose automatic save fails must be reported and rolled
             # back instead of leaving the server unable to save anything.
