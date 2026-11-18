@@ -522,6 +522,33 @@ json helpJson(const std::string &requestedTopic) {
            {{"tool", "schematic_add_component"},
             {"arguments",
              {{"cell", "top"}, {"type", "resistor"}, {"name", "R1"}, {"parameters", {{"resistance", "10k"}}}}}}}}},
+        {"analog-layout",
+         {{"summary", "Build compact procedural analog layouts with composition handles, constraints, and cell "
+                      "generators, then verify area utilization, LVS, DRC, and PEX."},
+          {"tools", json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate",
+                                 "layout_get_script", "layout_info", "lvs_run", "drc_run", "pex_run"})},
+          {"steps",
+           json::array(
+               {"Create or open the project and create a procedural layout with layout_create_procedural.",
+                "Build devices, then pack them with layout.row/column/grid/repeat and gap=0 instead of "
+                "move loops with large fixed gaps.",
+                "Use layout.constraint(\"Order\", ..., abut=True), layout.align, layout.symmetric, and "
+                "layout.boundary for placement intent.",
+                "Use layout.generate for mos_pair/resistor_bank/cap_array/guard_ring/rail/route_bundle, or "
+                "@layout.generator for reusable blocks.",
+                "Print layout.report(print_report=True) and read generation_log from layout_regenerate.",
+                "Iterate until utilization is reasonable and large gaps are explained; then run LVS, DRC, and PEX."})},
+          {"example", {{"tool", "layout_regenerate"}, {"arguments", {{"layout", "MillerOTA_pcell"}}}}},
+          {"notes",
+           json::array(
+               {"Start rows and columns with gap=0; add spacing only where routing or DRC requires it.",
+                "layout.report returns cell_area_um2, device_area_um2, utilization, "
+                "max_horizontal_gap_um, large_gaps, and warnings.",
+                "A fixed 30-60 um gap between every device or one large routing channel for all devices "
+                "usually wastes most of the cell area.",
+                "Use layout.measure, layout.clearance, and layout.overlaps for local checks before "
+                "committing the generated layout.",
+                "layout_regenerate returns generation_log on success so printed reports are visible to the agent."})}}},
         {"mixed-signal",
          {{"summary", "Place a SystemVerilog block with a generated symbol, wire its pins like any other device, "
                       "then let simulation_create auto-select the mixed simulator."},
@@ -3551,6 +3578,7 @@ class IceMcpServer {
                     {"stack", stack},
                     {"generated_cell", generatedCell},
                     {"generated", run.ok},
+                    {"generation_log", run.log},
                     {"generation_error", run.ok || !shouldRegenerate ? json(nullptr) : json(run.error)},
                     {"needs_regeneration",
                      ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}};
@@ -3569,6 +3597,7 @@ class IceMcpServer {
                     {"script_hash", run.scriptHash},
                     {"output_hash", run.outputHash},
                     {"pdk_version", run.pdkVersion},
+                    {"generation_log", run.log},
                     {"needs_regeneration", false}};
         }
         if (name == "layout_get_script") {
@@ -4790,7 +4819,8 @@ class IceMcpServer {
                             .with_boolean_param("regenerate", "Generate the script immediately (default true)", false)
                             .build());
         tools.push_back(tool_builder("layout_regenerate")
-                            .with_description("Run a procedural layout script and replace its generated layout.")
+                            .with_description("Run a procedural layout script, replace its generated layout, and "
+                                              "return generation_log (including layout.report output).")
                             .with_string_param("layout", "Procedural layout name or id")
                             .with_integer_param("timeout_seconds", "Optional timeout in seconds", false)
                             .build());

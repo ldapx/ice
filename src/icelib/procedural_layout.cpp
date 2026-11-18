@@ -938,7 +938,21 @@ bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const P
 
 } // namespace
 
-std::string proceduralScriptHash(const std::string &script) { return hashText(script); }
+std::string proceduralScriptHash(const std::string &script) {
+    // The builder and its built-in generators are part of the generated
+    // layout contract. Include their contents so upgrading ICE cannot leave
+    // stale generated geometry behind an unchanged user script.
+    std::string text = script;
+    const auto runner = proceduralRunnerScriptPath();
+    if (!runner.empty()) {
+        text.push_back('\0');
+        text += readTextFile(runner);
+        const auto builtins = runner.parent_path() / "generators" / "__init__.py";
+        text.push_back('\0');
+        text += readTextFile(builtins);
+    }
+    return hashText(text);
+}
 
 std::string proceduralParametersHash(const std::vector<Parameter> &parameters) {
     std::map<std::string, std::string> values;
@@ -957,8 +971,15 @@ std::string proceduralParametersHash(const std::vector<Parameter> &parameters) {
 bool proceduralLayoutNeedsRegeneration(const ProceduralLayout &layout) {
     if (layout.generatedScriptHash.empty() || layout.generatedParameterHash.empty())
         return true;
-    return layout.generatedScriptHash != proceduralScriptHash(layout.script) ||
-           layout.generatedParameterHash != proceduralParametersHash(layout.parameters);
+    if (layout.generatedScriptHash != proceduralScriptHash(layout.script) ||
+        layout.generatedParameterHash != proceduralParametersHash(layout.parameters))
+        return true;
+    if (layout.pdk != genericPdkId && !layout.generatedPdkVersion.empty()) {
+        const auto pdks = findPdks(layout.pdk);
+        if (!pdks.empty() && pdks.front().packageVersion != layout.generatedPdkVersion)
+            return true;
+    }
+    return false;
 }
 
 std::filesystem::path proceduralRunnerScriptPath(const std::filesystem::path &executablePath) {
@@ -1017,6 +1038,15 @@ std::string defaultProceduralLayoutScript() {
 # layout.instance("other_layout_cell", 0, 0, name="I1", orientation="r0")
 # layout.array("unit_cell", (2, 2), (2000, 2000))
 # layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)
+#
+# For compact layouts, compose handles instead of hand-computing coordinates:
+#   row = layout.row(gap=0, align="bottom")
+#   row.add(layout.device("nmos", name="M1", w="1u", l="0.15u"))
+#   row.add(layout.device("nmos", name="M2", w="1u", l="0.15u"))
+#   layout.add(row)
+# Use layout.constraint("Order", ..., abut=True), layout.align,
+# layout.generate("mos_pair"), and layout.repeat for matching.
+# Add spacing only where the router or DRC requires it.
 
 metal1 = layout.layer("Metal1", 1)
 metal2 = layout.layer("Metal2", 2)
@@ -1025,6 +1055,7 @@ width = layout.um(layout.parameter("width", "4", "Horizontal metal width in micr
 metal1.rectangle(layout.um(0), layout.um(0), width, layout.um(0.6))
 metal1.rectangle(layout.um(0), layout.um(2.4), width, layout.um(0.6))
 metal2.rectangle(layout.um(1), layout.um(1.5), width / 2, layout.um(0.6))
+layout.report(print_report=True)
 )";
 }
 

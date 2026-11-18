@@ -239,6 +239,158 @@ Device parameters are passed as keyword strings. Matching is case-insensitive
 and falls back to a substring match against the library index. A missing
 package library, unknown device, or failed PCell generator raises an error.
 
+## Composition
+
+Rows, columns, grids, stacks, and repeats compose existing handles without
+manual coordinate arithmetic. Each composition is itself a handle with
+`bounds`, `ports`, `anchor`, `move`, and `mirror`, so compositions can be
+nested and placed into a group or the root builder.
+
+```python
+pair = layout.group("input_pair")
+m1 = pair.device("nfet", name="M1", w="2", l="0.15",
+                 nets={"G": "IN", "D": "OUTN", "S": "VSS"})
+m2 = pair.device("nfet", name="M2", w="2", l="0.15",
+                 nets={"G": "IN", "D": "OUTP", "S": "VSS"})
+m2.mirror("y")
+
+core = layout.row(gap=0, align="bottom")
+core.add(m1)
+core.add(m2)
+core.add(layout.spacer(layout.um(0.5)))
+core.add(layout.generate("rail", width=layout.um(8), height=layout.um(0.4)))
+layout.add(core, x=layout.um(2), y=layout.um(1))
+```
+
+| Method | Purpose |
+| --- | --- |
+| `layout.group(name=None)` | Local-coordinate fragment with the full builder API. |
+| `layout.row(gap, align, distribute, width)` | Horizontal composition. |
+| `layout.column(gap, align, distribute, height)` | Vertical composition. |
+| `layout.grid(columns, x_gap, y_gap, align)` | Fixed-column grid. `layout.grid` remains the integer snap grid, but is callable for grid composition. |
+| `layout.stack(items, align)` | Overlay items on a common origin. |
+| `layout.repeat(unit, count, axis, pitch, mirror, alternate)` | Repeated, optionally mirrored copies. |
+| `layout.spacer(distance)` | Fixed gap in a row or column. |
+| `layout.stretch(weight=1)` | Flexible gap that consumes slack. |
+| `layout.add(item, x, y, mirror, prefix)` | Copy a composition into the current builder. |
+
+Row and column alignment accepts `top`, `bottom`, `center`, `left`, and
+`right`. `distribute="space-between"` or `"equal"` distributes slack when an
+explicit `width` or `height` is given; `layout.stretch()` participates in the
+same slack distribution. `repeat(..., pitch="abut")` places copies edge to
+edge, and `mirror=True, alternate=True` produces alternating mirrored copies
+for interdigitated structures.
+
+Composition copies groups and repetitions, but consumes concrete shapes,
+devices, and routes: adding `m1` to a row removes `m1`'s records from its
+previous builder while keeping the `m1` handle valid. Port names from repeated
+copies are suffixed (`P`, `P_2`, `P_3`, ...). Use `layout.add(..., prefix=...)`
+when embedding a fragment with names that already exist.
+
+### Inspection and measurement
+
+```python
+layout.extents([m1, m2])       # union bounds or None
+layout.clearance(m1, m2)       # edge-to-edge gap; negative when overlapping
+layout.overlaps(m1, m2)
+layout.contains(frame, core)
+layout.distance(m1, m2, axis="x")
+layout.measure(core)           # bounds, width, height, area
+```
+
+Every handle also exposes `bounds`, `width`, `height`, `ports`, `pin(name)`,
+`anchor(name)`, `move(dx, dy)`, `mirror(axis)`, and `is_empty`. Composition and
+shape bounds are `(x0, y0, x1, y1)` tuples; `DevicePlacement.bounds` keeps the
+existing `x`/`y`/`width`/`height` mapping for router compatibility.
+`mirror(axis="y")` flips horizontally; use `axis="x"` to flip vertically.
+
+## Constraints
+
+Constraints express local placement intent that is awkward to encode as
+nested rows and columns. They resolve deterministically and modify the involved
+records in place:
+
+```python
+layout.constraint("Order", items=[m1, m2, m3],
+                  direction="left_to_right", abut=True)
+layout.constraint("Align", items=[m1, m2, m3], line="h_center")
+layout.constraint("Symmetric", pairs=[[m1, m2]], axis="vertical")
+layout.constraint("Spread", items=[m1, m2, m3],
+                  direction="horizontal", distance=layout.um(0.4))
+layout.constraint("Boundary", max_width=layout.um(60), max_height=layout.um(40))
+layout.constraint("PortLocation", port="IN", side="left", align="center")
+```
+
+Convenience wrappers are available for the common cases: `layout.align`,
+`layout.order`, `layout.abut`, `layout.symmetric`, `layout.distribute`, and
+`layout.boundary`. Supported constraints are `Align`, `AlignInOrder`, `Order`,
+`Symmetric`, `Group`, `Boundary`, `AspectRatio`, `Spread`, `Grid`,
+`PortLocation`, and `Generator`. Invalid handles, unknown ports, and
+unsatisfiable boundaries or aspect ratios raise an error before geometry is
+committed.
+
+## Cell generators
+
+A generator is a reusable function that builds a local group. Declare an
+inline generator with `@layout.generator` and instantiate it with
+`layout.generate`:
+
+```python
+@layout.generator(
+    name="nmos_pair",
+    description="Matched NMOS pair",
+    parameters={"device": "nfet", "w": "2", "l": "0.15"},
+    ports=["D1", "G1", "S", "D2", "G2", "B"],
+)
+def nmos_pair(ctx, device, w, l):
+    row = ctx.row(gap=0, align="center")
+    left = ctx.device(device, name="M1", w=w, l=l, nets={"S": "VSS"})
+    right = ctx.device(device, name="M2", w=w, l=l, nets={"S": "VSS"})
+    right.mirror("y")
+    row.add(left)
+    row.add(right)
+    return row
+
+pair = layout.generate("nmos_pair", w="4")
+layout.add(pair)
+```
+
+Built-in generators are available without a package: `mos`, `mos_pair`,
+`resistor`, `resistor_bank`, `cap`, `cap_array`, `via_stack`, `guard_ring`,
+`rail`, and `route_bundle`. Device-based built-ins accept the package `device`
+name and pass remaining parameters to `layout.device`. Packages may provide
+additional generators under `<pdk>/layout/generators/`; a package entry with
+the same name replaces the built-in one. Generator metadata is reported in the
+generated JSON for GUI, CLI, and MCP discovery. `python3
+assets/layout/procedural_runner.py --list-generators` prints the built-in
+metadata as JSON.
+
+## Area quality check
+
+A layout that routes correctly can still waste most of its area. Start composed
+rows and columns with `gap=0` and add spacing only where routing or DRC needs
+it. Prefer one shared routing channel over fixed padding between every device.
+
+Call `layout.report()` after placement and routing:
+
+```python
+layout.report(print_report=True)
+```
+
+The report includes:
+
+- `cell_area_um2`, `device_area_um2`, and `utilization`;
+- `max_horizontal_gap_um` and `large_gaps` for devices whose rows overlap;
+- shape, port, and device counts;
+- warnings for low utilization and large fixed gaps.
+
+`generation_log` returned by `layout_regenerate` includes printed report output.
+A good first target is utilization above roughly 20% with no unexplained
+horizontal gap above roughly 10 µm. If utilization is lower, compact the
+floorplan with rows, columns, abutment, `repeat`, and constraints before adding
+more routing area. Check device orientation and finger/multiplier settings as
+well: tall stacked multiplier devices can dominate the cell height.
+
 ## Routing
 
 The builder includes a deterministic Manhattan router for both points and
@@ -390,6 +542,36 @@ in `assets/layout/procedural_runner.py`.
 
 ```{eval-rst}
 .. autoclass:: procedural_runner.Route
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Group
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Row
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Column
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Grid
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Stack
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.Repeat
    :members:
 ```
 

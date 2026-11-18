@@ -3037,6 +3037,48 @@ TEST_CASE("procedural layout parameters drive regeneration") {
         CHECK(generated.shapes.begin()->second.rectangle.width == 3000);
 }
 
+TEST_CASE("procedural layout composition and built-in generators") {
+    ice::Project project;
+    project.identity = "procedural-composition";
+    project.name = "procedural-composition";
+    const auto script = R"PY(
+a = layout.rectangle("Metal1", 0, 0, 1000, 500, name="a")
+b = layout.rectangle("Metal1", 0, 0, 1000, 500, name="b")
+row = layout.row(gap=0, align="bottom")
+row.add(a)
+row.add(b)
+layout.align(a, b, line="h_center")
+layout.add(row)
+ring = layout.generate("guard_ring", layer="Metal1", x=0, y=1000,
+                       width=4000, height=2000, ring=200, name="RING")
+layout.add(ring)
+layout.port("P", "Metal1", 0, 0, 100, 100, net="N")
+layout.report(print_report=True)
+)PY";
+    const auto proceduralId = ice::createProceduralLayout(project, "composition_top", ice::genericPdkId, script);
+    const auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(run.ok);
+    CHECK(run.log.find("utilization") != std::string::npos);
+    const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
+    CHECK(generated.shapes.size() == 6);
+    CHECK(generated.ports.size() == 1);
+    CHECK(generated.plannedDevices.empty());
+    const auto hasShape = [&](const std::string &name) {
+        return std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                           [&](const auto &entry) { return entry.second.name == name; });
+    };
+    CHECK(hasShape("a"));
+    CHECK(hasShape("b"));
+    CHECK(hasShape("RING_bottom"));
+    CHECK(hasShape("RING_top"));
+    CHECK(hasShape("RING_left"));
+    CHECK(hasShape("RING_right"));
+    const auto wideShape = std::any_of(generated.shapes.begin(), generated.shapes.end(),
+                                       [](const auto &entry) { return entry.second.rectangle.width >= 4000; });
+    CHECK(wideShape);
+    CHECK(project.validate().empty());
+}
+
 TEST_CASE("procedural layout boolean operations and holes") {
     ice::Project project;
     project.identity = "procedural-boolean";
