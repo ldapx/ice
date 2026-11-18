@@ -377,10 +377,12 @@ separate from physical-flow route DRC metrics in `implementation_status`.
 
 `schematic_add_component` creates a primitive and returns its pin handles.
 `schematic_add_circuit` accepts components and nets in one atomic call.
-`schematic_list_symbols` shows valid PDK symbols, pin names, and defaults.
-`schematic_validate` returns diagnostics with suggested calls, and
-`schematic_delete(dry_run=true)` lists simulation and hierarchy dependencies
-before deletion.
+`schematic_list_symbols` shows valid PDK symbols, pin names, and defaults; the
+generic Ports category includes `Input`, `Output`, and the bidirectional `Pin`.
+Place a bidirectional port marker with `schematic_add_component(type="pin")`
+and connect its `PIN` pin. `schematic_validate` returns diagnostics with
+suggested calls, and `schematic_delete(dry_run=true)` lists simulation and
+hierarchy dependencies before deletion.
 
 `schematic_add_symbol` with a known library name (`RES`, `NMOS`, `VDD`, `GND`,
 `IDC`, ...) auto-loads real artwork and pins. If a symbol is unknown and no pins

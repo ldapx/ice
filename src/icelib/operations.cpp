@@ -208,11 +208,17 @@ std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCel
         const auto symbol = cell.symbols.find(instance.symbol);
         if (symbol == cell.symbols.end())
             continue;
-        const auto type = lower(symbolTypeName(symbol->second.name));
-        if (type == "input")
+        switch (schematicPortKindForSymbol(symbol->second.name)) {
+        case SchematicPortKind::input:
+        case SchematicPortKind::inout:
             inputs.push_back(&instance);
-        else if (type == "output")
+            break;
+        case SchematicPortKind::output:
             outputs.push_back(&instance);
+            break;
+        case SchematicPortKind::none:
+            break;
+        }
     }
     const auto sortPorts = [](std::vector<const SchematicInstance *> &ports) {
         std::sort(ports.begin(), ports.end(), [](const SchematicInstance *left, const SchematicInstance *right) {
@@ -228,6 +234,17 @@ std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCel
     ports.insert(ports.end(), inputs.begin(), inputs.end());
     ports.insert(ports.end(), outputs.begin(), outputs.end());
     return ports;
+}
+
+SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName) {
+    const auto type = lower(symbolTypeName(symbolName));
+    if (type == "input")
+        return SchematicPortKind::input;
+    if (type == "output")
+        return SchematicPortKind::output;
+    if (type == "pin" || type == "inout" || type == "bidirectional")
+        return SchematicPortKind::inout;
+    return SchematicPortKind::none;
 }
 
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name,
@@ -262,8 +279,9 @@ std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) {
     int outputRow = 0;
     for (const auto *port : ports) {
         const auto portSymbol = source.symbols.find(port->symbol);
-        const auto type = portSymbol == source.symbols.end() ? std::string{} : symbolTypeName(portSymbol->second.name);
-        const bool isOutput = lower(type) == "output";
+        const auto kind = portSymbol == source.symbols.end() ? SchematicPortKind::none
+                                                             : schematicPortKindForSymbol(portSymbol->second.name);
+        const bool isOutput = kind == SchematicPortKind::output;
         const auto row = isOutput ? outputRow++ : inputRow++;
         pins.push_back({0, port->name, isOutput ? 70 : -70, count * spacing / 2 - row * spacing,
                         isOutput ? PinDirection::right : PinDirection::left, 1, true});
@@ -1337,8 +1355,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
             const auto symbol = cell.symbols.find(instance.symbol);
             if (symbol == cell.symbols.end())
                 continue;
-            const auto type = lower(symbolTypeName(symbol->second.name));
-            if (type == "input" || type == "output")
+            if (schematicPortKindForSymbol(symbol->second.name) != SchematicPortKind::none)
                 continue; // hierarchical port markers, not devices
             const char element = spiceElementForSymbol(symbol->second.name);
             if (element == 'G')

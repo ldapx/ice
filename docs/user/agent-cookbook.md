@@ -111,6 +111,8 @@ schematic_set_parameter(cell="top", instance="X1", name="R", value="2k")
 The child netlist is emitted with `.subckt divider A Y params: R=1k C=1n` and
 `R1 A Y {R}`. The parent instance is emitted as
 `X1 in out divider R=2k C=1n`; parameters not overridden keep their defaults.
+Use a `pin` component (the bidirectional `Pin` symbol) instead of `Input` or
+`Output` when a port can drive or receive, and connect its `PIN` pin.
 A top-level cell parameter becomes `.param name=value`. CLI equivalents are
 `schematic-set-cell-parameter <project> <cell> <name> <value>` and
 `schematic-set-parameter <project> <cell> <instance> <name> <value>`.

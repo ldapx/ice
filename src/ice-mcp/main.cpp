@@ -3194,8 +3194,9 @@ class IceMcpServer {
                 } else if (!sourceCellRef.textSchematic) {
                     // Drawn sub-cell: build the symbol from its ports in the
                     // same order the netlister emits the .subckt port list
-                    // (inputs top-down, then outputs), inputs on the left and
-                    // outputs on the right.
+                    // (inputs/inouts top-down, then outputs), directional
+                    // inputs and bidirectional pins on the left, outputs on
+                    // the right.
                     const auto ports = ice::schematicPortInstances(sourceCellRef);
                     if (!ports.empty()) {
                         const auto lowerType = [](std::string text) {

@@ -166,11 +166,18 @@ std::string symbolTypeName(std::string name);
 // `.subckt` port list, so hierarchical instance node lists must follow it too.
 std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCell &cell);
 
+// Classifies the symbol used for a hierarchical schematic port. Input and
+// Output are directional ports; Pin is a bidirectional inout port. Returns
+// `none` for ordinary devices. Trailing instance disambiguators such as
+// "Input 2" and "Pin 3" are ignored.
+enum class SchematicPortKind { none, input, output, inout };
+SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
+
 // Creates a symbol in `parentCellId` for the drawn sub-cell `sourceCellId`, with
 // one pin per port in subcircuit port order (inputs on the left, outputs on the
 // right). Returns the new symbol id.
-ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
-                               std::string name = {}, std::string artwork = {});
+ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
+                               std::string artwork = {});
 
 // Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
 // them from the project. Useful for tools that build their own symbol.

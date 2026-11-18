@@ -908,6 +908,19 @@ def main() -> int:
             )
             assert removed["removed"] is True, removed
 
+            mcp.tool("schematic_create", name="pin_test")
+            pin = mcp.tool(
+                "schematic_add_component",
+                cell="pin_test",
+                type="pin",
+                name="P1",
+                x=0,
+                y=0,
+            )
+            assert pin["pins"], pin
+            pin_netlist = mcp.tool("schematic_netlist", schematic="pin_test")
+            assert pin_netlist["ports"] == ["P1"], pin_netlist
+
             # A mutation whose automatic save fails must be reported and rolled
             # back instead of leaving the server unable to save anything.
             locked = [

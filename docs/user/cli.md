@@ -91,7 +91,10 @@ real artwork and pins for known library names (`RES`, `NMOS`, `VDD`, `GND`,
 
 `schematic-add-component` creates a primitive with a generated symbol and
 returns its pin ids. `schematic-list-symbols` lists primitive and PDK symbols.
-`schematic-add-circuit` takes a JSON object such as
+The generic `Ports` library includes `Input`, `Output`, and the bidirectional
+`Pin`; add a pin with
+`ice-cli schematic-add-component project divider pin P1 0 0`, then connect its
+`P1.PIN` pin to the desired net. `schematic-add-circuit` takes a JSON object such as
 `{"components":[{"type":"resistor","name":"R1","parameters":{"resistance":"1k"}}],
 "nets":[{"name":"out","pins":["R1.1","C1.1"]}]}`
 and commits the whole circuit atomically. `schematic-validate` checks

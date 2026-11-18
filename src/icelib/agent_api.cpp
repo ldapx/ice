@@ -63,11 +63,16 @@ bool hasParameter(const SchematicInstance &instance, std::initializer_list<const
 }
 
 std::string instancePrefix(const SchematicCell &cell, const std::string &symbolName) {
-    const auto lower = lowerCopy(symbolName);
-    if (lower == "input")
+    switch (schematicPortKindForSymbol(symbolName)) {
+    case SchematicPortKind::input:
         return "IN";
-    if (lower == "output")
+    case SchematicPortKind::output:
         return "OUT";
+    case SchematicPortKind::inout:
+        return "PIN";
+    case SchematicPortKind::none:
+        break;
+    }
     char prefix = spiceElementForSymbol(symbolName);
     if (prefix == 0)
         prefix = 'X';
@@ -159,6 +164,10 @@ const FileSymbol *findComponentSymbol(const std::vector<FileSymbol> &symbols, co
         {"port input", "input"},
         {"output", "output"},
         {"port output", "output"},
+        {"pin", "pin"},
+        {"port pin", "pin"},
+        {"inout", "pin"},
+        {"bidirectional", "pin"},
     };
     const auto alias = aliases.find(normalized);
     const auto wanted = alias != aliases.end() ? alias->second : normalized;
@@ -452,8 +461,8 @@ std::vector<Diagnostic> validateSchematic(const Project &project, ObjectId cellI
                           symbol->first);
         }
         const auto element = spiceElementForSymbol(symbol->second.name);
-        const auto lowerSymbol = lowerCopy(symbol->second.name);
-        if (element == 'G' || lowerSymbol == "input" || lowerSymbol == "output" || symbol->second.sourceCell != 0)
+        if (element == 'G' || schematicPortKindForSymbol(symbol->second.name) != SchematicPortKind::none ||
+            symbol->second.sourceCell != 0)
             continue;
         if (element == 'R' && !hasParameter(instance, {"resistance", "value"}))
             addDiagnostic(diagnostics, Diagnostic::Severity::warning, "schematic.component.value",
