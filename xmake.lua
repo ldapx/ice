@@ -77,6 +77,13 @@ local first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-fi
 target("ice-openroad")
     set_kind("phony")
     on_build(function (target)
+        -- A phony target is never up to date, so this would otherwise re-run the
+        -- full OpenROAD Bazel build on every `xmake build/run ice`. Skip it once
+        -- the helper is installed; `xmake build -r ice-openroad` still forces a
+        -- rebuild.
+        if os.isfile(path.join(target:targetdir(), "ice-openroad")) then
+            return
+        end
         os.execv("bash", {
             path.join(os.projectdir(), "scripts", "build-ice-openroad.sh"),
             "--output-dir", target:targetdir()
