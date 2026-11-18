@@ -62,7 +62,7 @@ ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn
 ice-cli schematic-hdl-ports <project> <cell>
 ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> [--flatten-buses]
 ice-cli schematic-validate-hierarchy <project> <cell>
-ice-cli schematic-netlist <project> <cell>
+ice-cli schematic-netlist <project> <cell>   # includes the subcircuit port order
 ```
 
 Cells, symbols, pins, and instances may be referenced by name or id. Pins can
@@ -162,8 +162,11 @@ and `layout-info` reports its generation hashes, parameter values, and stale
 state. `layout-set-parameter` edits a declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
 TEXT label. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
-layers also connect overlapping layers. `layout-export-lef` and
-`layout-export-def` write minimal pin metadata for place-and-route exchange.
+layers also connect overlapping layers. When unlabeled geometry (for example a
+poly resistor body) joins two explicitly named nets, the group keeps the first
+name and lists the rest under `aliases` instead of dropping them.
+`layout-export-lef` and `layout-export-def` write minimal pin metadata for
+place-and-route exchange.
 `layout-import-gds` creates a new project and, when a pin-label layer is given,
 converts matching TEXT records into pins. `layout-import-lef` and
 `layout-import-def` create a new project from a macro or design's pins and
@@ -374,13 +377,38 @@ before trying to simulate a transistor-level circuit.
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
 ice-cli simulation-remove <project> <simulation>
+ice-cli simulation-configure <project> <simulation> [analysis options]
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
+ice-cli simulation-corner-defaults <project> <simulation>
+ice-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
+ice-cli simulation-corner-list <project> <simulation>
+ice-cli simulation-corner-remove <project> <simulation> <name>
+ice-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
+ice-cli simulation-sweep-list <project> <simulation>
+ice-cli simulation-sweep-remove <project> <simulation> <parameter>
+ice-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
+ice-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
+ice-cli simulation-measure-list <project> <simulation>
+ice-cli simulation-measure-remove <project> <simulation> <name>
 ice-cli simulation-trace <project> <simulation> [signals] [max-points]
-ice-cli simulation-measure <project> <simulation> [signal] [threshold]
+ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
+  [--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] \
+  [--signal s] [--input s] [--voltage v] [--tolerance v]
 ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
 ice-cli simulation-graph-list <project> <simulation>
 ice-cli simulation-graph-info <project> <simulation> <graph>
-ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]
+ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
+  [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n] \
+  [--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]] \
+  [--clear-derived] [--clear-overlays] [--clear-markers]
+ice-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
+ice-cli simulation-graph-derive-remove <project> <simulation> <graph> <name>
+ice-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
+ice-cli simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>
+ice-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
+ice-cli simulation-graph-marker-remove <project> <simulation> <graph> <label>
+ice-cli simulation-runs <project> [simulation]
 ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
 ice-cli simulation-graph-delete <project> <simulation> <graph>
 ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
@@ -407,6 +435,18 @@ amplitude, mean, RMS, first/last values, zero and rising crossings, period,
 frequency, and settling time. Use it to validate oscillator startup and
 frequency instead of treating `state: succeeded` as proof that the circuit
 oscillates. A `threshold` overrides the default midpoint crossing level.
+Pass `--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power` for a
+declarative check, or declare metrics once with `simulation-measure-add`; they
+are then evaluated and stored after every run.
+
+`simulation-configure` edits analysis-specific fields such as AC points/range,
+DC source/range, noise output/input, transfer-function source/output,
+temperature, model section, `.param` values, and source overrides.
+`simulation-experiment` runs the configured sweeps, corners, and Monte Carlo
+samples. Each point is written to its own run file with a variant label unless
+`--no-store` is used. `simulation-corner-defaults` populates the TT/FF/SS
+sections declared by the active PDK; `simulation-corner-add` can add any
+explicit section, temperature, supply override, or parameter set.
 
 Without an explicit output path, the simulation writes a stored run under:
 
@@ -420,8 +460,8 @@ and trace data.
 
 Drawn SPICE, text SPICE, and SystemVerilog schematics can all be used. For text
 schematics the stored SPICE source is the circuit netlist; analysis-control
-directives (`.tran`, `.dc`, `.ac`, `.op`) and `.end` are removed because
-`simulate` supplies the transient analysis.
+directives (`.tran`, `.dc`, `.ac`, `.op`, `.noise`, `.tf`) and `.end` are
+removed because the simulation definition supplies the analysis.
 
 `simulation-add` on a SystemVerilog cell stores the `iverilog` simulator and
 `digital` analysis automatically. `simulation-run` compiles the source with
@@ -457,6 +497,15 @@ Simulation graphs are presentation definitions over captured signals.
 captured signals on Y. In `simulation-graph-update`, `-` keeps a field unchanged.
 In `simulation-graph-limits`, `-` clears a limit. Deleting the last graph is
 rejected.
+
+Graphs can also be analyzed without rerunning the circuit. `--view db` and
+`--view phase` transform the Y axis, `--fft on` switches to a spectrum, and
+`--derived name=expression` adds a math channel such as `out - in`,
+`db(v(out))`, or `derivative(i(v1))`. `simulation-runs` lists stored run ids
+for `--overlay`/`simulation-graph-overlay`, which compares corners or Monte
+Carlo samples on the same axes. `simulation-graph-marker-add` stores a labelled
+point annotation. All settings live on the graph in the project, so the GUI,
+CLI, and MCP display the same analysis.
 
 ## Simulation scripts
 

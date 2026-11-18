@@ -238,6 +238,24 @@ TEST_CASE("invalid lyrdb input is rejected") {
     CHECK_THROWS_AS(ice::parseGdsCheckLyrdbText("<not-a-report/>"), ice::ProjectError);
 }
 
+TEST_CASE("package DRC configuration declares the gdscheck process") {
+    const auto ihp = ice::drcDeckForPdk("ihp-sg13g2");
+    if (ihp) {
+        CHECK(ihp->engine == "gdscheck");
+        CHECK(ihp->process == "ihp-sg13g2");
+    }
+    const auto gf = ice::drcDeckForPdk("gf180mcuA");
+    if (gf) {
+        CHECK(gf->engine == "gdscheck");
+        CHECK(gf->process == "gf180mcuA");
+    }
+    const auto sky = ice::drcDeckForPdk("sky130A");
+    if (sky) {
+        CHECK(sky->engine == "klayout");
+        CHECK(sky->process == "sky130A");
+    }
+}
+
 TEST_CASE("gdscheck process and argument mapping is stable") {
     CHECK(ice::gdsCheckProcessForPdk("ihp.sg13g2") == "ihp-sg13g2");
     CHECK(ice::gdsCheckProcessForPdk("IHP SG13G2") == "ihp-sg13g2");

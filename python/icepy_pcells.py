@@ -1,531 +1,18 @@
-"""IHP PCell runtime for :mod:`icepy`.
+"""Package PCell runtime for :mod:`icepy`.
 
-The upstream IHP PyCell implementations are kept in the IHP checkout and are not
-copied into ICE. This module provides the ICE-side runtime:
-
-* bootstrap the IHP pure-Python CNI/PyCell layer,
-* evaluate a PCell with parameters,
-* transfer the resulting polygons into an ``icepy`` project/layout cell.
-
-The ``main_cli`` entry point is the command-line contract used by the IHP
-package's ``layout/devices/generator.py``.
+ICE-native package PCells live in ``<package>/layout/devices/pcell/`` and
+build geometry through the normal ``icepy`` layout builder. This module is
+technology-neutral: PDK-specific runtimes, such as the IHP PyCell bridge, live
+inside their own package.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
+import importlib.util
 import json
-import os
-import re
 import sys
-import types
 from pathlib import Path
-
-# Layers used by the PyCell library but missing from the compact CNI tech JSON.
-# Values come from ihp/klayout/tech/layers.lyp in the IHP repository.
-EXTRA_LAYERS = {
-    "EXTBlock": (111, 0),
-    "EXTBlock.drawing": (111, 0),
-    "RES": (24, 0),
-    "RES.drawing": (24, 0),
-    "dfpad": (41, 0),
-    "dfpad.drawing": (41, 0),
-    "dfpad.sbump": (41, 36),
-    "HeatRes": (52, 0),
-    "HeatRes.drawing": (52, 0),
-    "IND.text": (27, 25),
-    "LBE.drawing": (157, 0),
-    "NoRCX.drawing": (148, 0),
-    "Activ.nofill": (1, 23),
-    "GatPoly.nofill": (5, 23),
-    "Metal1.nofill": (8, 23),
-    "Metal2.nofill": (10, 23),
-    "Metal3.nofill": (30, 23),
-    "Metal4.nofill": (50, 23),
-    "Metal5.nofill": (67, 23),
-    "TopMetal1.nofill": (126, 23),
-    "TopMetal2.nofill": (134, 23),
-    "Activ.noqrc": (1, 28),
-    "GatPoly.noqrc": (5, 28),
-    "Metal1.noqrc": (8, 28),
-    "Metal2.noqrc": (10, 28),
-    "Metal3.noqrc": (30, 28),
-    "Metal4.noqrc": (50, 28),
-    "Metal5.noqrc": (67, 28),
-    "TopMetal1.noqrc": (126, 28),
-    "TopMetal2.noqrc": (134, 28),
-}
-
-META_PARAMETERS = {"cdf_version", "Display"}
-DEFAULT_PDK = "ihp.sg13g2"
-
-# Bare numbers entered for geometry parameters are interpreted as micrometers.
-LENGTH_PARAMETERS = {
-    "w",
-    "ws",
-    "l",
-    "le",
-    "we",
-    "d",
-    "s",
-    "ps",
-    "diameter",
-    "passEncl",
-    "edgeBox",
-    "STI",
-    "baspolyx",
-    "bipwinx",
-    "bipwiny",
-    "empolyx",
-    "empolyy",
-    "wfeed",
-    "p",
-    "pc",
-    "Wmin",
-    "Lmin",
-    "PSmin",
-    "Dmin",
-    "Smin",
-    "CMetY1",
-    "CMetY2",
-}
-BARE_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
-
-
-def normalize_override(name: str, value: str, default) -> str:
-    if not isinstance(value, str) or not BARE_NUMBER.match(value.strip()):
-        return value
-    if name not in LENGTH_PARAMETERS:
-        return value
-    # Inductor "l" is inductance, not length. Its default is in henries.
-    if (
-        name == "l"
-        and isinstance(default, str)
-        and default.endswith(("f", "p", "n", "u", "m"))
-    ):
-        if default.endswith(("p", "f")):
-            return value
-    return value + "u"
-
-
-def find_ihp_root(explicit: str | None = None) -> Path:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit))
-    env = os.environ.get("ICE_IHP_ROOT")
-    if env:
-        candidates.append(Path(env))
-    script_dir = Path(__file__).resolve().parent
-    candidates.extend(
-        [
-            script_dir.parent.parent / "IHP",
-            Path.cwd() / "IHP",
-            Path.cwd().parent / "IHP",
-            Path.home() / "repositories" / "IHP",
-        ]
-    )
-    for candidate in candidates:
-        candidate = candidate.expanduser().resolve()
-        if (candidate / "cni").is_dir() and (
-            candidate / "ihp" / "refs" / "ihp_pycell"
-        ).is_dir():
-            return candidate
-    raise RuntimeError(
-        "IHP source root was not found. Set ICE_IHP_ROOT or pass --ihp-root "
-        "to a checkout containing cni/ and ihp/refs/ihp_pycell/."
-    )
-
-
-def bootstrap(ihp_root: Path):
-    ihp_root = Path(ihp_root).resolve()
-    sys.path.insert(0, str(ihp_root))
-    import cni  # noqa: F401  (registers SG13_dev)
-    from cni.tech import Tech
-
-    pycell_dir = ihp_root / "ihp" / "refs" / "ihp_pycell"
-    if "ihp_pycell" not in sys.modules:
-        package = types.ModuleType("ihp_pycell")
-        package.__path__ = [str(pycell_dir)]  # type: ignore[attr-defined]
-        sys.modules["ihp_pycell"] = package
-
-    tech = Tech.get("SG13_dev")
-    tech.stream_layers().update(EXTRA_LAYERS)
-    return tech
-
-
-def create_wrapper(tech, module_name: str, class_name: str):
-    from cni.dlo import PCellWrapper
-
-    module = importlib.import_module("ihp_pycell." + module_name)
-    implementation = getattr(module, class_name)()
-    return PCellWrapper(impl=implementation, tech=tech)
-
-
-def value_text(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def parameter_specs(wrapper) -> list[dict[str, str]]:
-    specs: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for declaration in wrapper.param_decls:
-        if declaration.name in seen or declaration.name in META_PARAMETERS:
-            continue
-        seen.add(declaration.name)
-        specs.append(
-            {
-                "name": declaration.name,
-                "value": value_text(declaration.default),
-                "description": declaration.description or declaration.name,
-            }
-        )
-    return specs
-
-
-def parse_override(value: str, default):
-    if isinstance(default, bool):
-        return value.strip().lower() in {"1", "true", "yes", "on", "selected", "all"}
-    if isinstance(default, int):
-        return int(float(value))
-    if isinstance(default, float):
-        return float(value)
-    return value
-
-
-def parameter_values(wrapper, overrides: dict[str, str]):
-    values = []
-    for declaration in wrapper.param_decls:
-        if declaration.name in overrides:
-            value = normalize_override(
-                declaration.name, overrides[declaration.name], declaration.default
-            )
-        else:
-            value = declaration.default
-        if isinstance(value, str):
-            value = parse_override(value, declaration.default)
-        values.append(value)
-    return values
-
-
-def _produce(
-    ihp_root: Path, module_name: str, class_name: str, overrides: dict[str, str]
-):
-    import pya
-
-    tech = bootstrap(ihp_root)
-    wrapper = create_wrapper(tech, module_name, class_name)
-    layout = pya.Layout()
-    cell = layout.create_cell(class_name)
-    values = parameter_values(wrapper, overrides)
-    wrapper.produce(layout=layout, layers={}, parameters=values, cell=cell)
-    return tech, wrapper, values, layout, cell
-
-
-def _extract_pya_polygons(layout, cell):
-    import pya
-
-    polygons = []
-    for layer_index in layout.layer_indexes():
-        info = layout.get_info(layer_index)
-        iterator = cell.begin_shapes_rec(layer_index)
-        region = pya.Region()
-        found = False
-        while not iterator.at_end():
-            shape = iterator.shape()
-            if shape.is_box():
-                region.insert(shape.box)
-                found = True
-            elif shape.is_polygon():
-                region.insert(shape.polygon)
-                found = True
-            elif shape.is_path():
-                try:
-                    region.insert(shape.path.polygon())
-                    found = True
-                except Exception:
-                    pass
-            iterator.next()
-        if not found:
-            continue
-        region.merge()
-        for polygon in region.each():
-            simple = polygon.to_simple_polygon()
-            points = [(point.x, point.y) for point in simple.each_point()]
-            if len(points) >= 3:
-                polygons.append(
-                    {"number": info.layer, "datatype": info.datatype, "points": points}
-                )
-    if not polygons:
-        raise RuntimeError("the PyCell produced no polygon geometry")
-    return polygons
-
-
-def _layer_names(tech):
-    result = {}
-    for name, value in tech.stream_layers().items():
-        current = result.get(value)
-        if current is None:
-            result[value] = str(name)
-            continue
-        # Prefer the compact base name (Metal1) over a datatype-qualified alias
-        # (Metal1.drawing) when both describe the same stream layer.
-        if "." in current and "." not in str(name):
-            result[value] = str(name)
-        elif "." not in current and "." in str(name):
-            continue
-        elif len(str(name)) < len(current):
-            result[value] = str(name)
-    return result
-
-
-def _layer_name(reverse, number: int, datatype: int) -> str:
-    name = reverse.get((number, datatype))
-    if name:
-        return str(name)
-    return f"Layer {number} (dt {datatype})" if datatype else f"Layer {number}"
-
-
-def _pin_side(rectangle: dict, bounds) -> str:
-    left, bottom, right, top = bounds
-    center_x = rectangle["x"] + rectangle["width"] / 2
-    center_y = rectangle["y"] + rectangle["height"] / 2
-    distances = {
-        "left": abs(center_x - left),
-        "right": abs(right - center_x),
-        "bottom": abs(center_y - bottom),
-        "top": abs(top - center_y),
-    }
-    minimum = min(distances.values())
-    for side in ("top", "bottom", "right", "left"):
-        if distances[side] == minimum:
-            return side
-    return "left"
-
-
-def _pin_direction(name: str) -> str:
-    upper = name.upper()
-    if upper in {"G", "B", "IN", "VIN"} or upper.startswith("IN"):
-        return "input"
-    if upper in {"Y", "OUT", "VOUT"} or upper.startswith("OUT"):
-        return "output"
-    return "inout"
-
-
-def _extract_ihp_ports(wrapper, cell, tech) -> list[dict]:
-    """Read terminal pins from the IHP PyCell cell context."""
-    implementation = getattr(wrapper, "_impl", None)
-    contexts = getattr(implementation, "_cellContexts", {}) if implementation else {}
-    context = contexts.get(cell)
-    if context is None:
-        return []
-
-    bounds = None
-    try:
-        box = cell.bbox()
-        if box is not None:
-            bounds = (box.left, box.bottom, box.right, box.top)
-    except Exception:
-        bounds = None
-
-    stream_layers = tech.stream_layers()
-    ports = []
-    seen = set()
-    for pin in getattr(context, "pins", {}).values():
-        name = pin.getName()
-        if not name or name in seen:
-            continue
-        bbox = pin.getBBox()
-        box = getattr(bbox, "box", None) if bbox is not None else None
-        if box is None:
-            continue
-        layer_number = None
-        datatype = 0
-        for layer in getattr(pin, "_layers", []):
-            stream = stream_layers.get(layer.getLayerName())
-            if stream is not None:
-                layer_number, datatype = stream
-                break
-        if layer_number is None:
-            continue
-        rectangle = {
-            "x": int(round(box.left * 1000)),
-            "y": int(round(box.bottom * 1000)),
-            "width": int(round((box.right - box.left) * 1000)),
-            "height": int(round((box.top - box.bottom) * 1000)),
-        }
-        if rectangle["width"] <= 0 or rectangle["height"] <= 0:
-            continue
-        if bounds is None:
-            bounds = (
-                rectangle["x"],
-                rectangle["y"],
-                rectangle["x"] + rectangle["width"],
-                rectangle["y"] + rectangle["height"],
-            )
-        ports.append(
-            {
-                "name": name,
-                "layer": int(layer_number),
-                "datatype": int(datatype),
-                "rectangle": rectangle,
-                "direction": _pin_direction(name),
-                "side": _pin_side(rectangle, bounds),
-                "label": name,
-            }
-        )
-        seen.add(name)
-    return ports
-
-
-def generate_cell(
-    project,
-    cell_name: str,
-    ihp_root: str | Path | None,
-    module_name: str,
-    class_name: str,
-    parameters: dict[str, str] | None = None,
-    *,
-    pdk: str = DEFAULT_PDK,
-    library: bool = True,
-    device: str | None = None,
-):
-    """Generate one IHP PCell into an ``icepy.Project`` layout cell.
-
-    Returns the generated ``icepy.LayoutCell`` snapshot. The project keeps the
-    real cell and can save it normally.
-    """
-    root = find_ihp_root(str(ihp_root) if ihp_root else None)
-    tech, wrapper, values, layout, pya_cell = _produce(
-        root, module_name, class_name, parameters or {}
-    )
-    reverse = _layer_names(tech)
-    builder = project.create_layout_cell(cell_name, pdk)
-    builder.set_library(library)
-    builder.set_device(device or class_name)
-    for declaration, value in zip(wrapper.param_decls, values):
-        if declaration.name in META_PARAMETERS:
-            continue
-        builder.parameter(declaration.name, value_text(value))
-    for polygon in _extract_pya_polygons(layout, pya_cell):
-        layer = _layer_name(reverse, polygon["number"], polygon["datatype"])
-        builder.layer(layer, polygon["number"], polygon["datatype"])
-        points = [make_point(x, y) for x, y in polygon["points"]]
-        builder.polygon(layer, points)
-    for port in _extract_ihp_ports(wrapper, pya_cell, tech):
-        layer = _layer_name(reverse, port["layer"], port["datatype"])
-        builder.layer(layer, port["layer"], port["datatype"])
-        rectangle = port["rectangle"]
-        builder.port(
-            port["name"],
-            layer,
-            rectangle["x"],
-            rectangle["y"],
-            rectangle["width"],
-            rectangle["height"],
-            direction=port["direction"],
-            side=port["side"],
-            label=port["label"],
-        )
-    return builder.cell()
-
-
-def make_point(x, y):
-    import icepy
-
-    return icepy.LayoutPoint(int(x), int(y))
-
-
-def generate_geometry(
-    ihp_root: str | Path | None,
-    module_name: str,
-    class_name: str,
-    parameters: dict[str, str] | None = None,
-) -> dict:
-    """Generate a PCell through ``icepy`` and return the legacy JSON geometry."""
-    import icepy
-
-    root = find_ihp_root(str(ihp_root) if ihp_root else None)
-    tech = bootstrap(root)
-    stream_by_name = {str(name): value for name, value in tech.stream_layers().items()}
-    project = icepy.new_project(class_name)
-    cell = generate_cell(
-        project,
-        class_name,
-        root,
-        module_name,
-        class_name,
-        parameters,
-        pdk=DEFAULT_PDK,
-        library=True,
-        device=class_name,
-    )
-    layers_by_id = {layer.id: layer for layer in project.layers}
-    shapes = []
-    for shape in cell.shapes:
-        layer = layers_by_id.get(shape.layer)
-        name = layer.name if layer is not None else ""
-        number, datatype = stream_by_name.get(
-            name, (layer.number if layer else 0, layer.datatype if layer else 0)
-        )
-        points = [[point.x, point.y] for point in shape.polygon]
-        if len(points) < 3:
-            continue
-        shapes.append(
-            {"layer": int(number), "datatype": int(datatype), "points": points}
-        )
-    if not shapes:
-        raise RuntimeError(
-            "the PyCell produced no polygon geometry after transfer to icepy"
-        )
-    ports = []
-    for port in cell.ports:
-        layer = layers_by_id.get(port.layer)
-        name = layer.name if layer is not None else ""
-        number, datatype = stream_by_name.get(
-            name, (layer.number if layer else 0, layer.datatype if layer else 0)
-        )
-        ports.append(
-            {
-                "name": port.name,
-                "layer": int(number),
-                "datatype": int(datatype),
-                "rectangle": {
-                    "x": port.rectangle.x,
-                    "y": port.rectangle.y,
-                    "width": port.rectangle.width,
-                    "height": port.rectangle.height,
-                },
-                "direction": port_direction_text(port.direction),
-                "side": port_side_text(port.side),
-                "label": port.label or port.name,
-            }
-        )
-    bounds = cell.bounds
-    if bounds is None:
-        raise RuntimeError("the PyCell produced an empty bounding box")
-    return {
-        "bounds": [
-            bounds.x,
-            bounds.y,
-            bounds.x + bounds.width,
-            bounds.y + bounds.height,
-        ],
-        "shapes": shapes,
-        "ports": ports,
-    }
-
-
-def parameter_specs_for(ihp_root: str | Path | None, module_name: str, class_name: str):
-    root = find_ihp_root(str(ihp_root) if ihp_root else None)
-    tech = bootstrap(root)
-    wrapper = create_wrapper(tech, module_name, class_name)
-    return parameter_specs(wrapper)
-
 
 # ---------------------------------------------------------------------------
 # Package-local PCell runtime
@@ -745,8 +232,7 @@ class PackagePcell:
 
     Packages supply a logical layer map and a parameter list. The geometry
     templates below are deliberately technology-neutral: they only use the
-    layers the package declares, so the same device model works for IHP,
-    Sky130, and GF180MCU packages.
+    layers the package declares, so the same device model works across PDKs.
     """
 
     name = ""
@@ -771,6 +257,15 @@ class PackagePcell:
     contact_size = 170
     contact_spacing = 200
     contact_margin = 100
+    # met1 -> met2 cut for stacked passives. Packages whose upper-metal via
+    # rules differ override it (GF180MCU via1 is 0.26 um).
+    via_size = 150
+    # Per cut layer (size, enclosure) overrides for stacked vias. SKY130 sizes
+    # grow with the metal level and via4 needs a 0.31 um enclosure.
+    via_rules = {}
+    # Smallest legal top-metal pad/plate (width and height). SKY130 met5 needs
+    # 1.6 um width and 4 um^2 area, so a smaller stack must widen its top pad.
+    top_metal_min_size = 0
 
     def __init__(self, values: dict[str, str] | None = None):
         self.values = package_parameter_values(self.parameters, values or {})
@@ -903,6 +398,12 @@ class PackagePcell:
         margin = max(margin, 0)
         usable_w = int(width) - 2 * margin
         usable_h = int(height) - 2 * margin
+        if usable_w < size or usable_h < size:
+            # Pad too small for the margin: drop the margin instead of silently
+            # emitting no cut, which would leave the terminal floating.
+            margin = 0
+            usable_w = int(width)
+            usable_h = int(height)
         if usable_w < size or usable_h < size:
             return
         columns = max(1, (usable_w + spacing) // (size + spacing))
@@ -1135,12 +636,13 @@ class PackagePcell:
             or self.boolean("guard_ring")
             or self.text("bulk").lower() in {"guard ring", "gaurd ring"}
         ):
+            guard_gap = max(bus_gap, 600)
             self.build_guard_ring(
                 builder,
-                source_bus_x - bus_gap,
-                -enclosure - gate_extension - bus_gap,
-                tap_right - source_bus_x + 2 * bus_gap,
-                poly_top + enclosure + gate_extension + 2 * bus_gap,
+                source_bus_x - guard_gap,
+                -enclosure - gate_extension - guard_gap,
+                tap_right - source_bus_x + 2 * guard_gap,
+                poly_top + enclosure + gate_extension + 2 * guard_gap,
                 max(bus_width, 300),
             )
 
@@ -1195,23 +697,27 @@ class PackagePcell:
         width = max(self.um("w", 0.5), 100)
         body = self.body_layer
         head = max(length // 4, 200)
-        contact = max(min(width // 2, 200), 100)
+        reach = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(length // 2, 100),
+        )
         self.rect(builder, body, 0, 0, length, width)
-        self.rect(builder, "li1", -head, 0, head, width)
-        self.rect(builder, "li1", length, 0, head, width)
-        self.rect(builder, "met1", -head, -100, head + 100, width + 200)
-        self.rect(builder, "met1", length - 100, -100, head + 100, width + 200)
-        self.rect(
-            builder, "li1", -head + 100, width // 2 - contact // 2, contact, contact
-        )
-        self.rect(
-            builder,
-            "li1",
-            length + head - 100 - contact,
-            width // 2 - contact // 2,
-            contact,
-            contact,
-        )
+        # Both terminals are contacted on the body itself; the pad, the contact
+        # stack, and the body must all overlap or the pin metal floats.
+        if body in ("nwell", "pwell"):
+            # A well resistor is tapped through an ohmic diffusion tap; the well
+            # itself cannot take a contact.
+            tap = "nplus" if self.doping == "n" else "pplus"
+            for start in (0, length - reach):
+                self.rect(builder, "diff", start, 0, reach, width)
+                if tap in self.layers:
+                    self.rect(builder, tap, start - 100, -100, reach + 200, width + 200)
+                self.contact_stack(builder, start, 0, reach, width)
+        elif body != "met1":
+            self.contact_stack(builder, 0, 0, reach, width)
+            self.contact_stack(builder, length - reach, 0, reach, width)
+        self.rect(builder, "met1", -head, -100, head + reach, width + 200)
+        self.rect(builder, "met1", length - reach, -100, head + reach, width + 200)
         if self.res_layer in self.layers:
             self.rect(builder, self.res_layer, -200, -200, length + 400, width + 400)
         if self.doping == "n" and "nwell" in self.layers:
@@ -1219,15 +725,23 @@ class PackagePcell:
         elif self.doping == "p" and "pwell" in self.layers:
             self.rect(builder, "pwell", -head, -300, length + 2 * head, width + 600)
         self.port(
-            builder, "1", "met1", -head, -100, head + 100, width + 200, "inout", "left"
+            builder,
+            "1",
+            "met1",
+            -head,
+            -100,
+            head + reach,
+            width + 200,
+            "inout",
+            "left",
         )
         self.port(
             builder,
             "2",
             "met1",
-            length - 100,
+            length - reach,
             -100,
-            head + 100,
+            head + reach,
             width + 200,
             "inout",
             "right",
@@ -1256,22 +770,35 @@ class PackagePcell:
             max(length - 400, 100),
             max(width - 400, 100),
         )
-        self.rect(builder, bottom, -200, width // 2 - 100, 200, 200)
-        self.rect(builder, top, length, width // 2 - 100, 200, 200)
+        # Terminal tabs must overlap their plate. A tab placed flush against an
+        # inset plate leaves a sub-rule gap that only shows up once metal is
+        # routed to the pin (metal spacing / notch violations).
+        self.rect(builder, bottom, -200, width // 2 - 100, 300, 200)
+        self.rect(builder, top, max(length - 300, 0), width // 2 - 100, 300, 200)
         self.port(
-            builder, "1", bottom, -200, width // 2 - 100, 200, 200, "inout", "left"
+            builder, "1", bottom, -200, width // 2 - 100, 300, 200, "inout", "left"
         )
         self.port(
-            builder, "2", top, length, width // 2 - 100, 200, 200, "inout", "right"
+            builder,
+            "2",
+            top,
+            max(length - 300, 0),
+            width // 2 - 100,
+            300,
+            200,
+            "inout",
+            "right",
         )
 
     def build_vpp_cap(self, builder):
         length = max(self.um("l", self.number("w", 4.0)), 800)
         width = max(self.um("h", self.number("w", 4.0)), 800)
+        plates = []
+        max_inset = max(0, (min(length, width) - self.top_metal_min_size) // 2)
         for index, layer in enumerate(("met1", "met2", "met3", "met4", "met5")):
             if layer not in self.layers or index > 4:
                 continue
-            inset = index * 100
+            inset = min(index * 100, max_inset)
             self.rect(
                 builder,
                 layer,
@@ -1280,73 +807,141 @@ class PackagePcell:
                 max(length - 2 * inset, 100),
                 max(width - 2 * inset, 100),
             )
-        self.rect(builder, "met1", -200, width // 2 - 100, 200, 200)
-        top_layer = "met5" if "met5" in self.layers else "met4"
+            plates.append((layer, inset))
+        # Both terminal tabs overlap their plate; a tab flush with the inset top
+        # plate would leave a metal gap at the pin.
+        top_layer, top_inset = plates[-1] if plates else ("met1", 0)
+        self.rect(builder, "met1", -200, width // 2 - 100, 300, 200)
         self.rect(
             builder,
             top_layer,
-            length,
+            max(length - top_inset - 300, 0),
             width // 2 - 100,
-            200,
+            300,
             200,
         )
         self.port(
-            builder, "1", "met1", -200, width // 2 - 100, 200, 200, "inout", "left"
+            builder, "1", "met1", -200, width // 2 - 100, 300, 200, "inout", "left"
         )
         self.port(
             builder,
             "2",
             top_layer,
-            length,
+            max(length - top_inset - 300, 0),
             width // 2 - 100,
-            200,
+            300,
             200,
             "inout",
             "right",
         )
 
     def build_var_cap(self, builder):
-        length = max(self.um("l", 1.0), 100)
-        width = max(self.um("w", 2.0), 200)
-        self.rect(builder, "nwell", -300, -300, length + 600, width + 600)
+        """MOS varactor: poly gate plate over an n-well diffusion.
+
+        The gate is contacted on the poly finger, the body on the diffusion; the
+        body terminal is raised to met2 over a via array.
+        """
+        length = max(self.um("l", 1.0), 400)
+        width = max(self.um("w", 2.0), 400)
+        tap = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(length // 2, 100),
+        )
+        pad = min(max(self.contact_size + 2 * self.contact_margin, 300), width)
+        via = "via" if "via" in self.layers else "via1"
+        middle = width // 2 - pad // 2
+        self.rect(
+            builder, "nwell", -length // 2 - 300, -300, length + 600, width + 600
+        )
         self.rect(builder, "diff", 0, 0, length, width)
-        self.rect(builder, "poly", -length // 2, -200, length, width + 400)
-        self.rect(builder, "li1", 100, width // 2 - 100, max(length - 200, 100), 200)
-        self.rect(builder, "met1", -length // 2 - 100, -300, 100, width + 600)
-        self.rect(builder, "met2", length // 2, -300, 100, width + 600)
+        self.rect(builder, "poly", -length // 2 - tap, -200, length + tap, width + 400)
+        # Gate terminal on the poly finger.
+        self.contact_stack(builder, -length // 2 - tap, middle, tap, pad)
+        self.rect(
+            builder, "met1", -length // 2 - tap, middle - 50, tap + 100, pad + 100
+        )
         self.port(
             builder,
             "1",
             "met1",
-            -length // 2 - 100,
-            -300,
-            100,
-            width + 600,
+            -length // 2 - tap,
+            middle - 50,
+            tap + 100,
+            pad + 100,
             "inout",
             "left",
         )
+        # Body terminal on the diffusion, raised to met2.
+        self.contact_stack(builder, length - tap, middle, tap, pad)
+        self.rect(builder, "met1", length - tap, middle - 50, tap + 300, pad + 100)
+        via_size = self.via_cut_size(via)
+        self.rect(
+            builder,
+            via,
+            length - tap + (tap - via_size) // 2,
+            middle + (pad - via_size) // 2,
+            via_size,
+            via_size,
+        )
+        self.rect(builder, "met2", length - tap, middle - 50, tap + 300, pad + 100)
         self.port(
-            builder, "2", "met2", length // 2, -300, 100, width + 600, "inout", "right"
+            builder,
+            "2",
+            "met2",
+            length - tap,
+            middle - 50,
+            tap + 300,
+            pad + 100,
+            "inout",
+            "right",
         )
 
     def build_diode(self, builder):
+        """Two-terminal diode: both terminals are contacted on the diffusion."""
         width = max(self.um("w", 2.0), 300)
         height = max(self.um("h", self.number("w", 2.0)), 300)
+        tap = min(
+            max(self.contact_size + 2 * self.contact_margin, 300),
+            max(width // 3, 100),
+        )
+        pad = min(max(self.contact_size + 2 * self.contact_margin, 300), height)
         well = "nwell" if self.doping == "n" else "pwell"
         self.rect(builder, well, -300, -300, width + 600, height + 600)
         self.rect(builder, "diff", 0, 0, width, height)
-        self.rect(builder, "li1", 100, height // 2 - 100, width - 200, 200)
-        self.rect(builder, "met1", -300, height // 2 - 150, 300, 300)
-        self.rect(builder, "met1", width, height // 2 - 150, 300, 300)
+        middle = height // 2 - pad // 2
+        # Anode: contacts on the left end of the diffusion, pad overhanging left.
+        self.contact_stack(builder, 0, middle, tap, pad)
+        self.rect(builder, "met1", -300, middle - 50, 300 + tap + 50, pad + 100)
+        # Cathode: contacts on the right end of the diffusion.
+        self.contact_stack(builder, width - tap, middle, tap, pad)
+        self.rect(
+            builder, "met1", width - tap - 50, middle - 50, tap + 350, pad + 100
+        )
         if "nplus" in self.layers:
             self.rect(builder, "nplus", 0, 0, width // 2, height)
         if "pplus" in self.layers:
             self.rect(builder, "pplus", width // 2, 0, width // 2, height)
         self.port(
-            builder, "A", "met1", -300, height // 2 - 150, 300, 300, "inout", "left"
+            builder,
+            "A",
+            "met1",
+            -300,
+            middle - 50,
+            300 + tap + 50,
+            pad + 100,
+            "inout",
+            "left",
         )
         self.port(
-            builder, "K", "met1", width, height // 2 - 150, 300, 300, "inout", "right"
+            builder,
+            "K",
+            "met1",
+            width - tap - 50,
+            middle - 50,
+            tap + 350,
+            pad + 100,
+            "inout",
+            "right",
         )
 
     def build_bjt(self, builder):
@@ -1414,7 +1009,9 @@ class PackagePcell:
             # li1 -> met1 contact plus the terminal pad
             pad_x = x + tap_width // 2 - pad // 2
             pad_y = size // 2 - pad // 2
-            self.rect(builder, "mcon", pad_x + pad // 2 - cut // 2, pad_y + pad // 2 - cut // 2, cut, cut)
+            # Contact stack from the tap up to the terminal pad. Packages
+            # without li1 (GF180MCU) cut straight to metal1.
+            self.contact_stack(builder, pad_x, pad_y, pad, pad, cut)
             self.rect(builder, "met1", pad_x, pad_y, pad, pad)
 
         # Terminals are ordered base, collector, emitter so a diode connected
@@ -1424,15 +1021,64 @@ class PackagePcell:
         self.port(builder, "C", "met1", pads[1][0], pads[1][1], pad, pad, "inout", "top")
         self.port(builder, "E", "met1", pads[2][0], pads[2][1], pad, pad, "inout", "right")
 
+    def via_cut_for(self, index: int) -> str:
+        """Cut layer joining stack metal ``index`` to ``index + 1``.
+
+        SKY130 names its first cut ``via`` and the rest ``via2``.., GF180MCU
+        uses ``via1``.., so both spellings are probed.
+        """
+        for candidate in (f"via{index}", "via"):
+            if candidate in self.layers:
+                return candidate
+        return ""
+
+    def via_cut_size(self, layer: str) -> int:
+        rule = self.via_rules.get(layer)
+        return int(rule[0]) if rule else int(self.via_size)
+
+    def via_cut_enclosure(self, layer: str) -> int:
+        rule = self.via_rules.get(layer)
+        return int(rule[1]) if rule else int(self.contact_margin)
+
     def build_via_stack(self, builder):
         width = max(self.um("w", 1.0), 200)
         height = max(self.um("h", 1.0), 200)
-        for layer in self.stack_layers:
-            if layer in self.layers:
-                self.rect(builder, layer, 0, 0, width, height)
-        for layer in ("met1", "met2", "met3", "met4"):
-            if layer in self.layers:
-                self.rect(builder, layer, width // 2 - 100, height // 2 - 100, 200, 200)
+        layers = [layer for layer in self.stack_layers if layer in self.layers]
+        cuts = [self.via_cut_for(index) for index in range(len(layers))]
+        # A landing pad must enclose every cut it hosts, and the top metal also
+        # has to respect the package minimum feature size.
+        spans = []
+        for index in range(len(layers)):
+            span_w, span_h = width, height
+            for cut_index in (index, index + 1):
+                cut = cuts[cut_index] if cut_index < len(cuts) else ""
+                if not cut:
+                    continue
+                need = self.via_cut_size(cut) + 2 * self.via_cut_enclosure(cut)
+                span_w = max(span_w, need)
+                span_h = max(span_h, need)
+            if index == len(layers) - 1:
+                span_w = max(span_w, self.top_metal_min_size)
+                span_h = max(span_h, self.top_metal_min_size)
+            spans.append((span_w, span_h))
+        for (span_w, span_h), layer in zip(spans, layers):
+            self.rect(builder, layer, 0, 0, span_w, span_h)
+        for index, cut in enumerate(cuts[:-1]):
+            if not cut:
+                continue
+            # One centred cut per level, centred inside the smaller of the two
+            # pads: no spacing rule applies and both enclosures are met.
+            size = self.via_cut_size(cut)
+            inner_w = min(spans[index][0], spans[index + 1][0])
+            inner_h = min(spans[index][1], spans[index + 1][1])
+            self.rect(
+                builder,
+                cut,
+                (inner_w - size) // 2,
+                (inner_h - size) // 2,
+                size,
+                size,
+            )
 
     def build_guard_ring(
         self, builder, x=0, y=0, width=2000, height=2000, thickness=300
@@ -1455,14 +1101,20 @@ class PackagePcell:
         self.build_guard_ring(builder, 0, 0, width, height, max(width // 40, 300))
 
     def build_spiral(self, builder):
+        """Stylised square spiral: one trace-width ring per turn.
+
+        Every piece is at least one trace wide so the coil stays inside the
+        metal width and area rules of the package.
+        """
         turns = max(self.integer("turns", self.turns), 1)
         pitch = max(self.um("pitch", 2.0), 500)
         width = max(self.um("w", 1.0), 100)
+        radius = max(pitch - width, width)
         for turn in range(turns):
             offset = turn * pitch
-            self.rect(builder, "met1", offset, offset, width, width)
-            self.rect(builder, "met1", offset, offset, width, 100)
-            self.rect(builder, "met2", offset + width, offset + width // 2, 100, 100)
+            self.rect(builder, "met1", offset, offset, radius, width)
+            self.rect(builder, "met1", offset, offset, width, radius)
+            self.rect(builder, "met2", offset + width, offset + width, width, width)
 
 
 def package_main_cli(argv: list[str] | None = None) -> int:
@@ -1504,58 +1156,13 @@ def package_main_cli(argv: list[str] | None = None) -> int:
         return 1
 
 
-def main_cli(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ihp-root")
-    parser.add_argument("--module", required=True)
-    parser.add_argument("--class", dest="class_name", required=True)
-    parser.add_argument("--params-file")
-    parser.add_argument("--output")
-    parser.add_argument("--list-params", action="store_true")
-    parser.add_argument(
-        "--pdk-root", help="Accepted for package-generator compatibility"
-    )
-    args = parser.parse_args(argv)
-
-    try:
-        if args.list_params:
-            output = {
-                "parameters": parameter_specs_for(
-                    args.ihp_root, args.module, args.class_name
-                )
-            }
-        else:
-            overrides = {}
-            if args.params_file:
-                overrides = json.loads(Path(args.params_file).read_text())
-                if not isinstance(overrides, dict):
-                    raise RuntimeError("--params-file must contain a JSON object")
-            output = generate_geometry(
-                args.ihp_root, args.module, args.class_name, overrides
-            )
-        text = json.dumps(output, separators=(",", ":"))
-        if args.output:
-            Path(args.output).write_text(text)
-        else:
-            print(text)
-        return 0
-    except Exception as error:  # noqa: BLE001 - CLI boundary
-        print(f"IHP PCell generation failed: {error}", file=sys.stderr)
-        return 1
-
-
 __all__ = [
-    "DEFAULT_PDK",
     "PACKAGE_DBU_PER_UM",
-    "find_ihp_root",
-    "generate_cell",
-    "generate_geometry",
+    "PackagePcell",
     "generate_package_geometry",
     "load_package_pcell_module",
-    "main_cli",
     "package_main_cli",
     "package_parameter_specs",
     "package_parameter_values",
     "package_pcell_class",
-    "parameter_specs_for",
 ]

@@ -4,14 +4,15 @@ Run from the repository root with the build directory and python/ on PYTHONPATH:
 
     PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_smoke.py
 
-If ICE_IHP_ROOT points to an IHP checkout, the IHP nmos PCell is generated
-through icepy.pcells as well.
+If the IHP package is available, its package-local PCell runtime generates the
+IHP nmos PCell through icepy as well.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 import icepy
@@ -108,18 +109,33 @@ def test_procedural_layout() -> None:
 
 
 def test_ihp_pcell_runtime() -> None:
+    package = os.environ.get("ICE_IHP_PACKAGE")
+    if not package:
+        candidates = [
+            Path.home() / "repositories" / "ice-pkg-ihp-sg13g2",
+            Path.home() / ".ice" / "packages" / "ihp.sg13g2",
+        ]
+        for candidate in candidates:
+            if candidate.is_dir():
+                package = str(candidate)
+                break
+    if not package:
+        print("IHP PCell test skipped: the IHP package was not found")
+        return
+    package_root = Path(package)
+    sys.path.insert(0, str(package_root / "layout" / "devices" / "pcell"))
+    from ihp_runtime import generate_cell
+
     root = os.environ.get("ICE_IHP_ROOT")
     if not root:
-        candidate = Path.home() / "repositories" / "IHP"
-        if candidate.is_dir():
-            root = str(candidate)
+        vendored = package_root / "vendor" / "ihp"
+        if vendored.is_dir():
+            root = str(vendored)
     if not root:
-        print(
-            "IHP PCell test skipped: ICE_IHP_ROOT is not set and no checkout was found"
-        )
+        print("IHP PCell test skipped: no IHP source tree was found")
         return
     project = icepy.new_project("icepy-pcell-smoke")
-    cell = icepy.pcells.generate_cell(
+    cell = generate_cell(
         project,
         "IHP nmos_smoke",
         root,
@@ -130,7 +146,7 @@ def test_ihp_pcell_runtime() -> None:
     assert cell.shapes
     assert cell.bounds is not None
     assert project.validate() == 0
-    print(f"IHP nmos generated {len(cell.shapes)} shapes through icepy")
+    print(f"IHP nmos generated {len(cell.shapes)} shapes through the package runtime")
 
 
 if __name__ == "__main__":

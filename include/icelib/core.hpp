@@ -470,6 +470,30 @@ struct ImplementationRun {
     std::string updatedAt;
 };
 
+// A derived trace defined by a waveform expression, for example
+// "out - in", "db(out)", or "derivative(i(v1))". Expressions only affect how
+// stored runs are displayed; the simulator output is never rewritten.
+struct SimulationDerivedTrace {
+    std::string name;
+    std::string expression;
+};
+
+// One additional stored run drawn on the same graph. `runId` is the identifier
+// written by the simulation store; the label defaults to the run variant.
+struct SimulationOverlayRun {
+    std::string runId;
+    std::string label;
+};
+
+// Persistent point annotation placed by the user on a plot.
+struct SimulationGraphMarker {
+    std::string label;
+    std::string signal;
+    double x = 0.0;
+    double y = 0.0;
+    bool hasY = false;
+};
+
 struct SimulationGraph {
     ObjectId id = 0;
     std::string name;
@@ -492,6 +516,57 @@ struct SimulationGraph {
     std::optional<double> xMax;
     std::optional<double> yMin;
     std::optional<double> yMax;
+    // Display transform: "linear", "db", or "phase".
+    std::string view = "linear";
+    // Frequency-domain view of the selected traces.
+    bool fft = false;
+    std::string fftWindow = "hann";
+    int fftPoints = 0; // 0 selects the next power of two.
+    bool showMeasurements = true;
+    std::vector<SimulationDerivedTrace> derivedTraces;
+    std::vector<SimulationOverlayRun> overlays;
+    std::vector<SimulationGraphMarker> markers;
+};
+
+// One process/temperature/supply corner for a simulation experiment. Empty
+// modelSection and parameters keep the project/PDK defaults; sourceOverrides
+// use ngspice source names such as "V1".
+struct SimulationCorner {
+    std::string name = "tt";
+    std::string modelSection;
+    double temperature = 27.0;
+    std::map<std::string, double> sourceOverrides;
+    std::map<std::string, double> parameters;
+};
+
+// One parameter sweep axis. Values are expanded as a Cartesian product.
+struct SimulationSweep {
+    std::string parameter;
+    std::vector<double> values;
+};
+
+// Deterministic Monte Carlo variation on top of the nominal run or corners.
+struct SimulationMonteCarloOptions {
+    bool enabled = false;
+    int samples = 20;
+    double temperatureSigma = 0.0;
+    double supplySigmaPercent = 0.0;
+    std::string supplySource = "V1";
+    double supplyNominal = 1.0;
+    std::map<std::string, double> parameterSigmaPercent;
+    std::uint32_t seed = 1;
+};
+
+// Declarative post-simulation measurement. Supported metrics are gain,
+// bandwidth, phase_margin, slew_rate, settling_time, and power.
+struct SimulationMeasurementSpec {
+    std::string name;
+    std::string metric;
+    std::string signal;
+    std::string input;
+    double voltage = 0.0;
+    std::optional<double> threshold;
+    double tolerance = 0.02;
 };
 
 struct SimulationItem {
@@ -500,13 +575,48 @@ struct SimulationItem {
     ObjectId schematic = 0;
     std::string simulator = "ngspice";
     std::string analysis = "transient";
+    // Transient analysis window. `start` is optional (zero keeps the ngspice
+    // default) and `stop`/`step` are also reused by DC sweeps unless the
+    // dedicated DC fields are set.
+    double start = 0.0;
     double stop = 1.0;
     double step = 0.01;
     bool use_initial_conditions = false;
     std::string directives;
+    // Process/temperature/supply overrides applied to every run.
+    double temperature = 27.0;
+    std::string modelSection;
+    std::map<std::string, double> parameters;
+    std::map<std::string, double> sourceOverrides;
+    // DC sweep.
+    std::string dcSource;
+    double dcStart = 0.0;
+    double dcStop = 1.0;
+    double dcStep = 0.01;
+    // AC sweep.
+    std::string acVariation = "dec";
+    int acPoints = 10;
+    double acStart = 1.0;
+    double acStop = 1e6;
+    // Noise analysis.
+    std::string noiseOutput;
+    std::string noiseInput;
+    std::string noiseVariation = "dec";
+    int noisePoints = 10;
+    double noiseStart = 1.0;
+    double noiseStop = 1e6;
+    // Transfer-function analysis.
+    std::string tfOutput;
+    std::string tfSource;
     // Comma-separated signals requested from the simulator. Axis selections in
     // each graph reference entries in this list, or the special "time" value.
     std::string captureSignals;
+    // Optional experiment configuration. Empty corners/sweeps with Monte Carlo
+    // disabled is the normal single-run workflow.
+    std::vector<SimulationCorner> corners;
+    std::vector<SimulationSweep> sweeps;
+    SimulationMonteCarloOptions monteCarlo;
+    std::vector<SimulationMeasurementSpec> measurements;
     std::vector<SimulationGraph> graphs;
 };
 
@@ -546,6 +656,9 @@ class Project {
     std::map<ObjectId, SimulationItem> simulations;
     std::map<ObjectId, ProjectReport> reports;
 
+    // Returns a fresh object id. Ids are monotonic even when several are
+    // allocated before the objects are inserted (for example a copied symbol
+    // together with its pins).
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;
     std::vector<Diagnostic> validate() const;
@@ -566,10 +679,17 @@ class Project {
     // Revision of the split files as they existed when this project was loaded
     // or last saved. Empty for a project that has never been loaded or saved.
     const std::string &sourceRevision() const noexcept { return sourceRevision_; }
+    // Adopt the disk fingerprint (root + revision) of another project. Used when
+    // a session restores an in-memory history entry (undo/redo) so that the next
+    // save is still compared against the revision that is actually on disk.
+    void adoptSourceRevisionFrom(const Project &other);
 
   private:
     mutable std::filesystem::path sourceRoot_;
     mutable std::string sourceRevision_;
+    // Highest id handed out by nextId(). Kept as a high-water mark so that ids
+    // allocated in a batch, before the objects exist, stay unique.
+    ObjectId lastIssuedId_ = 0;
 };
 
 class SelectionModel {
@@ -595,7 +715,10 @@ class ProjectSession {
     const std::vector<std::string> &history() const noexcept;
     std::size_t historyPosition() const noexcept;
     void setLastHistoryLabel(std::string label);
-    void replaceProject(Project project);
+    // Replace the session contents. Pass markDirty=false when the project was
+    // just read from disk (reload/recover), so the session is not left with a
+    // pending save that would rewrite files nobody changed.
+    void replaceProject(Project project, bool markDirty = true);
     void markDirty();
     void subscribe(Observer observer);
     void beginTransaction(std::string label);

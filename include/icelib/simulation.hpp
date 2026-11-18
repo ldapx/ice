@@ -20,10 +20,39 @@ enum class JobState { queued, running, succeeded, failed, cancelled, timed_out }
 
 struct SimulationRequest {
     std::string analysis = "transient";
+    // Transient window. Other analyses use their dedicated fields below.
+    double start = 0.0;
     double stop = 1.0;
     double step = 0.01;
     double amplitude = 1.0;
     double time_constant = 0.1;
+    // Process/temperature/supply overrides. `modelSection` rewrites the section
+    // argument of .lib lines; `sourceOverrides` become ngspice `alter` commands.
+    double temperature = 27.0;
+    std::string modelSection;
+    std::map<std::string, double> parameters;
+    std::map<std::string, double> sourceOverrides;
+    // DC sweep.
+    std::string dcSource;
+    double dcStart = 0.0;
+    double dcStop = 1.0;
+    double dcStep = 0.01;
+    // AC sweep.
+    std::string acVariation = "dec";
+    int acPoints = 10;
+    double acStart = 1.0;
+    double acStop = 1e6;
+    // Noise analysis.
+    std::string noiseOutput;
+    std::string noiseInput;
+    std::string noiseVariation = "dec";
+    int noisePoints = 10;
+    double noiseStart = 1.0;
+    double noiseStop = 1e6;
+    // Transfer-function analysis.
+    std::string tfOutput;
+    std::string tfSource;
+    std::vector<SimulationMeasurementSpec> measurements;
     std::string simulator = "ngspice";
     std::string simulator_version = "1";
     bool use_initial_conditions = false;
@@ -64,12 +93,30 @@ bool prepareMixedSignalRequest(SimulationRequest &request, const Project &projec
 // Returns true when the simulation definition changed.
 bool populateSimulationSignalsFromTraces(SimulationItem &simulation, const std::vector<SimulationTrace> &traces);
 
+struct SimulationMeasurementResult {
+    std::string name;
+    std::string metric;
+    double value = 0.0;
+    std::string unit;
+    bool valid = false;
+    std::string error;
+};
+
 struct SimulationResult {
     int schema_version = 1;
     JobState state = JobState::queued;
     std::string analysis;
+    // Primary x axis. `time` always holds the samples for compatibility;
+    // `xAxis`/`xUnit` describe what those samples mean (time, frequency,
+    // voltage sweep, operating point, ...).
+    std::string xAxis = "time";
+    std::string xUnit = "s";
     std::vector<double> time;
     std::vector<SimulationTrace> traces;
+    // Scalar results for operating point, transfer function, and integrated
+    // noise totals.
+    std::map<std::string, double> scalars;
+    std::vector<SimulationMeasurementResult> measurements;
     std::string simulator;
     std::string simulator_version;
     std::string input_fingerprint;
@@ -153,6 +200,10 @@ struct SweepParameter {
 };
 
 struct ExperimentPoint {
+    // Human-readable variant label: corner name and/or Monte Carlo sample.
+    std::string variant;
+    std::string corner;
+    int sample = 0;
     std::map<std::string, double> parameters;
     SimulationResult result;
 };
@@ -160,12 +211,33 @@ struct ExperimentPoint {
 class Experiment {
   public:
     void addParameter(std::string name, std::vector<double> values);
+    void addCorner(SimulationCorner corner);
+    void setMonteCarlo(SimulationMonteCarloOptions options);
     std::vector<ExperimentPoint> run(const SimulationRequest &base, std::chrono::milliseconds timeout,
                                      const ProgressCallback &progress = {}) const;
 
   private:
     std::vector<SweepParameter> parameters_;
+    std::vector<SimulationCorner> corners_;
+    SimulationMonteCarloOptions monteCarlo_;
 };
+
+// Build the concrete simulator request for one stored SimulationItem. This is
+// shared by the GUI, CLI, MCP, and experiment runner so all surfaces apply the
+// same netlist, PDK setup, analysis options, measurement specs, and directives.
+SimulationRequest simulationRequestForItem(const Project &project, const SimulationItem &item,
+                                           const std::filesystem::path &projectRoot = {},
+                                           std::vector<std::string> *notes = nullptr);
+
+// Returns standard TT/FF/SS-style corners declared by an installed PDK package.
+std::vector<SimulationCorner> pdkSimulationCorners(const std::string &pdkId);
+
+// Configure an Experiment from the item's sweeps, corners, and Monte Carlo
+// options, then run every combination.
+std::vector<ExperimentPoint> runSimulationExperiment(const Project &project, const SimulationItem &item,
+                                                     std::chrono::milliseconds timeout,
+                                                     const ProgressCallback &progress = {},
+                                                     const std::filesystem::path &projectRoot = {});
 
 std::string jobStateName(JobState state);
 std::string serializeSimulationResult(const SimulationResult &result);

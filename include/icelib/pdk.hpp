@@ -14,6 +14,56 @@
 
 namespace ice {
 
+// Technology-level layer semantics declared by a PDK package in
+// `technology/connectivity.json`. Names are matched case-insensitively after
+// removing a trailing `.purpose` suffix, so package data can name `met1` while
+// layout geometry uses `met1.drawing` or `met1.pin`.
+struct PdkLayerRole {
+    std::string name;
+    // One of: conductor, active, gate, via, marker, implant, well, boundary,
+    // label, text, ignored. Unknown roles leave the layer to ICE's generic
+    // name fallback.
+    std::string role;
+    // Optional sheet resistance in ohm/square. Zero means the extractor keeps
+    // its generic per-kind default.
+    double sheetResistance = 0.0;
+};
+
+struct PdkVia {
+    std::string name;
+    // Electrical layer bases connected by this cut layer.
+    std::vector<std::string> lower;
+    std::vector<std::string> upper;
+    // Minimum cut size and enclosure in nanometres. Zero means unspecified.
+    double size = 0.0;
+    double enclosure = 0.0;
+};
+
+struct PdkConnectivity {
+    // Layers in vertical routing order, from lowest to highest.
+    std::vector<std::string> routingStack;
+    std::vector<PdkLayerRole> layers;
+    std::vector<PdkVia> vias;
+    bool declared = false;
+
+    // Loads and validates a connectivity document. Throws ProjectError on
+    // malformed data.
+    static PdkConnectivity load(const std::filesystem::path &path);
+
+    // Role of a layer name, matched by exact lower-case name first and then by
+    // base name (the part before the last dot). Empty when undeclared.
+    std::string roleFor(const std::string &layerName) const;
+    // Via declaration matching a cut layer name.
+    const PdkVia *viaFor(const std::string &layerName) const;
+    // Via declaration connecting two conductor names in either order.
+    const PdkVia *viaBetween(const std::string &lower, const std::string &upper) const;
+};
+
+// Reads `technology/connectivity.json` from the installed package that provides
+// the PDK id. Returns nullopt for the generic PDK, an unknown PDK, or a package
+// without the file. Results are cached per canonical PDK id.
+std::optional<PdkConnectivity> pdkConnectivityFor(const std::string &pdkId);
+
 // One SPICE model file shipped by a PDK. `sections` contains the names defined
 // by .LIB/.lib section headers in that file.
 struct PdkModelFile {

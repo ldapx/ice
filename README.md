@@ -125,7 +125,9 @@ xmake format
 ## Documentation
 
 Full documentation is in [`docs/`](docs/) (Sphinx, Furo theme with an
-xmake-docs-inspired palette). Build it with:
+xmake-docs-inspired palette). It is split into a user guide, a developer guide,
+and project direction pages; start at [`docs/index.md`](docs/index.md). Build it
+with:
 
 ```sh
 pip install -r docs/requirements.txt
@@ -138,16 +140,11 @@ or:
 xmake docs
 ```
 
-| Page | Contents |
+| Section | Contents |
 | --- | --- |
-| Getting Started | Prerequisites, build, test, and docs build. |
-| Vision | Product purpose, principles, long-term direction. |
-| Architecture | Domain model, interfaces, adapters, subsystem contracts. |
-| GUI | Desktop shell, schematic/layout editors, interaction contracts. |
-| Roadmap | Capabilities and acceptance criteria. |
-| Capabilities | GUI / CLI / Python capability parity matrix. |
-| Packages, Simulation, Symbols, Plugins | Subsystem contracts. |
-| Documentation Guide | How the docs pages relate. |
+| User Guide | Getting started, GUI, CLI, simulation, symbols, packages, Python API, procedural layouts, MCP, and agent recipes. |
+| Developer Guide | Build/test workflow, architecture, capability parity, package/PDK authoring, plugins, and the documentation guide. |
+| Project | Product vision and implementation roadmap. |
 
 ## Project status
 

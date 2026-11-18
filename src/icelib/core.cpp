@@ -116,7 +116,8 @@ ObjectId Project::nextId() {
     }
     for (const auto &[id, _] : reports)
         update(id);
-    return highest + 1;
+    lastIssuedId_ = std::max(lastIssuedId_, highest) + 1;
+    return lastIssuedId_;
 }
 
 Coordinate Project::snap(Coordinate value) const {
@@ -689,12 +690,87 @@ std::string Project::serialize() const {
                   {"schematic", sim.schematic},
                   {"simulator", sim.simulator},
                   {"analysis", sim.analysis},
+                  {"start", sim.start},
                   {"stop", sim.stop},
                   {"step", sim.step},
                   {"use_initial_conditions", sim.use_initial_conditions},
                   {"directives", sim.directives},
+                  {"temperature", sim.temperature},
                   {"signals", sim.captureSignals},
                   {"graphs", json::array()}};
+        const auto putMap = [](json &target, const char *key, const std::map<std::string, double> &values) {
+            if (values.empty())
+                return;
+            target[key] = values;
+        };
+        if (!sim.modelSection.empty())
+            s["model_section"] = sim.modelSection;
+        putMap(s, "parameters", sim.parameters);
+        putMap(s, "source_overrides", sim.sourceOverrides);
+        if (!sim.dcSource.empty())
+            s["dc_source"] = sim.dcSource;
+        if (sim.dcStart != 0.0 || sim.dcStop != 1.0 || sim.dcStep != 0.01) {
+            s["dc_start"] = sim.dcStart;
+            s["dc_stop"] = sim.dcStop;
+            s["dc_step"] = sim.dcStep;
+        }
+        if (sim.acVariation != "dec" || sim.acPoints != 10 || sim.acStart != 1.0 || sim.acStop != 1e6) {
+            s["ac_variation"] = sim.acVariation;
+            s["ac_points"] = sim.acPoints;
+            s["ac_start"] = sim.acStart;
+            s["ac_stop"] = sim.acStop;
+        }
+        if (!sim.noiseOutput.empty() || !sim.noiseInput.empty() || sim.noiseVariation != "dec" ||
+            sim.noisePoints != 10 || sim.noiseStart != 1.0 || sim.noiseStop != 1e6) {
+            s["noise_output"] = sim.noiseOutput;
+            s["noise_input"] = sim.noiseInput;
+            s["noise_variation"] = sim.noiseVariation;
+            s["noise_points"] = sim.noisePoints;
+            s["noise_start"] = sim.noiseStart;
+            s["noise_stop"] = sim.noiseStop;
+        }
+        if (!sim.tfOutput.empty() || !sim.tfSource.empty()) {
+            s["tf_output"] = sim.tfOutput;
+            s["tf_source"] = sim.tfSource;
+        }
+        if (!sim.corners.empty()) {
+            s["corners"] = json::array();
+            for (const auto &corner : sim.corners) {
+                json entry = {{"name", corner.name}, {"temperature", corner.temperature}};
+                if (!corner.modelSection.empty())
+                    entry["model_section"] = corner.modelSection;
+                putMap(entry, "source_overrides", corner.sourceOverrides);
+                putMap(entry, "parameters", corner.parameters);
+                s["corners"].push_back(std::move(entry));
+            }
+        }
+        if (!sim.sweeps.empty()) {
+            s["sweeps"] = json::array();
+            for (const auto &sweep : sim.sweeps)
+                s["sweeps"].push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+        }
+        if (sim.monteCarlo.enabled) {
+            json mc = {{"enabled", true},
+                       {"samples", sim.monteCarlo.samples},
+                       {"temperature_sigma", sim.monteCarlo.temperatureSigma},
+                       {"supply_sigma_percent", sim.monteCarlo.supplySigmaPercent},
+                       {"supply_source", sim.monteCarlo.supplySource},
+                       {"supply_nominal", sim.monteCarlo.supplyNominal},
+                       {"seed", sim.monteCarlo.seed}};
+            putMap(mc, "parameter_sigma_percent", sim.monteCarlo.parameterSigmaPercent);
+            s["monte_carlo"] = std::move(mc);
+        }
+        if (!sim.measurements.empty()) {
+            s["measurements"] = json::array();
+            for (const auto &measurement : sim.measurements) {
+                json entry = {{"name", measurement.name},       {"metric", measurement.metric},
+                              {"signal", measurement.signal},   {"input", measurement.input},
+                              {"voltage", measurement.voltage}, {"tolerance", measurement.tolerance}};
+                if (measurement.threshold)
+                    entry["threshold"] = *measurement.threshold;
+                s["measurements"].push_back(std::move(entry));
+            }
+        }
         for (const auto &graph : sim.graphs) {
             json graphJson = {
                 {"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_signals", graph.ySignals}};
@@ -712,6 +788,31 @@ std::string Project::serialize() const {
                 graphJson["y_min"] = *graph.yMin;
             if (graph.yMax)
                 graphJson["y_max"] = *graph.yMax;
+            if (graph.view != "linear")
+                graphJson["view"] = graph.view;
+            if (graph.fft || graph.fftWindow != "hann" || graph.fftPoints != 0)
+                graphJson["fft"] = {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}};
+            if (!graph.showMeasurements)
+                graphJson["show_measurements"] = false;
+            if (!graph.derivedTraces.empty()) {
+                graphJson["derived_traces"] = json::array();
+                for (const auto &trace : graph.derivedTraces)
+                    graphJson["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+            }
+            if (!graph.overlays.empty()) {
+                graphJson["overlays"] = json::array();
+                for (const auto &overlay : graph.overlays)
+                    graphJson["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+            }
+            if (!graph.markers.empty()) {
+                graphJson["markers"] = json::array();
+                for (const auto &marker : graph.markers) {
+                    json markerJson = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+                    if (marker.hasY)
+                        markerJson["y"] = marker.y;
+                    graphJson["markers"].push_back(std::move(markerJson));
+                }
+            }
             s["graphs"].push_back(std::move(graphJson));
         }
         j["simulations"].push_back(s);
@@ -1089,10 +1190,86 @@ Project Project::deserialize(const std::string &text) {
                 sim.schematic = s.value("schematic", ObjectId{0});
                 sim.simulator = s.value("simulator", std::string{"ngspice"});
                 sim.analysis = s.value("analysis", std::string{"transient"});
+                sim.start = s.value("start", 0.0);
                 sim.stop = s.value("stop", 1.0);
                 sim.step = s.value("step", 0.01);
                 sim.use_initial_conditions = s.value("use_initial_conditions", false);
                 sim.directives = s.value("directives", std::string{});
+                sim.temperature = s.value("temperature", 27.0);
+                sim.modelSection = s.value("model_section", std::string{});
+                const auto readMap = [](const json &source, const char *key, std::map<std::string, double> &target) {
+                    if (!source.contains(key) || !source.at(key).is_object())
+                        return;
+                    for (auto entry = source.at(key).begin(); entry != source.at(key).end(); ++entry) {
+                        if (entry.value().is_number())
+                            target[entry.key()] = entry.value().get<double>();
+                    }
+                };
+                readMap(s, "parameters", sim.parameters);
+                readMap(s, "source_overrides", sim.sourceOverrides);
+                sim.dcSource = s.value("dc_source", std::string{});
+                sim.dcStart = s.value("dc_start", 0.0);
+                sim.dcStop = s.value("dc_stop", 1.0);
+                sim.dcStep = s.value("dc_step", 0.01);
+                sim.acVariation = s.value("ac_variation", std::string{"dec"});
+                sim.acPoints = s.value("ac_points", 10);
+                sim.acStart = s.value("ac_start", 1.0);
+                sim.acStop = s.value("ac_stop", 1e6);
+                sim.noiseOutput = s.value("noise_output", std::string{});
+                sim.noiseInput = s.value("noise_input", std::string{});
+                sim.noiseVariation = s.value("noise_variation", std::string{"dec"});
+                sim.noisePoints = s.value("noise_points", 10);
+                sim.noiseStart = s.value("noise_start", 1.0);
+                sim.noiseStop = s.value("noise_stop", 1e6);
+                sim.tfOutput = s.value("tf_output", std::string{});
+                sim.tfSource = s.value("tf_source", std::string{});
+                if (s.contains("corners") && s.at("corners").is_array()) {
+                    for (const auto &cornerJson : s.at("corners")) {
+                        SimulationCorner corner;
+                        corner.name = cornerJson.value("name", std::string{"tt"});
+                        corner.modelSection = cornerJson.value("model_section", std::string{});
+                        corner.temperature = cornerJson.value("temperature", 27.0);
+                        readMap(cornerJson, "source_overrides", corner.sourceOverrides);
+                        readMap(cornerJson, "parameters", corner.parameters);
+                        sim.corners.push_back(std::move(corner));
+                    }
+                }
+                if (s.contains("sweeps") && s.at("sweeps").is_array()) {
+                    for (const auto &sweepJson : s.at("sweeps")) {
+                        SimulationSweep sweep;
+                        sweep.parameter = sweepJson.value("parameter", std::string{});
+                        if (sweepJson.contains("values") && sweepJson.at("values").is_array())
+                            sweep.values = sweepJson.at("values").get<std::vector<double>>();
+                        if (!sweep.parameter.empty() && !sweep.values.empty())
+                            sim.sweeps.push_back(std::move(sweep));
+                    }
+                }
+                if (s.contains("monte_carlo") && s.at("monte_carlo").is_object()) {
+                    const auto &mc = s.at("monte_carlo");
+                    sim.monteCarlo.enabled = mc.value("enabled", false);
+                    sim.monteCarlo.samples = mc.value("samples", 20);
+                    sim.monteCarlo.temperatureSigma = mc.value("temperature_sigma", 0.0);
+                    sim.monteCarlo.supplySigmaPercent = mc.value("supply_sigma_percent", 0.0);
+                    sim.monteCarlo.supplySource = mc.value("supply_source", std::string{"V1"});
+                    sim.monteCarlo.supplyNominal = mc.value("supply_nominal", 1.0);
+                    sim.monteCarlo.seed = mc.value("seed", std::uint32_t{1});
+                    readMap(mc, "parameter_sigma_percent", sim.monteCarlo.parameterSigmaPercent);
+                }
+                if (s.contains("measurements") && s.at("measurements").is_array()) {
+                    for (const auto &measurementJson : s.at("measurements")) {
+                        SimulationMeasurementSpec measurement;
+                        measurement.name = measurementJson.value("name", std::string{});
+                        measurement.metric = measurementJson.value("metric", std::string{});
+                        measurement.signal = measurementJson.value("signal", std::string{});
+                        measurement.input = measurementJson.value("input", std::string{});
+                        measurement.voltage = measurementJson.value("voltage", 0.0);
+                        measurement.tolerance = measurementJson.value("tolerance", 0.02);
+                        if (measurementJson.contains("threshold") && measurementJson.at("threshold").is_number())
+                            measurement.threshold = measurementJson.at("threshold").get<double>();
+                        if (!measurement.name.empty() && !measurement.metric.empty())
+                            sim.measurements.push_back(std::move(measurement));
+                    }
+                }
                 sim.captureSignals = s.value("signals", std::string{});
                 if (s.contains("graphs")) {
                     for (const auto &g : s.at("graphs")) {
@@ -1120,6 +1297,50 @@ Project Project::deserialize(const std::string &text) {
                             graph.yMin = g.at("y_min").get<double>();
                         if (g.contains("y_max") && !g.at("y_max").is_null())
                             graph.yMax = g.at("y_max").get<double>();
+                        graph.view = g.value("view", std::string{"linear"});
+                        if (const auto fft = g.find("fft"); fft != g.end() && fft->is_object()) {
+                            graph.fft = fft->value("enabled", false);
+                            graph.fftWindow = fft->value("window", std::string{"hann"});
+                            graph.fftPoints = fft->value("points", 0);
+                        }
+                        graph.showMeasurements = g.value("show_measurements", true);
+                        if (const auto derived = g.find("derived_traces"); derived != g.end() && derived->is_array()) {
+                            for (const auto &entry : *derived) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationDerivedTrace trace;
+                                trace.name = entry.value("name", std::string{});
+                                trace.expression = entry.value("expression", std::string{});
+                                if (!trace.expression.empty())
+                                    graph.derivedTraces.push_back(std::move(trace));
+                            }
+                        }
+                        if (const auto overlays = g.find("overlays"); overlays != g.end() && overlays->is_array()) {
+                            for (const auto &entry : *overlays) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationOverlayRun overlay;
+                                overlay.runId = entry.value("run_id", std::string{});
+                                overlay.label = entry.value("label", std::string{});
+                                if (!overlay.runId.empty())
+                                    graph.overlays.push_back(std::move(overlay));
+                            }
+                        }
+                        if (const auto markers = g.find("markers"); markers != g.end() && markers->is_array()) {
+                            for (const auto &entry : *markers) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationGraphMarker marker;
+                                marker.label = entry.value("label", std::string{});
+                                marker.signal = entry.value("signal", std::string{});
+                                marker.x = entry.value("x", 0.0);
+                                if (entry.contains("y") && entry.at("y").is_number()) {
+                                    marker.y = entry.at("y").get<double>();
+                                    marker.hasY = true;
+                                }
+                                graph.markers.push_back(std::move(marker));
+                            }
+                        }
                         sim.graphs.push_back(std::move(graph));
                     }
                 }
@@ -1359,7 +1580,8 @@ std::string generatedAgentsGuidance() {
               "with the shell.\n\n"
            << "At the start of a session, call `ice_version` (or `ice-cli --version`) and confirm "
               "that the features you need are present. If `project_repair`, `simulation_measure`, "
-              "text-schematic support, `digital_hdl`, `mixed_signal`, or "
+              "`simulation_analyses`, `simulation_experiments`, `simulation_measurements`, "
+              "`waveform_analysis`, text-schematic support, `digital_hdl`, `mixed_signal`, or "
               "`implementation_runs` is missing, stop and ask the user to "
               "rebuild and restart ICE instead of working around the missing tools. Restart a "
               "long-lived MCP server after installing a new build.\n\n"
@@ -1598,6 +1820,11 @@ void Project::save(const std::filesystem::path &path) const {
     sourceRoot_ = root;
     sourceRevision_ = projectRevision(root);
     spdlog::info("Saved project {}", (root / "project.icepro").string());
+}
+
+void Project::adoptSourceRevisionFrom(const Project &other) {
+    sourceRoot_ = other.sourceRoot_;
+    sourceRevision_ = other.sourceRevision_;
 }
 
 std::filesystem::path Project::saveCellFile(ObjectId id) const {
@@ -1848,9 +2075,9 @@ void ProjectSession::setLastHistoryLabel(std::string label) {
     if (historyPosition_ != 0 && historyPosition_ <= historyLabels_.size())
         historyLabels_[historyPosition_ - 1] = std::move(label);
 }
-void ProjectSession::replaceProject(Project project) {
+void ProjectSession::replaceProject(Project project, bool markDirty) {
     project_ = std::move(project);
-    dirty_ = true;
+    dirty_ = markDirty;
     notify();
 }
 void ProjectSession::markDirty() {
@@ -1904,7 +2131,9 @@ bool ProjectSession::undo() {
     if (historyPosition_ == 0)
         return false;
     --historyPosition_;
-    project_ = historyStates_[historyPosition_];
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
     dirty_ = true;
     notify();
     return true;
@@ -1913,7 +2142,9 @@ bool ProjectSession::redo() {
     if (historyPosition_ >= historyLabels_.size())
         return false;
     ++historyPosition_;
-    project_ = historyStates_[historyPosition_];
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
     dirty_ = true;
     notify();
     return true;
@@ -1963,6 +2194,10 @@ BuildInfo buildInfo() {
                      "text_schematic",
                      "ngspice_log_capture",
                      "simulation_metrics",
+                     "simulation_analyses",
+                     "simulation_experiments",
+                     "simulation_measurements",
+                     "waveform_analysis",
                      "pdk_status",
                      "pdk_build",
                      "save_revision_guard",

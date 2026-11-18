@@ -358,7 +358,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         ObjectId actualId = 0;
         const auto matches = actualByName.find(normalizedIdentifier(planned.name));
         if (matches != actualByName.end()) {
-            for (const auto candidate : matches->second) {
+            for (const auto &candidate : matches->second) {
                 if (usedActual.contains(candidate))
                     continue;
                 actualId = candidate;
@@ -879,7 +879,7 @@ ObjectId schematicForLayout(const Project &project, ObjectId layoutCellId) {
         return cell == project.schematicCells.end() || layout->second.pdk.empty() ||
                layout->second.pdk == genericPdkId || cell->second.pdk.empty() || cell->second.pdk == layout->second.pdk;
     };
-    for (const auto candidate :
+    for (const auto &candidate :
          {layoutBase + "_lvs", layoutBase + "_dut", layoutBase + "_layout", layoutBase, layoutName}) {
         const auto it = byName.find(candidate);
         if (it != byName.end() && pdkMatches(it->second))

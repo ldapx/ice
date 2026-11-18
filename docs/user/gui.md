@@ -370,6 +370,35 @@ The graph toolbar has a **Load VCD** action that imports an external VCD file
 into the current simulation. Its traces replace the capture list, populate
 empty graphs, and are shown immediately without running a simulator.
 
+### Waveform analysis
+
+The plot is interactive. Drag to pan, use the mouse wheel to zoom the time or
+frequency axis, Ctrl+wheel to zoom both axes, and Shift+drag to box-zoom.
+Double-click inside the plot to reset the zoom. Click once to place cursor A
+and Shift+click to place cursor B. Drag either cursor line to move it. The
+readout inside the plot shows each trace value at the cursor and the A/B delta.
+Right-click offers reset zoom, cursor placement/clearing, marker mode, marker
+placement/clearing, and copying the cursor readout.
+
+The **chart** button next to the graph controls opens **Waveform Analysis**:
+
+- **View** switches the Y axis between linear, magnitude in dB, and phase.
+  Phase view reads the companion `<signal>.phase` traces emitted by AC
+  analyses. The FFT group transforms the selected traces to amplitude and phase
+  spectra; non-uniform transient samples are resampled to a uniform grid, and
+  the FFT window/size are configurable. Measurement annotations can be hidden.
+- **Derived traces** add math channels such as `out - in`, `db(v(out))`,
+  `derivative(i(v1))`, and `phase(out)`.
+- **Overlays** draw stored runs on the same graph. Corner, sweep, and Monte
+  Carlo runs appear with their variant labels and use dashed lines; runs from
+  other simulations can be overlaid when they expose compatible signals.
+- **Markers** lists the persistent point annotations that can also be placed
+  from the plot context menu.
+
+All of these settings are saved on the `SimulationGraph` in the project and are
+also available through the CLI and MCP. Derived traces, view transforms, FFT,
+overlays, and markers never modify the stored simulation samples.
+
 Future schematic features include buses, reusable libraries, ERC, netlisting,
 and richer hierarchy editing.
 
@@ -456,6 +485,44 @@ for LVS. The call returns a placement object with absolute pin rectangles
 (`placement.G`, `placement.ports["G"]`). Pass `nets={"G": "GATE", ...}` to bind
 device terminals to layout nets and keep them through extraction.
 
+Placed pins can be routed with `layout.connect(device_a, "G", device_b, "G",
+layer="met1.drawing", width=layout.um(0.4), net="GATE")`, or with
+`layout.route(start, end, layer, width, ...)` for point and rectangle endpoints.
+Both build a deterministic Manhattan route that avoids device bounds and
+other-net shapes, emits rectangles carrying the requested net, and reports the
+route length and bend count. For pins on different layers, pass
+`layers=["met1.drawing", "met2.drawing", ...]` in vertical stack order, or omit
+`layers` to use the PDK package's declared routing stack; the router may insert
+via stacks between adjacent layers. Via cut layers and their default size and
+enclosure come from the package's `technology/connectivity.json`, with common
+names (`via`/`via2`, `Via1`/`Via2`, `Metal1`/`Metal2`) as a fallback. The
+mapping can be overridden with
+`via_layers={("met1.drawing", "met2.drawing"): "via.drawing"}`. `via_size`,
+`via_enclosure`, and `via_cost` tune the transition geometry and cost. `clearance`, `escape`, `obstacles`, `start_side`, `end_side`, and
+`bend_penalty` tune the route. If no legal path exists, the router raises a
+clear error instead of creating a short. The returned `Route` exposes
+`segments`, `point_layers`, `vias`, and `via_count` in addition to `points`,
+`shapes`, `length`, and `bends`.
+
+```python
+m1 = layout.device("nfet", name="M1", x=0, y=0, w="2", l="1", nf="1",
+                   nets={"G": "GATE", "D": "GATE", "S": "VSS", "B": "VSS"})
+m2 = layout.device("nfet", name="M2", x=layout.um(12), y=0, w="4", l="1", nf="1",
+                   nets={"G": "GATE", "D": "OUT", "S": "VSS", "B": "VSS"})
+layout.connect(m1, "G", m2, "G", layer="met1.drawing",
+               width=layout.um(0.4), net="GATE")
+layout.connect(m1, "S", m2, "S", layer="met1.drawing", net="VSS")
+
+# Multi-layer route: met1 pin to a met2 pad, with an inferred SKY130 via.
+out = layout.route(
+    m2.D,
+    (layout.um(20), layout.um(2), layout.um(1), layout.um(0.6)),
+    layers=["met1.drawing", "met2.drawing"],
+    width=layout.um(0.4),
+    net="OUT",
+)
+```
+
 Right-click a procedural layout and choose **Regenerate layout** (or use the
 editor's **Regenerate layout** button) to replace the generated child's geometry
 from the current script. Scripts run with `python3`, or the interpreter selected
@@ -472,7 +539,8 @@ the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
 project. A PDK without that implementation reports a clear error when the API
 is used. The active PDK package's device library appears in **Devices**, with
-search, category filtering, and a geometry preview in **Properties**.
+search, category filtering, and a geometry preview in **Properties**. See
+{doc}`procedural-layout` for the complete builder, device, and routing API.
 Parameterized devices are Python PCells generated on selection; fixed devices
 are backed by `layout/devices/fixed/*.icelay` cells. IHP SG13G2, Sky130, and GF180MCU
 packages ship their own libraries, and switching the active layout to a cell
@@ -794,6 +862,18 @@ warnings and errors. Simulation status, warnings, errors, and stored-run paths
 are written here instead of appearing below the netlist pane. Implementation
 stage output, DRC summaries/violations, LVS summaries/mismatches, and generic
 application messages use the same category-aware sinks.
+
+## Simulation experiments
+
+Selecting a simulation exposes **Experiment Setup…** next to **Run Simulation**.
+The dialog edits analysis parameters for transient, DC sweep, AC sweep,
+operating point, noise, and transfer-function analyses; PDK TT/FF/SS corners
+(and custom corners with temperature, supply, and parameter overrides);
+parameter sweeps; deterministic Monte Carlo sampling; and declarative
+measurements. **Run Experiment** executes every corner/sweep/sample and lists
+one result per variant with its measurement values and stored run path. The
+main **Run Simulation** button runs the nominal simulation only; both paths use
+the same project model, CLI, and MCP configuration.
 
 ## Simulation scripts
 

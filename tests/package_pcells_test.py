@@ -47,6 +47,110 @@ PACKAGES = {
     },
 }
 
+def shape_bounds(shape: dict) -> tuple[float, float, float, float]:
+    points = shape.get("points") or []
+    xs = [point[0] if isinstance(point, (list, tuple)) else point["x"] for point in points]
+    ys = [point[1] if isinstance(point, (list, tuple)) else point["y"] for point in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def overlaps(first, second) -> bool:
+    return (
+        first[0] < second[2]
+        and second[0] < first[2]
+        and first[1] < second[3]
+        and second[1] < first[3]
+    )
+
+
+def connectivity_components(library: dict, connectivity: dict, geometry: dict):
+    """Group generated shapes into conducting islands.
+
+    Shapes on one layer join when they overlap. A cut on a via layer joins the
+    lower and upper conductors it touches, exactly like the package
+    connectivity document describes.
+    """
+    stream_name = {
+        (layer["number"], layer["datatype"]): layer["name"].split(".")[0]
+        for layer in library["layers"]
+    }
+    shapes = []
+    for shape in geometry["shapes"]:
+        stream = (shape["layer"], shape["datatype"])
+        if stream not in stream_name:
+            continue
+        shapes.append((stream_name[stream], shape_bounds(shape), stream))
+
+    parent = list(range(len(shapes)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first, second):
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parent[second_root] = first_root
+
+    for first in range(len(shapes)):
+        for second in range(first + 1, len(shapes)):
+            if shapes[first][0] != shapes[second][0]:
+                continue
+            if overlaps(shapes[first][1], shapes[second][1]):
+                union(first, second)
+
+    vias = []
+    for entry in connectivity["vias"]:
+        vias.append(
+            (
+                entry["name"].split(".")[0],
+                {name.split(".")[0] for name in entry["lower"]},
+                {name.split(".")[0] for name in entry["upper"]},
+            )
+        )
+    for index, (layer, box, _) in enumerate(shapes):
+        for via_name, lower, upper in vias:
+            if layer != via_name:
+                continue
+            lowers = [i for i, (name, other, _) in enumerate(shapes) if name in lower and overlaps(box, other)]
+            uppers = [i for i, (name, other, _) in enumerate(shapes) if name in upper and overlaps(box, other)]
+            for lower_index in lowers:
+                for upper_index in uppers:
+                    union(lower_index, upper_index)
+    return shapes, find
+
+
+def check_terminal_connectivity(name: str, cell: dict, library: dict, connectivity: dict, geometry: dict) -> None:
+    """Every terminal must be part of its device metal, not an island.
+
+    A pin tab that abuts (or stops short of) its plate, or a contact stack that
+    is never drawn, leaves a terminal with no electrical connection at all.
+    """
+    shapes, find = connectivity_components(library, connectivity, geometry)
+    for port in geometry["ports"]:
+        stream = (port["layer"], port["datatype"])
+        rect = port["rectangle"]
+        pin = (rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"])
+        seed = next(
+            (
+                index
+                for index, (_, box, shape_stream) in enumerate(shapes)
+                if shape_stream == stream and overlaps(box, pin)
+            ),
+            None,
+        )
+        assert seed is not None, (
+            f"{name}: {cell['name']} port {port['name']} does not sit on "
+            f"stream {stream[0]}/{stream[1]} metal"
+        )
+        component = [index for index in range(len(shapes)) if find(index) == find(seed)]
+        assert len(component) > 1, (
+            f"{name}: {cell['name']} port {port['name']} is a floating island "
+            f"(no contact, via, or overlapping metal)"
+        )
+
 
 def absolute_pythonpath() -> str:
     entries = [
@@ -101,6 +205,23 @@ def check_library(name: str, root: Path) -> None:
             )
         else:
             assert cell.get("generator"), f"{name}: {cell['name']} has neither layout nor generator"
+
+    if name != "ice-pkg-ihp-sg13g2":
+        connectivity = json.loads((root / "technology" / "connectivity.json").read_text())
+        for cell in library["cells"]:
+            generator = cell.get("generator")
+            if not generator:
+                continue
+            geometry = icepy.pcells.generate_package_geometry(
+                root,
+                generator["module"],
+                generator["class"],
+                {
+                    parameter["name"]: parameter["value"]
+                    for parameter in cell.get("parameters", [])
+                },
+            )
+            check_terminal_connectivity(name, cell, library, connectivity, geometry)
 
     layer_names = {
         (layer["number"], layer["datatype"]): layer["name"]

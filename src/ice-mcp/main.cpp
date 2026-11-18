@@ -14,6 +14,7 @@
 #include "icelib/simulation_store.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
+#include "icelib/waveform.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -50,6 +51,9 @@
 namespace {
 
 using json = nlohmann::json;
+
+std::vector<std::string> parseSignalListValue(const json &value, const char *name);
+json measurementResultJson(const ice::SimulationMeasurementResult &measurement);
 
 struct ToolError : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -575,12 +579,20 @@ json helpJson(const std::string &requestedTopic) {
                                  "Use implementation_log and implementation_status to inspect route DRC, antenna, "
                                  "timing, and power results from the physical flow."})}}},
         {"simulation",
-         {{"tools", json::array({"simulation_create", "simulation_update", "simulation_run", "simulation_result",
-                                 "simulation_signals", "simulation_trace", "simulation_measure",
+         {{"tools", json::array({"simulation_create", "simulation_update", "simulation_run", "simulation_experiment",
+                                 "simulation_corner_defaults", "simulation_result", "simulation_signals",
+                                 "simulation_trace", "simulation_measure", "simulation_runs", "simulation_waveform",
                                  "simulation_graph_create", "simulation_graph_list", "simulation_graph_update"})},
+          {"notes",
+           json::array({"simulation_update accepts analysis fields, corners, sweeps, Monte Carlo, and measurements.",
+                        "Use simulation_corner_defaults to load the PDK TT/FF/SS sections.",
+                        "Use simulation_experiment to run every corner/sweep/Monte Carlo variant.",
+                        "simulation_graph_update accepts view (linear/db/phase), fft, derived_traces, overlays, "
+                        "and markers. simulation_waveform returns the analyzed series for a stored run."})},
           {"example",
            {{"tool", "simulation_create"},
-            {"arguments", {{"name", "tran1"}, {"schematic", "top"}, {"template", "tran"}}}}}}},
+            {"arguments",
+             {{"name", "ac1"}, {"schematic", "top"}, {"analysis", "ac"}, {"ac_points", 20}, {"signals", "out,in"}}}}}}},
         {"pdk",
          {{"tools", json::array({"pdk_info", "pdk_build", "ice_doctor"})},
           {"notes", json::array({"ICE applies the package PDK setup automatically based on the schematic PDK.",
@@ -620,8 +632,13 @@ json resultJson(const ice::SimulationResult &result) {
     json available = json::array();
     for (const auto &trace : result.traces)
         available.push_back(trace.name);
+    json measurements = json::array();
+    for (const auto &measurement : result.measurements)
+        measurements.push_back(measurementResultJson(measurement));
     return {{"state", ice::jobStateName(result.state)},
             {"analysis", result.analysis},
+            {"x_axis", result.xAxis},
+            {"x_unit", result.xUnit},
             {"simulator", result.simulator},
             {"simulator_version", result.simulator_version},
             {"error", result.error},
@@ -629,7 +646,9 @@ json resultJson(const ice::SimulationResult &result) {
             {"time_points", result.time.size()},
             {"trace_count", result.traces.size()},
             {"trace_details", std::move(traces)},
-            {"available_signals", std::move(available)}};
+            {"available_signals", std::move(available)},
+            {"scalars", result.scalars},
+            {"measurements", std::move(measurements)}};
 }
 
 json buildJson(const std::filesystem::path &executablePath) {
@@ -661,6 +680,246 @@ json measurementJson(const ice::SignalMeasurement &measurement) {
         result["frequency"] = *measurement.frequency;
     if (measurement.settlingTime)
         result["settling_time"] = *measurement.settlingTime;
+    return result;
+}
+
+json cornerJson(const ice::SimulationCorner &corner) {
+    return {{"name", corner.name},
+            {"model_section", corner.modelSection},
+            {"temperature", corner.temperature},
+            {"source_overrides", corner.sourceOverrides},
+            {"parameters", corner.parameters}};
+}
+
+json measurementSpecJson(const ice::SimulationMeasurementSpec &spec) {
+    json result = {{"name", spec.name},   {"metric", spec.metric},   {"signal", spec.signal},
+                   {"input", spec.input}, {"voltage", spec.voltage}, {"tolerance", spec.tolerance}};
+    if (spec.threshold)
+        result["threshold"] = *spec.threshold;
+    return result;
+}
+
+json measurementResultJson(const ice::SimulationMeasurementResult &measurement) {
+    json result = {{"name", measurement.name},
+                   {"metric", measurement.metric},
+                   {"value", measurement.value},
+                   {"unit", measurement.unit},
+                   {"valid", measurement.valid}};
+    if (!measurement.error.empty())
+        result["error"] = measurement.error;
+    return result;
+}
+
+json simulationItemJson(const ice::SimulationItem &simulation) {
+    json result = {{"id", simulation.id},
+                   {"name", simulation.name},
+                   {"schematic", simulation.schematic},
+                   {"simulator", simulation.simulator},
+                   {"analysis", simulation.analysis},
+                   {"start", simulation.start},
+                   {"stop", simulation.stop},
+                   {"step", simulation.step},
+                   {"use_initial_conditions", simulation.use_initial_conditions},
+                   {"temperature", simulation.temperature},
+                   {"model_section", simulation.modelSection},
+                   {"parameters", simulation.parameters},
+                   {"source_overrides", simulation.sourceOverrides},
+                   {"dc_source", simulation.dcSource},
+                   {"dc_start", simulation.dcStart},
+                   {"dc_stop", simulation.dcStop},
+                   {"dc_step", simulation.dcStep},
+                   {"ac_variation", simulation.acVariation},
+                   {"ac_points", simulation.acPoints},
+                   {"ac_start", simulation.acStart},
+                   {"ac_stop", simulation.acStop},
+                   {"noise_output", simulation.noiseOutput},
+                   {"noise_input", simulation.noiseInput},
+                   {"noise_variation", simulation.noiseVariation},
+                   {"noise_points", simulation.noisePoints},
+                   {"noise_start", simulation.noiseStart},
+                   {"noise_stop", simulation.noiseStop},
+                   {"tf_output", simulation.tfOutput},
+                   {"tf_source", simulation.tfSource},
+                   {"signals", simulation.captureSignals},
+                   {"corners", json::array()},
+                   {"sweeps", json::array()},
+                   {"measurements", json::array()},
+                   {"monte_carlo",
+                    {{"enabled", simulation.monteCarlo.enabled},
+                     {"samples", simulation.monteCarlo.samples},
+                     {"temperature_sigma", simulation.monteCarlo.temperatureSigma},
+                     {"supply_sigma_percent", simulation.monteCarlo.supplySigmaPercent},
+                     {"supply_source", simulation.monteCarlo.supplySource},
+                     {"supply_nominal", simulation.monteCarlo.supplyNominal},
+                     {"parameter_sigma_percent", simulation.monteCarlo.parameterSigmaPercent},
+                     {"seed", simulation.monteCarlo.seed}}}};
+    for (const auto &corner : simulation.corners)
+        result["corners"].push_back(cornerJson(corner));
+    for (const auto &sweep : simulation.sweeps)
+        result["sweeps"].push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+    for (const auto &measurement : simulation.measurements)
+        result["measurements"].push_back(measurementSpecJson(measurement));
+    return result;
+}
+
+void readNumberMap(const json &value, const char *name, std::map<std::string, double> &target) {
+    if (!value.is_object())
+        throw ToolError(std::string("Argument '") + name + "' must be an object.");
+    for (auto entry = value.begin(); entry != value.end(); ++entry)
+        target[entry.key()] = numberValue(entry.value(), name);
+}
+
+void applySimulationArguments(ice::SimulationItem &simulation, const json &arguments) {
+    if (arguments.contains("analysis"))
+        simulation.analysis = requiredString(arguments, "analysis");
+    if (arguments.contains("simulator"))
+        simulation.simulator = requiredString(arguments, "simulator");
+    if (arguments.contains("start"))
+        simulation.start = numberValue(arguments.at("start"), "start");
+    if (arguments.contains("stop"))
+        simulation.stop = numberValue(arguments.at("stop"), "stop");
+    if (arguments.contains("step"))
+        simulation.step = numberValue(arguments.at("step"), "step");
+    if (arguments.contains("temperature"))
+        simulation.temperature = numberValue(arguments.at("temperature"), "temperature");
+    if (arguments.contains("model_section"))
+        simulation.modelSection = requiredStringAllowEmpty(arguments, "model_section");
+    if (arguments.contains("parameters"))
+        readNumberMap(arguments.at("parameters"), "parameters", simulation.parameters);
+    if (arguments.contains("source_overrides"))
+        readNumberMap(arguments.at("source_overrides"), "source_overrides", simulation.sourceOverrides);
+    if (arguments.contains("dc_source"))
+        simulation.dcSource = requiredStringAllowEmpty(arguments, "dc_source");
+    if (arguments.contains("dc_start"))
+        simulation.dcStart = numberValue(arguments.at("dc_start"), "dc_start");
+    if (arguments.contains("dc_stop"))
+        simulation.dcStop = numberValue(arguments.at("dc_stop"), "dc_stop");
+    if (arguments.contains("dc_step"))
+        simulation.dcStep = numberValue(arguments.at("dc_step"), "dc_step");
+    if (arguments.contains("ac_variation"))
+        simulation.acVariation = requiredString(arguments, "ac_variation");
+    if (arguments.contains("ac_points"))
+        simulation.acPoints = static_cast<int>(numberValue(arguments.at("ac_points"), "ac_points"));
+    if (arguments.contains("ac_start"))
+        simulation.acStart = numberValue(arguments.at("ac_start"), "ac_start");
+    if (arguments.contains("ac_stop"))
+        simulation.acStop = numberValue(arguments.at("ac_stop"), "ac_stop");
+    if (arguments.contains("noise_output"))
+        simulation.noiseOutput = requiredStringAllowEmpty(arguments, "noise_output");
+    if (arguments.contains("noise_input"))
+        simulation.noiseInput = requiredStringAllowEmpty(arguments, "noise_input");
+    if (arguments.contains("noise_variation"))
+        simulation.noiseVariation = requiredString(arguments, "noise_variation");
+    if (arguments.contains("noise_points"))
+        simulation.noisePoints = static_cast<int>(numberValue(arguments.at("noise_points"), "noise_points"));
+    if (arguments.contains("noise_start"))
+        simulation.noiseStart = numberValue(arguments.at("noise_start"), "noise_start");
+    if (arguments.contains("noise_stop"))
+        simulation.noiseStop = numberValue(arguments.at("noise_stop"), "noise_stop");
+    if (arguments.contains("tf_output"))
+        simulation.tfOutput = requiredStringAllowEmpty(arguments, "tf_output");
+    if (arguments.contains("tf_source"))
+        simulation.tfSource = requiredStringAllowEmpty(arguments, "tf_source");
+    if (arguments.contains("signals")) {
+        const auto signals = parseSignalListValue(arguments.at("signals"), "signals");
+        simulation.captureSignals.clear();
+        for (std::size_t index = 0; index < signals.size(); ++index) {
+            if (index)
+                simulation.captureSignals += ",";
+            simulation.captureSignals += signals[index];
+        }
+    }
+    if (arguments.contains("directives"))
+        simulation.directives = requiredStringAllowEmpty(arguments, "directives");
+    if (arguments.contains("corners")) {
+        if (!arguments.at("corners").is_array())
+            throw ToolError("Argument 'corners' must be an array.");
+        simulation.corners.clear();
+        for (const auto &entry : arguments.at("corners")) {
+            if (!entry.is_object())
+                throw ToolError("Each simulation corner must be an object.");
+            ice::SimulationCorner corner;
+            corner.name = entry.value("name", std::string{"tt"});
+            corner.modelSection = entry.value("model_section", std::string{});
+            corner.temperature = entry.value("temperature", 27.0);
+            if (entry.contains("source_overrides"))
+                readNumberMap(entry.at("source_overrides"), "source_overrides", corner.sourceOverrides);
+            if (entry.contains("parameters"))
+                readNumberMap(entry.at("parameters"), "parameters", corner.parameters);
+            simulation.corners.push_back(std::move(corner));
+        }
+    }
+    if (arguments.contains("sweeps")) {
+        if (!arguments.at("sweeps").is_array())
+            throw ToolError("Argument 'sweeps' must be an array.");
+        simulation.sweeps.clear();
+        for (const auto &entry : arguments.at("sweeps")) {
+            if (!entry.is_object())
+                throw ToolError("Each simulation sweep must be an object.");
+            ice::SimulationSweep sweep;
+            sweep.parameter = requiredString(entry, "parameter");
+            if (!entry.contains("values") || !entry.at("values").is_array())
+                throw ToolError("Each simulation sweep needs a values array.");
+            for (const auto &value : entry.at("values"))
+                sweep.values.push_back(numberValue(value, "sweep value"));
+            simulation.sweeps.push_back(std::move(sweep));
+        }
+    }
+    if (arguments.contains("monte_carlo")) {
+        const auto &mc = arguments.at("monte_carlo");
+        if (!mc.is_object())
+            throw ToolError("Argument 'monte_carlo' must be an object.");
+        simulation.monteCarlo.enabled = mc.value("enabled", true);
+        simulation.monteCarlo.samples = static_cast<int>(mc.value("samples", 20.0));
+        simulation.monteCarlo.temperatureSigma = mc.value("temperature_sigma", 0.0);
+        simulation.monteCarlo.supplySigmaPercent = mc.value("supply_sigma_percent", 0.0);
+        simulation.monteCarlo.supplySource = mc.value("supply_source", std::string{"V1"});
+        simulation.monteCarlo.supplyNominal = mc.value("supply_nominal", 1.0);
+        simulation.monteCarlo.seed = mc.value("seed", std::uint32_t{1});
+        if (mc.contains("parameter_sigma_percent"))
+            readNumberMap(mc.at("parameter_sigma_percent"), "parameter_sigma_percent",
+                          simulation.monteCarlo.parameterSigmaPercent);
+    }
+    if (arguments.contains("measurements")) {
+        if (!arguments.at("measurements").is_array())
+            throw ToolError("Argument 'measurements' must be an array.");
+        simulation.measurements.clear();
+        for (const auto &entry : arguments.at("measurements")) {
+            if (!entry.is_object())
+                throw ToolError("Each simulation measurement must be an object.");
+            ice::SimulationMeasurementSpec spec;
+            spec.name = requiredString(entry, "name");
+            spec.metric = requiredString(entry, "metric");
+            spec.signal = entry.value("signal", std::string{});
+            spec.input = entry.value("input", std::string{});
+            spec.voltage = entry.value("voltage", 0.0);
+            spec.tolerance = entry.value("tolerance", 0.02);
+            if (entry.contains("threshold") && entry.at("threshold").is_number())
+                spec.threshold = entry.at("threshold").get<double>();
+            simulation.measurements.push_back(std::move(spec));
+        }
+    }
+}
+
+json experimentPointJson(const ice::ExperimentPoint &point) {
+    json result = {{"variant", point.variant},
+                   {"corner", point.corner},
+                   {"sample", point.sample},
+                   {"parameters", point.parameters},
+                   {"state", ice::jobStateName(point.result.state)},
+                   {"analysis", point.result.analysis},
+                   {"x_axis", point.result.xAxis},
+                   {"x_unit", point.result.xUnit},
+                   {"time_points", point.result.time.size()},
+                   {"scalars", point.result.scalars},
+                   {"trace_names", json::array()},
+                   {"measurements", json::array()}};
+    for (const auto &trace : point.result.traces)
+        result["trace_names"].push_back(trace.name);
+    if (!point.result.error.empty())
+        result["error"] = point.result.error;
+    for (const auto &measurement : point.result.measurements)
+        result["measurements"].push_back(measurementResultJson(measurement));
     return result;
 }
 
@@ -1113,14 +1372,119 @@ json drcReportJson(const ice::VerificationReport &report) {
 }
 
 json graphJson(const ice::SimulationGraph &graph) {
-    return {{"id", graph.id},
-            {"name", graph.name},
-            {"x_axis", graph.xAxis},
-            {"y_signals", graph.ySignals},
-            {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
-            {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
-            {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
-            {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)}};
+    json result = {{"id", graph.id},
+                   {"name", graph.name},
+                   {"x_axis", graph.xAxis},
+                   {"y_signals", graph.ySignals},
+                   {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
+                   {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
+                   {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
+                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)},
+                   {"view", graph.view},
+                   {"fft", {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}}},
+                   {"show_measurements", graph.showMeasurements},
+                   {"derived_traces", json::array()},
+                   {"overlays", json::array()},
+                   {"markers", json::array()}};
+    for (const auto &trace : graph.derivedTraces)
+        result["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+    for (const auto &overlay : graph.overlays)
+        result["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+    for (const auto &marker : graph.markers) {
+        json entry = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+        if (marker.hasY)
+            entry["y"] = marker.y;
+        result["markers"].push_back(std::move(entry));
+    }
+    return result;
+}
+
+void applyGraphArguments(ice::SimulationGraph &graph, const json &arguments) {
+    if (arguments.contains("view")) {
+        const auto text = requiredString(arguments, "view");
+        const auto view = ice::parseWaveformView(text);
+        if (!view)
+            throw ToolError("Unknown waveform view: " + text);
+        graph.view = ice::waveformViewName(*view);
+    }
+    if (const auto fft = arguments.find("fft"); fft != arguments.end()) {
+        if (fft->is_boolean()) {
+            graph.fft = fft->get<bool>();
+        } else if (fft->is_object()) {
+            graph.fft = fft->value("enabled", true);
+            graph.fftWindow = fft->value("window", graph.fftWindow);
+            graph.fftPoints = fft->value("points", graph.fftPoints);
+        } else {
+            throw ToolError("Argument 'fft' must be a boolean or an object.");
+        }
+    }
+    if (arguments.contains("fft_window"))
+        graph.fftWindow = requiredString(arguments, "fft_window");
+    if (arguments.contains("fft_points"))
+        graph.fftPoints = static_cast<int>(numberValue(arguments.at("fft_points"), "fft_points"));
+    if (arguments.contains("show_measurements"))
+        graph.showMeasurements = optionalBoolean(arguments, "show_measurements", graph.showMeasurements);
+    if (optionalBoolean(arguments, "clear_derived", false))
+        graph.derivedTraces.clear();
+    if (arguments.contains("derived_traces")) {
+        if (!arguments.at("derived_traces").is_array())
+            throw ToolError("Argument 'derived_traces' must be an array.");
+        for (const auto &entry : arguments.at("derived_traces")) {
+            if (!entry.is_object())
+                throw ToolError("Each derived trace must be an object.");
+            ice::SimulationDerivedTrace trace;
+            trace.name = requiredString(entry, "name");
+            trace.expression = requiredString(entry, "expression");
+            const auto found =
+                std::find_if(graph.derivedTraces.begin(), graph.derivedTraces.end(),
+                             [&](const ice::SimulationDerivedTrace &existing) { return existing.name == trace.name; });
+            if (found == graph.derivedTraces.end())
+                graph.derivedTraces.push_back(std::move(trace));
+            else
+                *found = std::move(trace);
+        }
+    }
+    if (optionalBoolean(arguments, "clear_overlays", false))
+        graph.overlays.clear();
+    if (arguments.contains("overlays")) {
+        if (!arguments.at("overlays").is_array())
+            throw ToolError("Argument 'overlays' must be an array.");
+        for (const auto &entry : arguments.at("overlays")) {
+            if (!entry.is_object())
+                throw ToolError("Each overlay must be an object.");
+            ice::SimulationOverlayRun overlay;
+            overlay.runId = requiredString(entry, "run_id");
+            overlay.label = entry.value("label", std::string{});
+            const auto found = std::find_if(
+                graph.overlays.begin(), graph.overlays.end(),
+                [&](const ice::SimulationOverlayRun &existing) { return existing.runId == overlay.runId; });
+            if (found == graph.overlays.end())
+                graph.overlays.push_back(std::move(overlay));
+            else
+                *found = std::move(overlay);
+        }
+    }
+    if (optionalBoolean(arguments, "clear_markers", false))
+        graph.markers.clear();
+    if (arguments.contains("markers")) {
+        if (!arguments.at("markers").is_array())
+            throw ToolError("Argument 'markers' must be an array.");
+        for (const auto &entry : arguments.at("markers")) {
+            if (!entry.is_object())
+                throw ToolError("Each marker must be an object.");
+            ice::SimulationGraphMarker marker;
+            marker.label = entry.value("label", std::string{});
+            marker.signal = entry.value("signal", std::string{});
+            marker.x = numberValue(requiredValue(entry, "x"), "marker x");
+            if (entry.contains("y") && entry.at("y").is_number()) {
+                marker.y = entry.at("y").get<double>();
+                marker.hasY = true;
+            }
+            std::erase_if(graph.markers,
+                          [&](const ice::SimulationGraphMarker &existing) { return existing.label == marker.label; });
+            graph.markers.push_back(std::move(marker));
+        }
+    }
 }
 
 json graphWithSimulation(const ice::SimulationItem &simulation, const ice::SimulationGraph &graph) {
@@ -1503,7 +1867,7 @@ class IceMcpServer {
                 if (session_->dirty())
                     throw ToolError("Project changed outside ice-mcp while local changes are pending; save or reopen "
                                     "the project before mutating it.");
-                session_->replaceProject(ice::Project::load(projectPath_));
+                session_->replaceProject(ice::Project::load(projectPath_), false);
                 projectStamp_ = projectStateStamp(projectPath_);
             }
         }
@@ -1514,7 +1878,17 @@ class IceMcpServer {
                 projectStamp_ = projectStateStamp(projectPath_);
                 result["saved"] = true;
             } catch (const ice::ProjectError &error) {
-                throw ToolError("Mutation was applied in memory but could not be saved: " + std::string(error.what()));
+                // Never leave the session dirty with a state that cannot be
+                // persisted: every later call would retry the same doomed save
+                // and fail, including read-only ones. Drop back to the on-disk
+                // state and report what happened.
+                try {
+                    session_->replaceProject(ice::Project::load(projectPath_), false);
+                    projectStamp_ = projectStateStamp(projectPath_);
+                } catch (const std::exception &) {
+                    // Keep the save error below; it is the actionable one.
+                }
+                throw ToolError("Mutation could not be saved and was discarded: " + std::string(error.what()));
             }
         }
         return result;
@@ -1526,6 +1900,9 @@ class IceMcpServer {
             result["features"].push_back("mcp");
             result["features"].push_back("schematic_create_text");
             result["features"].push_back("simulation_measure");
+            result["features"].push_back("simulation_experiment");
+            result["features"].push_back("simulation_corner_defaults");
+            result["features"].push_back("waveform_analysis");
             result["features"].push_back("pdk_info");
             if (!startupWarning_.empty())
                 result["startup_warning"] = startupWarning_;
@@ -1663,13 +2040,15 @@ class IceMcpServer {
 
         if (name == "project_reload") {
             requireSession();
-            if (session_->dirty())
-                throw ToolError("Cannot reload a project with unsaved local changes.");
+            const bool discard = optionalBoolean(arguments, "discard", false);
+            if (session_->dirty() && !discard)
+                throw ToolError("Cannot reload a project with unsaved local changes. Pass discard=true to throw the "
+                                "local changes away and reload from disk.");
             const bool recover = optionalBoolean(arguments, "recover", false);
             ice::ProjectLoadOptions options;
             options.recover = recover;
             ice::ProjectLoadReport report;
-            session_->replaceProject(ice::Project::load(projectPath_, options, &report));
+            session_->replaceProject(ice::Project::load(projectPath_, options, &report), false);
             projectStamp_ = projectStateStamp(projectPath_);
             if (recover) {
                 session_->save(projectPath_);
@@ -1745,14 +2124,7 @@ class IceMcpServer {
                 simulation.stop = numberValue(*value, "stop");
             if (const auto value = arguments.find("step"); value != arguments.end())
                 simulation.step = numberValue(*value, "step");
-            if (arguments.contains("signals")) {
-                const auto signals = parseSignalListValue(arguments.at("signals"), "signals");
-                for (std::size_t index = 0; index < signals.size(); ++index) {
-                    if (index)
-                        simulation.captureSignals += ",";
-                    simulation.captureSignals += signals[index];
-                }
-            }
+            applySimulationArguments(simulation, arguments);
             const auto graphName = optionalString(arguments, "graph_name", "Graph 1");
             ice::ObjectId simulationId = 0;
             ice::ObjectId graphId = 0;
@@ -1768,21 +2140,14 @@ class IceMcpServer {
                 graph.ySignals = splitCommaList(simulation.captureSignals);
                 project.simulations.at(simulation.id).graphs.push_back(std::move(graph));
             });
-            return {{"id", simulationId},
-                    {"name", simulation.name},
-                    {"schematic", schematic},
-                    {"simulator", simulation.simulator},
-                    {"analysis", simulation.analysis},
-                    {"signals", simulation.captureSignals},
-                    {"graph", graphId}};
+            auto result = simulationItemJson(session.project().simulations.at(simulationId));
+            result["graph"] = graphId;
+            return result;
         }
         if (name == "simulation_update") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
             auto updated = session.project().simulations.at(id);
-            if (arguments.contains("analysis"))
-                updated.analysis = requiredString(arguments, "analysis");
-            if (arguments.contains("simulator"))
-                updated.simulator = requiredString(arguments, "simulator");
+            applySimulationArguments(updated, arguments);
             const auto &updatedSchematic = session.project().schematicCells.at(updated.schematic);
             const bool updatedMixed = !updatedSchematic.systemVerilogSchematic &&
                                       ice::schematicContainsHdl(session.project(), updated.schematic);
@@ -1790,28 +2155,9 @@ class IceMcpServer {
                 throw ToolError("simulator='mixed' requires a drawn schematic with SystemVerilog blocks");
             if (updated.simulator == "iverilog" && !updatedSchematic.systemVerilogSchematic)
                 throw ToolError("simulator='iverilog' requires a SystemVerilog source cell");
-            if (arguments.contains("stop"))
-                updated.stop = numberValue(arguments.at("stop"), "stop");
-            if (arguments.contains("step"))
-                updated.step = numberValue(arguments.at("step"), "step");
-            if (arguments.contains("signals")) {
-                const auto signals = parseSignalListValue(arguments.at("signals"), "signals");
-                updated.captureSignals.clear();
-                for (std::size_t index = 0; index < signals.size(); ++index) {
-                    if (index)
-                        updated.captureSignals += ",";
-                    updated.captureSignals += signals[index];
-                }
-            }
             session.execute("mcp simulation-update",
                             [&](ice::Project &project) { project.simulations.at(id) = updated; });
-            return {{"id", id},
-                    {"name", updated.name},
-                    {"simulator", updated.simulator},
-                    {"analysis", updated.analysis},
-                    {"stop", updated.stop},
-                    {"step", updated.step},
-                    {"signals", updated.captureSignals}};
+            return simulationItemJson(session.project().simulations.at(id));
         }
         if (name == "simulation_run") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -1819,46 +2165,9 @@ class IceMcpServer {
             const auto schematic = session.project().schematicCells.find(simulation.schematic);
             if (schematic == session.project().schematicCells.end())
                 throw ToolError("Simulation references a missing schematic.");
-            ice::SimulationRequest request;
-            request.analysis = simulation.analysis;
-            request.stop = simulation.stop;
-            request.step = simulation.step;
-            request.simulator = simulation.simulator;
-            request.use_initial_conditions = simulation.use_initial_conditions;
-            request.workingDirectory = projectRootPath();
-            const auto appendDirectives = [&] {
-                std::istringstream directives(simulation.directives);
-                std::string directive;
-                while (std::getline(directives, directive)) {
-                    const auto trimmed = directive.find_first_not_of(" \t\r\n") == std::string::npos
-                                             ? std::string{}
-                                             : directive.substr(directive.find_first_not_of(" \t\r\n"));
-                    if (!trimmed.empty())
-                        request.netlist.push_back(trimmed);
-                }
-            };
-            const bool mixedSignal = !schematic->second.systemVerilogSchematic &&
-                                     ice::schematicContainsHdl(session.project(), simulation.schematic);
-            if (mixedSignal) {
-                std::string error;
-                if (!ice::prepareMixedSignalRequest(request, session.project(), simulation.schematic, &error))
-                    throw ToolError("Mixed-signal plan failed: " + error);
-                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
-                appendDirectives();
-            } else if (schematic->second.systemVerilogSchematic) {
-                request.analysis = "digital";
-                request.simulator = "iverilog";
-                const auto source = ice::buildSystemVerilogSimulationSource(session.project(), simulation.schematic);
-                std::istringstream lines(source);
-                std::string line;
-                while (std::getline(lines, line))
-                    request.netlist.push_back(line);
-            } else {
-                request.simulator = "ngspice";
-                request.netlist = ice::buildSimulationNetlist(session.project(), simulation.schematic);
-                ice::applyPdkSimulationSetup(schematic->second.pdk, request);
-            }
-            request.probeSignals = splitCommaList(simulation.captureSignals);
+            std::vector<std::string> notes;
+            const auto request =
+                ice::simulationRequestForItem(session.project(), simulation, projectRootPath(), &notes);
             const auto timeout = std::chrono::milliseconds(
                 std::max<std::int64_t>(1, optionalInteger(arguments, "timeout_ms").value_or(60000)));
             ice::SimulationRunner runner;
@@ -1882,6 +2191,7 @@ class IceMcpServer {
             context.schematicId = simulation.schematic;
             context.schematicName = schematic->second.name;
             context.request = request;
+            context.netlistNotes = notes;
             context.graphs = simulation.graphs;
             const auto artifact = ice::writeSimulationRun(context, result);
             auto summary = resultJson(result);
@@ -1979,6 +2289,60 @@ class IceMcpServer {
             }
             return summary;
         }
+        if (name == "simulation_corner_defaults") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto &simulation = session.project().simulations.at(id);
+            const auto schematic = session.project().schematicCells.find(simulation.schematic);
+            if (schematic == session.project().schematicCells.end())
+                throw ToolError("Simulation references a missing schematic.");
+            const auto corners = ice::pdkSimulationCorners(schematic->second.pdk);
+            session.execute("mcp simulation-corner-defaults",
+                            [&](ice::Project &project) { project.simulations.at(id).corners = corners; });
+            json result = simulationItemJson(session.project().simulations.at(id));
+            result["pdk"] = schematic->second.pdk;
+            return result;
+        }
+        if (name == "simulation_experiment") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            const auto simulation = session.project().simulations.at(id);
+            const auto schematic = session.project().schematicCells.find(simulation.schematic);
+            if (schematic == session.project().schematicCells.end())
+                throw ToolError("Simulation references a missing schematic.");
+            const auto timeout = std::chrono::milliseconds(
+                std::max<std::int64_t>(1, optionalInteger(arguments, "timeout_ms").value_or(60000)));
+            const bool store = optionalBoolean(arguments, "store", true);
+            const auto points =
+                ice::runSimulationExperiment(session.project(), simulation, timeout, {}, projectRootPath());
+            json results = json::array();
+            json stored = json::array();
+            for (const auto &point : points) {
+                results.push_back(experimentPointJson(point));
+                if (!store || projectRootPath().empty())
+                    continue;
+                const auto request = ice::simulationRequestForItem(session.project(), simulation, projectRootPath());
+                ice::SimulationRunContext context;
+                context.projectRoot = projectRootPath();
+                context.projectIdentity = session.project().identity;
+                context.projectName = session.project().name;
+                context.simulationId = id;
+                context.simulationName = simulation.name;
+                context.variant = point.variant;
+                context.schematicId = simulation.schematic;
+                context.schematicName = schematic->second.name;
+                context.request = request;
+                context.directives = simulation.directives;
+                context.graphs = simulation.graphs;
+                const auto artifact = ice::writeSimulationRun(context, point.result);
+                stored.push_back(artifact.path.string());
+            }
+            return {{"simulation", simulation.name},
+                    {"schematic", schematic->second.name},
+                    {"corner_count", simulation.corners.size()},
+                    {"sweep_count", simulation.sweeps.size()},
+                    {"monte_carlo", simulation.monteCarlo.enabled},
+                    {"points", std::move(results)},
+                    {"stored", std::move(stored)}};
+        }
         if (name == "simulation_trace") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
             const auto stored = ice::latestSimulationRun(projectRootPath(), id);
@@ -2060,6 +2424,21 @@ class IceMcpServer {
                 throw ToolError("No stored simulation run was found for this simulation.");
             if (stored->result.time.empty() || stored->result.traces.empty())
                 throw ToolError("The stored simulation has no time vector or traces to measure.");
+            if (arguments.contains("metric")) {
+                ice::SimulationMeasurementSpec spec;
+                spec.name = optionalString(arguments, "name", "measurement");
+                spec.metric = requiredString(arguments, "metric");
+                spec.signal = optionalString(arguments, "signal");
+                spec.input = optionalString(arguments, "input");
+                spec.voltage = arguments.value("voltage", 0.0);
+                spec.tolerance = arguments.value("tolerance", 0.02);
+                if (arguments.contains("threshold") && arguments.at("threshold").is_number())
+                    spec.threshold = arguments.at("threshold").get<double>();
+                json result = measurementResultJson(ice::evaluateMeasurements({spec}, stored->result).front());
+                result["simulation"] = stored->simulationName;
+                result["run_id"] = stored->runId;
+                return result;
+            }
             double threshold = std::numeric_limits<double>::quiet_NaN();
             if (const auto value = arguments.find("threshold"); value != arguments.end() && !value->is_null())
                 threshold = numberValue(*value, "threshold");
@@ -2077,13 +2456,23 @@ class IceMcpServer {
                 measurements.push_back(
                     measurementJson(ice::measureSignal(trace, stored->result.time, threshold, start, settleTolerance)));
             }
-            if (measurements.empty())
+            json declarative = json::array();
+            if (const auto simulation = session.project().simulations.find(id);
+                simulation != session.project().simulations.end()) {
+                for (const auto &measurement :
+                     ice::evaluateMeasurements(simulation->second.measurements, stored->result))
+                    declarative.push_back(measurementResultJson(measurement));
+            }
+            if (measurements.empty() && declarative.empty())
                 throw ToolError("No captured signal matched '" + selected + "'.");
             return {{"simulation", stored->simulationName},
                     {"schematic", stored->schematicName},
                     {"run_id", stored->runId},
+                    {"analysis", stored->result.analysis},
+                    {"x_axis", stored->result.xAxis},
                     {"time_points", stored->result.time.size()},
-                    {"measurements", std::move(measurements)}};
+                    {"measurements", std::move(measurements)},
+                    {"declarative_measurements", std::move(declarative)}};
         }
         if (name == "simulation_graph_create") {
             const auto simulationId = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
@@ -2110,6 +2499,7 @@ class IceMcpServer {
             applyLimit("x_max", graph.xMax);
             applyLimit("y_min", graph.yMin);
             applyLimit("y_max", graph.yMax);
+            applyGraphArguments(graph, arguments);
             ice::ObjectId graphId = 0;
             session.execute("mcp simulation-graph-create", [&](ice::Project &project) {
                 graphId = ice::addSimulationGraph(project, simulationId, graph);
@@ -2184,6 +2574,7 @@ class IceMcpServer {
             applyLimit("x_max", updated.xMax);
             applyLimit("y_min", updated.yMin);
             applyLimit("y_max", updated.yMax);
+            applyGraphArguments(updated, arguments);
             session.execute("mcp simulation-graph-update", [&](ice::Project &project) {
                 ice::updateSimulationGraph(project, simulationId, updated.id, updated);
             });
@@ -2205,6 +2596,102 @@ class IceMcpServer {
                 ice::removeSimulationGraph(project, simulationId, graph.id);
             });
             return {{"id", graph.id}, {"name", graph.name}, {"simulation", simulationId}, {"deleted", true}};
+        }
+
+        if (name == "simulation_runs") {
+            const auto simulationValue = arguments.find("simulation");
+            const std::optional<ice::ObjectId> simulationId =
+                simulationValue != arguments.end() && !simulationValue->is_null()
+                    ? std::optional<ice::ObjectId>(resolveSimulation(session.project(), *simulationValue))
+                    : std::nullopt;
+            json runs = json::array();
+            for (const auto &run : ice::listSimulationRunSummaries(projectRootPath(), simulationId)) {
+                runs.push_back({{"run_id", run.runId},
+                                {"variant", run.variant},
+                                {"created_at", run.createdAt},
+                                {"simulation", run.simulationId},
+                                {"simulation_name", run.simulationName},
+                                {"schematic", run.schematicId},
+                                {"path", run.path.string()}});
+            }
+            return {{"runs", std::move(runs)}};
+        }
+
+        if (name == "simulation_waveform") {
+            const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
+            std::optional<ice::StoredSimulationRun> stored;
+            const auto runId = optionalString(arguments, "run_id");
+            if (!runId.empty())
+                stored = ice::findSimulationRun(projectRootPath(), runId);
+            else
+                stored = ice::latestSimulationRun(projectRootPath(), id);
+            if (!stored)
+                throw ToolError("No stored simulation run was found for this simulation.");
+            std::vector<std::string> signals;
+            if (arguments.contains("signals"))
+                signals = parseSignalListValue(arguments.at("signals"), "signals");
+            std::vector<ice::SimulationDerivedTrace> derived;
+            if (const auto value = arguments.find("derived"); value != arguments.end()) {
+                if (!value->is_array())
+                    throw ToolError("Argument 'derived' must be an array.");
+                for (const auto &entry : *value) {
+                    if (!entry.is_object())
+                        throw ToolError("Each derived trace must be an object.");
+                    derived.push_back({requiredString(entry, "name"), requiredString(entry, "expression")});
+                }
+            }
+            const auto viewText = optionalString(arguments, "view", "linear");
+            const auto view = ice::parseWaveformView(viewText);
+            if (!view)
+                throw ToolError("Unknown waveform view: " + viewText);
+            bool fft = false;
+            ice::WaveformFftOptions fftOptions;
+            if (const auto value = arguments.find("fft"); value != arguments.end()) {
+                if (value->is_boolean()) {
+                    fft = value->get<bool>();
+                } else if (value->is_object()) {
+                    fft = value->value("enabled", true);
+                    fftOptions.window = value->value("window", fftOptions.window);
+                    fftOptions.points = value->value("points", 0);
+                } else {
+                    throw ToolError("Argument 'fft' must be a boolean or an object.");
+                }
+            }
+            std::vector<std::string> warnings;
+            const auto series =
+                ice::buildWaveformSeries(stored->result, signals, derived, *view, fft, fftOptions, &warnings);
+            const auto maxPoints = std::max<std::int64_t>(2, optionalInteger(arguments, "max_points").value_or(2000));
+            json outputSeries = json::array();
+            for (const auto &entry : series) {
+                const auto count = std::min(entry.x.size(), entry.y.size());
+                const auto limit = static_cast<std::size_t>(maxPoints);
+                const auto step = std::max<std::size_t>(1, (count + limit - 1) / limit);
+                json x = json::array();
+                json y = json::array();
+                for (std::size_t index = 0; index < count; index += step) {
+                    x.push_back(entry.x[index]);
+                    y.push_back(entry.y[index]);
+                }
+                if (count > 0 && (count - 1) % step != 0) {
+                    x.push_back(entry.x[count - 1]);
+                    y.push_back(entry.y[count - 1]);
+                }
+                outputSeries.push_back({{"name", entry.name},
+                                        {"label", entry.label},
+                                        {"x_unit", entry.xUnit},
+                                        {"y_unit", entry.yUnit},
+                                        {"source_points", count},
+                                        {"points", x.size()},
+                                        {"x", std::move(x)},
+                                        {"y", std::move(y)}});
+            }
+            return {{"simulation", stored->simulationName},
+                    {"run_id", stored->runId},
+                    {"analysis", stored->result.analysis},
+                    {"view", ice::waveformViewName(*view)},
+                    {"fft", fft},
+                    {"series", std::move(outputSeries)},
+                    {"warnings", std::move(warnings)}};
         }
 
         if (name == "simulation_delete") {
@@ -2860,9 +3347,15 @@ class IceMcpServer {
             const auto cellId = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
             std::vector<std::string> notes;
             const auto netlist = ice::buildSimulationNetlist(session.project(), cellId, &notes);
+            // Expose the subcircuit port order so callers can wrap a drawn cell
+            // in their own testbench without guessing the pin sequence.
+            json ports = json::array();
+            for (const auto *port : ice::schematicPortInstances(session.project().schematicCells.at(cellId)))
+                ports.push_back(port->name);
             return {{"id", cellId},
                     {"name", session.project().schematicCells.at(cellId).name},
                     {"netlist", netlist},
+                    {"ports", std::move(ports)},
                     {"notes", notes}};
         }
         if (name == "schematic_validate_hierarchy") {
@@ -3369,6 +3862,7 @@ class IceMcpServer {
             for (const auto &group : ice::extractLayoutNets(session.project(), cell)) {
                 nets.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
                                 {"name", group.name},
+                                {"aliases", group.aliases},
                                 {"shapes", group.shapes},
                                 {"ports", group.ports},
                                 {"connections", group.connections}});
@@ -3819,6 +4313,18 @@ class IceMcpServer {
 
 #ifdef ICE_HAVE_AGENTSDK
     std::vector<agentsdk::mcp::tool> listTools() const {
+        const auto withSimulationConfigSchema = [](agentsdk::mcp::tool tool) {
+            auto schema = json::parse(tool.input_schema);
+            schema["properties"]["parameters"] = {{"type", "object"}, {"additionalProperties", {{"type", "number"}}}};
+            schema["properties"]["source_overrides"] = {{"type", "object"},
+                                                        {"additionalProperties", {{"type", "number"}}}};
+            schema["properties"]["corners"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["sweeps"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["monte_carlo"] = {{"type", "object"}};
+            schema["properties"]["measurements"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            tool.input_schema = schema.dump();
+            return tool;
+        };
         using agentsdk::mcp::tool_builder;
         std::vector<agentsdk::mcp::tool> tools;
         const auto customTool = [](std::string name, std::string description, std::string schema) {
@@ -3866,6 +4372,7 @@ class IceMcpServer {
             tool_builder("project_reload")
                 .with_description("Reload the open project from disk.")
                 .with_boolean_param("recover", "Quarantine invalid sidecar files and reload the rest", false)
+                .with_boolean_param("discard", "Throw unsaved in-memory changes away and reload from disk", false)
                 .build());
         tools.push_back(tool_builder("project_undo").with_description("Undo the last project mutation.").build());
         tools.push_back(tool_builder("project_redo").with_description("Redo the next project mutation.").build());
@@ -3884,40 +4391,97 @@ class IceMcpServer {
                 .with_string_param("simulation", "Optional simulation whose schematic includes to validate", false)
                 .with_boolean_param("probe", "Run a minimal transistor load check for the project PDK", false)
                 .build());
-        tools.push_back(tool_builder("simulation_create")
-                            .with_description("Create a simulation and its first graph.")
-                            .with_string_param("name", "Simulation name")
-                            .with_string_param("schematic", "Schematic name or id")
-                            .with_string_param("template", "tran, mixed, pwm_dac, or digital", false)
-                            .with_string_param("analysis", "Analysis type", false)
-                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
-                            .with_number_param("stop", "Stop time", false)
-                            .with_number_param("step", "Time step", false)
-                            .with_string_param("signals", "Signals to capture", false)
-                            .with_string_param("graph_name", "Initial graph name", false)
-                            .build());
-        tools.push_back(tool_builder("simulation_update")
-                            .with_description("Update simulation settings and capture signals.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("analysis", "Analysis type", false)
-                            .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
-                            .with_number_param("stop", "Stop time", false)
-                            .with_number_param("step", "Time step", false)
-                            .with_string_param("signals", "Signals to capture", false)
-                            .build());
+        tools.push_back(withSimulationConfigSchema(
+            tool_builder("simulation_create")
+                .with_description("Create a simulation and its first graph.")
+                .with_string_param("name", "Simulation name")
+                .with_string_param("schematic", "Schematic name or id")
+                .with_string_param("template", "tran, mixed, pwm_dac, or digital", false)
+                .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
+                .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
+                .with_number_param("start", "Transient start time", false)
+                .with_number_param("stop", "Transient stop time", false)
+                .with_number_param("step", "Transient step", false)
+                .with_number_param("temperature", "Simulation temperature in C", false)
+                .with_string_param("model_section", "Override the .lib model section", false)
+                .with_string_param("dc_source", "DC sweep source", false)
+                .with_number_param("dc_start", "DC sweep start", false)
+                .with_number_param("dc_stop", "DC sweep stop", false)
+                .with_number_param("dc_step", "DC sweep step", false)
+                .with_number_param("ac_points", "AC points per decade/octave", false)
+                .with_number_param("ac_start", "AC start frequency", false)
+                .with_number_param("ac_stop", "AC stop frequency", false)
+                .with_string_param("noise_output", "Noise output node", false)
+                .with_string_param("noise_input", "Noise input source", false)
+                .with_number_param("noise_points", "Noise points per decade/octave", false)
+                .with_number_param("noise_start", "Noise start frequency", false)
+                .with_number_param("noise_stop", "Noise stop frequency", false)
+                .with_string_param("tf_output", "Transfer-function output node", false)
+                .with_string_param("tf_source", "Transfer-function input source", false)
+                .with_string_param("signals", "Signals to capture", false)
+                .with_string_param("graph_name", "Initial graph name", false)
+                .build()));
+        tools.push_back(withSimulationConfigSchema(
+            tool_builder("simulation_update")
+                .with_description("Update simulation analysis settings, corners, sweeps, Monte Carlo, "
+                                  "and declarative measurements.")
+                .with_string_param("simulation", "Simulation name or id")
+                .with_string_param("analysis", "transient, dc, ac, op, noise, tf, or digital", false)
+                .with_string_param("simulator", "ngspice, iverilog, or mixed", false)
+                .with_number_param("start", "Transient start time", false)
+                .with_number_param("stop", "Transient stop time", false)
+                .with_number_param("step", "Transient step", false)
+                .with_number_param("temperature", "Simulation temperature in C", false)
+                .with_string_param("model_section", "Override the .lib model section", false)
+                .with_string_param("dc_source", "DC sweep source", false)
+                .with_number_param("dc_start", "DC sweep start", false)
+                .with_number_param("dc_stop", "DC sweep stop", false)
+                .with_number_param("dc_step", "DC sweep step", false)
+                .with_number_param("ac_points", "AC points per decade/octave", false)
+                .with_number_param("ac_start", "AC start frequency", false)
+                .with_number_param("ac_stop", "AC stop frequency", false)
+                .with_string_param("noise_output", "Noise output node", false)
+                .with_string_param("noise_input", "Noise input source", false)
+                .with_number_param("noise_points", "Noise points per decade/octave", false)
+                .with_number_param("noise_start", "Noise start frequency", false)
+                .with_number_param("noise_stop", "Noise stop frequency", false)
+                .with_string_param("tf_output", "Transfer-function output node", false)
+                .with_string_param("tf_source", "Transfer-function input source", false)
+                .with_string_param("signals", "Signals to capture", false)
+                .build()));
         tools.push_back(tool_builder("simulation_run")
                             .with_description("Run a simulation and store a compact run artifact.")
                             .with_string_param("simulation", "Simulation name or id")
                             .with_integer_param("timeout_ms", "Timeout in milliseconds", false)
+                            .build());
+        tools.push_back(tool_builder("simulation_corner_defaults")
+                            .with_description("Populate TT/FF/SS-style corners declared by the active PDK.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .build());
+        tools.push_back(tool_builder("simulation_experiment")
+                            .with_description("Run the configured parameter sweeps, corners, and Monte Carlo "
+                                              "samples, returning one result per variant.")
+                            .with_string_param("simulation", "Simulation name or id")
+                            .with_integer_param("timeout_ms", "Per-run timeout in milliseconds", false)
+                            .with_boolean_param("store", "Store every point as a run artifact (default true)", false)
                             .build());
         tools.push_back(tool_builder("simulation_result")
                             .with_description("Read the latest stored run for a simulation with trace statistics.")
                             .with_string_param("simulation", "Simulation name or id")
                             .build());
         tools.push_back(tool_builder("simulation_measure")
-                            .with_description("Measure zero crossings, frequency, amplitude, and settling time.")
+                            .with_description("Measure zero crossings, frequency, amplitude, settling time, or "
+                                              "evaluate a declarative metric.")
                             .with_string_param("simulation", "Simulation name or id")
+                            .with_string_param("name", "Optional measurement name", false)
+                            .with_string_param("metric",
+                                               "Optional metric: gain, bandwidth, phase_margin, "
+                                               "slew_rate, settling_time, or power",
+                                               false)
                             .with_string_param("signal", "Optional captured signal name", false)
+                            .with_string_param("input", "Optional input/reference signal for gain metrics", false)
+                            .with_number_param("voltage", "Optional supply voltage for power metrics", false)
+                            .with_number_param("tolerance", "Optional settling tolerance", false)
                             .with_number_param("threshold", "Optional crossing threshold", false)
                             .with_number_param("start", "Optional start time for frequency measurements", false)
                             .with_number_param("settle_tolerance", "Relative settling tolerance (default 0.02)", false)
@@ -3932,17 +4496,34 @@ class IceMcpServer {
                             .with_description("List available signals and trace sizes from the latest stored run.")
                             .with_string_param("simulation", "Simulation name or id")
                             .build());
-        tools.push_back(tool_builder("simulation_graph_create")
-                            .with_description("Add a graph definition to a simulation.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("name", "Graph name")
-                            .with_string_param("x_axis", "Optional X-axis signal or time", false)
-                            .with_string_param("y_signals", "Optional comma-separated Y signals", false)
-                            .with_number_param("x_min", "Optional X minimum", false)
-                            .with_number_param("x_max", "Optional X maximum", false)
-                            .with_number_param("y_min", "Optional Y minimum", false)
-                            .with_number_param("y_max", "Optional Y maximum", false)
-                            .build());
+        const auto withGraphAnalysisSchema = [](agentsdk::mcp::tool tool) {
+            auto schema = json::parse(tool.input_schema);
+            schema["properties"]["view"] = {{"type", "string"}, {"enum", {"linear", "db", "phase"}}};
+            schema["properties"]["fft"] = {{"type", "boolean"}};
+            schema["properties"]["fft_window"] = {{"type", "string"}};
+            schema["properties"]["fft_points"] = {{"type", "integer"}};
+            schema["properties"]["show_measurements"] = {{"type", "boolean"}};
+            schema["properties"]["derived_traces"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["overlays"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["markers"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            schema["properties"]["clear_derived"] = {{"type", "boolean"}};
+            schema["properties"]["clear_overlays"] = {{"type", "boolean"}};
+            schema["properties"]["clear_markers"] = {{"type", "boolean"}};
+            tool.input_schema = schema.dump();
+            return tool;
+        };
+        tools.push_back(
+            withGraphAnalysisSchema(tool_builder("simulation_graph_create")
+                                        .with_description("Add a graph definition to a simulation.")
+                                        .with_string_param("simulation", "Simulation name or id")
+                                        .with_string_param("name", "Graph name")
+                                        .with_string_param("x_axis", "Optional X-axis signal or time", false)
+                                        .with_string_param("y_signals", "Optional comma-separated Y signals", false)
+                                        .with_number_param("x_min", "Optional X minimum", false)
+                                        .with_number_param("x_max", "Optional X maximum", false)
+                                        .with_number_param("y_min", "Optional Y minimum", false)
+                                        .with_number_param("y_max", "Optional Y maximum", false)
+                                        .build()));
         tools.push_back(tool_builder("simulation_graph_list")
                             .with_description("List simulation graph definitions.")
                             .with_string_param("simulation", "Optional simulation name or id", false)
@@ -3952,19 +4533,42 @@ class IceMcpServer {
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("graph", "Graph name or id")
                             .build());
-        tools.push_back(tool_builder("simulation_graph_update")
-                            .with_description("Update a simulation graph definition.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .with_string_param("graph", "Graph name or id")
-                            .with_string_param("name", "Optional new graph name", false)
-                            .with_string_param("x_axis", "Optional new X-axis signal or time", false)
-                            .with_string_param("y_signals", "Optional new comma-separated Y signals", false)
-                            .with_number_param("x_min", "Optional X minimum", false)
-                            .with_number_param("x_max", "Optional X maximum", false)
-                            .with_number_param("y_min", "Optional Y minimum", false)
-                            .with_number_param("y_max", "Optional Y maximum", false)
-                            .with_boolean_param("clear_limits", "Clear all axis limits before applying new ones", false)
+        tools.push_back(withGraphAnalysisSchema(
+            tool_builder("simulation_graph_update")
+                .with_description("Update a graph definition, including FFT/dB/phase view, derived "
+                                  "traces, stored-run overlays, and point markers.")
+                .with_string_param("simulation", "Simulation name or id")
+                .with_string_param("graph", "Graph name or id")
+                .with_string_param("name", "Optional new graph name", false)
+                .with_string_param("x_axis", "Optional new X-axis signal or time", false)
+                .with_string_param("y_signals", "Optional new comma-separated Y signals", false)
+                .with_number_param("x_min", "Optional X minimum", false)
+                .with_number_param("x_max", "Optional X maximum", false)
+                .with_number_param("y_min", "Optional Y minimum", false)
+                .with_number_param("y_max", "Optional Y maximum", false)
+                .with_boolean_param("clear_limits", "Clear all axis limits before applying new ones", false)
+                .build()));
+        tools.push_back(tool_builder("simulation_runs")
+                            .with_description("List stored simulation runs for overlay selection.")
+                            .with_string_param("simulation", "Optional simulation name or id", false)
                             .build());
+        const auto withWaveformSchema = [](agentsdk::mcp::tool tool) {
+            auto schema = json::parse(tool.input_schema);
+            schema["properties"]["fft"] = {{"type", "boolean"}};
+            schema["properties"]["derived"] = {{"type", "array"}, {"items", {{"type", "object"}}}};
+            tool.input_schema = schema.dump();
+            return tool;
+        };
+        tools.push_back(
+            withWaveformSchema(tool_builder("simulation_waveform")
+                                   .with_description("Return analyzed waveform series for a stored run: derived "
+                                                     "expressions, dB/phase view, or FFT spectra.")
+                                   .with_string_param("simulation", "Simulation name or id")
+                                   .with_string_param("run_id", "Optional stored run id; defaults to the latest", false)
+                                   .with_string_param("signals", "Optional comma-separated signals", false)
+                                   .with_string_param("view", "Optional linear, db, or phase view", false)
+                                   .with_integer_param("max_points", "Maximum points per series (default 2000)", false)
+                                   .build()));
         tools.push_back(tool_builder("simulation_graph_delete")
                             .with_description("Delete a simulation graph; one graph must remain.")
                             .with_string_param("simulation", "Simulation name or id")

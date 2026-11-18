@@ -1,5 +1,6 @@
 #include "app_window.hpp"
 #include "app_widgets.hpp"
+#include "icelib/connectivity.hpp"
 #include "icelib/core.hpp"
 #include "icelib/drc.hpp"
 #include "icelib/hdl.hpp"
@@ -26,6 +27,8 @@
 #include "schematic_utils.hpp"
 #include "shortcuts.hpp"
 #include "side_panels.hpp"
+#include "simulation_experiment_ui.hpp"
+#include "waveform_analysis_ui.hpp"
 
 #include "appearance.hpp"
 #include "file_labels.hpp"
@@ -456,12 +459,6 @@ ice::ObjectId layoutPortForSchematicPin(const ice::LayoutCell &child, const std:
     return 0;
 }
 
-struct LayoutConnectivity {
-    std::set<ice::ObjectId> conductors;
-    std::map<ice::ObjectId, std::set<ice::ObjectId>> viaConductors;
-    std::set<std::pair<ice::ObjectId, ice::ObjectId>> directPairs;
-};
-
 struct LayoutNetTrace {
     std::set<ice::ObjectId> shapes;
     std::set<ice::ObjectId> connections;
@@ -592,128 +589,6 @@ PinRoutePoint pinRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
     return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}} : PinRoutePoint{{centerX, rect.y}, {0, -1}};
 }
 
-bool parseIndexedLayer(const std::string &key, const std::string &prefix, int &index) {
-    if (!key.starts_with(prefix))
-        return false;
-    const auto digits = key.substr(prefix.size());
-    if (digits.empty() ||
-        !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c) != 0; }))
-        return false;
-    try {
-        index = std::stoi(digits);
-    } catch (const std::exception &) {
-        return false;
-    }
-    return index >= 0;
-}
-
-LayoutConnectivity inferLayoutConnectivity(const ice::Project &project) {
-    LayoutConnectivity connectivity;
-    std::map<std::string, ice::ObjectId> layersByKey;
-    for (const auto &[id, layer] : project.layers) {
-        const auto key = layerKey(layer.name);
-        if (!key.empty())
-            layersByKey.emplace(key, id);
-    }
-    const auto layerFor = [&](const std::string &key) -> ice::ObjectId {
-        const auto layer = layersByKey.find(key);
-        return layer == layersByKey.end() ? 0 : layer->second;
-    };
-    const auto addConductor = [&](ice::ObjectId layer) {
-        if (layer != 0)
-            connectivity.conductors.insert(layer);
-    };
-
-    std::vector<std::pair<int, ice::ObjectId>> metals;
-    std::vector<std::pair<int, ice::ObjectId>> topMetals;
-    for (const auto &[key, id] : layersByKey) {
-        int index = 0;
-        if (parseIndexedLayer(key, "metal", index))
-            metals.emplace_back(index, id);
-        else if (parseIndexedLayer(key, "topmetal", index))
-            topMetals.emplace_back(index, id);
-    }
-    std::sort(metals.begin(), metals.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
-    std::sort(topMetals.begin(), topMetals.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
-
-    std::vector<std::pair<int, bool>> stack; // layer index, is top metal
-    for (const auto &entry : metals)
-        stack.emplace_back(entry.first, false);
-    for (const auto &entry : topMetals)
-        stack.emplace_back(entry.first, true);
-    if (!stack.empty()) {
-        for (const auto &[_, id] : metals)
-            addConductor(id);
-        for (const auto &[_, id] : topMetals)
-            addConductor(id);
-        for (std::size_t index = 0; index + 1 < stack.size(); ++index) {
-            const auto lowerLayer = stack[index].second ? layerFor("topmetal" + std::to_string(stack[index].first))
-                                                        : layerFor("metal" + std::to_string(stack[index].first));
-            const auto upperLayer = stack[index + 1].second
-                                        ? layerFor("topmetal" + std::to_string(stack[index + 1].first))
-                                        : layerFor("metal" + std::to_string(stack[index + 1].first));
-            if (lowerLayer == 0 || upperLayer == 0)
-                continue;
-            std::string viaKey;
-            if (!stack[index].second && !stack[index + 1].second)
-                viaKey = "via" + std::to_string(stack[index].first);
-            else
-                viaKey = "topvia" + std::to_string(stack[index + 1].first);
-            const auto viaLayer = layerFor(viaKey);
-            if (viaLayer != 0) {
-                auto &allowed = connectivity.viaConductors[viaLayer];
-                allowed.insert(lowerLayer);
-                allowed.insert(upperLayer);
-            } else {
-                connectivity.directPairs.emplace(std::min(lowerLayer, upperLayer), std::max(lowerLayer, upperLayer));
-            }
-        }
-    }
-
-    // A contact layer connects active/poly to the first metal layer. Include
-    // those device layers so a trace can continue from metal into a device.
-    const auto contactLayer = layerFor("contact");
-    if (contactLayer != 0) {
-        std::set<ice::ObjectId> contactConductors;
-        for (const auto &key : {"activ", "gatpoly", "poly2", "metal1"}) {
-            if (const auto layer = layerFor(key); layer != 0)
-                contactConductors.insert(layer);
-        }
-        if (contactConductors.size() >= 2) {
-            auto &allowed = connectivity.viaConductors[contactLayer];
-            for (const auto layer : contactConductors) {
-                allowed.insert(layer);
-                addConductor(layer);
-            }
-        }
-    }
-
-    if (connectivity.conductors.empty()) {
-        // Generic projects may not use technology layer names. Fall back to a
-        // permissive stack so tracing still works for custom layer naming.
-        std::vector<ice::ObjectId> viaLayers;
-        for (const auto &[key, id] : layersByKey) {
-            const bool via = key.find("via") != std::string::npos || key.find("contact") != std::string::npos;
-            const bool ignored = key.find("text") != std::string::npos || key.find("label") != std::string::npos ||
-                                 key.find("boundary") != std::string::npos;
-            if (via) {
-                viaLayers.push_back(id);
-            } else if (!ignored) {
-                addConductor(id);
-            }
-        }
-        if (connectivity.conductors.empty()) {
-            for (const auto &[_, layer] : project.layers)
-                addConductor(layer.id);
-        }
-        for (const auto via : viaLayers)
-            connectivity.viaConductors[via] = connectivity.conductors;
-    }
-    return connectivity;
-}
-
 struct AutoRouteGeometry {
     ice::ObjectId layer = 0;
     std::vector<ice::LayoutPoint> points;
@@ -779,7 +654,7 @@ double routePointSegmentDistance(ice::LayoutPoint point, ice::LayoutPoint a, ice
 }
 
 AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::PlannedConnection &connection,
-                                      const LayoutConnectivity &connectivity) {
+                                      const ice::LayoutConnectivity &connectivity) {
     AutoRouteObstacles result;
     for (const auto &[_, shape] : cell.shapes) {
         if (shape.routedConnection == 0 || shape.routedConnection == connection.id)
@@ -819,7 +694,7 @@ AutoRouteObstacles autoRouteObstacles(const ice::LayoutCell &cell, const ice::Pl
 
 int autoRouteConflictCount(const std::vector<ice::LayoutPoint> &points, const std::vector<ice::ObjectId> &segmentLayers,
                            const std::vector<std::vector<ice::ObjectId>> &pointVias, ice::Coordinate width,
-                           const AutoRouteObstacles &obstacles, const LayoutConnectivity &connectivity,
+                           const AutoRouteObstacles &obstacles, const ice::LayoutConnectivity &connectivity,
                            ice::Coordinate margin) {
     if (points.size() < 2 || segmentLayers.size() + 1 != points.size())
         return std::numeric_limits<int>::max() / 2;
@@ -947,7 +822,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     if (sourceLayer == 0 || targetLayer == 0)
         return fail("A pin layer has no drawing layer to route from.");
 
-    const auto connectivity = inferLayoutConnectivity(project);
+    const auto connectivity = ice::inferLayoutConnectivity(project, cellIt->second.pdk);
     std::map<ice::ObjectId, std::vector<std::pair<ice::ObjectId, ice::ObjectId>>> graph;
     for (const auto &[via, conductors] : connectivity.viaConductors) {
         for (const auto left : conductors) {
@@ -1018,7 +893,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
             layerIsPinLayer(layerIt->second))
             continue;
-        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+        if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
         const auto sourceVias = viaStack(sourceLayer, layer, predecessorFrom);
         const auto targetVias = viaStack(targetLayer, layer, predecessorTo);
@@ -1174,7 +1049,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
             layerIsPinLayer(layerIt->second))
             continue;
-        if (layerKey(layerIt->second.name).find("metal") == std::string::npos)
+        if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
         if (std::find(bridgeLayers.begin(), bridgeLayers.end(), neighbor) == bridgeLayers.end())
             bridgeLayers.push_back(neighbor);
@@ -3838,8 +3713,26 @@ class DocumentWindow : public QMainWindow {
                 QStringLiteral("Create a layout layer before converting sources or grounds to pins."));
             return;
         }
-        const auto isMetalLayer = [](const ice::Layer &layer) {
-            return layerKey(layer.name).find("metal") != std::string::npos;
+        const auto connectivity = ice::inferLayoutConnectivity(project_->project(), cellIt->second.pdk);
+        std::set<std::string> routingBases;
+        for (const auto layerId : connectivity.routingLayers) {
+            const auto layer = project_->project().layers.find(layerId);
+            if (layer != project_->project().layers.end()) {
+                auto base = layer->second.name;
+                if (const auto dot = base.find('.'); dot != std::string::npos)
+                    base = base.substr(0, dot);
+                routingBases.insert(layerKey(base));
+            }
+        }
+        const auto isMetalLayer = [&](const ice::Layer &layer) {
+            if (connectivity.routingLayers.contains(layer.id))
+                return true;
+            auto base = layer.name;
+            if (const auto dot = base.find('.'); dot != std::string::npos)
+                base = base.substr(0, dot);
+            if (routingBases.contains(layerKey(base)))
+                return true;
+            return routingBases.empty() && layerKey(layer.name).find("metal") != std::string::npos;
         };
         const auto isPinLayer = [](const ice::Layer &layer) { return layerIsPinLayer(layer); };
 
@@ -4344,45 +4237,33 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto &project = project_->project();
         const auto layers = layoutLayers(project, activeLayoutId_);
-        const auto findLayer = [&](const char *name) -> ice::ObjectId {
-            const auto wanted = QString::fromLatin1(name);
-            QStringList wantedNames{wanted};
-            // SKY130 names its metal layers met1-met5 instead of Metal1-Metal5.
-            if (wanted.startsWith(QStringLiteral("Metal"), Qt::CaseInsensitive))
-                wantedNames.push_back(QStringLiteral("met") + wanted.mid(5));
-            for (const auto &[id, layer] : project.layers) {
-                if (!layerAvailableForLayout(project, activeLayoutId_, layer))
-                    continue;
-                const auto candidate = QString::fromStdString(layer.name);
-                const auto base = candidate.section('.', 0, 0);
-                for (const auto &candidateName : wantedNames) {
-                    if (candidate.compare(candidateName, Qt::CaseInsensitive) == 0 ||
-                        base.compare(candidateName, Qt::CaseInsensitive) == 0)
-                        return id;
-                }
-            }
-            return 0;
-        };
-        static constexpr std::array<std::pair<const char *, const char *>, 7> steps = {{
-            {"Metal1", "Via1"},
-            {"Metal2", "Via2"},
-            {"Metal3", "Via3"},
-            {"Metal4", "Via4"},
-            {"Metal5", "TopVia1"},
-            {"TopMetal1", "TopVia2"},
-            {"TopMetal2", nullptr},
-        }};
+        const auto cell = project.layoutCells.find(activeLayoutId_);
+        const auto connectivity =
+            ice::inferLayoutConnectivity(project, cell == project.layoutCells.end() ? std::string{} : cell->second.pdk);
+
         LayoutPathConfig config;
         config.width = 0;
         config.cell = activeLayoutId_;
-        for (const auto &[metal, via] : steps) {
-            const auto layerId = findLayer(metal);
-            if (layerId == 0)
-                break;
-            const auto viaId = via ? findLayer(via) : 0;
-            const auto layerIt = project.layers.find(layerId);
-            const auto minimum = layerIt == project.layers.end() ? 0 : layoutPathMinimumWidth(layerIt->second);
-            config.layers.push_back({layerId, viaId, metal, minimum});
+        const auto viaBetween = [&](ice::ObjectId lower, ice::ObjectId upper) -> ice::ObjectId {
+            for (const auto &[via, allowed] : connectivity.viaConductors) {
+                if (allowed.contains(lower) && allowed.contains(upper))
+                    return via;
+            }
+            return 0;
+        };
+        std::vector<ice::ObjectId> order;
+        for (const auto layerId : connectivity.routingOrder) {
+            const auto layer = project.layers.find(layerId);
+            if (layer == project.layers.end() || !layerAvailableForLayout(project, activeLayoutId_, layer->second))
+                continue;
+            order.push_back(layerId);
+        }
+        for (std::size_t index = 0; index < order.size(); ++index) {
+            const auto layer = project.layers.find(order[index]);
+            const auto viaId = index + 1 < order.size() ? viaBetween(order[index], order[index + 1]) : 0;
+            const auto minimum = layer == project.layers.end() ? 0 : layoutPathMinimumWidth(layer->second);
+            config.layers.push_back(
+                {order[index], viaId, layer == project.layers.end() ? std::string{} : layer->second.name, minimum});
         }
         if (config.layers.empty() && !layers.empty()) {
             for (const auto &layerRef : layers) {
@@ -4864,7 +4745,7 @@ class DocumentWindow : public QMainWindow {
         const auto cell = project_->project().layoutCells.find(activeLayoutId_);
         if (cell == project_->project().layoutCells.end())
             return trace;
-        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto connectivity = ice::inferLayoutConnectivity(project_->project(), cell->second.pdk);
         const auto shapeLayers = [](const ice::Shape &shape) {
             std::set<ice::ObjectId> layers;
             if (shape.isPath()) {
@@ -5181,7 +5062,10 @@ class DocumentWindow : public QMainWindow {
                                      QStringLiteral("Create or open a project first."));
             return;
         }
-        const auto connectivity = inferLayoutConnectivity(project_->project());
+        const auto activeCell = project_->project().layoutCells.find(activeLayoutId_);
+        const auto connectivity = ice::inferLayoutConnectivity(
+            project_->project(),
+            activeCell == project_->project().layoutCells.end() ? std::string{} : activeCell->second.pdk);
         const auto nameOf = [&](ice::ObjectId layerId) -> QString {
             const auto layer = project_->project().layers.find(layerId);
             return layer == project_->project().layers.end() ? QStringLiteral("#%1").arg(layerId)
@@ -7860,7 +7744,135 @@ class DocumentWindow : public QMainWindow {
         });
         plot->setYAxisLabelEditCallback(
             [this](ice::ObjectId graphId, const QString &label) { renameGraphYAxisLabel(graphId, label); });
+        plot->setStatusCallback([this](const QString &message) {
+            if (!message.isEmpty())
+                statusBar()->showMessage(message, 6000);
+        });
+        plot->setMarkerCallback(
+            [this, plot](const ice::SimulationGraphMarker &marker) { persistGraphMarker(plot, marker); });
+        plot->setClearMarkersCallback([this, plot] {
+            const auto graphId = plot->graph().id;
+            clearGraphMarkers(graphId);
+            auto updated = plot->graph();
+            updated.markers.clear();
+            plot->setGraph(updated);
+        });
         return plot;
+    }
+
+    void persistGraphMarker(SimulationPlot *plot, const ice::SimulationGraphMarker &marker) {
+        if (!project_ || activeSimulationId_ == 0 || !plot)
+            return;
+        const auto simId = activeSimulationId_;
+        const auto graphId = plot->graph().id;
+        if (graphId == 0)
+            return;
+        ice::SimulationGraph stored;
+        project_->execute("add graph marker", [&](ice::Project &project) {
+            auto simulation = project.simulations.find(simId);
+            if (simulation == project.simulations.end())
+                return;
+            for (auto &graph : simulation->second.graphs) {
+                if (graph.id != graphId)
+                    continue;
+                graph.markers.push_back(marker);
+                stored = graph;
+                break;
+            }
+        });
+        if (stored.id != 0)
+            plot->setGraph(stored);
+    }
+
+    void clearGraphMarkers(ice::ObjectId graphId) {
+        if (!project_ || activeSimulationId_ == 0 || graphId == 0)
+            return;
+        const auto simId = activeSimulationId_;
+        project_->execute("clear graph markers", [&](ice::Project &project) {
+            auto simulation = project.simulations.find(simId);
+            if (simulation == project.simulations.end())
+                return;
+            for (auto &graph : simulation->second.graphs) {
+                if (graph.id == graphId)
+                    graph.markers.clear();
+            }
+        });
+    }
+
+    // Resolves stored-run overlays for one plot. Results are cached by run id
+    // so switching graph tabs does not re-read the same JSON file.
+    void applyGraphOverlays(SimulationPlot *plot, const ice::SimulationGraph &graph) {
+        if (!plot)
+            return;
+        std::vector<SimulationPlot::Overlay> overlays;
+        if (!projectPath_.isEmpty()) {
+            const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+            for (const auto &overlay : graph.overlays) {
+                if (overlay.runId.empty())
+                    continue;
+                std::shared_ptr<const ice::SimulationResult> result;
+                std::string variant;
+                if (const auto cached = overlayResults_.find(overlay.runId); cached != overlayResults_.end()) {
+                    result = cached->second.result;
+                    variant = cached->second.variant;
+                } else {
+                    auto stored = ice::findSimulationRun(root, overlay.runId);
+                    if (!stored)
+                        continue;
+                    variant = stored->variant;
+                    result = std::make_shared<ice::SimulationResult>(std::move(stored->result));
+                    overlayResults_[overlay.runId] = {result, variant};
+                }
+                auto label = overlay.label;
+                if (label.empty())
+                    label = variant.empty() ? overlay.runId : variant;
+                overlays.push_back({label, std::move(result)});
+            }
+        }
+        plot->setOverlays(std::move(overlays));
+    }
+
+    void openWaveformAnalysisDialog() {
+        if (!project_ || activeSimulationId_ == 0 || !graphTabs_ || graphTabs_->currentIndex() < 0)
+            return;
+        const auto tabIndex = graphTabs_->currentIndex();
+        const auto graphId = static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(tabIndex).toULongLong());
+        const auto simId = activeSimulationId_;
+        const auto simulation = project_->project().simulations.find(simId);
+        if (simulation == project_->project().simulations.end() || graphId == 0)
+            return;
+        const auto graphIt = std::find_if(simulation->second.graphs.begin(), simulation->second.graphs.end(),
+                                          [graphId](const ice::SimulationGraph &graph) { return graph.id == graphId; });
+        if (graphIt == simulation->second.graphs.end())
+            return;
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        WaveformAnalysisDialog dialog(*graphIt, root, simId, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto updated = dialog.graph();
+        project_->execute("configure graph analysis", [&](ice::Project &project) {
+            auto target = project.simulations.find(simId);
+            if (target == project.simulations.end())
+                return;
+            for (auto &graph : target->second.graphs) {
+                if (graph.id == graphId) {
+                    graph = updated;
+                    break;
+                }
+            }
+        });
+        const auto &storedSimulation = project_->project().simulations.at(simId);
+        rebuildGraphTabs(storedSimulation.graphs);
+        simulationPanel_->setProject(project_->project());
+        for (int index = 0; index < graphTabs_->count(); ++index) {
+            if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
+                graphTabs_->setCurrentIndex(index);
+                break;
+            }
+        }
+        statusBar()->showMessage(QStringLiteral("Waveform analysis settings saved"));
     }
 
     void renameGraphSignalLabel(ice::ObjectId graphId, const std::string &signal, const QString &label) {
@@ -7960,6 +7972,7 @@ class DocumentWindow : public QMainWindow {
             // Show a single empty plot labelled "Graph 1".
             simulationPlot_->clear();
             simulationPlot_->setGraph({});
+            simulationPlot_->setOverlays({});
             simulationPlot_->setGridVisible(graphGridVisible_);
             graphTabs_->addTab(simulationPlot_, QStringLiteral("Graph 1"));
             return;
@@ -7982,6 +7995,7 @@ class DocumentWindow : public QMainWindow {
             plot->setGridVisible(graphGridVisible_);
             if (const auto previous = previousPlots.find(graphs[i].id); previous != previousPlots.end())
                 plot->setResult(previous->second.result);
+            applyGraphOverlays(plot, displayGraph);
             const auto tabName = QString::fromStdString(graphs[i].name);
             const auto idx = graphTabs_->addTab(plot, tabName);
             graphTabs_->tabBar()->setTabData(idx, QVariant::fromValue<qulonglong>(graphs[i].id));
@@ -7994,8 +8008,10 @@ class DocumentWindow : public QMainWindow {
         if (!graphTabs_)
             return;
         for (int index = 0; index < graphTabs_->count(); ++index) {
-            if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index)))
+            if (auto *plot = dynamic_cast<SimulationPlot *>(graphTabs_->widget(index))) {
                 plot->setResult(result);
+                applyGraphOverlays(plot, plot->graph());
+            }
         }
     }
 
@@ -8048,15 +8064,45 @@ class DocumentWindow : public QMainWindow {
         const bool transient = analysis == QStringLiteral("transient");
         if (useInitialConditions_)
             useInitialConditions_->setEnabled(transient);
+        ice::SimulationItem settings;
+        if (project_ && activeSimulationId_ != 0) {
+            if (const auto found = project_->project().simulations.find(activeSimulationId_);
+                found != project_->project().simulations.end())
+                settings = found->second;
+        }
         QString line;
         if (transient) {
             line = QStringLiteral(".tran %1 %2").arg(stepTime_->value()).arg(stopTime_->value());
             if (useInitialConditions_ && useInitialConditions_->isChecked())
                 line += QStringLiteral(" uic");
         } else if (analysis == QStringLiteral("dc")) {
-            line = QStringLiteral(".dc V1 0 1 0.01");
+            line =
+                QStringLiteral(".dc %1 %2 %3 %4")
+                    .arg(settings.dcSource.empty() ? QStringLiteral("V1") : QString::fromStdString(settings.dcSource))
+                    .arg(settings.dcStart)
+                    .arg(settings.dcStop)
+                    .arg(settings.dcStep);
         } else if (analysis == QStringLiteral("ac")) {
-            line = QStringLiteral(".ac dec 10 1 1e6");
+            line = QStringLiteral(".ac %1 %2 %3 %4")
+                       .arg(QString::fromStdString(settings.acVariation))
+                       .arg(settings.acPoints)
+                       .arg(settings.acStart)
+                       .arg(settings.acStop);
+        } else if (analysis == QStringLiteral("noise")) {
+            line = QStringLiteral(".noise v(%1) %2 %3 %4 %5 %6")
+                       .arg(settings.noiseOutput.empty() ? QStringLiteral("out")
+                                                         : QString::fromStdString(settings.noiseOutput),
+                            settings.noiseInput.empty() ? QStringLiteral("V1")
+                                                        : QString::fromStdString(settings.noiseInput),
+                            QString::fromStdString(settings.noiseVariation))
+                       .arg(settings.noisePoints)
+                       .arg(settings.noiseStart)
+                       .arg(settings.noiseStop);
+        } else if (analysis == QStringLiteral("tf")) {
+            line =
+                QStringLiteral(".tf v(%1) %2")
+                    .arg(settings.tfOutput.empty() ? QStringLiteral("out") : QString::fromStdString(settings.tfOutput),
+                         settings.tfSource.empty() ? QStringLiteral("V1") : QString::fromStdString(settings.tfSource));
         } else if (analysis == QStringLiteral("digital")) {
             line = QStringLiteral("SystemVerilog testbench: $finish / VCD traces");
         } else {
@@ -9182,67 +9228,75 @@ class DocumentWindow : public QMainWindow {
             graphTabs_->currentWidget()->update();
     }
 
-    ice::SimulationRequest buildSimulationRequest(const ice::SimulationItem &sim, QStringList &netlistNotes) const {
-        ice::SimulationRequest request;
-        request.analysis = sim.analysis;
-        request.simulator = sim.simulator;
-        request.stop = sim.stop;
-        request.step = sim.step;
-        request.use_initial_conditions = sim.use_initial_conditions;
-        if (!projectPath_.isEmpty())
-            request.workingDirectory = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
-        // The circuit comes from the schematic the simulation points at, so
-        // Run simulates what you drew instead of hand-typed directives. The
-        // additional directives box is reserved for model cards / .include
-        // lines.
-        const auto &project = project_->project();
-        const auto cellId = sim.schematic != 0 && project.schematicCells.contains(sim.schematic)
-                                ? sim.schematic
-                                : (project.schematicCells.empty() ? 0 : project.schematicCells.begin()->first);
-        bool hdl = false;
-        if (cellId != 0) {
-            const auto &cell = project.schematicCells.at(cellId);
-            if (cell.systemVerilogSchematic) {
-                hdl = true;
-                request.simulator = "iverilog";
-                request.analysis = "digital";
-                const auto source = ice::buildSystemVerilogSimulationSource(project, cellId);
-                std::istringstream lines(source);
-                std::string line;
-                while (std::getline(lines, line))
-                    request.netlist.push_back(line);
-                netlistNotes << QStringLiteral("SystemVerilog source cell");
-            } else if (ice::schematicContainsHdl(project, cellId)) {
-                std::string error;
-                if (!ice::prepareMixedSignalRequest(request, project, cellId, &error))
-                    throw ice::ProjectError("simulation.mixed", error);
-                ice::applyPdkSimulationSetup(cell.pdk, request);
-                netlistNotes << QStringLiteral("Mixed-signal co-simulation (ngspice + Icarus Verilog)");
-            } else {
-                request.simulator = "ngspice";
-                std::vector<std::string> notes;
-                const auto lines = ice::buildSimulationNetlist(project, cellId, &notes);
-                request.netlist.insert(request.netlist.end(), lines.begin(), lines.end());
-                ice::applyPdkSimulationSetup(cell.pdk, request);
-                for (const auto &noteText : notes)
-                    netlistNotes << QString::fromStdString(noteText);
-            }
+    void openSimulationExperimentDialog() {
+        if (!project_ || activeSimulationId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Simulation Experiment"),
+                                     QStringLiteral("Select a simulation first."));
+            return;
         }
-        if (!hdl) {
-            for (const auto &line : additionalDirectives_->text().split('\n')) {
-                const auto trimmed = line.trimmed();
-                // Skip analysis/control directives the runner already handles from
-                // the simulation properties; keep model cards and includes.
-                if (trimmed.isEmpty() || isAnalysisControlDirective(trimmed))
-                    continue;
-                request.netlist.push_back(trimmed.toStdString());
-            }
+        const auto simulation = project_->project().simulations.find(activeSimulationId_);
+        if (simulation == project_->project().simulations.end()) {
+            QMessageBox::information(this, QStringLiteral("Simulation Experiment"),
+                                     QStringLiteral("Select a simulation first."));
+            return;
         }
-        // The captured-signal list tells the adapter which vectors to fetch
-        // back from ngspice. Graph axis selections then pick from those traces.
-        for (const auto &signal : parseSignalList(QString::fromStdString(sim.captureSignals)))
-            request.probeSignals.push_back(signal.toStdString());
+        auto item = simulation->second;
+        if (!simulationItemIsDigital(item)) {
+            const auto form = currentSimulationFormItem();
+            item.schematic = form.schematic;
+            item.simulator = form.simulator;
+            item.analysis = form.analysis;
+            item.stop = form.stop;
+            item.step = form.step;
+            item.use_initial_conditions = form.use_initial_conditions;
+            item.directives = form.directives;
+            item.captureSignals = form.captureSignals;
+        }
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        SimulationExperimentDialog dialog(project_->project(), item, root, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const auto updated = dialog.simulation();
+        project_->execute("configure simulation experiment", [&](ice::Project &project) {
+            auto target = project.simulations.find(activeSimulationId_);
+            if (target == project.simulations.end())
+                return;
+            target->second.temperature = updated.temperature;
+            target->second.modelSection = updated.modelSection;
+            target->second.dcSource = updated.dcSource;
+            target->second.dcStart = updated.dcStart;
+            target->second.dcStop = updated.dcStop;
+            target->second.dcStep = updated.dcStep;
+            target->second.acVariation = updated.acVariation;
+            target->second.acPoints = updated.acPoints;
+            target->second.acStart = updated.acStart;
+            target->second.acStop = updated.acStop;
+            target->second.noiseOutput = updated.noiseOutput;
+            target->second.noiseInput = updated.noiseInput;
+            target->second.noiseVariation = updated.noiseVariation;
+            target->second.noisePoints = updated.noisePoints;
+            target->second.noiseStart = updated.noiseStart;
+            target->second.noiseStop = updated.noiseStop;
+            target->second.tfOutput = updated.tfOutput;
+            target->second.tfSource = updated.tfSource;
+            target->second.corners = updated.corners;
+            target->second.sweeps = updated.sweeps;
+            target->second.monteCarlo = updated.monteCarlo;
+            target->second.measurements = updated.measurements;
+        });
+        statusBar()->showMessage(QStringLiteral("Simulation experiment settings saved"));
+    }
 
+    ice::SimulationRequest buildSimulationRequest(const ice::SimulationItem &sim, QStringList &netlistNotes) const {
+        const auto root = projectPath_.isEmpty()
+                              ? std::filesystem::path{}
+                              : std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
+        std::vector<std::string> notes;
+        auto request = ice::simulationRequestForItem(project_->project(), sim, root, &notes);
+        for (const auto &note : notes)
+            netlistNotes << QString::fromStdString(note);
         return request;
     }
 
@@ -9299,6 +9353,11 @@ class DocumentWindow : public QMainWindow {
 
     ice::SimulationItem currentSimulationFormItem() const {
         ice::SimulationItem sim;
+        if (project_ && activeSimulationId_ != 0) {
+            if (const auto found = project_->project().simulations.find(activeSimulationId_);
+                found != project_->project().simulations.end())
+                sim = found->second;
+        }
         sim.schematic = selectedSimulationSchematicId();
         sim.simulator = simulatorSelector_->currentData().toString().toStdString();
         sim.analysis = analysisSelector_->currentData().toString().toStdString();
@@ -9772,6 +9831,8 @@ class DocumentWindow : public QMainWindow {
             simulationGridButton_->setEnabled(hasSimulation);
         if (simulationLoadVcdButton_)
             simulationLoadVcdButton_->setEnabled(hasSimulation);
+        if (simulationAnalyzeButton_)
+            simulationAnalyzeButton_->setEnabled(hasSimulation);
         if (simulationTestbenchRunButton_)
             simulationTestbenchRunButton_->setEnabled(hasSimulation && hasSchematic && hdl);
         updateSimulationTestbenchTab();
@@ -9816,10 +9877,27 @@ class DocumentWindow : public QMainWindow {
                             QString::fromStdString(result.simulator_version)));
         if (result.state == ice::JobState::succeeded) {
             logMessage(ice::logging::simulation, spdlog::level::info,
-                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s)")
+                       QStringLiteral("Simulation '%1' succeeded: %2 sample(s), %3 trace(s) on %4")
                            .arg(name)
                            .arg(result.time.size())
-                           .arg(result.traces.size()));
+                           .arg(result.traces.size())
+                           .arg(QString::fromStdString(result.xAxis)));
+            for (const auto &measurement : result.measurements) {
+                if (!measurement.valid) {
+                    logMessage(ice::logging::simulation, spdlog::level::warn,
+                               QStringLiteral("Measurement '%1' (%2) failed: %3")
+                                   .arg(QString::fromStdString(measurement.name),
+                                        QString::fromStdString(measurement.metric),
+                                        QString::fromStdString(measurement.error)));
+                    continue;
+                }
+                logMessage(
+                    ice::logging::simulation, spdlog::level::info,
+                    QStringLiteral("Measurement '%1' (%2): %3 %4")
+                        .arg(QString::fromStdString(measurement.name), QString::fromStdString(measurement.metric))
+                        .arg(measurement.value)
+                        .arg(QString::fromStdString(measurement.unit)));
+            }
         } else {
             logMessage(ice::logging::simulation,
                        result.state == ice::JobState::cancelled ? spdlog::level::warn : spdlog::level::err,
@@ -12779,6 +12857,8 @@ class DocumentWindow : public QMainWindow {
         analysisSelector_->addItem(QStringLiteral("DC sweep"), QStringLiteral("dc"));
         analysisSelector_->addItem(QStringLiteral("AC sweep"), QStringLiteral("ac"));
         analysisSelector_->addItem(QStringLiteral("Operating point"), QStringLiteral("op"));
+        analysisSelector_->addItem(QStringLiteral("Noise"), QStringLiteral("noise"));
+        analysisSelector_->addItem(QStringLiteral("Transfer function"), QStringLiteral("tf"));
         stopTime_ = new QDoubleSpinBox;
         stopTime_->setRange(1e-12, 1e9);
         stopTime_->setDecimals(9);
@@ -12833,9 +12913,15 @@ class DocumentWindow : public QMainWindow {
         simulationBuildNetlistButton_->setAccessibleName(QStringLiteral("Build simulation netlist"));
         simulationBuildNetlistButton_->setEnabled(false);
         simulationBuildNetlistButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        auto *experimentButton = new QPushButton(QStringLiteral("Experiment Setup…"));
+        setLucideIcon(experimentButton, QStringLiteral("flask-conical"), 16);
+        experimentButton->setToolTip(QStringLiteral("Configure analysis parameters, corners, sweeps, "
+                                                    "Monte Carlo, and measurements"));
+        connect(experimentButton, &QPushButton::clicked, this, [this] { openSimulationExperimentDialog(); });
         auto *runRow = new QHBoxLayout;
         runRow->addWidget(simulationBuildNetlistButton_, 1);
         runRow->addWidget(runButton, 1);
+        runRow->addWidget(experimentButton, 1);
         propertiesColumn->addLayout(runRow);
 
         simulationNetlist_ = new QPlainTextEdit;
@@ -12890,11 +12976,19 @@ class DocumentWindow : public QMainWindow {
         simulationLoadVcdButton_->setFixedWidth(32);
         simulationLoadVcdButton_->setEnabled(false);
         setLucideIcon(simulationLoadVcdButton_, QStringLiteral("notebook-text"), 16);
+        simulationAnalyzeButton_ = new QPushButton;
+        simulationAnalyzeButton_->setToolTip(
+            QStringLiteral("Waveform analysis: FFT, dB/phase views, derived traces, run overlays, markers"));
+        simulationAnalyzeButton_->setAccessibleName(QStringLiteral("Waveform analysis"));
+        simulationAnalyzeButton_->setFixedWidth(32);
+        simulationAnalyzeButton_->setEnabled(false);
+        setLucideIcon(simulationAnalyzeButton_, QStringLiteral("chart-spline"), 16);
         graphControlsLayout->addStretch(1);
         graphControlsLayout->addWidget(simulationAddGraphButton_);
         graphControlsLayout->addWidget(simulationDeleteGraphButton_);
         graphControlsLayout->addWidget(simulationEditGraphButton_);
         graphControlsLayout->addWidget(simulationGridButton_);
+        graphControlsLayout->addWidget(simulationAnalyzeButton_);
         graphControlsLayout->addWidget(simulationLoadVcdButton_);
         graphControlsLayout->addStretch(1);
 
@@ -13159,6 +13253,7 @@ class DocumentWindow : public QMainWindow {
                     plot->setGridVisible(visible);
         });
         connect(simulationLoadVcdButton_, &QPushButton::clicked, this, [this] { loadVcdGraphs(); });
+        connect(simulationAnalyzeButton_, &QPushButton::clicked, this, [this] { openWaveformAnalysisDialog(); });
         connect(graphTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshGraphPlot(); });
         connect(simulationTabs_, &QTabWidget::currentChanged, this, [this](int index) {
             if (simulationTabs_ && simulationGraphsPage_ && simulationTabs_->widget(index) == simulationGraphsPage_)
@@ -14761,6 +14856,12 @@ class DocumentWindow : public QMainWindow {
     QPushButton *simulationEditGraphButton_ = nullptr;
     QPushButton *simulationGridButton_ = nullptr;
     QPushButton *simulationLoadVcdButton_ = nullptr;
+    QPushButton *simulationAnalyzeButton_ = nullptr;
+    struct OverlayResult {
+        std::shared_ptr<const ice::SimulationResult> result;
+        std::string variant;
+    };
+    std::map<std::string, OverlayResult> overlayResults_;
     QString currentSimulationNetlist_;
     QString builtSimulationNetlist_;
     ice::ObjectId builtSimulationNetlistSchematicId_ = 0;

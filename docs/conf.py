@@ -10,8 +10,19 @@ language = "en"
 
 extensions = [
     "myst_parser",
+    "sphinx.ext.autodoc",
     "sphinx_copybutton",
 ]
+
+# The procedural layout runner is a standalone script under assets/. Put it on
+# sys.path so autodoc can import the builder classes for the API reference.
+_docs_dir = os.path.dirname(os.path.abspath(__file__))
+_runner_dir = os.path.join(os.path.dirname(_docs_dir), "assets", "layout")
+if _runner_dir not in sys.path:
+    sys.path.insert(0, _runner_dir)
+
+autodoc_member_order = "bysource"
+autodoc_preserve_defaults = True
 
 source_suffix = {
     ".rst": "restructuredtext",
@@ -27,7 +38,14 @@ myst_enable_extensions = [
 myst_heading_anchors = 3
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    # Work-in-progress proposals; keep them in the repository but out of the
+    # published documentation until they are accepted.
+    "developer/proposals/*.md",
+]
 
 html_theme = "furo"
 html_static_path = ["_static"]

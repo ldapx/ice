@@ -26,12 +26,14 @@ It exercises drawn-schematic creation with pins and nets, parameter editing,
 SystemVerilog source and port inspection, mixed-signal co-simulation, simulation
 diagnostics, and doctor/PDK discovery.
 
-The MCP server exposes `simulation_create`, `simulation_update`, and
-`simulation_run`, so a client can create, configure, and run a simulation
-without switching to `ice-cli`. `project_reload` explicitly refreshes an open
-project; the server also detects changes made by another ICE client before a
-mutation. Existing text SPICE and SystemVerilog cells can be edited with
-`schematic_set_text`.
+The MCP server exposes `simulation_create`, `simulation_update`,
+`simulation_run`, and `simulation_experiment`, so a client can create,
+configure, sweep/corner, and run simulations without switching to `ice-cli`. `project_reload` explicitly refreshes an open
+project (`discard=true` throws unsaved in-memory changes away first); the server
+also detects changes made by another ICE client before a mutation. A mutation
+whose automatic save fails is rolled back to the on-disk state and reported, so
+a read-only call afterwards still works. Existing text SPICE and SystemVerilog
+cells can be edited with `schematic_set_text`.
 
 Or open a project at startup:
 
@@ -138,16 +140,22 @@ and ask the user to rebuild/restart ICE.
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
-| `simulation_create` | Create a simulation and its first graph; supports `template="tran"`, `"mixed"`, `"pwm_dac"`, or `"digital"`. |
+| `simulation_create` | Create a simulation and its first graph; supports transient, DC, AC, OP, noise, transfer-function, mixed, and digital analyses. |
+| `simulation_update` | Update analysis fields, corners, sweeps, Monte Carlo settings, capture signals, and declarative measurements. |
+| `simulation_run` | Run the nominal simulation and store a run artifact. |
+| `simulation_experiment` | Run configured sweeps, corners, and Monte Carlo samples and return one result per variant. |
+| `simulation_corner_defaults` | Populate TT/FF/SS-style corners declared by the active PDK. |
 | `simulation_trace` | Return decimated waveform samples for named signals. |
 | `simulation_result` | Read the latest stored run with trace statistics and signal diagnostics. |
 | `simulation_signals` | List available signals and trace sizes from the latest stored run. |
-| `simulation_measure` | Measure crossings, frequency, amplitude, RMS, and settling time. |
-| `simulation_graph_create` | Add a graph definition to a simulation. |
+| `simulation_measure` | Measure crossings, frequency, amplitude, RMS, settling time, or evaluate `gain`, `bandwidth`, `phase_margin`, `slew_rate`, `settling_time`, and `power`. |
+| `simulation_graph_create` | Add a graph definition to a simulation; accepts view, derived traces, overlays, and markers. |
 | `simulation_graph_list` | List graph definitions. |
 | `simulation_graph_info` | Read one graph definition. |
-| `simulation_graph_update` | Update axes, signals, or limits. |
+| `simulation_graph_update` | Update axes, signals, limits, FFT/dB/phase view, derived traces, run overlays, or markers. |
 | `simulation_graph_delete` | Delete a graph while keeping the last one. |
+| `simulation_runs` | List stored runs with run id, variant, and creation time for overlay selection. |
+| `simulation_waveform` | Return analyzed series for a stored run, including derived expressions, dB/phase view, or FFT spectra. |
 | `simulation_delete` | Delete a simulation and all its graph definitions. |
 | `simulation_script_create` | Create a simulation script from a template or supplied source. |
 | `simulation_script_list` | List project-level simulation scripts. |
@@ -184,9 +192,18 @@ or readable names such as `I1.Y` and `I2.A`. Use `schematic_info` to inspect the
 result and `schematic_netlist` to check the generated SPICE. Duplicate symbol
 names and duplicate pin names are rejected.
 
-`simulation_run` returns the state, error, netlist context, trace statistics,
-and available signal names. A simulation that points at a SystemVerilog cell
-uses the `iverilog` simulator and `digital` analysis automatically; the result
+`simulation_run` returns the state, error, netlist context, x-axis, scalars,
+trace statistics, declarative measurement results, and available signal names.
+Configure AC/DC/noise/TF analysis fields, corners, sweeps, Monte Carlo, and
+measurements with `simulation_update`, then use `simulation_experiment` to run
+every variant. `simulation_corner_defaults` reads the active PDK's declared
+TT/FF/SS sections. `simulation_runs` lists stored run ids for comparison;
+`simulation_graph_update` can set `view` (`linear`, `db`, `phase`), `fft`,
+`derived_traces`, `overlays`, and `markers` on a graph. `simulation_waveform`
+returns the same analysis numerically, including FFT magnitude/phase and
+derived math channels, without rerunning the circuit. A simulation that points
+at a SystemVerilog cell uses the `iverilog` simulator and `digital` analysis
+automatically; the result
 traces come from the generated VCD, and empty capture/graph selections are
 filled from the first traces and saved. If ngspice or a PDK library cannot initialize, run
 `ice_doctor` with the schematic or simulation name to validate model includes
@@ -194,7 +211,10 @@ and PDK readiness before editing the circuit. `simulation_result` and
 `simulation_signals` read the latest stored run without requiring shell access
 to `build/`. `simulation_measure` computes min/max/mean/RMS, zero crossings,
 rising crossings, period, frequency, amplitude, and settling time for one or all
-captured signals.
+captured signals. Pass `metric="gain"`, `"bandwidth"`, `"phase_margin"`,
+`"slew_rate"`, `"settling_time"`, or `"power"` for a one-off declarative check.
+Measurements declared on the simulation are evaluated automatically after every
+run.
 
 A successful transient run is not proof of oscillation. Use
 `simulation_measure` and report the measurements before claiming that an
@@ -327,9 +347,10 @@ standard-cell GDS decks and records `final/6_final.gds`; the package
 GDS decks produce a warning, and `implementation_export_gds` can rerun the
 export.
 
-`drc_run` exports the layout, invokes the deck declared by
-`<package>/technology/drc.json` (or the gdscheck process derived from its PDK),
-and returns normalized violations. Optional `engine` and `deck` arguments
+`drc_run` exports the layout, invokes the deck or declared gdscheck process in
+`<package>/technology/drc.json`, and returns normalized violations. Packages
+without a DRC configuration fall back to a generic identifier normalization,
+not a PDK-specific process table. Optional `engine` and `deck` arguments
 override the package deck, and `suite` selects a named variant. The response
 includes `engine`, `deck`, and `suite`. DRC and LVS results are
 separate from physical-flow route DRC metrics in `implementation_status`.

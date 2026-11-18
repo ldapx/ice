@@ -11,11 +11,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
-#include <map>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -28,6 +28,11 @@ namespace {
 
 using json = nlohmann::json;
 std::vector<std::filesystem::path> packageRootOverride;
+
+namespace {
+std::mutex connectivityMutex;
+std::map<std::string, std::optional<PdkConnectivity>> connectivityCache;
+} // namespace
 
 std::string lowerCopy(std::string text) {
     for (auto &character : text)
@@ -272,25 +277,25 @@ class PdkBuildLock {
 
 std::string setupLine(const std::filesystem::path &path) { return path.generic_string(); }
 
-std::string deviceDimensions(const std::string &id) {
-    if (id.find("sky130") != std::string::npos)
-        return "w=1 l=0.15";
-    if (id.find("gf180") != std::string::npos)
-        return "w=1u l=0.28u";
-    return "w=1u l=0.13u";
+std::string layerBaseName(std::string name) {
+    if (const auto dot = name.rfind('.'); dot != std::string::npos)
+        name = name.substr(0, dot);
+    return lowerCopy(std::move(name));
 }
 
-void addSupplyForPdk(const std::string &id, double &vdd, double &vd) {
-    if (id.find("sky130") != std::string::npos) {
-        vdd = 1.8;
-        vd = 0.9;
-    } else if (id.find("gf180") != std::string::npos) {
-        vdd = 3.3;
-        vd = 1.0;
-    } else {
-        vdd = 1.2;
-        vd = 0.6;
+std::vector<std::string> stringOrArray(const json &value) {
+    std::vector<std::string> result;
+    if (value.is_string()) {
+        result.push_back(value.get<std::string>());
+        return result;
     }
+    if (value.is_array()) {
+        for (const auto &entry : value) {
+            if (entry.is_string())
+                result.push_back(entry.get<std::string>());
+        }
+    }
+    return result;
 }
 
 PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
@@ -417,7 +422,138 @@ PdkInfo infoFromPackage(const PackageIndexEntry &entry) {
 
 } // namespace
 
-void setPdkPackageRoots(std::vector<std::filesystem::path> roots) { packageRootOverride = std::move(roots); }
+PdkConnectivity PdkConnectivity::load(const std::filesystem::path &path) {
+    std::ifstream input(path);
+    if (!input)
+        throw ProjectError("pdk.connectivity", "Unable to read PDK connectivity: " + path.string());
+    json document;
+    try {
+        input >> document;
+    } catch (const std::exception &error) {
+        throw ProjectError("pdk.connectivity", "Invalid PDK connectivity " + path.string() + ": " + error.what());
+    }
+    if (!document.is_object())
+        throw ProjectError("pdk.connectivity", "PDK connectivity must be a JSON object: " + path.string());
+    if (document.value("schema_version", 1) != 1)
+        throw ProjectError("pdk.connectivity", "PDK connectivity must use schema_version 1: " + path.string());
+
+    PdkConnectivity connectivity;
+    connectivity.declared = true;
+    if (const auto layers = document.find("layers"); layers != document.end()) {
+        if (!layers->is_array())
+            throw ProjectError("pdk.connectivity", "PDK connectivity 'layers' must be an array");
+        for (const auto &item : *layers) {
+            if (!item.is_object())
+                throw ProjectError("pdk.connectivity", "PDK connectivity layer entries must be objects");
+            PdkLayerRole entry;
+            entry.name = lowerCopy(item.value("name", std::string{}));
+            entry.role = lowerCopy(item.value("role", std::string{}));
+            entry.sheetResistance = item.value("sheet_resistance", 0.0);
+            if (entry.name.empty() || entry.role.empty())
+                throw ProjectError("pdk.connectivity", "PDK connectivity layers require name and role");
+            static const std::set<std::string> roles = {
+                "conductor", "metal",   "active", "diffusion", "gate",  "poly", "via",     "pad",
+                "marker",    "implant", "well",   "boundary",  "label", "text", "ignored", "insulator"};
+            if (!roles.contains(entry.role))
+                throw ProjectError("pdk.connectivity", "Unknown PDK connectivity role: " + entry.role);
+            if (entry.sheetResistance < 0.0)
+                throw ProjectError("pdk.connectivity", "PDK connectivity sheet_resistance must not be negative");
+            connectivity.layers.push_back(std::move(entry));
+        }
+    }
+    if (const auto vias = document.find("vias"); vias != document.end()) {
+        if (!vias->is_array())
+            throw ProjectError("pdk.connectivity", "PDK connectivity 'vias' must be an array");
+        for (const auto &item : *vias) {
+            if (!item.is_object())
+                throw ProjectError("pdk.connectivity", "PDK connectivity via entries must be objects");
+            PdkVia entry;
+            entry.name = lowerCopy(item.value("name", std::string{}));
+            if (const auto lower = item.find("lower"); lower != item.end())
+                for (const auto &name : stringOrArray(*lower))
+                    entry.lower.push_back(layerBaseName(name));
+            if (const auto upper = item.find("upper"); upper != item.end())
+                for (const auto &name : stringOrArray(*upper))
+                    entry.upper.push_back(layerBaseName(name));
+            entry.size = item.value("size", 0.0);
+            entry.enclosure = item.value("enclosure", 0.0);
+            if (entry.name.empty() || entry.lower.empty() || entry.upper.empty())
+                throw ProjectError("pdk.connectivity", "PDK connectivity vias require name, lower, and upper");
+            if (entry.size < 0.0 || entry.enclosure < 0.0)
+                throw ProjectError("pdk.connectivity", "PDK connectivity via size/enclosure must not be negative");
+            connectivity.vias.push_back(std::move(entry));
+        }
+    }
+    if (const auto routing = document.find("routing"); routing != document.end() && routing->is_object()) {
+        if (const auto stack = routing->find("stack"); stack != routing->end()) {
+            if (!stack->is_array())
+                throw ProjectError("pdk.connectivity", "PDK connectivity routing.stack must be an array");
+            for (const auto &entry : *stack)
+                if (entry.is_string())
+                    connectivity.routingStack.push_back(entry.get<std::string>());
+        }
+    } else if (const auto stack = document.find("routing_stack"); stack != document.end()) {
+        if (!stack->is_array())
+            throw ProjectError("pdk.connectivity", "PDK connectivity routing_stack must be an array");
+        for (const auto &entry : *stack)
+            if (entry.is_string())
+                connectivity.routingStack.push_back(entry.get<std::string>());
+    }
+    return connectivity;
+}
+
+std::string PdkConnectivity::roleFor(const std::string &layerName) const {
+    const auto lower = lowerCopy(layerName);
+    for (const auto &layer : layers) {
+        if (layer.name == lower)
+            return layer.role;
+    }
+    if (const auto dot = lower.rfind('.'); dot != std::string::npos) {
+        // Purpose variants that annotate or block a conductor are not part of
+        // the electrical layer even when the package declares the base layer
+        // as a conductor.
+        static const std::set<std::string> nonConductingPurposes = {
+            "label", "text",    "boundary", "blockage", "block", "dummy", "slot",  "nofill",
+            "noqrc", "keepout", "cut",      "res",      "mask",  "net",   "probe", "short"};
+        if (nonConductingPurposes.contains(lower.substr(dot + 1)))
+            return "marker";
+    }
+    const auto base = layerBaseName(layerName);
+    for (const auto &layer : layers) {
+        if (layer.name == base)
+            return layer.role;
+    }
+    return {};
+}
+
+const PdkVia *PdkConnectivity::viaFor(const std::string &layerName) const {
+    const auto base = layerBaseName(layerName);
+    for (const auto &via : vias) {
+        if (via.name == base)
+            return &via;
+    }
+    return nullptr;
+}
+
+const PdkVia *PdkConnectivity::viaBetween(const std::string &lower, const std::string &upper) const {
+    const auto lowerBase = layerBaseName(lower);
+    const auto upperBase = layerBaseName(upper);
+    const auto contains = [](const std::vector<std::string> &names, const std::string &name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    for (const auto &via : vias) {
+        if ((contains(via.lower, lowerBase) && contains(via.upper, upperBase)) ||
+            (contains(via.lower, upperBase) && contains(via.upper, lowerBase)))
+            return &via;
+    }
+    return nullptr;
+}
+
+void setPdkPackageRoots(std::vector<std::filesystem::path> roots) {
+    packageRootOverride = std::move(roots);
+    std::lock_guard<std::mutex> lock(connectivityMutex);
+    connectivityCache.clear();
+}
 
 std::vector<std::filesystem::path> defaultPdkRoots() {
     if (!packageRootOverride.empty()) {
@@ -548,6 +684,35 @@ Coordinate pdkManufacturingGrid(const std::string &idOrPath) {
     return pdks.empty() ? 0 : pdks.front().manufacturingGrid;
 }
 
+std::optional<PdkConnectivity> pdkConnectivityFor(const std::string &pdkId) {
+    if (pdkId.empty() || pdkId == genericPdkId)
+        return std::nullopt;
+    const auto key = normalizeId(pdkId);
+    {
+        std::lock_guard<std::mutex> lock(connectivityMutex);
+        if (const auto cached = connectivityCache.find(key); cached != connectivityCache.end())
+            return cached->second;
+    }
+    std::optional<PdkConnectivity> result;
+    for (const auto &info : findPdks(pdkId)) {
+        const auto path = info.packageRoot / "technology" / "connectivity.json";
+        std::error_code status;
+        if (!std::filesystem::is_regular_file(path, status) || status)
+            continue;
+        try {
+            result = PdkConnectivity::load(path);
+        } catch (const ProjectError &) {
+            result.reset();
+        }
+        break;
+    }
+    {
+        std::lock_guard<std::mutex> lock(connectivityMutex);
+        connectivityCache[key] = result;
+    }
+    return result;
+}
+
 void applyPdkDefaultGrid(Project &project, const std::string &pdkId) {
     const auto grid = pdkManufacturingGrid(pdkId);
     if (grid > 0 && project.grid == 1)
@@ -637,9 +802,11 @@ PdkProbeResult probePdk(const PdkInfo &info, std::chrono::milliseconds timeout) 
     const auto netlist = directory / "probe.sp";
     const auto logPath = directory / "probe.log";
     const auto init = directory / ".spiceinit";
-    double vdd = 1.2;
-    double vd = 0.6;
-    addSupplyForPdk(normalizeId(info.id), vdd, vd);
+    const auto &probe = info.packageSimulation->probe;
+    const auto width = probe.declared ? probe.width : std::string{"1u"};
+    const auto length = probe.declared ? probe.length : std::string{"0.13u"};
+    const auto vdd = probe.declared ? probe.vdd : 1.2;
+    const auto vd = probe.declared ? probe.vd : 0.6;
     {
         std::ofstream output(netlist);
         output << "* ICE PDK probe\n";
@@ -650,8 +817,7 @@ PdkProbeResult probePdk(const PdkInfo &info, std::chrono::milliseconds timeout) 
                << "VSS vss 0 0\n"
                << "VD d 0 " << vd << "\n"
                << "VG g 0 " << vd << "\n"
-               << "X1 d g vss vss " << info.exampleDevices.at("nmos") << " " << deviceDimensions(normalizeId(info.id))
-               << "\n"
+               << "X1 d g vss vss " << info.exampleDevices.at("nmos") << " w=" << width << " l=" << length << "\n"
                << ".print tran v(d)\n"
                << ".tran 1p 1n\n"
                << ".end\n";
@@ -874,12 +1040,17 @@ nlohmann::json pdkInfoJson(const PdkInfo &info, bool includeFiles) {
     const auto layoutLibrary = info.packageRoot / "layout" / "devices" / "index.json";
     const auto layoutGenerator = info.packageRoot / "layout" / "devices" / "generator.py";
     const auto layoutExtraction = info.packageRoot / "technology" / "extraction.json";
+    const auto layoutConnectivity = info.packageRoot / "technology" / "connectivity.json";
+    const auto drcConfig = info.packageRoot / "technology" / "drc.json";
     result["layout_library"] =
         std::filesystem::is_regular_file(layoutLibrary) ? json(layoutLibrary.string()) : json(nullptr);
     result["layout_generator"] =
         std::filesystem::is_regular_file(layoutGenerator) ? json(layoutGenerator.string()) : json(nullptr);
     result["layout_extraction"] =
         std::filesystem::is_regular_file(layoutExtraction) ? json(layoutExtraction.string()) : json(nullptr);
+    result["layout_connectivity"] =
+        std::filesystem::is_regular_file(layoutConnectivity) ? json(layoutConnectivity.string()) : json(nullptr);
+    result["drc_config"] = std::filesystem::is_regular_file(drcConfig) ? json(drcConfig.string()) : json(nullptr);
     if (includeFiles) {
         json files = json::array();
         for (const auto &file : info.modelFiles)

@@ -17,6 +17,12 @@ growing in one file.
 - `procedural_layout.*` — Python script editor and runner, PDK layout-extension
   dispatch, and generated-layout refresh for procedural layouts.
 - `properties_panel.*` — the shared schematic/layout properties panel.
+- `simulation_experiment_ui.*` — analysis, corner, sweep, Monte Carlo, and
+  measurement editor for simulation experiments.
+- `simulation_plot.*` — graph rendering, cursors, zoom/pan, overlays, markers,
+  and measurement annotations.
+- `waveform_analysis_ui.*` — FFT/dB/phase, derived trace, overlay, and marker
+  editor for one graph.
 - `side_panels.*` — project/layout hierarchy, layers, simulations, symbols, and
   schematic netlist panels.
 - `text_document_editor.*` — source-text editor used by text SPICE schematic

@@ -1317,6 +1317,38 @@ TEST_CASE("symbol default parameters are seeded without duplicates") {
     CHECK(instance.parameters.size() == 2);
 }
 
+TEST_CASE("project ids stay unique when allocated before insertion") {
+    ice::Project project;
+    project.identity = "ids";
+    project.name = "ids";
+    const auto first = project.nextId();
+    CHECK(project.nextId() == first + 1);
+    CHECK(project.nextId() == first + 2);
+}
+
+TEST_CASE("repeated symbol instances get distinct symbol and pin ids") {
+    ice::Project project;
+    project.identity = "symbols";
+    project.name = "symbols";
+    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto symbolId = ice::addSymbol(project, cellId, "Voltage Source");
+    auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
+    symbol.pins.push_back({project.nextId(), "+", 0, 32, ice::PinDirection::up});
+    symbol.pins.push_back({project.nextId(), "-", 0, -32, ice::PinDirection::down});
+
+    ice::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
+    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "V2", 0, 100);
+
+    const auto &placed = project.schematicCells.at(cellId);
+    const auto &copy = placed.symbols.at(placed.instances.at(second).symbol);
+    CHECK(copy.id != symbolId);
+    CHECK(copy.pins.size() == 2);
+    if (copy.pins.size() != 2)
+        return;
+    CHECK(copy.pins[0].id != copy.pins[1].id);
+    CHECK(copy.pins[0].id != symbol.pins[0].id);
+}
+
 TEST_CASE("simulation graph axis limits are optional and survive serialization") {
     ice::Project project;
     project.identity = "graphs";
@@ -1415,7 +1447,7 @@ TEST_CASE("ngspice simulation reports missing netlists explicitly") {
 
     ice::SimulationRequest unsupported = request;
     unsupported.netlist = {"* test", ".end"};
-    unsupported.analysis = "ac";
+    unsupported.analysis = "unsupported-analysis";
     auto rejected = runner.run(unsupported, std::chrono::seconds(1));
     CHECK(rejected.state == ice::JobState::failed);
     CHECK(rejected.error.find("unsupported") != std::string::npos);
@@ -1916,9 +1948,7 @@ TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
     const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
     ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
     const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
-    project.schematicCells.at(parentId)
-        .instances.at(source)
-        .parameters.push_back({project.nextId(), "voltage", "1"});
+    project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "voltage", "1"});
     ice::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
     ice::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
 
@@ -1941,7 +1971,8 @@ TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
     project.identity = "hierarchy-pins";
     project.name = "hierarchy-pins";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name, std::initializer_list<const char *> pins) {
+    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+                               std::initializer_list<const char *> pins) {
         const auto symbolId = ice::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
@@ -2511,8 +2542,11 @@ TEST_CASE("package layout device libraries load") {
     }
 }
 
-TEST_CASE("shipped IHP layout device library loads") {
-    const auto libraryPath = std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "ihp.sg13g2.json";
+TEST_CASE("package IHP geometry library loads") {
+    const auto repositoryRoot = std::filesystem::path(ICE_SOURCE_DIR).parent_path();
+    const auto libraryPath = repositoryRoot / "ice-pkg-ihp-sg13g2" / "layout" / "devices" / "ihp.sg13g2.json";
+    if (!std::filesystem::is_regular_file(libraryPath))
+        return;
     const auto library = ice::LayoutDeviceLibrary::load(libraryPath);
     CHECK(library.name == "IHP SG13G2");
     CHECK(library.pdk == "ihp-sg13g2");
@@ -3022,6 +3056,12 @@ verilog_a = "verilog-a"
 [pdk.simulation.devices]
 nmos = "sg13_lv_nmos"
 pmos = "sg13_lv_pmos"
+
+[pdk.simulation.probe]
+w = "1.5u"
+l = "0.2u"
+vdd = 1.5
+vd = 0.75
 )";
 
     const auto pdks = ice::discoverPdks({root});
@@ -3029,6 +3069,15 @@ pmos = "sg13_lv_pmos"
     if (pdks.size() == 1) {
         CHECK(pdks.front().id == "ihp-sg13g2");
         CHECK(pdks.front().packageName == "test.ihp");
+        CHECK(pdks.front().packageSimulation.has_value());
+        if (pdks.front().packageSimulation) {
+            const auto &probe = pdks.front().packageSimulation->probe;
+            CHECK(probe.declared);
+            CHECK(probe.width == "1.5u");
+            CHECK(probe.length == "0.2u");
+            CHECK(probe.vdd == 1.5);
+            CHECK(probe.vd == 0.75);
+        }
         CHECK(pdks.front().packageVersion == "1.0.0");
         CHECK(pdks.front().needsOsdi);
         CHECK(!pdks.front().simulationReady);
@@ -3743,4 +3792,49 @@ TEST_CASE("schematic comments survive serialization") {
 
     ice::removeSchematicComment(project, cellId, commentId);
     CHECK(project.schematicCells.at(cellId).comments.empty());
+}
+
+TEST_CASE("project session keeps saving after undo and redo") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-session-undo-test";
+    std::filesystem::remove_all(root);
+    ice::Project seed;
+    seed.identity = "session-undo";
+    seed.name = "session-undo";
+    seed.save(root);
+    const auto path = root / "project.icepro";
+
+    ice::ProjectSession session(ice::Project::load(path));
+    session.execute("first", [](ice::Project &project) { ice::createSchematicCell(project, "a"); });
+    session.save(path);
+    session.execute("second", [](ice::Project &project) { ice::createSchematicCell(project, "b"); });
+    session.save(path);
+
+    REQUIRE(session.undo());
+    session.save(path);
+    REQUIRE(session.undo());
+    session.save(path);
+    session.execute("third", [](ice::Project &project) { ice::createSchematicCell(project, "c"); });
+    session.save(path);
+
+    const auto reloaded = ice::Project::load(path);
+    CHECK(reloaded.schematicCells.size() == 1);
+}
+
+TEST_CASE("replacing a session from disk leaves it clean") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-session-replace-test";
+    std::filesystem::remove_all(root);
+    ice::Project seed;
+    seed.identity = "session-replace";
+    seed.name = "session-replace";
+    seed.save(root);
+    const auto path = root / "project.icepro";
+    ice::createSchematicCell(seed, "draft");
+    seed.save(path);
+
+    ice::ProjectSession session(ice::Project::load(path));
+    session.execute("dirty", [](ice::Project &project) { ice::createSchematicCell(project, "local"); });
+    CHECK(session.dirty());
+
+    session.replaceProject(ice::Project::load(path), false);
+    CHECK(!session.dirty());
 }

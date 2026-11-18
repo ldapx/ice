@@ -1,7 +1,7 @@
 # ICE Architecture
 
-> Product intent is in {doc}`vision`; capabilities and acceptance
-> criteria are in {doc}`roadmap`.
+> Product intent is in {doc}`/project/vision`; capabilities and acceptance
+> criteria are in {doc}`/project/roadmap`.
 
 ## Overview
 
@@ -852,19 +852,36 @@ A testbench should be able to specify:
 * Parameters
 * Sweeps
 
-Supported analysis should eventually include:
+The ngspice adapter currently supports:
 
 ```text
-DC
-AC
+DC sweep
+AC sweep
 Transient
 Noise
 Operating point
+Transfer function
 Parameter sweeps
 Temperature sweeps
 Corner analysis
-Monte Carlo, where supported
+Monte Carlo sampling
 ```
+
+`SimulationItem` stores the analysis-specific fields, corners, sweeps, Monte
+Carlo options, and declarative measurements. The GUI experiment dialog, CLI
+(`simulation-configure`, `simulation-corner-*`, `simulation-sweep-*`,
+`simulation-monte-carlo`, `simulation-measure-*`, `simulation-experiment`), and
+MCP tools (`simulation_update`, `simulation_corner_defaults`,
+`simulation_experiment`) all use the same `Experiment`/`SimulationRunner`
+contract.
+
+Waveform analysis is presentation-only and lives in `icelib/waveform.*`.
+`computeSpectrum` resamples onto a uniform grid and returns amplitude/phase
+spectra; `evaluateDerivedTrace` evaluates safe arithmetic/function expressions
+over captured traces; `buildWaveformSeries` applies a graph's view, derived
+traces, and optional FFT. The Qt plot consumes those series but never mutates
+stored runs. Graph-level analysis settings, stored-run overlay ids, and point
+markers are serialized on `SimulationGraph` so the GUI, CLI, and MCP agree.
 
 ---
 
