@@ -144,6 +144,20 @@ std::vector<Diagnostic> Project::validate() const {
             {Diagnostic::Severity::error, "project.units", "Database units must be positive", std::nullopt});
     if (grid <= 0)
         result.push_back({Diagnostic::Severity::error, "project.grid", "Grid spacing must be positive", std::nullopt});
+    {
+        std::unordered_set<std::string> simulationNames;
+        for (const auto &[simulationId, simulation] : simulations) {
+            std::string key = simulation.name;
+            for (auto &character : key)
+                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+            if (simulation.name.empty())
+                result.push_back({Diagnostic::Severity::error, "simulation.name",
+                                  "Simulation name must not be empty", simulationId});
+            else if (!simulationNames.insert(key).second)
+                result.push_back({Diagnostic::Severity::error, "simulation.name.duplicate",
+                                  "Simulation name '" + simulation.name + "' is used more than once", simulationId});
+        }
+    }
     std::unordered_set<std::string> dependencyNames;
     for (const auto &dependency : packageDependencies) {
         if (dependency.empty()) {

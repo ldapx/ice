@@ -3418,6 +3418,7 @@ int main(int argc, char **argv) {
             ice::ProjectSession session(project);
             ice::ObjectId graphId = 0;
             session.execute("simulation-add", [&](ice::Project &p) {
+                ice::requireUniqueSimulationName(p, simulation.name);
                 simulation.id = p.nextId();
                 p.simulations.emplace(simulation.id, simulation);
                 ice::SimulationGraph graph;

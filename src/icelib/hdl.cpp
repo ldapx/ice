@@ -378,6 +378,7 @@ std::vector<HdlPort> parsePortsFromHeader(const std::string &header, bool &hasDi
     WidthResult inheritedWidth;
     bool sawDirection = false;
 
+    bool inheritedReal = false;
     for (const auto &segment : splitTopLevel(header, ',')) {
         if (segment.empty())
             continue;
@@ -399,6 +400,12 @@ std::vector<HdlPort> parsePortsFromHeader(const std::string &header, bool &hasDi
         const auto segmentWidth = widthForSegment(segment);
         if (segmentHasDirection || !sawDirection)
             inheritedWidth = segmentWidth;
+        // A type qualifier applies to every name in the comma-separated list,
+        // e.g. "output real samp, samp_b, clkc" makes all three ports real.
+        const bool segmentReal = containsWord(lowered, "real") || containsWord(lowered, "realtime") ||
+                                 containsWord(lowered, "shortreal");
+        if (segmentHasDirection)
+            inheritedReal = segmentReal;
         const auto name = portNameForSegment(segment);
         if (name.empty())
             continue;
@@ -407,8 +414,7 @@ std::vector<HdlPort> parsePortsFromHeader(const std::string &header, bool &hasDi
         port.direction = direction;
         port.width = segmentHasDirection ? segmentWidth.width : inheritedWidth.width;
         port.widthKnown = segmentHasDirection ? segmentWidth.known : inheritedWidth.known;
-        port.real =
-            containsWord(lowered, "real") || containsWord(lowered, "realtime") || containsWord(lowered, "shortreal");
+        port.real = segmentHasDirection ? segmentReal : inheritedReal;
         ports.push_back(std::move(port));
     }
     return ports;
@@ -431,6 +437,7 @@ void applyBodyDeclarations(const std::string &body, std::vector<HdlPort> &ports)
             trimmed.find_first_of(" \t\n") == std::string::npos ? trimmed.size() : trimmed.find_first_of(" \t\n"));
         WidthResult inheritedWidth;
         bool hasWidth = false;
+        bool inheritedReal = false;
         for (const auto &part : splitTopLevel(trimCopy(afterDirection), ',')) {
             if (part.empty())
                 continue;
@@ -445,15 +452,17 @@ void applyBodyDeclarations(const std::string &body, std::vector<HdlPort> &ports)
             auto existing = std::find_if(ports.begin(), ports.end(),
                                          [&](const HdlPort &port) { return lowerCopy(port.name) == lowerCopy(name); });
             const auto loweredPart = lowerCopy(part);
-            const bool realPort = containsWord(loweredPart, "real") || containsWord(loweredPart, "realtime") ||
-                                  containsWord(loweredPart, "shortreal");
+            // The qualifier applies to the whole declaration list.
+            if (containsWord(loweredPart, "real") || containsWord(loweredPart, "realtime") ||
+                containsWord(loweredPart, "shortreal"))
+                inheritedReal = true;
             if (existing != ports.end()) {
                 existing->direction = *direction;
                 existing->width = inheritedWidth.width;
                 existing->widthKnown = inheritedWidth.known;
-                existing->real = realPort;
+                existing->real = inheritedReal;
             } else {
-                ports.push_back({name, *direction, inheritedWidth.width, inheritedWidth.known, realPort});
+                ports.push_back({name, *direction, inheritedWidth.width, inheritedWidth.known, inheritedReal});
             }
         }
     }

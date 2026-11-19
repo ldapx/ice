@@ -216,6 +216,16 @@ struct OutputPortBinding {
 };
 
 const SimulationTrace *findDigitalOutputTrace(const SimulationResult &result, const OutputPortBinding &output) {
+    // Icarus does not reliably update the value-change records of a real
+    // variable that is connected to a real output port (the parent-scope
+    // variable can stay frozen at its initial value). Prefer the module-scope
+    // signal for real ports; it is the actual driver value.
+    if (output.real) {
+        if (const auto *trace = findTraceForPort(result, output.tbInstance, output.signalName))
+            return trace;
+        if (const auto *trace = findTraceForPort(result, output.tbInstance, output.signalName + "[0]"))
+            return trace;
+    }
     if (const auto *trace = findTraceEndingWith(result, output.tbWire))
         return trace;
     if (const auto *trace = findTraceForPort(result, output.tbInstance, output.signalName))
@@ -236,6 +246,15 @@ std::string pwlValue(const std::vector<double> &time, const std::vector<double> 
         const auto value = realValues ? values[index] : (values[index] > 0.5 ? high : low);
         if (value == previous)
             continue;
+        // Emit a step, not a ramp. ngspice interpolates linearly between PWL
+        // breakpoints, so a value that is held for several grid samples and
+        // then changes would otherwise ramp across the whole constant segment.
+        // Hold the old level until just before the transition, then switch.
+        const auto interval = time[index] - time[index - 1];
+        const auto hold = std::max(1.0e-15, std::min(1.0e-12, interval * 0.25));
+        const auto switching = time[index] - hold;
+        if (switching > points.back().first)
+            points.emplace_back(switching, previous);
         points.emplace_back(time[index], value);
         previous = value;
     }
@@ -484,7 +503,16 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
     SimulationResult finalDigital;
     SimulationResult finalAnalog;
     bool converged = false;
-    const auto iterations = std::clamp(request.mixedSignal.iterations, 1, 20);
+    // The digital/analog fixed point needs roughly one pass per decision for a
+    // successive-approximation loop, so allow a larger budget than the generic
+    // default. ICE_MIXED_ITERATIONS overrides it for long closed-loop runs.
+    int iterations = request.mixedSignal.iterations;
+    if (const char *configured = std::getenv("ICE_MIXED_ITERATIONS")) {
+        const auto parsed = std::atoi(configured);
+        if (parsed > 0)
+            iterations = parsed;
+    }
+    iterations = std::clamp(iterations, 1, 256);
 
     for (int iteration = 0; iteration < iterations; ++iteration) {
         if (token.cancelled()) {
@@ -507,6 +535,7 @@ SimulationResult MixedSignalSimulator::run(const SimulationRequest &request, con
         digitalRequest.stop = effectiveStop;
         digitalRequest.step = step;
         digitalRequest.workingDirectory = request.workingDirectory;
+        digitalRequest.wallTimeoutSeconds = request.wallTimeoutSeconds;
         digitalRequest.netlist = splitLines(buildDigitalSource());
         const auto digital = IcarusVerilogSimulator().run(digitalRequest, token, {});
         if (digital.state != JobState::succeeded) {
