@@ -3,7 +3,9 @@
 #include "icelib/core.hpp"
 #include "icelib/geometry.hpp"
 
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,6 +44,11 @@ bool removeSchematicCellParameter(Project &project, ObjectId cellId, const std::
 ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId,
                                   std::string instanceName, Coordinate x, Coordinate y, ObjectId *symbolId = nullptr,
                                   bool flattenBuses = false);
+// Creates a symbol from the `.subckt` ports of a text SPICE cell and places one
+// instance in the parent drawn schematic. Subcircuit parameter defaults are
+// copied onto the cell and instance so they can be overridden per placement.
+ObjectId addTextSpiceInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string instanceName,
+                              Coordinate x, Coordinate y, ObjectId *symbolId = nullptr);
 // SPICE node name used by the schematic netlister for a net in a drawn cell.
 std::string schematicNetNodeName(const SchematicCell &cell, const Net &net);
 ObjectId addNet(Project &project, ObjectId cellId, std::string name, std::vector<ObjectId> pins, Coordinate x = 0,
@@ -150,14 +157,43 @@ bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId gra
 enum class SchematicNetlistMode {
     // Pure SPICE: SystemVerilog blocks are an error.
     analog,
-    // Mixed-signal base netlist: top-level SystemVerilog blocks are omitted so
-    // the co-simulation adapter can add their interface sources.
+    // Mixed-signal base netlist: SystemVerilog blocks are omitted so the
+    // co-simulation adapter can add their interface sources. Nested blocks in
+    // drawn subcircuits require the flattened mixed-signal entry point.
     mixed,
 };
 std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId,
                                                std::vector<std::string> *notes = nullptr,
                                                SchematicNetlistMode mode = SchematicNetlistMode::analog,
                                                double geometryScale = 1.0);
+
+// One source block discovered while flattening a drawn hierarchy for
+// mixed-signal co-simulation. `path` joins the instance names from the top
+// cell; `pinNodes` maps the block symbol's pin names to flattened SPICE nodes.
+struct SchematicNetlistBlock {
+    ObjectId instanceId = 0;
+    ObjectId symbolId = 0;
+    ObjectId sourceCell = 0;
+    std::string path;
+    std::vector<std::string> pinNames;
+    std::map<std::string, std::string> pinNodes;
+};
+
+struct SchematicNetlistBuild {
+    std::vector<std::string> lines;
+    std::vector<SchematicNetlistBlock> blocks;
+    std::vector<std::string> notes;
+    // Flattened node -> voltage-source instance name. Mixed-signal planning
+    // uses this to reject a digital output shorted to an analog source.
+    std::map<std::string, std::string> voltageSourceDrivers;
+};
+
+// Builds the mixed-signal analog base netlist with drawn hierarchy flattened
+// into the top cell. This gives every nested node a unique name so HDL blocks
+// inside drawn subcircuits can be connected to the shared co-simulation
+// interface. Text SPICE blocks remain subcircuits and are emitted once.
+SchematicNetlistBuild buildMixedSignalSchematicNetlist(const Project &project, ObjectId cellId,
+                                                       double geometryScale = 1.0);
 
 // Builds a simulation netlist from either a drawn schematic or a text SPICE
 // schematic. Analysis-control directives that the simulation properties own
@@ -184,9 +220,10 @@ std::vector<const SchematicInstance *> schematicPortInstances(const SchematicCel
 enum class SchematicPortKind { none, input, output, inout };
 SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
 
-// Creates a symbol in `parentCellId` for the drawn sub-cell `sourceCellId`, with
-// one pin per port in subcircuit port order (inputs on the left, outputs on the
-// right). Returns the new symbol id.
+// Creates a symbol in `parentCellId` for the drawn or text-source sub-cell
+// `sourceCellId`. Drawn cells expose their Input/Output instances; text SPICE
+// cells expose the selected `.subckt` ports; SystemVerilog cells expose module
+// ports. Returns the new symbol id.
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
                                std::string artwork = {});
 

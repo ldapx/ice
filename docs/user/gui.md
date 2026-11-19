@@ -376,7 +376,9 @@ The simulator selector then defaults to **Mixed-signal (ngspice + Icarus)** and
 the analysis to **Transient**. The resulting graph contains both the analog
 node traces and the digital `<instance>.<port>` traces. HDL instances are placed
 by MCP/CLI with a generated symbol whose pins match the module ports; the same
-symbols render and wire normally in the schematic canvas.
+symbols render and wire normally in the schematic canvas. HDL blocks may also be
+nested inside drawn subcells; mixed-signal planning flattens those nodes and
+uses scoped names such as `U1_U2`.
 
 The graph toolbar has a **Load VCD** action that imports an external VCD file
 into the current simulation. Its traces replace the capture list, populate
@@ -792,9 +794,10 @@ layout devices, and pins converted from them are not compared as schematic
 ports. Top-level schematic ports created with `Input`/`Output`/`Pin` symbols are
 matched to layout pins by name, including pins produced by **Convert to Pin**;
 missing pins, extra pins, direction changes, and net-binding changes are
-reported. Results appear in the **Reports** tab with **LVS** selected, showing
-mismatch categories and schematic/layout object ids. Text SPICE and
-SystemVerilog source cells are not supported by LVS yet.
+reported. Text SPICE schematics are parsed into logical devices and recursively
+flattened subcircuits; SystemVerilog cells are compared at module-port level.
+Results appear in the **Reports** tab with **LVS** selected, showing mismatch
+categories and schematic/layout object ids.
 
 **Tools → Run PEX** (or right-clicking a layout cell and choosing
 **Extract Parasitics (PEX)**) extracts first-order parasitics from the active

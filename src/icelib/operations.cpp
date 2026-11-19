@@ -2,6 +2,7 @@
 
 #include "icelib/hdl.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/spice.hpp"
 #include "icelib/symbols.hpp"
 
 #include <algorithm>
@@ -214,16 +215,36 @@ SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName) {
 
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name,
                                std::string artwork) {
-    const auto &source = require(project.schematicCells, sourceCellId, "schematic.symbol.source",
-                                 "Source schematic cell does not exist");
-    if (source.textSchematic)
-        throw ProjectError("schematic.symbol.source", "A text SPICE cell cannot be used as a hierarchical block");
+    auto &source = require(project.schematicCells, sourceCellId, "schematic.symbol.source",
+                           "Source schematic cell does not exist");
     const auto &parent =
         require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
     if (parent.isTextSource())
         throw ProjectError("schematic.symbol.source", "Symbols can only be added to a drawn schematic");
+    if (source.textSchematic) {
+        const auto interface = spiceInterfaceForCell(source);
+        if (!interface.ok)
+            throw ProjectError("schematic.spice.parse", interface.error);
+        // Refresh the cell's declared defaults so new instances can show and
+        // override them. Manually authored values are preserved.
+        for (const auto &parameter : interface.parameters) {
+            if (parameter.name.empty())
+                continue;
+            const auto existing =
+                std::find_if(source.parameters.begin(), source.parameters.end(), [&](const Parameter &candidate) {
+                    return lower(candidate.name) == lower(parameter.name);
+                });
+            if (existing == source.parameters.end())
+                source.parameters.push_back({project.nextId(), parameter.name, parameter.value});
+            else if (existing->value.empty())
+                existing->value = parameter.value;
+        }
+    }
     if (name.empty())
-        name = source.name;
+        name = source.textSchematic            ? source.name + " SPICE"
+               : source.systemVerilogSchematic ? source.name + " HDL"
+                                               : source.name;
+    name = uniqueSchematicSymbolName(parent, name);
     const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(artwork), sourceCellId);
     auto &symbol = project.schematicCells.at(parentCellId).symbols.at(symbolId);
     auto nextPinId = project.nextId();
@@ -235,6 +256,18 @@ ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId
 }
 
 std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) {
+    if (source.textSchematic) {
+        const auto interface = spiceInterfaceForCell(source);
+        if (!interface.ok)
+            throw ProjectError("schematic.spice.parse", interface.error);
+        return spiceSubcircuitPins(interface);
+    }
+    if (source.systemVerilogSchematic) {
+        const auto parsed = parseSystemVerilogModule(source);
+        if (!parsed.ok)
+            throw ProjectError("schematic.hdl.parse", parsed.error);
+        return makeHdlSymbolTemplate(parsed.module, true).pins;
+    }
     const auto ports = schematicPortInstances(source);
     const auto count = static_cast<int>(ports.size());
     const auto spacing = 40;
@@ -332,6 +365,16 @@ ObjectId createTextSchematicCell(Project &project, std::string name, std::string
     auto &cell = project.schematicCells.at(id);
     cell.textSchematic = true;
     cell.spiceText = std::move(spiceText);
+    const auto interface = spiceInterfaceForText(cell.spiceText, cell.name);
+    for (const auto &parameter : interface.parameters) {
+        if (parameter.name.empty())
+            continue;
+        const auto existing = std::find_if(cell.parameters.begin(), cell.parameters.end(), [&](const Parameter &entry) {
+            return lower(entry.name) == lower(parameter.name);
+        });
+        if (existing == cell.parameters.end())
+            cell.parameters.push_back({project.nextId(), parameter.name, parameter.value});
+    }
     return id;
 }
 ObjectId createSystemVerilogCell(Project &project, std::string name, std::string pdk, std::string source) {
@@ -361,8 +404,7 @@ void setSchematicSymbolArtwork(Project &project, ObjectId cellId, ObjectId symbo
                            "Only symbols created from a schematic cell can have a custom icon");
     const auto source = project.schematicCells.find(sourceCellId);
     if (source == project.schematicCells.end() || source->second.isTextSource())
-        throw ProjectError("schematic.symbol.artwork",
-                           "The symbol does not reference a drawn schematic cell");
+        throw ProjectError("schematic.symbol.artwork", "The symbol does not reference a drawn schematic cell");
     // Placed instances own private copies of the block symbol, so match the
     // source schematic instead of the symbol id or a suffixed symbol name.
     for (auto &entry : cell.symbols)
@@ -535,7 +577,34 @@ ObjectId addSystemVerilogInstance(Project &project, ObjectId parentCellId, Objec
     return instanceId;
 }
 
+ObjectId addTextSpiceInstance(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string instanceName,
+                              Coordinate x, Coordinate y, ObjectId *symbolId) {
+    if (instanceName.empty())
+        throw ProjectError("schematic.instance", "Instance name must not be empty");
+    const auto &parent =
+        require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    if (parent.isTextSource())
+        throw ProjectError("schematic.spice.parent", "A SPICE block can only be placed in a drawn schematic");
+    const auto &source =
+        require(project.schematicCells, sourceCellId, "schematic.spice.source", "SPICE source cell does not exist");
+    if (!source.textSchematic)
+        throw ProjectError("schematic.spice.source", "Source cell is not a text SPICE cell");
+    const auto interface = spiceInterfaceForCell(source);
+    if (!interface.ok)
+        throw ProjectError("schematic.spice.parse", interface.error);
+    if (interface.ports.empty())
+        throw ProjectError("schematic.spice.ports", "SPICE subcircuit has no ports");
+
+    const auto symbol = addHierarchicalSymbol(project, parentCellId, sourceCellId);
+    const auto instance = addSchematicInstance(project, parentCellId, symbol, std::move(instanceName), x, y);
+    if (symbolId)
+        *symbolId = symbol;
+    return instance;
+}
+
 std::string schematicNetNodeName(const SchematicCell &cell, const Net &net) {
+    if (net.name == "0")
+        return "0";
     for (const auto pinId : net.pins) {
         for (const auto &[_, instance] : cell.instances) {
             const auto symbol = cell.symbols.find(instance.symbol);
@@ -1185,8 +1254,12 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
     return resultIds;
 }
 
-std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId, std::vector<std::string> *notes,
-                                               SchematicNetlistMode mode, double geometryScale) {
+namespace {
+std::vector<std::string> buildSchematicNetlistImpl(const Project &project, ObjectId cellId,
+                                                   std::vector<std::string> *notes, SchematicNetlistMode mode,
+                                                   double geometryScale, bool flattenHierarchy,
+                                                   std::vector<SchematicNetlistBlock> *blocks,
+                                                   std::map<std::string, std::string> *voltageSourceDrivers) {
     const auto &topCell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
     if (topCell.textSchematic || topCell.systemVerilogSchematic)
         throw ProjectError("schematic.netlist", "SPICE netlisting requires a drawn schematic");
@@ -1283,11 +1356,16 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
     out << "* ICE schematic netlist: " << topCell.name << "\n";
     std::ostringstream subcircuits;
     std::set<ObjectId> emittedSubcircuits;
+    std::set<ObjectId> emittedTextSources;
+    std::map<ObjectId, SpiceInterface> textInterfaces;
     std::set<ObjectId> visiting;
-    std::function<std::string(const SchematicCell &, const std::map<ObjectId, std::string> &, bool)> emitBody;
+    std::function<std::string(const SchematicCell &, const std::map<ObjectId, std::string> &, bool, const std::string &,
+                              const std::string &)>
+        emitBody;
     std::function<void(ObjectId)> emitSubcircuit;
 
-    emitBody = [&](const SchematicCell &cell, const std::map<ObjectId, std::string> &portNodeNames, bool topLevel) {
+    emitBody = [&](const SchematicCell &cell, const std::map<ObjectId, std::string> &portNodeNames, bool topLevel,
+                   const std::string &instancePrefix, const std::string &nodePrefix) {
         // A symbol is reusable, so placing it twice duplicates its pin ids.
         // Detect symbols used by more than one instance; their pins cannot be
         // resolved to a unique instance for netlisting.
@@ -1330,9 +1408,11 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                         return "0";
                 }
             }
+            if (net.name == "0")
+                return "0";
             if (!net.name.empty())
-                return net.name;
-            return "n" + std::to_string(net.id);
+                return nodePrefix + net.name;
+            return nodePrefix + "n" + std::to_string(net.id);
         };
 
         std::ostringstream body;
@@ -1360,6 +1440,40 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                                                instance.name +
                                                "); use mixed-signal simulation instead of a pure SPICE netlist");
                     }
+                    if (flattenHierarchy) {
+                        if (symbolUseCount[instance.symbol] > 1) {
+                            throw ProjectError("schematic.netlist.ambiguous_symbol",
+                                               "Symbol '" + symbol->second.name +
+                                                   "' is instantiated more than once; create one HDL symbol per "
+                                                   "instance");
+                        }
+                        std::map<ObjectId, std::string> pinToNode;
+                        for (const auto &[_, net] : cell.nets) {
+                            const auto node = nodeFor(net);
+                            for (const auto &pinId : net.pins) {
+                                const SchematicInstance *owner = nullptr;
+                                const Pin *pin = nullptr;
+                                if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
+                                    pinToNode[pinId] = node;
+                            }
+                        }
+                        if (blocks) {
+                            SchematicNetlistBlock block;
+                            block.instanceId = instanceId;
+                            block.symbolId = instance.symbol;
+                            block.sourceCell = child->first;
+                            block.path = instancePrefix + instance.name;
+                            for (const auto &pin : symbol->second.pins) {
+                                block.pinNames.push_back(pin.name);
+                                if (const auto node = pinToNode.find(pin.id); node != pinToNode.end())
+                                    block.pinNodes[pin.name] = node->second;
+                            }
+                            blocks->push_back(std::move(block));
+                        }
+                        body << "* SystemVerilog block: " << instancePrefix << instance.name << " "
+                             << child->second.name << "\n";
+                        continue;
+                    }
                     if (!topLevel) {
                         throw ProjectError("schematic.netlist.hdl_nested",
                                            "Nested SystemVerilog block '" + child->second.name + "' (" + instance.name +
@@ -1372,9 +1486,88 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     continue;
                 }
                 if (child->second.textSchematic) {
-                    throw ProjectError("schematic.netlist.text", "Text SPICE schematic '" + child->second.name + "' (" +
-                                                                     instance.name +
-                                                                     ") cannot be used as a hierarchical block");
+                    auto interface = textInterfaces.find(child->first);
+                    if (interface == textInterfaces.end())
+                        interface = textInterfaces.emplace(child->first, spiceInterfaceForCell(child->second)).first;
+                    if (!interface->second.ok) {
+                        throw ProjectError("schematic.netlist.spice",
+                                           "Text SPICE schematic '" + child->second.name + "' (" + instance.name +
+                                               ") has no usable subcircuit: " + interface->second.error);
+                    }
+                    if (emittedTextSources.insert(child->first).second) {
+                        for (const auto &line : spiceSourceLinesForHierarchy(child->second.spiceText))
+                            subcircuits << line << "\n";
+                    }
+                    if (symbolUseCount[instance.symbol] > 1) {
+                        throw ProjectError("schematic.netlist.ambiguous_symbol",
+                                           "Symbol '" + symbol->second.name +
+                                               "' is instantiated more than once; create one symbol per instance");
+                    }
+
+                    std::map<ObjectId, std::string> pinToNode;
+                    for (const auto &[_, net] : cell.nets) {
+                        const auto node = nodeFor(net);
+                        for (const auto &pinId : net.pins) {
+                            const SchematicInstance *owner = nullptr;
+                            const Pin *pin = nullptr;
+                            if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
+                                pinToNode[pinId] = node;
+                        }
+                    }
+
+                    std::string designator = instancePrefix + instance.name;
+                    if (designator.empty() || std::toupper(static_cast<unsigned char>(designator.front())) != 'X')
+                        designator.insert(designator.begin(), 'X');
+                    body << designator << " ";
+                    bool matchedByName = !interface->second.ports.empty();
+                    std::size_t portIndex = 0;
+                    for (const auto &port : interface->second.ports) {
+                        const Pin *connection = nullptr;
+                        for (const auto &pin : symbol->second.pins) {
+                            if (lower(pin.name) == lower(port)) {
+                                connection = &pin;
+                                break;
+                            }
+                        }
+                        if (connection == nullptr && portIndex < symbol->second.pins.size()) {
+                            connection = &symbol->second.pins[portIndex];
+                            matchedByName = false;
+                        }
+                        if (connection != nullptr) {
+                            if (lower(connection->name) != lower(port))
+                                matchedByName = false;
+                            const auto node = pinToNode.find(connection->id);
+                            body << (node != pinToNode.end() ? node->second : "0") << " ";
+                        } else {
+                            body << "0 ";
+                        }
+                        ++portIndex;
+                    }
+                    if (!matchedByName)
+                        note("SPICE block symbol '" + symbol->second.name + "' pins do not match the ports of '" +
+                             child->second.name + "'; connecting by position");
+                    if (symbol->second.pins.size() > interface->second.ports.size())
+                        note("SPICE block symbol '" + symbol->second.name + "' declares " +
+                             std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name +
+                             "' has " + std::to_string(interface->second.ports.size()) +
+                             " ports; extra pins are ignored");
+                    body << interface->second.subcircuitName;
+                    std::set<std::string> declaredNames;
+                    for (const auto &parameter : interface->second.parameters) {
+                        declaredNames.insert(lower(parameter.name));
+                        const auto overrideValue = instanceParameterValue(instance, parameter.name);
+                        if (!overrideValue.empty())
+                            body << " " << parameter.name << "=" << overrideValue;
+                    }
+                    for (const auto &parameter : instance.parameters) {
+                        if (parameter.name.empty() || declaredNames.contains(lower(parameter.name)))
+                            continue;
+                        note("SPICE instance '" + instance.name + "' parameter '" + parameter.name +
+                             "' is not declared by subcircuit '" + interface->second.subcircuitName +
+                             "'; it is ignored");
+                    }
+                    body << "\n";
+                    continue;
                 }
                 if (visiting.contains(child->first)) {
                     throw ProjectError("schematic.netlist.cycle", "Hierarchical schematic cycle at '" +
@@ -1384,6 +1577,67 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     throw ProjectError("schematic.netlist.ambiguous_symbol",
                                        "Symbol '" + symbol->second.name +
                                            "' is instantiated more than once; create one symbol per instance");
+                }
+                if (flattenHierarchy) {
+                    std::map<ObjectId, std::string> pinToNode;
+                    for (const auto &[_, net] : cell.nets) {
+                        const auto node = nodeFor(net);
+                        for (const auto &pinId : net.pins) {
+                            const SchematicInstance *owner = nullptr;
+                            const Pin *pin = nullptr;
+                            if (resolvePin(pinId, &owner, &pin) && owner->id == instanceId)
+                                pinToNode[pinId] = node;
+                        }
+                    }
+
+                    const auto childPorts = schematicPortInstances(child->second);
+                    std::map<ObjectId, std::string> childPortMap;
+                    bool matchedByName = !childPorts.empty();
+                    std::size_t portIndex = 0;
+                    for (const auto *port : childPorts) {
+                        const Pin *connection = nullptr;
+                        for (const auto &pin : symbol->second.pins) {
+                            if (lower(pin.name) == lower(port->name)) {
+                                connection = &pin;
+                                break;
+                            }
+                        }
+                        if (connection == nullptr && portIndex < symbol->second.pins.size()) {
+                            connection = &symbol->second.pins[portIndex];
+                            matchedByName = false;
+                        }
+                        std::string portNode = "0";
+                        if (connection != nullptr) {
+                            if (lower(connection->name) != lower(port->name))
+                                matchedByName = false;
+                            if (const auto node = pinToNode.find(connection->id); node != pinToNode.end())
+                                portNode = node->second;
+                        }
+                        const auto portSymbol = child->second.symbols.find(port->symbol);
+                        if (portSymbol != child->second.symbols.end() && !portSymbol->second.pins.empty()) {
+                            const auto portPin = portSymbol->second.pins.front().id;
+                            for (const auto &[netId, net] : child->second.nets) {
+                                if (std::find(net.pins.begin(), net.pins.end(), portPin) != net.pins.end()) {
+                                    childPortMap[netId] = portNode;
+                                    break;
+                                }
+                            }
+                        }
+                        ++portIndex;
+                    }
+                    if (!matchedByName)
+                        note("hierarchical symbol '" + symbol->second.name + "' pins do not match the ports of '" +
+                             child->second.name + "'; flattening by position");
+                    if (symbol->second.pins.size() > childPorts.size())
+                        note("hierarchical symbol '" + symbol->second.name + "' declares " +
+                             std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name +
+                             "' has " + std::to_string(childPorts.size()) + " ports; extra pins are ignored");
+                    const auto scope = spiceIdentifier(instance.name);
+                    visiting.insert(child->first);
+                    body << emitBody(child->second, childPortMap, false, instancePrefix + scope + "_",
+                                     nodePrefix + scope + "_");
+                    visiting.erase(child->first);
+                    continue;
                 }
                 emitSubcircuit(child->first);
                 if (!emittedSubcircuits.contains(child->first)) {
@@ -1402,7 +1656,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
                     }
                 }
 
-                std::string designator = instance.name;
+                std::string designator = instancePrefix + instance.name;
                 if (designator.empty() || std::toupper(static_cast<unsigned char>(designator.front())) != 'X')
                     designator.insert(designator.begin(), 'X');
                 body << designator << " ";
@@ -1593,11 +1847,15 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
 
             // Instance names commonly already carry the element letter (V1, R1);
             // only prepend it when they do not, so we never emit "VV1".
-            std::string designator = instance.name;
+            std::string designator = instancePrefix + instance.name;
             const auto prefix = static_cast<char>(std::toupper(static_cast<unsigned char>(lineElement)));
             if (designator.empty() ||
                 static_cast<char>(std::toupper(static_cast<unsigned char>(designator.front()))) != prefix)
                 designator.insert(designator.begin(), prefix);
+            if (element == 'V' && voltageSourceDrivers) {
+                for (const auto &node : nodes)
+                    (*voltageSourceDrivers)[node] = designator;
+            }
 
             const auto appendAttribute = [&](std::string_view label, std::initializer_list<std::string_view> names) {
                 const auto value = parameterNamed(instance, names);
@@ -1715,7 +1973,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         visiting.insert(childId);
         const auto ports = portInstances(child->second);
         const auto portNodeNames = portNodes(child->second);
-        const auto body = emitBody(child->second, portNodeNames, false);
+        const auto body = emitBody(child->second, portNodeNames, false, {}, {});
 
         std::ostringstream definition;
         definition << ".subckt " << spiceIdentifier(child->second.name);
@@ -1734,7 +1992,7 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
     };
 
     visiting.insert(cellId);
-    const auto topBody = emitBody(topCell, {}, true);
+    const auto topBody = emitBody(topCell, {}, true, {}, {});
     visiting.erase(cellId);
     std::ostringstream topParameters;
     for (const auto &parameter : parametersFor(topCell))
@@ -1748,6 +2006,19 @@ std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId 
         if (!line.empty())
             lines.push_back(line);
     return lines;
+}
+} // namespace
+
+std::vector<std::string> buildSchematicNetlist(const Project &project, ObjectId cellId, std::vector<std::string> *notes,
+                                               SchematicNetlistMode mode, double geometryScale) {
+    return buildSchematicNetlistImpl(project, cellId, notes, mode, geometryScale, false, nullptr, nullptr);
+}
+
+SchematicNetlistBuild buildMixedSignalSchematicNetlist(const Project &project, ObjectId cellId, double geometryScale) {
+    SchematicNetlistBuild result;
+    result.lines = buildSchematicNetlistImpl(project, cellId, &result.notes, SchematicNetlistMode::mixed, geometryScale,
+                                             true, &result.blocks, &result.voltageSourceDrivers);
+    return result;
 }
 
 std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId cellId,

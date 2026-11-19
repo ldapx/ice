@@ -151,8 +151,8 @@ std::vector<Diagnostic> Project::validate() const {
             for (auto &character : key)
                 character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
             if (simulation.name.empty())
-                result.push_back({Diagnostic::Severity::error, "simulation.name",
-                                  "Simulation name must not be empty", simulationId});
+                result.push_back({Diagnostic::Severity::error, "simulation.name", "Simulation name must not be empty",
+                                  simulationId});
             else if (!simulationNames.insert(key).second)
                 result.push_back({Diagnostic::Severity::error, "simulation.name.duplicate",
                                   "Simulation name '" + simulation.name + "' is used more than once", simulationId});
@@ -1411,9 +1411,7 @@ std::filesystem::path projectRootDirectory(const std::filesystem::path &path) {
 
 namespace {
 
-std::filesystem::path projectRoot(const std::filesystem::path &path) {
-    return projectRootDirectory(path);
-}
+std::filesystem::path projectRoot(const std::filesystem::path &path) { return projectRootDirectory(path); }
 
 std::string normalizedRoot(const std::filesystem::path &path) {
     std::error_code status;
@@ -1673,7 +1671,8 @@ std::string generatedAgentsGuidance() {
               "The run generates VCD traces; graph the traces or import an external VCD file in the "
               "GUI with Load VCD. A drawn schematic containing SystemVerilog instances uses the "
               "`mixed` simulator automatically; its result contains analog node traces and "
-              "`<instance>.<port>` digital traces. Mixed mode requires top-level HDL instances. "
+              "`<instance>.<port>` digital traces. HDL instances may be nested inside drawn subcells; "
+              "their scoped names use underscores such as `U1_U2`. "
               "Logic ports are thresholded, real ports are bridged directly, and buses must be "
               "flattened with `bus_mode=\"flatten\"` before simulation. "
               "`schematic_validate_hierarchy` reports `inout` ports, unflattened buses, missing "

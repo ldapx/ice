@@ -14,6 +14,7 @@ CLI invokes the same operations through `ProjectSession`.
 | Generate package PCell geometry | Yes | Devices panel | Core API | package `ihp_runtime.generate_cell`, `icepy.pcells.generate_package_geometry` |
 | Polygon Boolean/offset | Yes | Layout toolbar (Boolean) | Core API | Core API |
 | Layout-versus-schematic check | Yes | Tools → Run LVS | `ice-cli lvs` | `icepy.run_lvs` |
+| LVS against text SPICE or HDL | Yes | Tools → Run LVS | `ice-cli lvs` | Core API |
 | Mixed-signal HDL capture | Yes | Schematic + Simulation surfaces | `schematic-add-hdl-instance`, `simulation-run` | Core API |
 | Mixed-signal co-simulation | Yes | Mixed-signal simulator | `simulation-run` | Core API |
 | SPICE analyses (DC, AC, transient, OP, noise, TF) | Yes | Analysis selector + experiment dialog | `simulation-configure`, `simulation-run` | Core API |
@@ -23,7 +24,7 @@ CLI invokes the same operations through `ProjectSession`.
 | High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
 | Parameterized schematic cells | Yes | Schematic Properties parameters | `schematic-set-cell-parameter`, `schematic-remove-cell-parameter`, `schematic-set-parameter` | `setSchematicCellParameter`, `setSchematicParameter` |
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
-| SPICE import | Yes | Schematic import | `schematic-import-spice` | Core API |
+| SPICE import and hierarchy | Yes | Schematic import | `schematic-import-spice`, `schematic-add-spice-instance` | Core API |
 | Stored waveform sampling | Yes | Graph/result inspection | `simulation-trace` | Core API |
 | Create/inspect implementation runs | Yes | Physical Design | `implementation-create`, `implementation-update`, `implementation-list`, `implementation-status` | `Project.create_implementation`, `Project.implementation_runs` |
 | Prepare and execute OpenROAD/Yosys stages | Yes | Physical Design (run-to-stage per row / Run all / Cancel) | `implementation-prepare`, `implementation-map`, `implementation-run`, `implementation-log`, `implementation-cancel` | `Project.run_implementation` |

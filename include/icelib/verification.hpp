@@ -34,10 +34,10 @@ struct LvsOptions {
     bool compareParameters = true;
 };
 
-// Result of comparing a schematic cell against a layout cell. Layout
-// connectivity is taken from planned-device connections; device identity is
-// matched through planned-device schematic links first and reference names
-// second.
+// Result of comparing a schematic cell against a layout cell. Drawn, text SPICE,
+// and SystemVerilog source schematics are supported. Layout connectivity is
+// taken from planned-device connections; device identity is matched through
+// planned-device schematic links first and reference names second.
 struct LvsReport {
     int schemaVersion = 1;
     std::string schematic;

@@ -91,7 +91,7 @@ bool prepareMixedSignalRequest(SimulationRequest &request, const Project &projec
     }
     if (plan.hdlInstances.empty()) {
         if (error)
-            *error = "Schematic has no top-level SystemVerilog block instances";
+            *error = "Schematic has no SystemVerilog block instances";
         return false;
     }
     request.analysis = "transient";
@@ -125,35 +125,32 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
     std::set<std::string> outputNodes;
     std::map<std::string, std::string> moduleSources;
     std::map<std::string, std::string> outputDrivers;
-    std::map<ObjectId, int> symbolUseCount;
-    for (const auto &[_, instance] : cell->second.instances)
-        ++symbolUseCount[instance.symbol];
 
-    for (const auto &[instanceId, instance] : cell->second.instances) {
-        const auto symbol = cell->second.symbols.find(instance.symbol);
-        if (symbol == cell->second.symbols.end() || symbol->second.sourceCell == 0)
+    const auto geometryScale = pdkNetlistGeometryScale(cell->second.pdk);
+    SchematicNetlistBuild netlist;
+    try {
+        netlist = buildMixedSignalSchematicNetlist(project, cellId, geometryScale);
+    } catch (const ProjectError &error) {
+        plan.error = error.what();
+        return plan;
+    }
+    for (const auto &warning : netlist.notes)
+        plan.warnings.push_back(warning);
+
+    for (const auto &block : netlist.blocks) {
+        const auto source = project.schematicCells.find(block.sourceCell);
+        if (source == project.schematicCells.end() || !source->second.systemVerilogSchematic)
             continue;
-        const auto source = project.schematicCells.find(symbol->second.sourceCell);
-        if (source == project.schematicCells.end())
-            continue;
-        if (!source->second.systemVerilogSchematic)
-            continue;
-        if (symbolUseCount[instance.symbol] > 1) {
-            addError(plan, "SystemVerilog symbol '" + symbol->second.name +
-                               "' is shared by multiple instances; create one HDL instance per symbol");
-            continue;
-        }
 
         const auto parsed = parseSystemVerilogModule(source->second);
         if (!parsed.ok) {
-            addError(plan,
-                     "SystemVerilog block '" + source->second.name + "' (" + instance.name + "): " + parsed.error);
+            addError(plan, "SystemVerilog block '" + source->second.name + "' (" + block.path + "): " + parsed.error);
             continue;
         }
         for (const auto &warning : parsed.warnings)
             plan.warnings.push_back(source->second.name + ": " + warning);
         if (sourceHasDumpCommands(source->second.systemVerilogText)) {
-            addError(plan, "SystemVerilog block '" + source->second.name + "' (" + instance.name +
+            addError(plan, "SystemVerilog block '" + source->second.name + "' (" + block.path +
                                ") contains testbench dump commands; mixed-signal blocks must be plain modules");
             continue;
         }
@@ -171,28 +168,34 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
         }
 
         HdlInstanceBinding binding;
-        binding.instanceId = instanceId;
-        binding.symbolId = symbol->first;
-        binding.instanceName = instance.name;
-        binding.sourceCell = source->first;
+        binding.instanceId = block.instanceId;
+        binding.symbolId = block.symbolId;
+        binding.instanceName = block.path;
+        binding.sourceCell = block.sourceCell;
         binding.moduleName = moduleName;
         binding.source = source->second.systemVerilogText;
         binding.ports = parsed.module.ports;
 
+        std::map<std::string, std::string> pinNodes;
+        for (const auto &[name, node] : block.pinNodes)
+            pinNodes[lowerCopy(name)] = node;
+        std::set<std::string> pinNames;
+        for (const auto &name : block.pinNames)
+            pinNames.insert(lowerCopy(name));
+
         std::set<std::string> modulePorts;
-        const auto registerNode = [&](const HdlPort &port, const std::string &signalName, const std::string &node,
-                                      const Net *net) {
+        const auto registerNode = [&](const HdlPort &port, const std::string &signalName, const std::string &node) {
             if (port.direction == HdlPortDirection::input) {
                 if (node != "0")
                     inputNodes.insert(node);
                 return;
             }
             if (node == "0") {
-                addError(plan,
-                         "SystemVerilog block '" + instance.name + "' output '" + signalName + "' cannot drive ground");
+                addError(plan, "SystemVerilog block '" + binding.instanceName + "' output '" + signalName +
+                                   "' cannot drive ground");
                 return;
             }
-            const auto entry = instance.name + "." + signalName;
+            const auto entry = binding.instanceName + "." + signalName;
             const auto previous = outputDrivers.find(node);
             if (previous != outputDrivers.end()) {
                 addError(plan,
@@ -200,16 +203,10 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
             } else {
                 outputDrivers[node] = entry;
             }
-            for (const auto netPin : net->pins) {
-                const Symbol *ownerSymbol = nullptr;
-                const auto owner = instanceForPin(cell->second, netPin, &ownerSymbol);
-                if (!owner || !ownerSymbol || owner->id == instanceId)
-                    continue;
-                if (spiceElementForSymbol(ownerSymbol->name) == 'V') {
-                    addError(plan, "Analog node '" + node + "' is driven by SystemVerilog output '" + entry +
-                                       "' and by voltage source '" + owner->name + "'");
-                    break;
-                }
+            if (const auto source = netlist.voltageSourceDrivers.find(node);
+                source != netlist.voltageSourceDrivers.end()) {
+                addError(plan, "Analog node '" + node + "' is driven by SystemVerilog output '" + entry +
+                                   "' and by voltage source '" + source->second + "'");
             }
             outputNodes.insert(node);
         };
@@ -231,22 +228,21 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
             }
             if (port.width == 1 || port.real) {
                 modulePorts.insert(lowerCopy(port.name));
-                const auto pin = pinForPort(symbol->second, port.name);
-                if (!pin) {
-                    addError(plan, "Symbol '" + symbol->second.name + "' is missing pin '" + port.name +
+                const auto pinName = lowerCopy(port.name);
+                if (!pinNames.contains(pinName)) {
+                    addError(plan, "Schematic block '" + block.path + "' is missing pin '" + port.name +
                                        "' for SystemVerilog module '" + moduleName + "'");
                     continue;
                 }
-                const auto net = netForPin(cell->second, pin->id);
-                if (!net) {
-                    addError(plan, "SystemVerilog block '" + instance.name + "' port '" + port.name +
+                const auto node = pinNodes.find(pinName);
+                if (node == pinNodes.end()) {
+                    addError(plan, "SystemVerilog block '" + binding.instanceName + "' port '" + port.name +
                                        "' is not connected to a net");
                     continue;
                 }
-                const auto node = schematicNetNodeName(cell->second, *net);
-                binding.portNodes[port.name] = node;
-                binding.portBits[port.name] = {node};
-                registerNode(port, port.name, node, net);
+                binding.portNodes[port.name] = node->second;
+                binding.portBits[port.name] = {node->second};
+                registerNode(port, port.name, node->second);
                 continue;
             }
 
@@ -256,31 +252,30 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
             for (int bit = 0; bit < port.width; ++bit) {
                 const auto bitName = port.name + "[" + std::to_string(bit) + "]";
                 modulePorts.insert(lowerCopy(bitName));
-                const auto pin = pinForPort(symbol->second, bitName);
-                if (!pin) {
+                const auto pinName = lowerCopy(bitName);
+                if (!pinNames.contains(pinName)) {
                     addError(plan, "SystemVerilog bus '" + moduleName + "." + port.name +
                                        "' is not flattened; create the instance with bus_mode=flatten or add pin '" +
                                        bitName + "'");
                     complete = false;
                     break;
                 }
-                const auto net = netForPin(cell->second, pin->id);
-                if (!net) {
-                    addError(plan, "SystemVerilog block '" + instance.name + "' bus bit '" + bitName +
+                const auto node = pinNodes.find(pinName);
+                if (node == pinNodes.end()) {
+                    addError(plan, "SystemVerilog block '" + binding.instanceName + "' bus bit '" + bitName +
                                        "' is not connected to a net");
                     complete = false;
                     break;
                 }
-                const auto node = schematicNetNodeName(cell->second, *net);
-                bits.push_back(node);
-                registerNode(port, bitName, node, net);
+                bits.push_back(node->second);
+                registerNode(port, bitName, node->second);
             }
             if (complete)
                 binding.portBits[port.name] = bits;
         }
-        for (const auto &pin : symbol->second.pins) {
-            if (!modulePorts.contains(lowerCopy(pin.name))) {
-                addError(plan, "Symbol '" + symbol->second.name + "' has pin '" + pin.name +
+        for (const auto &pinName : block.pinNames) {
+            if (!modulePorts.contains(lowerCopy(pinName))) {
+                addError(plan, "Schematic block '" + block.path + "' has pin '" + pinName +
                                    "' that is not a port of SystemVerilog module '" + moduleName + "'");
             }
         }
@@ -290,18 +285,7 @@ MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId) {
     if (!plan.error.empty())
         return plan;
 
-    std::vector<std::string> notes;
-    try {
-        const auto cell = project.schematicCells.find(cellId);
-        plan.analogNetlist = buildSchematicNetlist(
-            project, cellId, &notes, SchematicNetlistMode::mixed,
-            pdkNetlistGeometryScale(cell == project.schematicCells.end() ? std::string{} : cell->second.pdk));
-    } catch (const ProjectError &error) {
-        plan.error = error.what();
-        return plan;
-    }
-    for (const auto &note : notes)
-        plan.warnings.push_back(note);
+    plan.analogNetlist = std::move(netlist.lines);
     plan.analogInputNodes.assign(inputNodes.begin(), inputNodes.end());
     plan.digitalOutputNodes.assign(outputNodes.begin(), outputNodes.end());
     return plan;

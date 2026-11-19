@@ -1572,6 +1572,12 @@ The LVS system should eventually identify:
 * Incorrect multiplicity
 * Other topology mismatches
 
+The current comparator accepts drawn schematics, parsed text SPICE netlists
+(including recursively flattened `.subckt` instances), and SystemVerilog source
+cells. Text SPICE device identity, parameters, and terminal nets feed the same
+device/net comparison engine as drawn schematics. SystemVerilog cells contribute
+module ports and are compared at the port level.
+
 ---
 
 ## 36. Parasitic Extraction
