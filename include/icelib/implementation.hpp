@@ -214,10 +214,11 @@ struct ImplementationLayoutImport {
     std::vector<Diagnostic> diagnostics;
 };
 
-// Imports the newest available physical checkpoint (final DEF when present)
-// as an ICE layout cell with package layers, top-level pins, nets, routes, and
-// standard-cell instances. `replace` reuses the layout previously produced by
-// this run instead of creating another cell.
+// Imports the final GDS/OASIS stream as a flattened, read-only digital device
+// cell. When a final DEF checkpoint exists, its top-level pins and pin nets are
+// copied onto the device so procedural and manual layouts can reference them.
+// `replace` reuses the layout previously produced by this run instead of
+// creating another cell.
 ImplementationLayoutImport importImplementationLayout(Project &project, ImplementationRun &run,
                                                       const PackageSpec &package,
                                                       const std::filesystem::path &projectRoot,

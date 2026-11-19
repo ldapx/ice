@@ -360,6 +360,12 @@ void LayoutInterchange::exportGds(const Project &project, ObjectId cellId, const
     const auto cell = project.layoutCells.find(cellId);
     if (cell == project.layoutCells.end())
         throw ProjectError("interchange.cell", "Layout cell does not exist");
+    // The GDS writer emits exactly one structure. Flatten when instances are
+    // present so child geometry cannot be silently omitted from the stream.
+    if (!cell->second.instances.empty()) {
+        exportFlattenedGds(project, cellId, path);
+        return;
+    }
     writeCell(project, cell->second, path);
 }
 
@@ -372,6 +378,11 @@ void LayoutInterchange::exportFlattenedGds(const Project &project, ObjectId cell
     flatCell.id = cellId;
     flatCell.name = cell->second.name;
     flatCell.pdk = cell->second.pdk;
+    flatCell.stack = cell->second.stack;
+    // Flattening removes the instance hierarchy but must preserve the top
+    // cell's logical interface so pin labels survive the export.
+    flatCell.ports = cell->second.ports;
+    flatCell.nets = cell->second.nets;
     std::set<ObjectId> ancestors{cellId};
     auto nextId = flattened.nextId();
     collectFlattenedShapes(project, cellId, {}, ancestors, flattened, flatCell, nextId);

@@ -595,9 +595,7 @@ std::string readStdin() {
     return stream.str();
 }
 
-std::filesystem::path projectRootForCli(const std::filesystem::path &path) {
-    return ice::projectRootDirectory(path);
-}
+std::filesystem::path projectRootForCli(const std::filesystem::path &path) { return ice::projectRootDirectory(path); }
 
 std::filesystem::path defaultProjectPath() {
     if (const auto *configured = std::getenv("ICE_PROJECT"); configured && *configured)
@@ -2857,7 +2855,9 @@ int main(int argc, char **argv) {
                 ice::LayoutInterchange::exportFlattenedGds(project, cell, args[3]);
             else
                 ice::LayoutInterchange::exportGds(project, cell, args[3]);
-            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", flatten}});
+            // The GDS writer emits a single structure, so instance-bearing
+            // cells are always flattened to preserve child geometry.
+            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", true}});
             return 0;
         }
 
@@ -3287,6 +3287,14 @@ int main(int argc, char **argv) {
             response["ports"] = layout.ports.size();
             response["nets"] = layout.nets.size();
             response["instances"] = layout.instances.size();
+            json diagnostics = json::array();
+            for (const auto &diagnostic : imported.diagnostics) {
+                diagnostics.push_back(
+                    json{{"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                         {"code", diagnostic.code},
+                         {"message", diagnostic.message}});
+            }
+            response["diagnostics"] = std::move(diagnostics);
             printJson(response);
             return 0;
         }
@@ -3402,7 +3410,8 @@ int main(int argc, char **argv) {
                 if (simulation.analysis == "ac")
                     simulation.acPoints = std::max(1, static_cast<int>(parseDouble(args[6], "ac points per decade")));
                 else if (simulation.analysis == "noise")
-                    simulation.noisePoints = std::max(1, static_cast<int>(parseDouble(args[6], "noise points per decade")));
+                    simulation.noisePoints =
+                        std::max(1, static_cast<int>(parseDouble(args[6], "noise points per decade")));
                 else
                     simulation.step = parseDouble(args[6], "step time");
             }

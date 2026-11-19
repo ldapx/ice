@@ -392,6 +392,110 @@ def test_report_groups_rows_before_measuring_gaps():
     )
 
 
+def test_layout_instance_composition():
+    runner = load_runner()
+    cells = [
+        {
+            "name": "digital",
+            "bounds": {"x": 0, "y": 0, "width": 1000, "height": 600},
+            "ports": [
+                {
+                    "name": "clk",
+                    "layer": "Metal1",
+                    "rectangle": {"x": 100, "y": 100, "width": 20, "height": 80},
+                    "side": "left",
+                    "direction": "input",
+                    "net": "clk",
+                }
+            ],
+        }
+    ]
+    layout = runner.Layout(cells=cells)
+    pad = rectangle(layout, 0, 0, 100, 100, "pad")
+    block = layout.instance("DIGITAL", 0, 0, name="DIGITAL")
+    assert isinstance(block, runner.LayoutInstancePlacement)
+    assert block.cell == "digital"
+    assert block.bounds == {"x": 0, "y": 0, "width": 1000, "height": 600}
+    assert block.pin("clk") == (100, 100, 20, 80)
+
+    row = layout.row(gap=0)
+    row.add(pad)
+    row.add(block)
+    layout.add(row)
+    assert layout.instances[0]["x"] == 100
+    assert layout.bounds() == (0, 0, 1100, 600)
+
+    report = layout.report()
+    assert report["instance_count"] == 1
+    assert report["instance_area_um2"] > 0
+    assert report["utilization"] > 0.8
+    assert report["placement_style"] == "composed"
+
+    direct = runner.Layout(cells=cells)
+    moved = direct.instance("digital", 0, 0, name="D")
+    direct.add(moved, x=200, y=300)
+    assert direct.instances[0]["x"] == 200
+    assert direct.instances[0]["y"] == 300
+    moved.move(10, 20)
+    assert direct.instances[0]["x"] == 210
+    assert direct.instances[0]["y"] == 320
+
+    rotated = runner.Layout(cells=cells).instance("digital", 0, 0, orientation="r90")
+    assert rotated.bounds == {"x": -600, "y": 0, "width": 600, "height": 1000}
+    assert rotated.pin("clk") == (-180, 100, 80, 20)
+
+    mirrored = runner.Layout(cells=cells).instance("digital", 0, 0, name="M")
+    mirrored.mirror("y")
+    assert mirrored.orientation == "my"
+    assert mirrored.bounds == {"x": 0, "y": 0, "width": 1000, "height": 600}
+    assert mirrored.pin("clk") == (880, 100, 20, 80)
+
+    planned = runner.Layout(cells=cells)
+    planned.plan(
+        devices=0,
+        target_utilization=0.9,
+        max_gap_um=10000,
+    )
+    planned.instance("digital", 0, 0, name="D")
+    quality = planned.finish_placement()
+    assert quality["plan_passed"]
+    assert quality["instance_count"] == 1
+    assert quality["utilization"] == 1.0
+
+    try:
+        runner.Layout(cells=cells).instance("missing", 0, 0)
+    except ValueError as error:
+        assert "Unknown layout cell" in str(error)
+    else:
+        raise AssertionError("unknown instance cells must be rejected")
+
+
+def test_layout_instance_connect():
+    runner = load_runner()
+    cells = [
+        {
+            "name": "digital",
+            "bounds": {"x": 0, "y": 0, "width": 1000, "height": 600},
+            "ports": [
+                {
+                    "name": "clk",
+                    "layer": "Metal1",
+                    "rectangle": {"x": 100, "y": 100, "width": 20, "height": 80},
+                    "side": "left",
+                    "direction": "input",
+                    "net": "clk",
+                }
+            ],
+        }
+    ]
+    layout = runner.Layout(cells=cells)
+    first = layout.instance("digital", 0, 0, name="A")
+    second = layout.instance("digital", 2000, 0, name="B")
+    route = layout.connect(first, "clk", second, "clk", layer="Metal1")
+    assert route.net == "clk"
+    assert route.bounds is not None
+
+
 def test_device_composition():
     runner = load_runner()
     layout = runner.Layout()
@@ -466,6 +570,8 @@ def main():
         test_layout_plan_gate_and_review,
         test_layout_plan_gate_rejects_low_utilization,
         test_report_groups_rows_before_measuring_gaps,
+        test_layout_instance_composition,
+        test_layout_instance_connect,
         test_device_composition,
         test_output_metadata_and_determinism,
     ]

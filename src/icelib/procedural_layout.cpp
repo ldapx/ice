@@ -8,12 +8,14 @@
 #include "icelib/simulation_report.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -691,6 +693,158 @@ std::map<std::string, LayerDefaults> packageLayerDefaults(const ProceduralLayout
     return result;
 }
 
+void includeBounds(std::optional<Rect> &bounds, const Rect &rectangle) {
+    if (!rectangle.valid())
+        return;
+    if (!bounds) {
+        bounds = rectangle;
+        return;
+    }
+    const auto left = std::min(bounds->x, rectangle.x);
+    const auto bottom = std::min(bounds->y, rectangle.y);
+    const auto right = std::max(bounds->x + bounds->width, rectangle.x + rectangle.width);
+    const auto top = std::max(bounds->y + bounds->height, rectangle.y + rectangle.height);
+    bounds = Rect{left, bottom, right - left, top - bottom};
+}
+
+std::optional<Rect> pointBounds(const std::vector<LayoutPoint> &points) {
+    if (points.empty())
+        return std::nullopt;
+    auto minX = points.front().x;
+    auto minY = points.front().y;
+    auto maxX = minX;
+    auto maxY = minY;
+    for (const auto &point : points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    return Rect{minX, minY, maxX - minX, maxY - minY};
+}
+
+std::optional<Rect> layoutCellBounds(const Project &project, ObjectId cellId, std::set<ObjectId> &ancestors,
+                                     std::map<ObjectId, Rect> &cache) {
+    if (const auto cached = cache.find(cellId); cached != cache.end())
+        return cached->second;
+    if (ancestors.contains(cellId))
+        return std::nullopt;
+    const auto cellIt = project.layoutCells.find(cellId);
+    if (cellIt == project.layoutCells.end())
+        return std::nullopt;
+    ancestors.insert(cellId);
+    std::optional<Rect> bounds;
+    for (const auto &[_, shape] : cellIt->second.shapes) {
+        if (shape.rectangle.valid()) {
+            includeBounds(bounds, shape.rectangle);
+            continue;
+        }
+        if (!shape.polygon.empty()) {
+            if (const auto box = pointBounds(shape.polygon))
+                includeBounds(bounds, *box);
+            continue;
+        }
+        if (const auto box = pointBounds(shape.centerline)) {
+            auto expanded = *box;
+            const auto half = std::max<Coordinate>(0, shape.width) / 2;
+            expanded.x -= half;
+            expanded.y -= half;
+            expanded.width += 2 * half;
+            expanded.height += 2 * half;
+            includeBounds(bounds, expanded);
+        }
+    }
+    for (const auto &[_, port] : cellIt->second.ports)
+        includeBounds(bounds, port.rectangle);
+    for (const auto &[_, instance] : cellIt->second.instances) {
+        const auto child = layoutCellBounds(project, instance.cell, ancestors, cache);
+        if (!child)
+            continue;
+        const Transform transform{instance.x, instance.y, instance.orientation};
+        const std::array<Point, 4> corners = {
+            Point{child->x, child->y},
+            Point{child->x + child->width, child->y},
+            Point{child->x + child->width, child->y + child->height},
+            Point{child->x, child->y + child->height},
+        };
+        auto minX = std::numeric_limits<Coordinate>::max();
+        auto minY = std::numeric_limits<Coordinate>::max();
+        auto maxX = std::numeric_limits<Coordinate>::lowest();
+        auto maxY = std::numeric_limits<Coordinate>::lowest();
+        for (const auto &corner : corners) {
+            const auto point = transform.apply(corner);
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+        includeBounds(bounds, Rect{minX, minY, maxX - minX, maxY - minY});
+    }
+    ancestors.erase(cellId);
+    if (bounds)
+        cache.emplace(cellId, *bounds);
+    return bounds;
+}
+
+json layoutCellCatalog(const Project &project) {
+    std::map<ObjectId, json> entries;
+    std::set<std::string> names;
+    std::map<ObjectId, Rect> cache;
+    for (const auto &[id, cell] : project.layoutCells) {
+        std::set<ObjectId> ancestors;
+        const auto bounds = layoutCellBounds(project, id, ancestors, cache);
+        json entry = json::object();
+        entry["name"] = cell.name;
+        if (bounds) {
+            entry["bounds"] = {
+                {"x", bounds->x}, {"y", bounds->y}, {"width", bounds->width}, {"height", bounds->height}};
+            entry["width"] = bounds->width;
+            entry["height"] = bounds->height;
+        } else {
+            entry["width"] = 0;
+            entry["height"] = 0;
+        }
+        json ports = json::array();
+        for (const auto &[_, port] : cell.ports) {
+            json item = {{"name", port.name},
+                         {"label", port.label},
+                         {"direction", portDirectionName(port.direction)},
+                         {"side", portSideName(port.side)},
+                         {"rectangle",
+                          {{"x", port.rectangle.x},
+                           {"y", port.rectangle.y},
+                           {"width", port.rectangle.width},
+                           {"height", port.rectangle.height}}}};
+            if (const auto layer = project.layers.find(port.layer); layer != project.layers.end())
+                item["layer"] = layer->second.name;
+            if (port.net != 0) {
+                if (const auto net = cell.nets.find(port.net); net != cell.nets.end())
+                    item["net"] = net->second.name;
+            }
+            ports.push_back(std::move(item));
+        }
+        entry["ports"] = std::move(ports);
+        names.insert(cell.name);
+        entries.emplace(id, std::move(entry));
+    }
+    json result = json::array();
+    for (const auto &[_, entry] : entries)
+        result.push_back(entry);
+    for (const auto &[_, procedural] : project.proceduralLayouts) {
+        if (procedural.name.empty() || names.contains(procedural.name))
+            continue;
+        const auto entry = entries.find(procedural.generatedCell);
+        if (entry == entries.end())
+            continue;
+        auto alias = entry->second;
+        alias["name"] = procedural.name;
+        alias["generated_cell"] = entry->second.value("name", "");
+        names.insert(procedural.name);
+        result.push_back(std::move(alias));
+    }
+    return result;
+}
+
 bool applyGeneratedLayout(Project &project, ObjectId proceduralLayoutId, const ProceduralLayout &procedural,
                           const ParsedLayout &generated, std::string *error) {
     auto cellIt = project.layoutCells.find(procedural.generatedCell);
@@ -1121,6 +1275,7 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     };
     const auto scriptPath = directory / "layout.py";
     const auto paramsPath = directory / "params.json";
+    const auto cellsPath = directory / "cells.json";
     const auto outputPath = directory / "layout.json";
     const auto logPath = directory / "runner.log";
     {
@@ -1142,6 +1297,15 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         }
         paramsFile << params.dump(2);
     }
+    {
+        std::ofstream cellsFile(cellsPath, std::ios::binary | std::ios::trunc);
+        if (!cellsFile) {
+            result.error = "Unable to write the procedural layout cell catalog.";
+            cleanup();
+            return result;
+        }
+        cellsFile << layoutCellCatalog(project).dump(2);
+    }
 
     std::filesystem::path pdkRoot;
     if (procedural.pdk != genericPdkId) {
@@ -1161,6 +1325,7 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         python,          runner.string(),
         "--script",      scriptPath.string(),
         "--params-file", paramsPath.string(),
+        "--cells-file",  cellsPath.string(),
         "--output",      outputPath.string(),
         "--pdk",         procedural.pdk,
         "--db-unit-nm",  std::to_string(nanometersPerUnit),

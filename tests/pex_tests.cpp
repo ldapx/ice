@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -235,6 +236,34 @@ TEST_CASE("PEX extracts placed capacitor devices with their library values") {
     CHECK(device.type == "capacitor");
     CHECK(device.model == "cap_cmim");
     CHECK(device.spiceLine == "C1 PLUS MINUS 74.6f");
+}
+
+TEST_CASE("PEX skips imported digital macros even when names match passives") {
+    ice::Project project;
+    project.identity = "pex-digital-macro";
+    project.name = "pex-digital-macro";
+    const auto metal = ice::addLayer(project, "Metal1", 8);
+    const auto metalPin = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto child = ice::createLayoutCell(project, "digital_cap_macro", ice::genericPdkId);
+    auto &deviceCell = project.layoutCells.at(child);
+    deviceCell.library = true;
+    deviceCell.readOnly = true;
+    deviceCell.device = "digital:cap_impl";
+    ice::addPort(project, child, "A", metalPin, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
+    ice::addPort(project, child, "B", metalPin, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
+
+    const auto parent = ice::createLayoutCell(project, "top", ice::genericPdkId);
+    ice::addLayoutInstance(project, parent, child, "D1", 5000, 0);
+    const auto netA = ice::createLayoutNet(project, parent, "A");
+    const auto netB = ice::createLayoutNet(project, parent, "B");
+    ice::addRectangle(project, parent, metal, {5000, 0, 400, 400}, netA);
+    ice::addRectangle(project, parent, metal, {6000, 0, 400, 400}, netB);
+
+    const auto report = ice::runPex(project, parent);
+    CHECK(report.devices.empty());
+    CHECK(std::any_of(report.notes.begin(), report.notes.end(), [](const std::string &note) {
+        return note.find("not a recognized device") != std::string::npos;
+    }));
 }
 
 TEST_CASE("PEX extracts polygon MOS devices from PDK rules") {
