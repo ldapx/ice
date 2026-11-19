@@ -100,9 +100,9 @@ struct MixedSignalInterface {
 // SystemVerilog source cell.
 bool schematicContainsHdl(const Project &project, ObjectId cellId);
 
-// Validates the HDL instances in a schematic and builds the analog base netlist
-// used by the mixed-signal co-simulation adapter. Only top-level HDL instances
-// with scalar input/output ports are supported in this version.
+// Validates HDL instances anywhere in the drawn hierarchy and builds the
+// flattened analog base netlist used by the mixed-signal co-simulation adapter.
+// Scalar, real, and flattened bus input/output ports are supported.
 MixedSignalPlan buildMixedSignalPlan(const Project &project, ObjectId cellId);
 
 // User-facing hierarchy/port validation. Unlike Project::validate, this can

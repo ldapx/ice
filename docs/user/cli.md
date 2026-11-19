@@ -63,6 +63,7 @@ ice-cli schematic-validate <project> <cell>
 ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
 ice-cli schematic-hdl-ports <project> <cell>
 ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> [--flatten-buses]
+ice-cli schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>
 ice-cli schematic-validate-hierarchy <project> <cell>
 ice-cli schematic-netlist <project> <cell>   # includes the subcircuit port order
 ```
@@ -102,7 +103,12 @@ connectivity, component values, PDK setup, and mixed-signal hierarchy.
 
 `schematic-import-spice` creates a text SPICE cell, or a drawn R/C/L/V/I/D
 schematic with `--mode drawn`. `--mode auto` chooses drawn only when the source
-is a flat supported netlist. `schematic-remove --dry-run` lists dependencies;
+is a flat supported netlist. Text imports retain parsed `.subckt` port and
+parameter declarations, so the cell can be placed as a hierarchical block.
+`schematic-add-spice-instance` generates a symbol from a text SPICE
+subcircuit's ports and places it; instance parameters such as `R=2k` override
+the subcircuit defaults. `schematic-add-symbol` with a text source cell uses the
+same generated pins. `schematic-remove --dry-run` lists dependencies;
 `--cascade` removes dependent simulations and hierarchical symbols too.
 
 `schematic-add-text` accepts either the positional `[pdk] [spice-file]` form or
@@ -127,7 +133,8 @@ nets, buses, and mixed-signal support before simulation.
 
 A pure SPICE netlist rejects hierarchical SystemVerilog blocks with an explicit
 error instead of silently skipping them. Use mixed-signal simulation for drawn
-schematics that contain HDL instances.
+schematics that contain HDL instances; HDL blocks nested inside drawn subcells
+are flattened into scoped nodes during mixed-signal planning.
 
 ## Layout
 
@@ -345,9 +352,12 @@ degraded state so `project_repair` and `project_open(recover=true)` remain
 callable.
 
 `lvs` compares a schematic against a layout and prints the LVS report as JSON.
-`lvs-auto` infers the schematic from planned-device links, then prefers a
-`<layout>_lvs`, `<layout>_dut`, or `<layout>_layout` cell before a plain name
-match, so a testbench named after the block does not hide its DUT view.
+The schematic may be drawn, text SPICE, or a SystemVerilog source cell. Parsed
+SPICE subcircuits are flattened recursively with parameter defaults applied;
+SystemVerilog comparison is port-level. `lvs-auto` infers the schematic from
+planned-device links, then prefers a `<layout>_lvs`, `<layout>_dut`, or
+`<layout>_layout` cell before a plain name match, so a testbench named after the
+block does not hide its DUT view.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
 device types, shared device parameters, net topology from planned connections
@@ -519,8 +529,9 @@ times are given. `simulation-run` then iterates between ngspice and Icarus
 Verilog: digital outputs drive PWL sources in the analog deck, analog input
 nodes are sampled through a logic threshold, and the loop stops when the sampled
 input bits stabilize. Results contain both analog node traces and
-`<instance>.<port>` digital traces. Mixed mode requires top-level HDL
-instances; `schematic-validate-hierarchy` reports `inout` ports, buses, missing
+`<instance>.<port>` digital traces. HDL instances may be top-level or nested
+inside drawn subcells; nested instances get scoped names such as `U1_U2`;
+`schematic-validate-hierarchy` reports `inout` ports, buses, missing
 connections, and duplicate output drivers. Use `schematic-add-hdl-instance ...
 --flatten-buses` for scalar mixed simulation of a bus; pins become `data[0]`,
 `data[1]`, … and are concatenated in the generated testbench. `real` ports are

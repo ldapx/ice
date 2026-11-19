@@ -1,4 +1,6 @@
+#include "icelib/hdl.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/spice.hpp"
 #include "icelib/verification.hpp"
 
 #include <nlohmann/json.hpp>
@@ -7,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -177,15 +180,177 @@ struct LayoutLogicalSide {
     bool hasConnectivity = false;
 };
 
+LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<LvsMismatch> &mismatches) {
+    LogicalSide side;
+    auto document = parseSpiceDocument(cell.spiceText);
+    const auto *selected = findSpiceSubcircuit(document, cell.name);
+    if (!selected && document.elements.empty()) {
+        if (document.subcircuits.size() == 1)
+            selected = &document.subcircuits.front();
+        else if (!document.subcircuits.empty())
+            throw ProjectError("lvs.spice", "Text SPICE schematic '" + cell.name +
+                                                "' has several subcircuits; name the cell after the one to compare");
+    }
+
+    std::map<std::string, const SpiceSubcircuit *> subcircuits;
+    for (const auto &subcircuit : document.subcircuits)
+        subcircuits.emplace(normalizedIdentifier(subcircuit.name), &subcircuit);
+
+    std::map<std::string, std::set<ObjectId>> netDevices;
+    std::map<ObjectId, std::string> rawDeviceNames;
+    ObjectId nextDevice = 1;
+    ObjectId nextNet = 1;
+
+    const auto resolveNode = [](const std::string &node, const std::string &path,
+                                const std::map<std::string, std::string> &portMap) -> std::string {
+        if (const auto mapped = portMap.find(node); mapped != portMap.end())
+            return mapped->second;
+        if (node == "0" || path.empty())
+            return node;
+        return path + "." + node;
+    };
+
+    std::function<void(const SpiceSubcircuit &, const std::map<std::string, std::string> &, const std::string &,
+                       const std::set<std::string> &)>
+        flattenSubcircuit;
+    std::function<void(const std::vector<SpiceElement> &, const std::map<std::string, std::string> &,
+                       const std::string &, const std::set<std::string> &)>
+        emitElements;
+
+    emitElements = [&](const std::vector<SpiceElement> &elements, const std::map<std::string, std::string> &portMap,
+                       const std::string &path, const std::set<std::string> &scope) {
+        for (const auto &element : elements) {
+            const auto deviceName = path.empty() ? element.name : path + "_" + element.name;
+            const auto nodeFor = [&](const std::string &node) { return resolveNode(node, path, portMap); };
+            if (element.kind == 'x') {
+                const auto subcircuit = subcircuits.find(normalizedIdentifier(element.model));
+                if (subcircuit != subcircuits.end()) {
+                    if (scope.contains(normalizedIdentifier(subcircuit->second->name))) {
+                        mismatches.push_back(
+                            {1, "spice-cycle",
+                             "Recursive SPICE subcircuit '" + element.model + "' in '" + cell.name + "' was skipped",
+                             std::nullopt, std::nullopt, VerificationSeverity::warning});
+                        continue;
+                    }
+                    std::map<std::string, std::string> childPorts;
+                    std::size_t nodeIndex = 0;
+                    for (const auto &port : subcircuit->second->ports) {
+                        const auto bits = expandSpiceBus(port);
+                        for (const auto &bit : bits) {
+                            if (nodeIndex < element.nodes.size())
+                                childPorts[bit] = nodeFor(element.nodes[nodeIndex++]);
+                            else
+                                childPorts[bit] = path.empty() ? bit : path + "." + bit;
+                        }
+                    }
+                    auto childScope = scope;
+                    childScope.insert(normalizedIdentifier(subcircuit->second->name));
+                    const auto childPath = path.empty() ? deviceName : path + "." + element.name;
+                    flattenSubcircuit(*subcircuit->second, childPorts, childPath, childScope);
+                    continue;
+                }
+            }
+            if (element.kind == 'v' || element.kind == 'i' || element.kind == 'e' || element.kind == 'g' ||
+                element.kind == 'f' || element.kind == 'h' || element.kind == 'b' || element.kind == 'k')
+                continue;
+            if (element.kind != 'r' && element.kind != 'c' && element.kind != 'l' && element.kind != 'd' &&
+                element.kind != 'm' && element.kind != 'q' && element.kind != 'j' && element.kind != 'x')
+                continue;
+
+            LogicalDevice device;
+            device.object = nextDevice++;
+            device.name = deviceName;
+            device.type = spiceElementType(element);
+            device.parameters = spiceElementParameters(element);
+            device.hasParameters = true;
+            rawDeviceNames[device.object] = element.name;
+            for (const auto &node : element.nodes)
+                netDevices[nodeFor(node)].insert(device.object);
+            side.devices.emplace(device.object, std::move(device));
+        }
+    };
+
+    flattenSubcircuit = [&](const SpiceSubcircuit &subcircuit, const std::map<std::string, std::string> &portMap,
+                            const std::string &path, const std::set<std::string> &parentScope) {
+        auto scope = parentScope;
+        scope.insert(normalizedIdentifier(subcircuit.name));
+        emitElements(subcircuit.elements, portMap, path, scope);
+    };
+
+    if (selected) {
+        std::map<std::string, std::string> ports;
+        for (const auto &port : selected->ports) {
+            for (const auto &bit : expandSpiceBus(port))
+                ports[bit] = bit;
+        }
+        flattenSubcircuit(*selected, ports, {}, {});
+        for (const auto &port : selected->ports) {
+            for (const auto &bit : expandSpiceBus(port)) {
+                side.ports.push_back({nextNet++, bit, "inout", bit});
+            }
+        }
+    } else {
+        emitElements(document.elements, {}, {}, {});
+    }
+
+    // Prefer the source reference name when it is unique across the flattened
+    // hierarchy; path-qualified names keep duplicates distinguishable.
+    std::map<std::string, int> rawNameCounts;
+    for (const auto &[_, name] : rawDeviceNames)
+        ++rawNameCounts[normalizedIdentifier(name)];
+    for (auto &[_, device] : side.devices) {
+        const auto raw = rawDeviceNames.find(device.object);
+        if (raw != rawDeviceNames.end() && rawNameCounts[normalizedIdentifier(raw->second)] == 1)
+            device.name = raw->second;
+    }
+
+    for (const auto &[name, devices] : netDevices) {
+        if (devices.size() < 2)
+            continue;
+        side.nets.push_back({name, devices, nextNet++});
+    }
+    return side;
+}
+
+LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
+    LogicalSide side;
+    const auto parsed = parseSystemVerilogModule(cell);
+    if (!parsed.ok)
+        throw ProjectError("lvs.hdl", "SystemVerilog parse failed for '" + cell.name + "': " + parsed.error);
+    ObjectId nextObject = 1;
+    const auto directionName = [](HdlPortDirection direction) {
+        switch (direction) {
+        case HdlPortDirection::input:
+            return "input";
+        case HdlPortDirection::output:
+            return "output";
+        case HdlPortDirection::inout:
+            return "inout";
+        }
+        return "inout";
+    };
+    for (const auto &port : parsed.module.ports) {
+        if (port.width > 1 && port.widthKnown && !port.real) {
+            for (int bit = 0; bit < port.width; ++bit) {
+                const auto name = port.name + "[" + std::to_string(bit) + "]";
+                side.ports.push_back({nextObject++, name, directionName(port.direction), name});
+            }
+            continue;
+        }
+        side.ports.push_back({nextObject++, port.name, directionName(port.direction), port.name});
+    }
+    return side;
+}
+
 LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::vector<LvsMismatch> &mismatches) {
     const auto cellIt = project.schematicCells.find(cellId);
     if (cellIt == project.schematicCells.end())
         throw ProjectError("lvs.schematic", "Schematic cell does not exist");
     const auto &cell = cellIt->second;
-    if (cell.isTextSource())
-        throw ProjectError(
-            "lvs.schematic",
-            "LVS requires a drawn schematic; SPICE text and SystemVerilog source cells are not supported");
+    if (cell.textSchematic)
+        return collectSpiceSchematicSide(cell, mismatches);
+    if (cell.systemVerilogSchematic)
+        return collectHdlSchematicSide(cell);
 
     LogicalSide side;
     std::map<ObjectId, std::vector<ObjectId>> pinOwners;
@@ -399,10 +564,15 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             device.schematicInstance = planned.schematicInstance;
         } else if (planned.schematicInstance != 0) {
             if (!schematic.instances.contains(planned.schematicInstance)) {
-                mismatches.push_back({1, "layout-link",
-                                      "Planned device '" + planned.name +
-                                          "' links to a schematic instance that is not in this schematic",
-                                      std::nullopt, plannedId, VerificationSeverity::warning});
+                // A layout created from a drawn view may still carry links
+                // when it is compared against a text SPICE or HDL source cell.
+                // Those views have no canvas instances, so the fallback to
+                // planned model/device identity is expected.
+                if (!schematic.isTextSource())
+                    mismatches.push_back({1, "layout-link",
+                                          "Planned device '" + planned.name +
+                                              "' links to a schematic instance that is not in this schematic",
+                                          std::nullopt, plannedId, VerificationSeverity::warning});
             } else {
                 device.type = instanceType(schematic, planned.schematicInstance);
             }

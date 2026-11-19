@@ -12,6 +12,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/spice.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 #include "icelib/waveform.hpp"
@@ -894,6 +895,15 @@ json schematicInfo(const ice::SchematicCell &cell) {
     for (const auto &[id, net] : cell.nets) {
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
     }
+    if (cell.textSchematic) {
+        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name);
+        result["spice_ready"] = interface.ok;
+        result["spice_subcircuit"] = interface.subcircuitName;
+        result["spice_ports"] = interface.ports;
+        result["spice_port_declarations"] = interface.declaredPorts;
+        if (!interface.ok)
+            result["spice_error"] = interface.error;
+    }
     return result;
 }
 
@@ -1238,6 +1248,7 @@ void printHelp() {
               << "  schematic-hdl-ports <project> <cell>\n"
               << "  schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> "
                  "[--flatten-buses]\n"
+              << "  schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>\n"
               << "  schematic-validate-hierarchy <project> <cell>\n"
               << "  schematic-netlist <project> <cell>\n\n"
               << "Layout:\n"
@@ -1992,6 +2003,41 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-add-spice-instance") {
+            expectArguments(args, 7, 7, "schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>");
+            auto project = ice::Project::load(args[1]);
+            const auto parent = resolveSchematic(project, args[2]);
+            const auto source = resolveSchematic(project, args[3]);
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            ice::ProjectSession session(project);
+            ice::ObjectId instance = 0;
+            ice::ObjectId symbol = 0;
+            session.execute("schematic-add-spice-instance", [&](ice::Project &p) {
+                instance = ice::addTextSpiceInstance(p, parent, source, args[4], x, y, &symbol);
+            });
+            session.save(args[1]);
+            json pins = json::array();
+            const auto &symbolRef = session.project().schematicCells.at(parent).symbols.at(symbol);
+            for (const auto &pin : symbolRef.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            printJson({{"id", instance},
+                       {"cell", parent},
+                       {"source_cell", source},
+                       {"symbol", symbol},
+                       {"symbol_name", symbolRef.name},
+                       {"name", args[4]},
+                       {"x", x},
+                       {"y", y},
+                       {"pins", std::move(pins)}});
+            return 0;
+        }
+
         if (command == "schematic-validate-hierarchy") {
             expectArguments(args, 3, 3, "schematic-validate-hierarchy <project> <cell>");
             const auto project = ice::Project::load(args[1]);
@@ -2153,8 +2199,8 @@ int main(int argc, char **argv) {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     artwork = templ.artwork;
                     templatePins = templ.pins;
-                } else if (!sourceCell.textSchematic && !blank) {
-                    // Drawn sub-cell: one pin per port, in subcircuit port order.
+                } else if (!blank) {
+                    // Drawn or text SPICE sub-cell: one pin per declared port.
                     templatePins = ice::hierarchicalSymbolPins(sourceCell);
                 }
             } else if (!blank) {

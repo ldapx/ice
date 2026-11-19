@@ -196,6 +196,95 @@ TEST_CASE("SystemVerilog block instances get generated symbols and a mixed plan"
     }));
 }
 
+TEST_CASE("Mixed-signal planning flattens HDL blocks inside drawn hierarchy") {
+    ice::Project project;
+    project.identity = "mixed-nested";
+    project.name = "mixed-nested";
+    const auto block =
+        ice::createSystemVerilogCell(project, "buffer", ice::genericPdkId,
+                                     "module buffer(input logic in, output logic out);\nassign out = in;\nendmodule\n");
+
+    const auto channel = ice::createSchematicCell(project, "channel");
+    ice::ObjectId hdlSymbol = 0;
+    const auto hdlInstance = ice::addSystemVerilogInstance(project, channel, block, "U2", 0, 0, &hdlSymbol);
+    const auto inputSymbol = ice::addSymbol(project, channel, "Input");
+    addPin(project, channel, inputSymbol, "IN", ice::PinDirection::left);
+    const auto inputInstance = ice::addSchematicInstance(project, channel, inputSymbol, "IN", -200, 0);
+    const auto outputSymbol = ice::addSymbol(project, channel, "Output");
+    addPin(project, channel, outputSymbol, "OUT");
+    const auto outputInstance = ice::addSchematicInstance(project, channel, outputSymbol, "OUT", 200, 0);
+    auto &channelCell = project.schematicCells.at(channel);
+    const auto inputNet = project.nextId();
+    channelCell.nets.emplace(inputNet, ice::Net{inputNet,
+                                                "in",
+                                                {pinNamed(project, channel, hdlSymbol, "in"),
+                                                 pinNamed(project, channel, inputSymbol, "IN")}});
+    const auto outputNet = project.nextId();
+    channelCell.nets.emplace(outputNet, ice::Net{outputNet,
+                                                 "out",
+                                                 {pinNamed(project, channel, hdlSymbol, "out"),
+                                                  pinNamed(project, channel, outputSymbol, "OUT")}});
+    CHECK(hdlInstance != 0);
+    CHECK(inputInstance != 0);
+    CHECK(outputInstance != 0);
+
+    const auto top = ice::createSchematicCell(project, "top");
+    const auto channelSymbol = ice::addHierarchicalSymbol(project, top, channel, "channel");
+    ice::addSchematicInstance(project, top, channelSymbol, "U1", 0, 0);
+    const auto source =
+        ice::addSchematicComponent(project, top, {"voltage source", {}, "V1", 0, 0, {{0, "value", "1"}}});
+    const auto resistor =
+        ice::addSchematicComponent(project, top, {"resistor", {}, "R1", 0, 0, {{0, "resistance", "1k"}}});
+    (void)source;
+    (void)resistor;
+    const auto pin = [&](const std::string &name) {
+        return ice::resolveSchematicPin(project.schematicCells.at(top), name);
+    };
+    ice::addNet(project, top, "in", {pin("U1.IN"), pin("V1.+")});
+    ice::addNet(project, top, "out", {pin("U1.OUT"), pin("R1.1")});
+    ice::addNet(project, top, "0", {pin("V1.-"), pin("R1.2")});
+
+    CHECK(ice::schematicContainsHdl(project, top));
+    const auto plan = ice::buildMixedSignalPlan(project, top);
+    CHECK(plan.ok());
+    if (!plan.ok())
+        return;
+    REQUIRE(plan.hdlInstances.size() == 1);
+    CHECK(plan.hdlInstances.front().instanceName == "U1_U2");
+    CHECK(plan.hdlInstances.front().portNodes.at("in") == "in");
+    CHECK(plan.hdlInstances.front().portNodes.at("out") == "out");
+    CHECK(plan.analogInputNodes == std::vector<std::string>{"in"});
+    CHECK(plan.digitalOutputNodes == std::vector<std::string>{"out"});
+    const auto joined = [&] {
+        std::string text;
+        for (const auto &line : plan.analogNetlist)
+            text += line + "\n";
+        return text;
+    }();
+    CHECK(joined.find(".subckt channel") == std::string::npos);
+    CHECK(joined.find("V1 in 0 1") != std::string::npos);
+    CHECK(joined.find("R1 out 0 1k") != std::string::npos);
+
+    ice::SimulationRequest request;
+    request.analysis = "transient";
+    request.simulator = "mixed";
+    request.stop = 4.0e-9;
+    request.step = 1.0e-9;
+    request.netlist = plan.analogNetlist;
+    request.mixedSignal.blocks = plan.hdlInstances;
+    request.mixedSignal.analogInputNodes = plan.analogInputNodes;
+    request.mixedSignal.iterations = 2;
+    request.probeSignals = {"v(out)"};
+    ice::CancellationToken token;
+    const auto result = ice::MixedSignalSimulator().run(request, token, {});
+    if (result.state != ice::JobState::succeeded) {
+        CHECK(result.error.empty());
+        return;
+    }
+    CHECK(findTrace(result.traces, "U1_U2.out") != nullptr);
+    CHECK(findTrace(result.traces, "v(out)") != nullptr);
+}
+
 TEST_CASE("Mixed-signal hierarchy rejects unconnected and unflattened bus ports") {
     ice::Project project;
     project.identity = "mixed-errors";

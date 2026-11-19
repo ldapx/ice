@@ -91,7 +91,8 @@ and ask the user to rebuild/restart ICE.
 | `schematic_list_symbols` | List primitive and PDK symbols with pins and defaults. |
 | `schematic_add_circuit` | Add multiple components and nets atomically. |
 | `schematic_validate` | Validate connectivity, values, PDK setup, and mixed-signal hierarchy. |
-| `schematic_import_spice` | Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from SPICE. |
+| `schematic_import_spice` | Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from SPICE. Text imports retain subcircuit ports and parameter defaults. |
+| `schematic_add_spice_instance` | Generate a symbol from a text SPICE subcircuit's ports and place it. |
 | `schematic_delete` | Inspect or delete a schematic; `dry_run` lists dependencies and `cascade` removes them. |
 | `schematic_add_symbol` | Add a symbol; known library names auto-load artwork and pins. Custom symbols may pass `pins`/`artwork`. |
 | `schematic_add_pin` | Add a pin to an existing symbol. |
@@ -148,7 +149,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
-| `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
+| `lvs_run` | Compare a layout against a drawn, text SPICE, or SystemVerilog schematic and return the LVS report, including top-level pin matches. |
 | `pex_run` | Extract planned, placed, and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports transient, DC, AC, OP, noise, transfer-function, mixed, and digital analyses. |
 | `simulation_update` | Update analysis fields, corners, sweeps, Monte Carlo settings, capture signals, and declarative measurements. |
@@ -181,7 +182,9 @@ the cell's `pdk` and `stack`; `layout_create` and
 `"3LM_1TM"`), defaulting to the package's `default_stack`. Instances must use
 the same PDK and stack as their parent layout. `lvs_run` accepts a
 layout name or id and an optional schematic; when the schematic is omitted, ICE
-infers it from planned-device links or matching layout/schematic names.
+infers it from planned-device links or matching layout/schematic names. The
+schematic may be drawn, text SPICE, or a SystemVerilog source cell. Parsed SPICE
+subcircuits are flattened recursively; SystemVerilog comparison is port-level.
 `pex_run` accepts a layout plus optional coefficient overrides
 (`metal_sheet_resistance`, `poly_sheet_resistance`,
 `diffusion_sheet_resistance`, `via_resistance`, `area_capacitance`,
@@ -292,7 +295,9 @@ VCD, ICE adds a wrapper that dumps the design. Source-level `$dumpfile` and
 schematic with `schematic_add_hdl_instance`; ICE parses the module ports and
 generates a box symbol with matching pins. `schematic_add_symbol` also
 auto-generates pins and artwork when it is given a SystemVerilog `source_cell`
-without an explicit `pins` array. Connect pins with readable names such as
+without an explicit `pins` array. HDL instances may be nested inside drawn
+subcells; mixed-signal planning flattens those drawn blocks and gives nested
+signals scoped node names. Connect pins with readable names such as
 `U1.in` and `U1.out` via `schematic_add_net`. Set analog instance values with
 `schematic_set_parameter`, for example `resistance="1k"` or
 `value="PULSE(0 1 5n 1n 1n 20n 40n)"`. A drawn cell can also declare parameters
@@ -311,9 +316,11 @@ schematic_set_parameter(cell="top", instance="X1", name="R", value="2k")
 
 Call `schematic_hdl_ports` to inspect the parsed module and
 `schematic_validate_hierarchy` to check pin/port names, missing nets, bus
-widths, `inout` ports, and duplicate output drivers. Pure SPICE netlisting
-(`schematic_netlist`, or analog `simulation_run`) rejects hierarchical
-SystemVerilog blocks explicitly instead of silently dropping them.
+widths, `inout` ports, and duplicate output drivers. HDL instances may be
+nested in drawn subcells; mixed-signal planning flattens the drawn path and
+reports scoped instance names. Pure SPICE netlisting (`schematic_netlist`, or
+analog `simulation_run`) rejects hierarchical SystemVerilog blocks explicitly
+instead of silently dropping them.
 
 A drawn schematic containing HDL blocks is detected as mixed-signal.
 `simulation_create` selects `simulator="mixed"` and `transient` analysis
@@ -322,9 +329,10 @@ digital outputs drive PWL sources in the analog deck, analog input nodes are
 sampled through a logic threshold, and the loop stops when sampled input bits
 stabilize. Results contain analog node traces plus `<instance>.<port>` digital
 traces. `real` input/output ports are bridged without thresholding, and buses
-can be flattened into pins such as `data[0]` with `bus_mode="flatten"`. Mixed
-mode still requires top-level HDL instances; `inout` ports and unflattened buses
-are rejected explicitly.
+can be flattened into pins such as `data[0]` with `bus_mode="flatten"`. HDL
+instances may be nested inside drawn subcells; planning flattens the drawn
+hierarchy and uses scoped instance names such as `U1_U2`. `inout` ports and
+unflattened buses are rejected explicitly.
 
 `simulation_run` returns `analog_signals`, `digital_signals`, the applied
 `pdk_setup`, current `graphs`, `hints`, and `suggested_calls`. If a requested

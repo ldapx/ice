@@ -3,6 +3,7 @@
 #include "icelib/hdl.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/spice.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -334,12 +335,33 @@ ComponentPlacement addSchematicComponent(Project &project, ObjectId cellId, cons
             return {instanceId, symbolId, symbolName, instanceName, pins};
         }
 
-        // 3. Another drawn schematic: generate its hierarchical symbol on the fly.
+        // 3. Another schematic cell: generate its hierarchical symbol on the fly.
         for (const auto &[candidateId, candidate] : project.schematicCells) {
-            if (candidateId == cellId || candidate.isTextSource() || candidate.systemVerilogSchematic)
+            if (candidateId == cellId || lowerCopy(candidate.name) != lowerCopy(requestedName))
                 continue;
-            if (lowerCopy(candidate.name) != lowerCopy(requestedName))
-                continue;
+            if (candidate.systemVerilogSchematic) {
+                const auto instanceName = nextInstanceName(cell, candidate.name, request.name);
+                ObjectId symbol = 0;
+                const auto instance = addSystemVerilogInstance(project, cellId, candidateId, instanceName, request.x,
+                                                               request.y, &symbol, true);
+                for (const auto &parameter : request.parameters)
+                    setSchematicParameter(project, cellId, instance, parameter.name, parameter.value);
+                const auto &placed = project.schematicCells.at(cellId);
+                return {instance, symbol, placed.symbols.at(symbol).name, instanceName, placed.symbols.at(symbol).pins};
+            }
+            const auto instanceName = nextInstanceName(
+                cell, candidate.textSchematic ? candidate.name + " SPICE" : candidate.name, request.name);
+            ObjectId symbol = 0;
+            const auto instance =
+                candidate.textSchematic
+                    ? addTextSpiceInstance(project, cellId, candidateId, instanceName, request.x, request.y, &symbol)
+                    : 0;
+            if (candidate.textSchematic) {
+                for (const auto &parameter : request.parameters)
+                    setSchematicParameter(project, cellId, instance, parameter.name, parameter.value);
+                const auto &placed = project.schematicCells.at(cellId);
+                return {instance, symbol, placed.symbols.at(symbol).name, instanceName, placed.symbols.at(symbol).pins};
+            }
             return placeExistingSymbol(addHierarchicalSymbol(project, cellId, candidateId));
         }
     }
@@ -417,6 +439,14 @@ std::vector<Diagnostic> validateSchematic(const Project &project, ObjectId cellI
     }
 
     if (cell->second.textSchematic) {
+        const auto document = parseSpiceDocument(cell->second.spiceText);
+        for (const auto &warning : document.warnings)
+            addDiagnostic(diagnostics, Diagnostic::Severity::warning, "schematic.spice.parse", warning, cellId);
+        if (document.subcircuits.empty() && document.elements.empty()) {
+            addDiagnostic(diagnostics, Diagnostic::Severity::error, "schematic.spice.empty",
+                          "Text SPICE schematic contains no elements or subcircuits", cellId);
+            return diagnostics;
+        }
         std::istringstream source(cell->second.spiceText);
         std::string line;
         while (std::getline(source, line)) {
@@ -622,7 +652,26 @@ FileSymbol resolveSchematicSymbol(const std::string &pdk, const std::string &nam
 SpiceImportResult createSchematicFromSpice(Project &project, std::string name, std::string pdk,
                                            const std::string &source, bool drawn) {
     if (!drawn) {
-        return {createTextSchematicCell(project, std::move(name), std::move(pdk), source), {}};
+        SpiceImportResult result{createTextSchematicCell(project, std::move(name), std::move(pdk), source), {}};
+        const auto document = parseSpiceDocument(source);
+        result.warnings = document.warnings;
+        auto &cell = project.schematicCells.at(result.cell);
+        std::string error;
+        if (const auto *subcircuit = preferredSpiceSubcircuit(document, cell.name, &error)) {
+            for (const auto &parameter : subcircuit->parameters) {
+                if (parameter.name.empty())
+                    continue;
+                const auto existing =
+                    std::find_if(cell.parameters.begin(), cell.parameters.end(), [&](const Parameter &candidate) {
+                        return lowerCopy(candidate.name) == lowerCopy(parameter.name);
+                    });
+                if (existing == cell.parameters.end())
+                    cell.parameters.push_back({project.nextId(), parameter.name, parameter.value});
+            }
+        } else if (!document.subcircuits.empty() && document.elements.empty()) {
+            result.warnings.push_back(error);
+        }
+        return result;
     }
     const auto cell = createSchematicCell(project, std::move(name), std::move(pdk));
     SpiceImportResult result{cell, {}};

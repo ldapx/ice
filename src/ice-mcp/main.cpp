@@ -12,6 +12,7 @@
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
+#include "icelib/spice.hpp"
 #include "icelib/symbols.hpp"
 #include "icelib/verification.hpp"
 #include "icelib/waveform.hpp"
@@ -502,6 +503,15 @@ json schematicJson(const ice::SchematicCell &cell) {
     }
     for (const auto &[id, net] : cell.nets)
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+    if (cell.textSchematic) {
+        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name);
+        result["spice_ready"] = interface.ok;
+        result["spice_subcircuit"] = interface.subcircuitName;
+        result["spice_ports"] = interface.ports;
+        result["spice_port_declarations"] = interface.declaredPorts;
+        if (!interface.ok)
+            result["spice_error"] = interface.error;
+    }
     return result;
 }
 
@@ -572,8 +582,8 @@ json helpJson(const std::string &requestedTopic) {
                                  "schematic_set_parameter", "schematic_add_net", "schematic_validate_hierarchy",
                                  "simulation_create", "simulation_run"})},
           {"notes",
-           json::array({"Mixed mode supports top-level HDL instances with logic or real ports; buses must be "
-                        "flattened with bus_mode=\"flatten\" before simulation.",
+           json::array({"Mixed mode supports HDL instances at the top level or inside drawn subcells; buses "
+                        "must be flattened with bus_mode=\"flatten\" before simulation.",
                         "For a PWM DAC, drive the analog RC filter from a logic PWM output; the bridge maps logic "
                         "outputs to 0/1 PWL sources and samples analog inputs through a logic threshold.",
                         "A requested signal such as v(U1.out) is invalid for a digital port; use U1.out instead."})}}},
@@ -3235,7 +3245,10 @@ class IceMcpServer {
                         artwork = templ.artwork;
                     for (const auto &pin : templ.pins)
                         pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
-                } else if (!sourceCellRef.textSchematic) {
+                } else if (sourceCellRef.textSchematic) {
+                    for (const auto &pin : ice::hierarchicalSymbolPins(sourceCellRef))
+                        pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
+                } else {
                     // Drawn sub-cell: build the symbol from its ports in the
                     // same order the netlister emits the .subckt port list
                     // (inputs/inouts top-down, then outputs), directional
@@ -3530,6 +3543,37 @@ class IceMcpServer {
             session.execute("mcp schematic-add-hdl-instance", [&](ice::Project &project) {
                 instanceId = ice::addSystemVerilogInstance(project, parentCell, sourceCell, instanceName, x, y,
                                                            &symbolId, flattenBuses);
+            });
+            json pins = json::array();
+            const auto &symbol = session.project().schematicCells.at(parentCell).symbols.at(symbolId);
+            for (const auto &pin : symbol.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            return {{"id", instanceId},
+                    {"cell", parentCell},
+                    {"source_cell", sourceCell},
+                    {"symbol", symbolId},
+                    {"symbol_name", symbol.name},
+                    {"name", instanceName},
+                    {"x", x},
+                    {"y", y},
+                    {"pins", std::move(pins)}};
+        }
+        if (name == "schematic_add_spice_instance") {
+            const auto parentCell = resolveSchematicArgument(session.project(), arguments, {"cell", "schematic"});
+            const auto sourceText = requiredValue(arguments, "source_cell");
+            const auto sourceCell = lookupByIdOrName(session.project().schematicCells, sourceText, "schematic");
+            const auto instanceName = requiredString(arguments, "name");
+            const auto x = requiredInteger(arguments, "x");
+            const auto y = requiredInteger(arguments, "y");
+            ice::ObjectId instanceId = 0;
+            ice::ObjectId symbolId = 0;
+            session.execute("mcp schematic-add-spice-instance", [&](ice::Project &project) {
+                instanceId = ice::addTextSpiceInstance(project, parentCell, sourceCell, instanceName, x, y, &symbolId);
             });
             json pins = json::array();
             const auto &symbol = session.project().schematicCells.at(parentCell).symbols.at(symbolId);
@@ -4796,7 +4840,9 @@ class IceMcpServer {
                             .with_string_param("schematic", "Schematic name or id")
                             .build());
         tools.push_back(customTool(
-            "schematic_import_spice", "Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from a SPICE source.",
+            "schematic_import_spice",
+            "Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from a SPICE source. Text imports retain "
+            "subcircuit ports and parameter defaults.",
             R"json({"type":"object","properties":{"name":{"type":"string"},"pdk":{"type":"string"},"source":{"type":"string"},"file":{"type":"string"},"mode":{"type":"string","enum":["text","drawn","auto"]}},"required":["name"]})json"));
         tools.push_back(tool_builder("schematic_create")
                             .with_description("Create a drawn, text SPICE, or SystemVerilog schematic cell.")
@@ -4895,6 +4941,14 @@ class IceMcpServer {
                             .with_integer_param("y", "Y coordinate")
                             .with_string_param("bus_mode", "scalar or flatten (default scalar)", false)
                             .with_boolean_param("flatten_buses", "Alias for bus_mode=flatten", false)
+                            .build());
+        tools.push_back(tool_builder("schematic_add_spice_instance")
+                            .with_description("Create a symbol from a text SPICE subcircuit's ports and place it.")
+                            .with_string_param("cell", "Parent schematic name or id")
+                            .with_string_param("source_cell", "Text SPICE source cell name or id")
+                            .with_string_param("name", "Instance name")
+                            .with_integer_param("x", "X coordinate")
+                            .with_integer_param("y", "Y coordinate")
                             .build());
         tools.push_back(tool_builder("schematic_set_parameter")
                             .with_description("Set or create an instance parameter such as resistance or value.")

@@ -98,7 +98,8 @@ struct SpiceImportResult {
 };
 
 // Creates a text SPICE cell, or a drawn schematic for a flat R/C/L/V/I/D
-// netlist. Unsupported drawn constructs are rejected explicitly.
+// netlist. Text cells retain parsed `.subckt` defaults and can be placed as
+// hierarchical blocks.
 SpiceImportResult createSchematicFromSpice(Project &project, std::string name, std::string pdk,
                                            const std::string &source, bool drawn);
 

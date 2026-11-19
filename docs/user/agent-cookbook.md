@@ -238,7 +238,8 @@ the instance with `bus_mode="flatten"`, then wire `U1.duty[0]` … individually.
 
 Notes:
 
-- Mixed mode currently supports top-level HDL instances only.
+- HDL instances may be top-level or nested inside drawn subcells; nested blocks
+  receive scoped instance names such as `U1_U2`.
 - `logic` scalar ports are thresholded at `logic_threshold` (default 0.5 V) and
   outputs drive `output_high`/`output_low` (default 1 V / 0 V).
 - `real` ports are bridged without thresholding.

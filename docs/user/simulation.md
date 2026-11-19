@@ -107,9 +107,11 @@ and ngspice:
 5. Analog and digital traces are resampled onto the shared time grid and
    returned together. Digital traces are named `<instance>.<port>`.
 
-The current mixed-signal interface requires top-level HDL instances only and
-rejects `inout` ports, unflattened buses, and multiple digital drivers on one
-analog node. Scalar logic ports use threshold sampling and PWL 0/1 outputs.
+The mixed-signal interface supports HDL instances anywhere in the drawn
+hierarchy; nested drawn blocks are flattened and use scoped names such as
+`U1_U2`. It rejects `inout` ports, unflattened buses, and multiple digital
+drivers on one analog node. Scalar logic ports use threshold sampling and PWL
+0/1 outputs.
 `real` input/output ports are bridged directly: analog values are written to the
 digital input file and real VCD outputs drive the analog PWL source. Buses can be
 flattened with `bus_mode="flatten"`; pins become `data[0]`, `data[1]`, …
