@@ -126,6 +126,10 @@ gaps. A compact two-row floorplan looks like this:
 ```text
 layout_create_procedural(name="ota", pdk="sky130A")
 layout_set_script(layout="ota", script='''
+layout.plan(devices=["M1", "M2", "M3", "M4"], rows=2,
+            target_utilization=0.20, max_gap_um=10,
+            require_composition=True)
+
 M1 = layout.device("nfet", name="M1", w="3u", l="2u",
                    nets={"G": "INN", "D": "N1", "S": "TAIL", "B": "VSS"})
 M2 = layout.device("nfet", name="M2", w="3u", l="2u",
@@ -151,17 +155,24 @@ core.add(bottom)
 layout.add(core)
 
 layout.constraint("Boundary", max_width=layout.um(120), max_height=layout.um(120))
+layout.finish_placement()
+layout.review(require_plan=True)
 layout.report(print_report=True)
 ''')
 layout_regenerate(layout="ota")
+layout_review(layout="ota", require_plan=True)
 ```
 
-Then use `generation_log` from `layout_regenerate` to read the report. If
-`utilization` is low or `large_gaps` contains unexplained rows, compact the
-floorplan before routing. Add spacing only after a router/DRC failure, not
-between every device by default. Use `layout.repeat` and `layout.symmetric` for
-matched pairs, `layout.grid` for unit arrays, and `layout.generate("mos_pair")`
-or `layout.generate("cap_array")` where they fit.
+`layout.finish_placement()` is a hard gate: with a declared plan, `route()` and
+`connect()` reject calls until the utilization, row-gap, row-count, and
+composition requirements pass. `layout_regenerate` returns structured
+`layout_quality`, `layout_plan`, and `layout_review` objects; use those directly
+instead of parsing `generation_log`. If `utilization` is low or `large_gaps`
+contains unexplained rows, compact the floorplan before routing. Add spacing only
+after a router/DRC failure, not between every device by default. Use
+`layout.repeat` and `layout.symmetric` for matched pairs, `layout.grid` for unit
+arrays, and `layout.generate("mos_pair")` or `layout.generate("cap_array")` where
+they fit.
 
 ## Text SPICE for simple analog circuits
 

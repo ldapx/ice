@@ -3042,6 +3042,7 @@ TEST_CASE("procedural layout composition and built-in generators") {
     project.identity = "procedural-composition";
     project.name = "procedural-composition";
     const auto script = R"PY(
+layout.plan(devices=0, target_utilization=0.0, max_gap_um=1000)
 a = layout.rectangle("Metal1", 0, 0, 1000, 500, name="a")
 b = layout.rectangle("Metal1", 0, 0, 1000, 500, name="b")
 row = layout.row(gap=0, align="bottom")
@@ -3053,12 +3054,19 @@ ring = layout.generate("guard_ring", layer="Metal1", x=0, y=1000,
                        width=4000, height=2000, ring=200, name="RING")
 layout.add(ring)
 layout.port("P", "Metal1", 0, 0, 100, 100, net="N")
+layout.finish_placement()
+layout.review(require_plan=True)
 layout.report(print_report=True)
 )PY";
     const auto proceduralId = ice::createProceduralLayout(project, "composition_top", ice::genericPdkId, script);
     const auto run = ice::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
     CHECK(run.log.find("utilization") != std::string::npos);
+    CHECK(run.layoutQuality.find("utilization") != std::string::npos);
+    CHECK(run.layoutPlan.find("\"passed\":true") != std::string::npos);
+    CHECK(run.layoutReview.find("\"passed\":true") != std::string::npos);
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.proceduralLayouts.at(proceduralId).generatedLayoutQuality.find("utilization") != std::string::npos);
     const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
     CHECK(generated.shapes.size() == 6);
     CHECK(generated.ports.size() == 1);

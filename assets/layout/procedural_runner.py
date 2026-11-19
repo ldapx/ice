@@ -36,7 +36,11 @@ import traceback
 
 
 SCHEMA_VERSION = 2
-BUILDER_VERSION = 2
+BUILDER_VERSION = 3
+
+
+class LayoutQualityError(RuntimeError):
+    """Raised when the placement compaction gate or review does not pass."""
 
 
 def _coordinate(value, label):
@@ -511,6 +515,8 @@ class DevicePlacement:
 
     def move(self, dx, dy):
         """Translate the device geometry, pins, and metadata in place."""
+        if self._layout is not None:
+            self._layout._layout_state["manual_moves"] += 1
         dx = _coordinate(dx, "move dx")
         dy = _coordinate(dy, "move dy")
         for shape in self.shapes:
@@ -755,6 +761,9 @@ class Route:
 
     def move(self, dx, dy):
         """Translate all route shapes and the planned path in place."""
+        owner = getattr(self, "_owner", None)
+        if owner is not None:
+            owner._layout_state["manual_moves"] += 1
         dx = _coordinate(dx, "move dx")
         dy = _coordinate(dy, "move dy")
         for shape in self.shapes:
@@ -1947,6 +1956,30 @@ class Layout:
         self._builtin_generators = None
         self._device_handles = []
         self._route_handles = []
+        self._layout_state = {
+            "plan": None,
+            "compaction_passed": False,
+            "compaction_quality": None,
+            "review": None,
+            "composition": {
+                "group": 0,
+                "row": 0,
+                "column": 0,
+                "grid": 0,
+                "stack": 0,
+                "repeat": 0,
+                "spacer": 0,
+                "stretch": 0,
+                "constraint": 0,
+                "generator": 0,
+                "add": 0,
+            },
+            "manual_moves": 0,
+        }
+
+    def _note_composition(self, kind):
+        stats = self._layout_state["composition"]
+        stats[kind] = stats.get(kind, 0) + 1
 
     def _layer_spec(self, name, number=None, datatype=None):
         if not isinstance(name, str) or not name.strip():
@@ -3248,6 +3281,7 @@ class Layout:
         :raises ValueError: If endpoints, layers, or side arguments are
             invalid.
         """
+        self._check_compaction_gate()
         if layer is None and layers is None:
             layers = self.routing_stack()
         layer_names = self._normalize_route_layers(layer, layers)
@@ -3705,6 +3739,7 @@ class Layout:
             to different nets.
         :raises RuntimeError: If no legal path or via transition exists.
         """
+        self._check_compaction_gate()
         if not isinstance(device_a, DevicePlacement) or not isinstance(
             device_b, DevicePlacement
         ):
@@ -3823,6 +3858,7 @@ class Layout:
 
     def move(self, dx, dy):
         """Translate every record in this builder and return ``self``."""
+        self._layout_state["manual_moves"] += 1
         dx = _coordinate(dx, "move dx")
         dy = _coordinate(dy, "move dy")
         for record in self.shapes:
@@ -3873,6 +3909,7 @@ class Layout:
         repeats are accepted. Placement copies the item's records; the source
         handle remains valid and can be placed again.
         """
+        self._note_composition("add")
         detach = not isinstance(item, (Layout, _Container))
         block = _copy_handle_block(item, detach=detach)
         if mirror:
@@ -3911,22 +3948,26 @@ class Layout:
 
     def group(self, name=None):
         """Create a local-coordinate layout fragment."""
+        self._note_composition("group")
         return Group(self, name=name)
 
     def row(self, gap=0, align="bottom", distribute="fixed", width=None, name=None):
         """Create a horizontal composition."""
+        self._note_composition("row")
         return Row(
             self, gap=gap, align=align, distribute=distribute, width=width, name=name
         )
 
     def column(self, gap=0, align="left", distribute="fixed", height=None, name=None):
         """Create a vertical composition."""
+        self._note_composition("column")
         return Column(
             self, gap=gap, align=align, distribute=distribute, height=height, name=name
         )
 
     def _grid(self, items=None, columns=1, x_gap=0, y_gap=0, align="center", name=None):
         """Create a fixed-column grid composition."""
+        self._note_composition("grid")
         grid = Grid(
             self, columns=columns, x_gap=x_gap, y_gap=y_gap, align=align, name=name
         )
@@ -3936,6 +3977,7 @@ class Layout:
 
     def stack(self, items=None, align="center", name=None):
         """Create an overlay composition."""
+        self._note_composition("stack")
         stack = Stack(self, align=align, name=name)
         for item in items or []:
             stack.add(item)
@@ -3952,6 +3994,7 @@ class Layout:
         name=None,
     ):
         """Repeat a layout fragment along one axis."""
+        self._note_composition("repeat")
         return Repeat(
             self,
             unit=unit,
@@ -3965,10 +4008,12 @@ class Layout:
 
     def spacer(self, distance=0, height=None):
         """Reserve a fixed gap inside a row or column."""
+        self._note_composition("spacer")
         return _Spacer(distance, height=height)
 
     def stretch(self, weight=1):
         """Consume slack inside a row or column with an explicit size."""
+        self._note_composition("stretch")
         return _Spacer(0, stretch=True, weight=weight)
 
     def extents(self, *items):
@@ -4036,12 +4081,14 @@ class Layout:
         }
 
     def report(self, gap_threshold=None, print_report=False):
-        """Summarize layout area, device utilization, and obvious empty gaps.
+        """Summarize layout area, device utilization, rows, and row gaps.
 
-        The report is intended as an agent-facing quality check. A low
-        device-area utilization or a large horizontal gap between devices that
-        share a row usually means fixed spacing was used where rows, columns,
-        abutment, or constraints would pack the layout more tightly.
+        The report is intended as an agent-facing quality check. Devices are
+        grouped into row bands by vertical center and similar height before
+        gaps are measured, so a tall passive or routing blockage is not compared
+        with every small device in the cell. A low device-area utilization or a
+        large gap inside a row usually means fixed spacing was used where rows,
+        columns, abutment, or constraints would pack the layout more tightly.
 
         :param gap_threshold: Horizontal gap in database units that counts as
             large. Defaults to 10 micrometers.
@@ -4049,22 +4096,63 @@ class Layout:
             procedural-run log.
         :returns: A JSON-compatible dictionary.
         """
+        state = self._layout_state
+        composition = dict(state["composition"])
+        composition_used = any(
+            composition.get(kind, 0)
+            for kind in (
+                "row",
+                "column",
+                "grid",
+                "stack",
+                "repeat",
+                "add",
+                "constraint",
+                "generator",
+            )
+        )
         bounds = _bounds_of_records(self.shapes, self.ports)
         if bounds is None:
             bounds = _fragment_bounds(self)
+        device_boxes = []
+        for device in self.devices:
+            device_bounds = device.get("bounds")
+            if not isinstance(device_bounds, dict):
+                continue
+            device_boxes.append(
+                (
+                    str(device.get("name", "")),
+                    int(device_bounds.get("x", 0)),
+                    int(device_bounds.get("y", 0)),
+                    int(device_bounds.get("width", 0)),
+                    int(device_bounds.get("height", 0)),
+                )
+            )
         if bounds is None:
             report = {
                 "bounds": None,
                 "width": 0,
                 "height": 0,
+                "width_um": 0.0,
+                "height_um": 0.0,
                 "cell_area_um2": 0.0,
                 "device_area_um2": 0.0,
                 "utilization": 0.0,
                 "shape_count": 0,
                 "port_count": 0,
                 "device_count": 0,
+                "row_count": 0,
+                "rows": [],
                 "max_horizontal_gap_um": 0.0,
                 "large_gaps": [],
+                "placement_style": "empty",
+                "composition_used": composition_used,
+                "composition": composition,
+                "manual_move_count": int(state["manual_moves"]),
+                "plan_present": state["plan"] is not None,
+                "plan_passed": bool(
+                    state["plan"] and state["plan"].get("passed", False)
+                ),
                 "warnings": ["layout contains no geometry"],
             }
         else:
@@ -4072,52 +4160,99 @@ class Layout:
             height = bounds[3] - bounds[1]
             area = width * height
             area_scale = (self.db_unit_nm * self.db_unit_nm) / 1_000_000.0
-            device_boxes = []
-            for device in self.devices:
-                device_bounds = device.get("bounds")
-                if not isinstance(device_bounds, dict):
-                    continue
-                device_boxes.append(
-                    (
-                        str(device.get("name", "")),
-                        int(device_bounds.get("x", 0)),
-                        int(device_bounds.get("y", 0)),
-                        int(device_bounds.get("width", 0)),
-                        int(device_bounds.get("height", 0)),
-                    )
-                )
             device_area = sum(box[3] * box[4] for box in device_boxes)
             threshold = (
                 self.um(10)
                 if gap_threshold is None
                 else _coordinate(gap_threshold, "gap threshold")
             )
+
+            # Build row bands from device centers and heights. Requiring a
+            # similar height keeps a tall MIM capacitor or resistor out of the
+            # row gap measurement for the small transistors beside it.
+            rows = []
+            for box in sorted(
+                device_boxes, key=lambda item: (item[2] + item[4] // 2, item[1])
+            ):
+                _, _, y, _, box_height = box
+                center = y + box_height // 2
+                match = None
+                for row in rows:
+                    smaller = max(1, min(box_height, row["min_height"]))
+                    tolerance = max(1, smaller // 2)
+                    ratio = max(box_height, row["max_height"]) / smaller
+                    if abs(center - row["center"]) <= tolerance and ratio <= 2.0:
+                        match = row
+                        break
+                if match is None:
+                    match = {
+                        "center": center,
+                        "min_height": box_height,
+                        "max_height": box_height,
+                        "devices": [],
+                    }
+                    rows.append(match)
+                match["devices"].append(box)
+                match["min_height"] = min(match["min_height"], box_height)
+                match["max_height"] = max(match["max_height"], box_height)
+
+            rows.sort(key=lambda row: row["center"], reverse=True)
+            row_reports = []
             large_gaps = []
             maximum_gap = 0
-            for first_index, first in enumerate(device_boxes):
-                _, first_x, first_y, first_width, first_height = first
-                for second in device_boxes[first_index + 1 :]:
-                    _, second_x, second_y, second_width, second_height = second
-                    overlap = min(
-                        first_y + first_height, second_y + second_height
-                    ) - max(first_y, second_y)
-                    if overlap <= 0.5 * min(first_height, second_height):
+            for row_index, row in enumerate(rows):
+                devices = sorted(row["devices"], key=lambda item: item[1])
+                left = min(box[1] for box in devices)
+                right = max(box[1] + box[3] for box in devices)
+                top = max(box[2] + box[4] for box in devices)
+                bottom = min(box[2] for box in devices)
+                occupied_width = sum(box[3] for box in devices)
+                span = max(1, right - left)
+                row_gaps = []
+                for first, second in zip(devices, devices[1:]):
+                    gap = second[1] - (first[1] + first[3])
+                    if gap <= 0:
                         continue
-                    if first_x <= second_x:
-                        gap = second_x - (first_x + first_width)
-                        left, right = first[0], second[0]
-                    else:
-                        gap = first_x - (second_x + second_width)
-                        left, right = second[0], first[0]
                     maximum_gap = max(maximum_gap, gap)
+                    row_gaps.append(
+                        {
+                            "left": first[0],
+                            "right": second[0],
+                            "gap_um": round(gap * self.db_unit_nm / 1000.0, 3),
+                        }
+                    )
                     if gap > threshold:
                         large_gaps.append(
                             {
-                                "left": left,
-                                "right": right,
+                                "row": row_index,
+                                "left": first[0],
+                                "right": second[0],
                                 "gap_um": round(gap * self.db_unit_nm / 1000.0, 3),
                             }
                         )
+                row_reports.append(
+                    {
+                        "index": row_index,
+                        "devices": [box[0] for box in devices],
+                        "bounds_um": [
+                            round(left * self.db_unit_nm / 1000.0, 3),
+                            round(bottom * self.db_unit_nm / 1000.0, 3),
+                            round(right * self.db_unit_nm / 1000.0, 3),
+                            round(top * self.db_unit_nm / 1000.0, 3),
+                        ],
+                        "span_um": round(span * self.db_unit_nm / 1000.0, 3),
+                        "occupied_width_um": round(
+                            occupied_width * self.db_unit_nm / 1000.0, 3
+                        ),
+                        "row_utilization": round(occupied_width / span, 4),
+                        "max_gap_um": round(
+                            max((gap["gap_um"] for gap in row_gaps), default=0.0),
+                            3,
+                        ),
+                        "gaps": row_gaps,
+                    }
+                )
+
             utilization = device_area / area if area else 0.0
             warnings = []
             if device_boxes and utilization < 0.20:
@@ -4127,10 +4262,14 @@ class Layout:
                 )
             if maximum_gap > threshold:
                 warnings.append(
-                    f"largest horizontal gap between overlapping-row devices is "
-                    f"{maximum_gap * self.db_unit_nm / 1000.0:.1f} um; use "
-                    "row/column composition with gap=0 and let the router space pins"
+                    f"largest row gap is {maximum_gap * self.db_unit_nm / 1000.0:.1f} um; "
+                    "start rows/columns at gap=0 and let the router space pins"
                 )
+            placement_style = (
+                "composed"
+                if composition_used
+                else ("manual" if device_boxes else "empty")
+            )
             report = {
                 "bounds": bounds,
                 "width": width,
@@ -4143,15 +4282,253 @@ class Layout:
                 "shape_count": len(self.shapes),
                 "port_count": len(self.ports),
                 "device_count": len(device_boxes),
+                "row_count": len(row_reports),
+                "rows": row_reports,
                 "max_horizontal_gap_um": round(
                     maximum_gap * self.db_unit_nm / 1000.0, 3
                 ),
                 "large_gaps": large_gaps,
+                "placement_style": placement_style,
+                "composition_used": composition_used,
+                "composition": composition,
+                "manual_move_count": int(state["manual_moves"]),
+                "plan_present": state["plan"] is not None,
+                "plan_passed": bool(
+                    state["plan"] and state["plan"].get("passed", False)
+                ),
                 "warnings": warnings,
             }
+        self._layout_state["last_quality"] = report
         if print_report:
             print(json.dumps(report, indent=2))
         return report
+
+    def plan(
+        self,
+        devices=None,
+        rows=None,
+        columns=None,
+        target_utilization=0.20,
+        max_gap_um=10.0,
+        require_composition=False,
+        require_gate=True,
+        notes=None,
+    ):
+        """Declare the placement plan that the compaction gate will verify.
+
+        Call this before placing devices. The plan is intentionally simple:
+        expected devices, row/column grouping, a minimum device-area
+        utilization, a maximum row gap, and whether composition helpers are
+        required. ``finish_placement()`` (or ``compact()``) must pass before
+        ``route()`` or ``connect()`` is allowed when ``require_gate`` is true.
+        """
+        state = self._layout_state
+        if isinstance(devices, int):
+            device_spec = int(devices)
+        elif devices is None:
+            device_spec = None
+        else:
+            device_spec = [str(name) for name in devices]
+        if isinstance(rows, int):
+            row_spec = int(rows)
+        elif rows is None:
+            row_spec = None
+        else:
+            row_spec = [
+                [str(name) for name in row]
+                if isinstance(row, (list, tuple))
+                else str(row)
+                for row in rows
+            ]
+        plan = {
+            "declared": True,
+            "devices": device_spec,
+            "rows": row_spec,
+            "columns": _json_safe(columns),
+            "target_utilization": (
+                None if target_utilization is None else float(target_utilization)
+            ),
+            "max_gap_um": float(max_gap_um),
+            "require_composition": bool(require_composition),
+            "require_gate": bool(require_gate),
+            "notes": "" if notes is None else str(notes),
+            "passed": False,
+            "issues": [],
+        }
+        state["plan"] = plan
+        state["compaction_passed"] = False
+        state["compaction_quality"] = None
+        state["review"] = None
+        return plan
+
+    def finish_placement(self):
+        """Run the compaction gate and open routing.
+
+        The gate checks the declared plan against the current devices and
+        quality report. A failed gate raises :class:`LayoutQualityError` and
+        leaves routing blocked.
+        """
+        state = self._layout_state
+        plan = state.get("plan")
+        if not plan:
+            raise LayoutQualityError(
+                "layout.plan(...) is required before layout.finish_placement()"
+            )
+        quality = self.report()
+        issues = []
+        expected = plan.get("devices")
+        actual_names = [str(device.get("name", "")) for device in self.devices]
+        if isinstance(expected, int):
+            if len(actual_names) != expected:
+                issues.append(
+                    f"plan expected {expected} devices but found {len(actual_names)}"
+                )
+        elif isinstance(expected, list) and expected:
+            missing = sorted(set(expected) - set(actual_names))
+            if missing:
+                issues.append("planned device(s) missing: " + ", ".join(missing))
+        target = plan.get("target_utilization")
+        if target is not None and quality["utilization"] < float(target):
+            issues.append(
+                f"utilization {quality['utilization']:.1%} is below target {float(target):.1%}"
+            )
+        plan_gap = plan.get("max_gap_um")
+        if plan_gap is not None and quality["max_horizontal_gap_um"] > float(plan_gap):
+            issues.append(
+                f"largest row gap {quality['max_horizontal_gap_um']:.1f} um exceeds "
+                f"target {float(plan_gap):.1f} um"
+            )
+        if plan.get("require_composition") and not quality["composition_used"]:
+            issues.append("composition helpers were required but not used")
+        planned_rows = plan.get("rows")
+        if isinstance(planned_rows, int):
+            if quality["row_count"] != planned_rows:
+                issues.append(
+                    f"plan expected {planned_rows} row(s) but report found {quality['row_count']}"
+                )
+        elif isinstance(planned_rows, list) and planned_rows:
+            if quality["row_count"] != len(planned_rows):
+                issues.append(
+                    f"plan expected {len(planned_rows)} row(s) but report found {quality['row_count']}"
+                )
+        plan["issues"] = issues
+        if issues:
+            plan["passed"] = False
+            state["compaction_passed"] = False
+            raise LayoutQualityError(
+                "layout compaction gate failed: "
+                + "; ".join(issues)
+                + ". Compact the placement and call layout.finish_placement() again."
+            )
+        plan["passed"] = True
+        quality["plan_passed"] = True
+        state["compaction_passed"] = True
+        state["compaction_quality"] = quality
+        return quality
+
+    compact = finish_placement
+
+    def review(
+        self,
+        min_utilization=None,
+        max_gap_um=None,
+        require_composition=None,
+        require_plan=False,
+    ):
+        """Run the separate layout-review step and record its result.
+
+        Review is intentionally independent of the authoring flow: an agent can
+        call it after routing, or a reviewer can call it on a generated layout.
+        It returns a pass/fail record with actionable issues and the quality
+        report used for the decision.
+        """
+        state = self._layout_state
+        final_quality = self.report()
+        quality = state.get("compaction_quality") or final_quality
+        plan = state.get("plan")
+        issues = list(quality.get("warnings", []))
+        if require_plan and not plan:
+            issues.append("no layout.plan(...) was declared")
+        if plan:
+            if not plan.get("passed"):
+                issues.append("layout compaction gate has not passed")
+            target = (
+                plan.get("target_utilization")
+                if min_utilization is None
+                else min_utilization
+            )
+            if target is not None and quality["utilization"] < float(target):
+                issues.append(
+                    f"utilization {quality['utilization']:.1%} is below review target "
+                    f"{float(target):.1%}"
+                )
+            gap = plan.get("max_gap_um") if max_gap_um is None else max_gap_um
+            if gap is not None and quality["max_horizontal_gap_um"] > float(gap):
+                issues.append(
+                    f"largest row gap {quality['max_horizontal_gap_um']:.1f} um exceeds "
+                    f"review target {float(gap):.1f} um"
+                )
+            if require_composition is None:
+                require_composition = plan.get("require_composition", False)
+        elif min_utilization is not None and quality["utilization"] < float(
+            min_utilization
+        ):
+            issues.append(
+                f"utilization {quality['utilization']:.1%} is below review target "
+                f"{float(min_utilization):.1%}"
+            )
+        if max_gap_um is not None and quality["max_horizontal_gap_um"] > float(
+            max_gap_um
+        ):
+            issues.append(
+                f"largest row gap {quality['max_horizontal_gap_um']:.1f} um exceeds "
+                f"review target {float(max_gap_um):.1f} um"
+            )
+        if require_composition and not quality["composition_used"]:
+            issues.append("composition helpers were required but not used")
+        issues = list(dict.fromkeys(issues))
+        review = {
+            "passed": not issues,
+            "issues": issues,
+            "quality": quality,
+            "cell_quality": final_quality,
+            "plan": plan,
+        }
+        state["review"] = review
+        return review
+
+    def _check_compaction_gate(self):
+        state = self._layout_state
+        plan = state.get("plan")
+        if (
+            plan
+            and plan.get("require_gate", True)
+            and not state.get("compaction_passed", False)
+        ):
+            raise LayoutQualityError(
+                "layout compaction gate: call layout.finish_placement() (or "
+                "layout.compact()) after placement and before routing"
+            )
+
+    def _finalize_layout_metadata(self):
+        state = self._layout_state
+        plan = state.get("plan")
+        if (
+            plan
+            and plan.get("require_gate", True)
+            and not state.get("compaction_passed", False)
+        ):
+            raise LayoutQualityError(
+                "layout compaction gate: call layout.finish_placement() (or "
+                "layout.compact()) after placement and before output"
+            )
+        quality = state.get("compaction_quality") or self.report()
+        plan_output = None
+        if plan:
+            plan_output = {
+                key: value for key, value in plan.items() if key not in {"quality"}
+            }
+        return quality, plan_output, state.get("review")
 
     def abut(self, first, second, edge="right", gap=0):
         """Move ``second`` against one edge of ``first``."""
@@ -4216,6 +4593,7 @@ class Layout:
         ``Symmetric``, ``Group``, ``Boundary``, ``AspectRatio``, ``Spread``,
         ``Grid``, ``PortLocation``, and ``Generator``.
         """
+        self._note_composition("constraint")
         name = str(kind).strip()
         items = options.pop("items", None)
         if items is None:
@@ -4583,6 +4961,7 @@ class Layout:
 
     def generate(self, generator, **options):
         """Instantiate a registered or built-in cell generator."""
+        self._note_composition("generator")
         generator = str(generator)
         function = self._generators.get(generator)
         metadata = self._generator_metadata.get(generator, {})
@@ -4830,6 +5209,7 @@ class Layout:
         This is the document ICE validates and applies after the script
         finishes; scripts normally do not need to call it directly.
         """
+        quality, plan, review = self._finalize_layout_metadata()
         return {
             "format": "ice-procedural-layout",
             "schema_version": SCHEMA_VERSION,
@@ -4838,6 +5218,9 @@ class Layout:
             "grid": self.grid,
             "generator_metadata": self.generator_metadata,
             "constraints": self.constraints,
+            "layout_quality": _json_safe(quality),
+            "layout_plan": _json_safe(plan),
+            "layout_review": _json_safe(review),
             "layers": [
                 {
                     "name": name,
@@ -4877,6 +5260,7 @@ class Group(Layout):
         self._used_generators = parent._used_generators
         self._constraint_records = parent._constraint_records
         self._builtin_generators = parent._builtin_generators
+        self._layout_state = parent._layout_state
 
     @property
     def bounds(self):

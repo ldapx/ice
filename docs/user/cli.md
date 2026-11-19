@@ -146,6 +146,7 @@ ice-cli layout-set-parameter <project> <procedural> <name> <value>
 ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>
+ice-cli layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] [--require-composition] [--require-plan]
 ice-cli layout-remove <project> <cell|procedural>
 ice-cli layout-add-layer <project> <name> <number> [datatype]
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
@@ -177,9 +178,13 @@ removing a procedural layout also removes its generated static child. Removal
 is blocked when instances reference the layout, and library cells cannot be
 removed. `layout-add-procedural` generates the default script or the supplied
 script immediately and reports `generated`, `generation_error`, and
-`needs_regeneration`. `layout-regenerate` reruns an existing script; the generated child is read-only
-and `layout-info` reports its generation hashes, parameter values, and stale
-state. `layout-set-parameter` edits a declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
+`needs_regeneration`. `layout-regenerate` reruns an existing script and returns
+structured `layout_quality`, `layout_plan`, and `layout_review` objects; the
+generated child is read-only and `layout-info` reports the same metadata,
+generation hashes, parameter values, and stale state. `layout-review` applies
+optional utilization, row-gap, composition, and plan checks to that stored
+metadata without regenerating the layout. `layout-set-parameter` edits a
+declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
 TEXT label. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
 layers also connect overlapping layers. Resistor bodies marked with a `*.res`

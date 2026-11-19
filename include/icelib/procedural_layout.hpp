@@ -30,6 +30,10 @@ struct ProceduralLayoutRunResult {
     std::string parameterHash;
     std::string outputHash;
     std::string pdkVersion;
+    // Structured agent metadata from the runner, as JSON text.
+    std::string layoutQuality;
+    std::string layoutPlan;
+    std::string layoutReview;
 };
 
 // Runs the procedural layout script in a subprocess and replaces its generated
