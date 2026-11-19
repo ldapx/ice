@@ -2283,30 +2283,42 @@ class DocumentWindow : public QMainWindow {
     }
 
     void openLayoutInterchange() {
-        const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Open GDS/OASIS Layout"), QString(),
-                                                       QStringLiteral("GDSII Stream (*.gds *.gdsii);;OASIS "
-                                                                      "(unsupported) (*.oas *.oasis);;All files (*)"));
+        const auto path =
+            QFileDialog::getOpenFileName(this, QStringLiteral("Open GDS/OASIS Layout"), QString(),
+                                         QStringLiteral("GDSII/OASIS Stream (*.gds *.gdsii *.oas *.oasis);;"
+                                                        "GDSII Stream (*.gds *.gdsii);;OASIS Stream "
+                                                        "(*.oas *.oasis);;All files (*)"));
         if (path.isEmpty())
             return;
         try {
-            const auto suffix = QFileInfo(path).suffix().toLower();
-            if (suffix == QStringLiteral("oas") || suffix == QStringLiteral("oasis"))
-                throw ice::ProjectError("interchange.oasis", "Binary OASIS import is not supported yet");
-            if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
-                throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
             bool accepted = false;
-            const auto pinLayer = QInputDialog::getInt(this, QStringLiteral("GDS Pin Labels"),
-                                                       QStringLiteral("Pin label GDS layer (-1 imports text only):"),
-                                                       -1, -1, 65535, 1, &accepted);
+            const auto pinLayer = QInputDialog::getInt(this, QStringLiteral("GDS/OASIS Pin Labels"),
+                                                       QStringLiteral("Pin label layer (-1 imports text only):"), -1,
+                                                       -1, 65535, 1, &accepted);
             if (!accepted)
+                return;
+            bool acceptedTop = false;
+            const auto topCell = QInputDialog::getText(this, QStringLiteral("GDS/OASIS Top Cell"),
+                                                       QStringLiteral("Top cell name (blank auto-detects):"),
+                                                       QLineEdit::Normal, {}, &acceptedTop);
+            if (!acceptedTop)
                 return;
             ice::LayoutImportOptions options;
             if (pinLayer >= 0)
                 options.pinLabelLayer = pinLayer;
-            setProject(ice::LayoutInterchange::importGds(path.toStdString(), options));
+            options.topCell = topCell.trimmed().toStdString();
+            std::vector<std::string> warnings;
+            options.warnings = &warnings;
+            setProject(ice::LayoutInterchange::importStream(path.toStdString(), options));
             projectPath_.clear();
             if (activityPanel_)
                 activityPanel_->setProjectPath({});
+            if (!warnings.empty()) {
+                QStringList lines;
+                for (const auto &warning : warnings)
+                    lines << QString::fromStdString(warning);
+                QMessageBox::warning(this, QStringLiteral("GDS/OASIS Import"), lines.join(QStringLiteral("\n")));
+            }
             statusBar()->showMessage(QStringLiteral("Layout interchange opened"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Open GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -2327,17 +2339,17 @@ class DocumentWindow : public QMainWindow {
         const auto path =
             QFileDialog::getSaveFileName(this, QStringLiteral("Save GDS/OASIS Layout"),
                                          QString::fromStdString(project_->project().layoutCells.at(cellId).name),
-                                         QStringLiteral("GDSII Stream (*.gds *.gdsii);;OASIS "
-                                                        "(unsupported) (*.oas *.oasis);;All files (*)"));
+                                         QStringLiteral("GDSII/OASIS Stream (*.gds *.gdsii *.oas *.oasis);;"
+                                                        "GDSII Stream (*.gds *.gdsii);;OASIS Stream (*.oas *.oasis);;"
+                                                        "All files (*)"));
         if (path.isEmpty())
             return;
+        const auto flatten =
+            QMessageBox::question(this, QStringLiteral("Save GDS/OASIS Layout"),
+                                  QStringLiteral("Flatten instance hierarchy into one structure?"),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
         try {
-            const auto suffix = QFileInfo(path).suffix().toLower();
-            if (suffix == QStringLiteral("oas") || suffix == QStringLiteral("oasis"))
-                throw ice::ProjectError("interchange.oasis", "Binary OASIS export is not supported yet");
-            if (suffix != QStringLiteral("gds") && suffix != QStringLiteral("gdsii"))
-                throw ice::ProjectError("interchange.format", "Unsupported layout format (expected .gds/.gdsii)");
-            ice::LayoutInterchange::exportFlattenedGds(project_->project(), cellId, path.toStdString());
+            ice::LayoutInterchange::exportStream(project_->project(), cellId, path.toStdString(), flatten);
             statusBar()->showMessage(QStringLiteral("Layout interchange saved"));
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Save GDS/OASIS Layout"), QString::fromStdString(error.what()));
@@ -5922,8 +5934,8 @@ class DocumentWindow : public QMainWindow {
             return {};
         const auto root = std::filesystem::path(QFileInfo(projectPath_).absolutePath().toStdString());
         if (cell.reference) {
-            auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack,
-                                                          root, root / "build" / "layout-references");
+            auto loaded =
+                ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack, root);
             if (!loaded.model.empty())
                 return loaded.model;
         }
@@ -5956,8 +5968,7 @@ class DocumentWindow : public QMainWindow {
         if (referencePreviewKey_ == keyText)
             return;
         referencePreviewKey_ = keyText;
-        auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack, root,
-                                                      root / "build" / "layout-references");
+        auto loaded = ice::loadLayoutReferencePreview(*cell.reference, project_->project(), cell.pdk, cell.stack, root);
         if (loaded.model.empty()) {
             referencePreviewModel_.reset();
             referencePreviewError_ =
@@ -7464,8 +7475,7 @@ class DocumentWindow : public QMainWindow {
                 ice::setSchematicSymbolArtwork(project, cellId, symbolId, edited);
             });
         } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Change Schematic Icon"),
-                                  QString::fromStdString(error.what()));
+            QMessageBox::critical(this, QStringLiteral("Change Schematic Icon"), QString::fromStdString(error.what()));
             return;
         }
         refreshSchematic();
@@ -10281,7 +10291,9 @@ class DocumentWindow : public QMainWindow {
         drcTempDir_ = std::move(temporary);
         drcReportPath_ = reportPath;
         drcLog_.clear();
-        const ice::GdsCheckOptions options{gdsPath.toStdString(), reportPath.toStdString(), processName, "TOP", "main"};
+        const auto topCell = flattened ? std::string{"TOP"} : ice::LayoutInterchange::gdsStructureName(cell.name);
+        const ice::GdsCheckOptions options{gdsPath.toStdString(), reportPath.toStdString(), processName, topCell,
+                                           "main"};
         QStringList arguments;
         for (const auto &argument : ice::gdsCheckArguments(options))
             arguments << QString::fromStdString(argument);

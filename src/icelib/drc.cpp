@@ -600,7 +600,10 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
     }
 
     std::filesystem::remove(result.reportPath, status);
-    const auto topCell = options.topCell.empty() ? "TOP" : options.topCell;
+    const auto topCell =
+        !options.topCell.empty()
+            ? options.topCell
+            : (options.flatten ? std::string{"TOP"} : LayoutInterchange::gdsStructureName(cell->second.name));
     ProcessOptions processOptions;
     processOptions.workingDirectory = workDirectory;
     processOptions.logPath = result.logPath;

@@ -1263,10 +1263,10 @@ void printHelp() {
               << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
               << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
               << "  layout-connectivity <project> <cell>\n"
-              << "  layout-export-gds <project> <cell> <output.gds>\n"
+              << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
               << "  layout-export-def <project> <cell> <output.def>\n"
-              << "  layout-import-gds <input.gds> <project> [pin-label-layer]\n"
+              << "  layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>]\n"
               << "  layout-import-lef <input.lef> <project>\n"
               << "  layout-import-def <input.def> <project>\n\n"
               << "Implementation:\n"
@@ -2845,19 +2845,14 @@ int main(int argc, char **argv) {
 
         if (command == "layout-export-gds") {
             if (args.size() < 4 || args.size() > 5)
-                argumentError("Usage: ice-cli layout-export-gds <project> <cell> <output.gds> [--flatten]");
+                argumentError("Usage: ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]");
             const auto project = ice::Project::load(args[1]);
             const auto cell = resolveLayout(project, args[2]);
             const bool flatten = args.size() == 5 && args[4] == "--flatten";
             if (args.size() == 5 && !flatten)
                 argumentError("Unknown layout-export-gds option: " + args[4]);
-            if (flatten)
-                ice::LayoutInterchange::exportFlattenedGds(project, cell, args[3]);
-            else
-                ice::LayoutInterchange::exportGds(project, cell, args[3]);
-            // The GDS writer emits a single structure, so instance-bearing
-            // cells are always flattened to preserve child geometry.
-            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", true}});
+            const auto topCell = ice::LayoutInterchange::exportStream(project, cell, args[3], flatten);
+            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", flatten}, {"top_cell", topCell}});
             return 0;
         }
 
@@ -2880,20 +2875,41 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-import-gds") {
-            expectArguments(args, 3, 4, "layout-import-gds <input.gds> <project> [pin-label-layer]");
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli layout-import-gds <input.gds|oas> <project> "
+                              "[pin-label-layer] [--top-cell <name>]");
             ice::LayoutImportOptions options;
-            if (args.size() == 4)
-                options.pinLabelLayer = std::stoi(args[3]);
-            auto project = ice::LayoutInterchange::importGds(args[1], options);
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--top-cell") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --top-cell");
+                    options.topCell = args[index];
+                } else {
+                    try {
+                        options.pinLabelLayer = std::stoi(args[index]);
+                    } catch (const std::exception &) {
+                        argumentError("Unknown layout-import-gds option: " + args[index]);
+                    }
+                }
+            }
+            std::vector<std::string> warnings;
+            options.warnings = &warnings;
+            auto project = ice::LayoutInterchange::importStream(args[1], options);
             auto name = projectNameForPath(args[2]);
             if (project.name.empty())
                 project.name = name;
             project.identity = "project-" + project.name;
             project.save(args[2]);
-            printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
-                       {"name", project.name},
-                       {"cells", project.layoutCells.size()},
-                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            json warningJson = json::array();
+            for (const auto &warning : warnings)
+                warningJson.push_back(warning);
+            printJson(
+                {{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
+                 {"name", project.name},
+                 {"cells", project.layoutCells.size()},
+                 {"top_cell", project.layoutCells.empty() ? std::string{} : project.layoutCells.begin()->second.name},
+                 {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
+                 {"warnings", std::move(warningJson)}});
             return 0;
         }
 

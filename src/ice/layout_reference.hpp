@@ -15,12 +15,11 @@ struct LayoutReferencePreview {
     QString warning;
 };
 
-// Loads a GDS/OASIS reference through KLayout, flattens it into one cell, and
+// Loads a GDSII or OASIS reference with the native interchange reader and
 // returns a render model whose layers are matched to the open project's layer
-// definitions. The generated GDS cache lives under the project build directory.
+// definitions.
 LayoutReferencePreview loadLayoutReferencePreview(const LayoutReference &reference, const Project &styleProject,
                                                   const std::string &pdk, const std::string &stack,
-                                                  const std::filesystem::path &projectRoot,
-                                                  const std::filesystem::path &cacheRoot);
+                                                  const std::filesystem::path &projectRoot);
 
 } // namespace ice
