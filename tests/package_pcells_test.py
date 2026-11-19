@@ -47,10 +47,15 @@ PACKAGES = {
     },
 }
 
+
 def shape_bounds(shape: dict) -> tuple[float, float, float, float]:
     points = shape.get("points") or []
-    xs = [point[0] if isinstance(point, (list, tuple)) else point["x"] for point in points]
-    ys = [point[1] if isinstance(point, (list, tuple)) else point["y"] for point in points]
+    xs = [
+        point[0] if isinstance(point, (list, tuple)) else point["x"] for point in points
+    ]
+    ys = [
+        point[1] if isinstance(point, (list, tuple)) else point["y"] for point in points
+    ]
     return (min(xs), min(ys), max(xs), max(ys))
 
 
@@ -114,15 +119,25 @@ def connectivity_components(library: dict, connectivity: dict, geometry: dict):
         for via_name, lower, upper in vias:
             if layer != via_name:
                 continue
-            lowers = [i for i, (name, other, _) in enumerate(shapes) if name in lower and overlaps(box, other)]
-            uppers = [i for i, (name, other, _) in enumerate(shapes) if name in upper and overlaps(box, other)]
+            lowers = [
+                i
+                for i, (name, other, _) in enumerate(shapes)
+                if name in lower and overlaps(box, other)
+            ]
+            uppers = [
+                i
+                for i, (name, other, _) in enumerate(shapes)
+                if name in upper and overlaps(box, other)
+            ]
             for lower_index in lowers:
                 for upper_index in uppers:
                     union(lower_index, upper_index)
     return shapes, find
 
 
-def check_terminal_connectivity(name: str, cell: dict, library: dict, connectivity: dict, geometry: dict) -> None:
+def check_terminal_connectivity(
+    name: str, cell: dict, library: dict, connectivity: dict, geometry: dict
+) -> None:
     """Every terminal must be part of its device metal, not an island.
 
     A pin tab that abuts (or stops short of) its plate, or a contact stack that
@@ -132,7 +147,12 @@ def check_terminal_connectivity(name: str, cell: dict, library: dict, connectivi
     for port in geometry["ports"]:
         stream = (port["layer"], port["datatype"])
         rect = port["rectangle"]
-        pin = (rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"])
+        pin = (
+            rect["x"],
+            rect["y"],
+            rect["x"] + rect["width"],
+            rect["y"] + rect["height"],
+        )
         seed = next(
             (
                 index
@@ -204,10 +224,14 @@ def check_library(name: str, root: Path) -> None:
                 f"{name}: missing fixed-device cell {layout}"
             )
         else:
-            assert cell.get("generator"), f"{name}: {cell['name']} has neither layout nor generator"
+            assert cell.get("generator"), (
+                f"{name}: {cell['name']} has neither layout nor generator"
+            )
 
     if name != "ice-pkg-ihp-sg13g2":
-        connectivity = json.loads((root / "technology" / "connectivity.json").read_text())
+        connectivity = json.loads(
+            (root / "technology" / "connectivity.json").read_text()
+        )
         for cell in library["cells"]:
             generator = cell.get("generator")
             if not generator:
@@ -235,7 +259,25 @@ def check_library(name: str, root: Path) -> None:
         assert layer_names[(68, 20)] == "met1.drawing"
         assert layer_names[(68, 16)] == "met1.pin"
         assert layer_names[(65, 13)] == "diff.res"
+        assert layer_names[(66, 13)] == "poly.res"
         assert layer_names[(89, 44)] == "capm.drawing"
+
+        mim = icepy.pcells.generate_package_geometry(
+            root, "pcells", "mim_cap", {"l": "10u", "h": "10u"}
+        )
+        mim_shapes = {(shape["layer"], shape["datatype"]) for shape in mim["shapes"]}
+        mim_ports = {(port["layer"], port["datatype"]) for port in mim["ports"]}
+        assert (70, 20) in mim_shapes and (71, 20) in mim_shapes
+        assert (89, 44) in mim_shapes
+        assert mim_ports == {(70, 20), (71, 20)}
+
+        resistor = icepy.pcells.generate_package_geometry(
+            root, "pcells", "res_poly", {"w": "0.5u", "l": "10u"}
+        )
+        resistor_shapes = {
+            (shape["layer"], shape["datatype"]) for shape in resistor["shapes"]
+        }
+        assert (66, 13) in resistor_shapes
     elif name == "ice-pkg-gf180mcu":
         assert layer_names[(34, 0)] == "metal1"
         assert layer_names[(34, 4)] == "metal1.dummy"
@@ -370,15 +412,36 @@ def check_library(name: str, root: Path) -> None:
 def check_mos_geometry(name: str, root: Path) -> None:
     """Check the package MOS PCell has real cuts, taps, and separate fingers."""
     if name == "ice-pkg-sky130":
-        device, diff, gate, required = "nfet", (65, 20), (66, 20), {
-            (66, 20), (66, 44), (67, 44), (68, 20), (65, 44),
-            (93, 44), (94, 20), (95, 20),
-        }
+        device, diff, gate, required = (
+            "nfet",
+            (65, 20),
+            (66, 20),
+            {
+                (66, 20),
+                (66, 44),
+                (67, 44),
+                (68, 20),
+                (65, 44),
+                (93, 44),
+                (94, 20),
+                (95, 20),
+            },
+        )
         pmos_required = {(64, 20)}
     elif name == "ice-pkg-gf180mcu":
-        device, diff, gate, required = "nmos", (22, 0), (30, 0), {
-            (30, 0), (33, 0), (34, 0), (32, 0), (31, 0), (204, 0),
-        }
+        device, diff, gate, required = (
+            "nmos",
+            (22, 0),
+            (30, 0),
+            {
+                (30, 0),
+                (33, 0),
+                (34, 0),
+                (32, 0),
+                (31, 0),
+                (204, 0),
+            },
+        )
         pmos_required = {(21, 0)}
     else:
         return
@@ -395,28 +458,49 @@ def check_mos_geometry(name: str, root: Path) -> None:
         ys = [point[1] for point in shape["points"]]
         return min(xs), min(ys), max(xs), max(ys)
 
-    islands = [bounds(shape) for shape in geometry["shapes"]
-               if (shape["layer"], shape["datatype"]) == diff]
-    gates = [bounds(shape) for shape in geometry["shapes"]
-             if (shape["layer"], shape["datatype"]) == gate]
+    islands = [
+        bounds(shape)
+        for shape in geometry["shapes"]
+        if (shape["layer"], shape["datatype"]) == diff
+    ]
+    gates = [
+        bounds(shape)
+        for shape in geometry["shapes"]
+        if (shape["layer"], shape["datatype"]) == gate
+    ]
+
     def intersects(left, right):
-        return not (left[2] <= right[0] or right[2] <= left[0] or
-                    left[3] <= right[1] or right[3] <= left[1])
-    channel_islands = [island for island in islands
-                       if any(intersects(island, gate_bounds) for gate_bounds in gates)]
+        return not (
+            left[2] <= right[0]
+            or right[2] <= left[0]
+            or left[3] <= right[1]
+            or right[3] <= left[1]
+        )
+
+    channel_islands = [
+        island
+        for island in islands
+        if any(intersects(island, gate_bounds) for gate_bounds in gates)
+    ]
     assert len(channel_islands) == 2, (
         f"{name}: nf=2 produced {len(channel_islands)} channel diff islands"
     )
     for left, right in itertools.combinations(islands, 2):
-        separated = (left[2] <= right[0] or right[2] <= left[0] or
-                     left[3] <= right[1] or right[3] <= left[1])
+        separated = (
+            left[2] <= right[0]
+            or right[2] <= left[0]
+            or left[3] <= right[1]
+            or right[3] <= left[1]
+        )
         assert separated, f"{name}: multifinger diff islands overlap: {left} {right}"
 
     if device == "nfet" and pmos_required:
         pgeometry = icepy.pcells.generate_package_geometry(
             root, "pcells", "pfet", {"w": "4u", "l": "1u", "nf": "2", "m": "1"}
         )
-        pstreams = {(shape["layer"], shape["datatype"]) for shape in pgeometry["shapes"]}
+        pstreams = {
+            (shape["layer"], shape["datatype"]) for shape in pgeometry["shapes"]
+        }
         assert pmos_required <= pstreams, f"{name}: PMOS geometry is missing a well"
 
 

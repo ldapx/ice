@@ -102,7 +102,7 @@ convenience form. The returned `PexReport` exposes `schematic_cell`, `spice_text
 `total_resistance`, `total_capacitance`, per-net `PexNet` entries, extracted
 `PexDevice` entries, `devices_from_layout`, `devices_from_schematic`, and notes.
 `PexOptions` controls sheet resistances, capacitance coefficients, whether
-placed layout devices are extracted, whether polygon devices are extracted from
+planned or placed layout devices are extracted, whether polygon devices are extracted from
 the PDK rules, an optional extraction-rule path override, whether the linked
 schematic netlist is used as a fallback, and the generated cell name.
 `pex_report_json(report)` serializes the report.

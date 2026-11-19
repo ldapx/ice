@@ -59,6 +59,8 @@ bool isNonConductingLayer(const std::string &name, const PdkConnectivity *declar
         lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
     const auto dot = lower.find('.');
     const auto base = dot == std::string::npos ? lower : lower.substr(0, dot);
+    if (dot != std::string::npos && lower.substr(dot + 1) == "res")
+        return true;
     static const std::vector<std::string> markers = {"well",   "implant", "marker", "boundary", "outline",
                                                      "areaid", "mim",     "nsdm",   "psdm",     "nplus",
                                                      "pplus",  "npc",     "label",  "text"};
@@ -168,15 +170,22 @@ std::string layerBase(const Layer &layer) {
     return base;
 }
 
-bool isDrawingPurpose(const Layer &layer) {
+std::string layerPurpose(const Layer &layer) {
     const auto dot = layer.name.rfind('.');
     if (dot == std::string::npos)
-        return true;
+        return {};
     auto purpose = layer.name.substr(dot + 1);
     for (auto &character : purpose)
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-    return purpose == "drawing" || purpose == "pin";
+    return purpose;
 }
+
+bool isDrawingPurpose(const Layer &layer) {
+    const auto purpose = layerPurpose(layer);
+    return purpose.empty() || purpose == "drawing" || purpose == "pin";
+}
+
+bool isResistorMarker(const Layer &layer) { return layerPurpose(layer) == "res"; }
 
 bool isActiveLayer(const Layer &layer, const PdkConnectivity *declared) {
     if (!isDrawingPurpose(layer))
@@ -334,13 +343,57 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
     std::map<ObjectId, Shape> effectiveShapes = cell->second.shapes;
     splitActiveUnderGate(project, cell->second, effectiveShapes, connectivity);
 
+    // A resistor body is conductive, but its two terminals are not the same
+    // electrical node. Exclude the body from geometric net merging so an
+    // unlabelled poly/diff resistor does not alias the nets on both ends.
+    std::vector<std::pair<std::string, Rect>> resistorBodies;
+    const auto lowerText = [](std::string text) {
+        for (auto &character : text)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        return text;
+    };
+    for (const auto &[_, shape] : cell->second.shapes) {
+        if (!shape.rectangle.valid())
+            continue;
+        const auto layer = project.layers.find(shape.layer);
+        if (layer == project.layers.end() || !isResistorMarker(layer->second))
+            continue;
+        resistorBodies.emplace_back(baseFromLayerName(layer->second.name), shape.rectangle);
+    }
+    for (const auto &[_, device] : cell->second.plannedDevices) {
+        if (device.width <= 0 || device.height <= 0)
+            continue;
+        const auto identity = lowerText(device.device + " " + device.model);
+        if (identity.find("res") == std::string::npos)
+            continue;
+        std::string body;
+        if (identity.find("poly") != std::string::npos)
+            body = "poly";
+        else if (identity.find("diff") != std::string::npos)
+            body = "diff";
+        if (body.empty())
+            continue;
+        resistorBodies.emplace_back(body, Rect{device.x, device.y, device.width, device.height});
+    }
+    const auto isResistorBody = [&](const Layer &layer, const Rect &rectangle) {
+        if (!isDrawingPurpose(layer))
+            return false;
+        const auto base = layerBase(layer);
+        for (const auto &[body, region] : resistorBodies) {
+            if (body == base && overlapsOrTouches(region, rectangle))
+                return true;
+        }
+        return false;
+    };
+
     std::vector<ObjectRecord> objects;
     objects.reserve(effectiveShapes.size() + cell->second.ports.size());
     for (const auto &[id, shape] : effectiveShapes) {
         if (shape.isText() || !shape.rectangle.valid())
             continue;
         const auto layer = project.layers.find(shape.layer);
-        if (layer != project.layers.end() && isNonConductingLayer(layer->second.name, connectivity))
+        if (layer != project.layers.end() &&
+            (isNonConductingLayer(layer->second.name, connectivity) || isResistorBody(layer->second, shape.rectangle)))
             continue;
         const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name, connectivity);
         const auto layerName = layer == project.layers.end() ? std::string{} : layer->second.name;
@@ -463,8 +516,7 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
                 if (id == group.net)
                     continue;
                 const auto net = cell->second.nets.find(id);
-                group.aliases.push_back(net == cell->second.nets.end() ? "N" + std::to_string(id)
-                                                                       : net->second.name);
+                group.aliases.push_back(net == cell->second.nets.end() ? "N" + std::to_string(id) : net->second.name);
             }
             std::sort(group.aliases.begin(), group.aliases.end());
         }

@@ -284,7 +284,39 @@ std::string parameterValue(const LayoutCell &cell, std::initializer_list<std::st
     return {};
 }
 
+std::string parameterValue(const PlannedDevice &device, std::initializer_list<std::string_view> wanted) {
+    for (const auto &parameter : device.parameters) {
+        const auto name = lowerCopy(parameter.name);
+        for (const auto candidate : wanted) {
+            if (name == lowerCopy(std::string(candidate)))
+                return trimCopy(parameter.value);
+        }
+    }
+    return {};
+}
+
 enum class PlacedDeviceKind { unknown, mos, bjt, capacitor, resistor, diode, inductor };
+
+PlacedDeviceKind classifyDeviceIdentity(const std::string &deviceName, const std::string &model) {
+    const auto device = lowerCopy(deviceName);
+    const auto modelName = lowerCopy(model);
+    const auto matches = [&](std::initializer_list<const char *> needles) {
+        return containsAny(device, needles) || containsAny(modelName, needles);
+    };
+    if (matches({"nmos", "pmos", "nfet", "pfet", "mosfet"}))
+        return PlacedDeviceKind::mos;
+    if (matches({"npn", "pnp", "bjt", "hbt"}))
+        return PlacedDeviceKind::bjt;
+    if (matches({"capacitor", "mim", "cap"}))
+        return PlacedDeviceKind::capacitor;
+    if (matches({"resistor", "res"}))
+        return PlacedDeviceKind::resistor;
+    if (matches({"diode", "schottky"}))
+        return PlacedDeviceKind::diode;
+    if (matches({"inductor"}))
+        return PlacedDeviceKind::inductor;
+    return PlacedDeviceKind::unknown;
+}
 
 PlacedDeviceKind classifyPlacedDevice(const LayoutCell &child, const std::string &deviceName,
                                       const std::string &model) {
@@ -558,6 +590,109 @@ extractPlacedDevice(const LayoutCell &parent, const LayoutInstance &instance, co
     }
 
     return std::nullopt;
+}
+
+std::vector<PexDevice> extractPlannedDevices(const LayoutCell &layout,
+                                             const std::map<ObjectId, std::string> &netNodeById,
+                                             SpiceNameAllocator &names, std::set<std::string> &designators,
+                                             std::vector<std::string> &notes) {
+    std::vector<PexDevice> devices;
+    for (const auto &[_, planned] : layout.plannedDevices) {
+        if (planned.placeholder || planned.terminals.empty())
+            continue;
+        const auto identity = planned.device.empty() ? planned.name : planned.device;
+        const auto kind = classifyDeviceIdentity(identity, planned.model);
+        if (kind == PlacedDeviceKind::unknown)
+            continue;
+        const auto nodeFor = [&](ObjectId netId) -> std::string {
+            if (const auto found = netNodeById.find(netId); found != netNodeById.end())
+                return found->second;
+            if (const auto net = layout.nets.find(netId); net != layout.nets.end())
+                return names.unique(net->second.name.empty() ? "N" + std::to_string(netId) : net->second.name);
+            return {};
+        };
+        const auto requireNode = [&](const char *pin) -> std::string {
+            const auto found = planned.terminals.find(pin);
+            if (found == planned.terminals.end())
+                return {};
+            const auto node = nodeFor(found->second);
+            if (node.empty())
+                notes.push_back("Planned device '" + planned.name + "' terminal '" + pin +
+                                "' has no extracted layout net; using a private node.");
+            return node.empty() ? names.unique(planned.name + "_" + pin) : node;
+        };
+
+        PexDevice device;
+        device.instance = planned.id;
+        device.name = planned.name;
+        device.model = planned.model;
+
+        if (kind == PlacedDeviceKind::mos) {
+            const auto drain = requireNode("D");
+            const auto gate = requireNode("G");
+            const auto source = requireNode("S");
+            const auto bulk = planned.terminals.contains("B") ? requireNode("B") : std::string{"0"};
+            if (drain.empty() || gate.empty() || source.empty())
+                continue;
+            auto model = planned.model;
+            if (model.empty())
+                model = containsAny(lowerCopy(identity), {"pmos", "pfet"}) ? "PMOS" : "NMOS";
+            auto line = makeDeviceDesignator(planned.name, 'X', designators);
+            line += " " + drain + " " + gate + " " + source + " " + bulk + " " + model;
+            line = appendAttribute(std::move(line), "w", parameterValue(planned, {"w", "width"}));
+            line = appendAttribute(std::move(line), "l", parameterValue(planned, {"l", "length"}));
+            line = appendAttribute(std::move(line), "nf", parameterValue(planned, {"nf", "fingers"}));
+            line = appendAttribute(std::move(line), "m", parameterValue(planned, {"m", "mult"}));
+            device.type = "mos";
+            device.pins = {"D", "G", "S", "B"};
+            device.nodes = {drain, gate, source, bulk};
+            device.spiceLine = std::move(line);
+            devices.push_back(std::move(device));
+            continue;
+        }
+
+        std::vector<std::pair<std::string, std::string>> pins;
+        for (const auto &[pin, netId] : planned.terminals) {
+            auto node = nodeFor(netId);
+            if (node.empty())
+                node = names.unique(planned.name + "_" + pin);
+            pins.emplace_back(pin, std::move(node));
+        }
+        if (pins.size() < 2) {
+            notes.push_back("Planned passive device '" + planned.name +
+                            "' has fewer than two terminals and was skipped.");
+            continue;
+        }
+        char letter = 'X';
+        std::string value;
+        if (kind == PlacedDeviceKind::capacitor) {
+            letter = 'C';
+            value = parameterValue(planned, {"capacitance", "value", "c"});
+        } else if (kind == PlacedDeviceKind::resistor) {
+            letter = 'R';
+            value = parameterValue(planned, {"resistance", "value", "r"});
+        } else if (kind == PlacedDeviceKind::inductor) {
+            letter = 'L';
+            value = parameterValue(planned, {"inductance", "value", "l"});
+        } else {
+            letter = 'D';
+            value = planned.model.empty() ? "D" : planned.model;
+        }
+        if (value.empty()) {
+            notes.push_back("Planned device '" + planned.name + "' (" + placedDeviceKindName(kind) +
+                            ") has no value/model parameter and was skipped.");
+            continue;
+        }
+        auto line = makeDeviceDesignator(planned.name, letter, designators);
+        line += " " + pins[0].second + " " + pins[1].second + " " + value;
+        line = appendAttribute(std::move(line), "m", parameterValue(planned, {"m", "mult"}));
+        device.type = placedDeviceKindName(kind);
+        device.pins = {pins[0].first, pins[1].first};
+        device.nodes = {pins[0].second, pins[1].second};
+        device.spiceLine = std::move(line);
+        devices.push_back(std::move(device));
+    }
+    return devices;
 }
 
 std::string nextDeviceDesignator(char letter, std::set<std::string> &used) {
@@ -1451,7 +1586,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
                 return !entry.second.model.empty() || !entry.second.device.empty() || !entry.second.terminals.empty();
             });
         notes.push_back(hasDeviceMetadata
-                            ? "Planned-device metadata is kept for LVS; PEX extracts geometry-based devices."
+                            ? "Planned-device metadata is available for PEX extraction and LVS."
                             : "Planned-device placeholders do not contribute geometry or devices to this extraction.");
     }
     if (options.extractPolygonDevices) {
@@ -1537,8 +1672,17 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     }
 
     std::set<std::string> designators;
+    std::vector<PexDevice> plannedDevices;
+    if (options.extractPlannedDevices)
+        plannedDevices = extractPlannedDevices(layout, netNodeById, names, designators, notes);
+    if (!plannedDevices.empty()) {
+        report.devices = std::move(plannedDevices);
+        notes.push_back("Extracted " + std::to_string(report.devices.size()) +
+                        " planned layout device(s); placed/polygon device extraction was skipped to avoid duplicates.");
+    }
+    const bool usedPlannedDevices = !report.devices.empty();
     const auto placedDeviceStart = report.devices.size();
-    if (options.extractPlacedDevices) {
+    if (!usedPlannedDevices && options.extractPlacedDevices) {
         std::map<ObjectId, std::string> layerKeys;
         for (const auto &[id, layer] : project.layers)
             layerKeys.emplace(id, layoutLayerConnectivityKey(layer));
@@ -1554,13 +1698,13 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
             if (device)
                 report.devices.push_back(std::move(*device));
         }
-    } else if (!layout.instances.empty()) {
+    } else if (!usedPlannedDevices && !layout.instances.empty()) {
         notes.push_back("Placed layout device extraction is disabled.");
     }
     const auto placedDeviceCount = report.devices.size() - placedDeviceStart;
 
     std::size_t polygonDeviceCount = 0;
-    if (options.extractPolygonDevices && extractionRules && !extractionRules->rules.empty()) {
+    if (!usedPlannedDevices && options.extractPolygonDevices && extractionRules && !extractionRules->rules.empty()) {
         auto polygonDevices = extractPolygonDevices(project, layout, groups, report.nets, netNodeById, *extractionRules,
                                                     designators, notes);
         polygonDeviceCount = polygonDevices.size();
@@ -1569,11 +1713,14 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     }
     report.devicesFromLayout = !report.devices.empty();
     if (report.devicesFromLayout) {
-        notes.push_back("Extracted " + std::to_string(placedDeviceCount) + " placed layout device(s) and " +
-                        std::to_string(polygonDeviceCount) +
-                        " polygon device(s); linked schematic devices were not copied.");
-    } else if (!layout.instances.empty()) {
-        notes.push_back("No placed layout devices were recognized; the linked schematic netlist is used if available.");
+        if (!usedPlannedDevices) {
+            notes.push_back("Extracted " + std::to_string(placedDeviceCount) + " placed layout device(s) and " +
+                            std::to_string(polygonDeviceCount) +
+                            " polygon device(s); linked schematic devices were not copied.");
+        }
+    } else {
+        notes.push_back("No placed or planned layout devices were recognized; the linked schematic netlist is used "
+                        "if available.");
     }
 
     // Fall back to the inferred source schematic only when no layout devices
@@ -1655,7 +1802,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     text << "* Add sources or devices in a testbench as needed.\n";
     text << ".title " << name << "\n";
     if (!report.devices.empty()) {
-        text << "\n* Devices extracted from placed layout instances.\n";
+        text << "\n* Devices extracted from layout metadata or geometry.\n";
         for (const auto &device : report.devices)
             text << device.spiceLine << "\n";
     } else if (!linkedLines.empty()) {

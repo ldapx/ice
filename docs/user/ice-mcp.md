@@ -146,7 +146,7 @@ device-area utilization, and large-gap warnings to the agent. Use
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
 | `lvs_run` | Compare a layout against a schematic and return the LVS report, including top-level pin matches. |
-| `pex_run` | Extract placed and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
+| `pex_run` | Extract planned, placed, and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports transient, DC, AC, OP, noise, transfer-function, mixed, and digital analyses. |
 | `simulation_update` | Update analysis fields, corners, sweeps, Monte Carlo settings, capture signals, and declarative measurements. |
 | `simulation_run` | Run the nominal simulation and store a run artifact. |

@@ -840,6 +840,7 @@ NB_MODULE(icepy, module) {
         .def_rw("area_capacitance", &PexOptions::areaCapacitance)
         .def_rw("perimeter_capacitance", &PexOptions::perimeterCapacitance)
         .def_rw("extract_placed_devices", &PexOptions::extractPlacedDevices)
+        .def_rw("extract_planned_devices", &PexOptions::extractPlannedDevices)
         .def_rw("extract_polygon_devices", &PexOptions::extractPolygonDevices)
         .def_rw("extraction_rules_path", &PexOptions::extractionRulesPath)
         .def_rw("include_linked_schematic", &PexOptions::includeLinkedSchematic)

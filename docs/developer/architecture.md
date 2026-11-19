@@ -1591,12 +1591,15 @@ schematic named `<layout> PEX` in the project hierarchy. The generated deck
 reports area, perimeter, total resistance, and total capacitance to ground for
 each net. Single-terminal nets model the extracted resistance in series with
 their capacitance to ground; multi-terminal nets use a resistance star between
-their layout pins. Placed device-library instances are extracted when their
+their layout pins. Planned-device metadata from procedural layouts is extracted
+first, using its model, parameter values, and terminal-net ids; this preserves
+flattened PCell passives such as poly resistors and MIM capacitors in the
+post-layout deck. Placed device-library instances are extracted when their
 child cells provide terminal pins and model parameters; each terminal is
 matched to the parent net that overlaps its transformed pin geometry, and the
-device is emitted as a SPICE primitive or PDK subcircuit. If no placed devices
-are recognized, the extractor falls back to copying the inferred source
-schematic's device netlist before the parasitics.
+device is emitted as a SPICE primitive or PDK subcircuit. If no planned or
+placed devices are recognized, the extractor falls back to copying the inferred
+source schematic's device netlist before the parasitics.
 
 Polygon devices are recognized through per-PDK rules in
 `technology/extraction.json`. The rule engine intersects active/gate layers, cuts

@@ -192,7 +192,7 @@ TEST_CASE("PEX extracts placed MOS devices and prefers them over the schematic")
     CHECK(device.spiceLine == "XM1 DRAIN GATE SOURCE 0 sg13_lv_nmos w=1u l=0.1u");
 
     const auto &text = project.schematicCells.at(report.schematicCell).spiceText;
-    CHECK(text.find("* Devices extracted from placed layout instances.") != std::string::npos);
+    CHECK(text.find("* Devices extracted from layout metadata or geometry.") != std::string::npos);
     CHECK(text.find("XM1 DRAIN GATE SOURCE 0 sg13_lv_nmos w=1u l=0.1u") != std::string::npos);
     CHECK(text.find("RSCH") == std::string::npos);
 
@@ -382,6 +382,52 @@ TEST_CASE("PEX extracts polygon resistors from PDK rules") {
     CHECK(report.devices.front().type == "resistor");
     CHECK(report.devices.front().model == "RES_TEST");
     CHECK(report.devices.front().spiceLine == "R1 A B 4000");
+}
+
+TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
+    ice::Project project;
+    project.identity = "pex-planned";
+    project.name = "pex-planned";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto metal = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto netA = ice::createLayoutNet(project, cell, "A");
+    const auto netB = ice::createLayoutNet(project, cell, "B");
+    const auto netC = ice::createLayoutNet(project, cell, "C");
+    ice::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netA);
+    ice::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netB);
+    ice::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netC);
+
+    auto &layout = project.layoutCells.at(cell);
+    ice::PlannedDevice resistor;
+    resistor.id = project.nextId();
+    resistor.name = "RBIAS";
+    resistor.device = "res_poly";
+    resistor.model = "sky130_fd_pr__res_high_po";
+    resistor.parameters.push_back({project.nextId(), "resistance", "55k"});
+    resistor.terminals = {{"1", netA}, {"2", netB}};
+    resistor.placeholder = false;
+    layout.plannedDevices.emplace(resistor.id, resistor);
+
+    ice::PlannedDevice capacitor;
+    capacitor.id = project.nextId();
+    capacitor.name = "CC";
+    capacitor.device = "mim_cap";
+    capacitor.model = "sky130_fd_pr__cap_mim_m3_1";
+    capacitor.parameters.push_back({project.nextId(), "capacitance", "3p"});
+    capacitor.terminals = {{"1", netB}, {"2", netC}};
+    capacitor.placeholder = false;
+    layout.plannedDevices.emplace(capacitor.id, capacitor);
+
+    const auto report = ice::runPex(project, cell);
+    CHECK(report.devices.size() == 2);
+    if (report.devices.size() != 2)
+        return;
+    CHECK(report.devices[0].type == "resistor");
+    CHECK(report.devices[0].spiceLine.find(" A B 55k") != std::string::npos);
+    CHECK(report.devices[1].type == "capacitor");
+    CHECK(report.devices[1].spiceLine.find(" B C 3p") != std::string::npos);
+    CHECK(project.schematicCells.at(report.schematicCell).spiceText.find("planned layout device(s)") !=
+          std::string::npos);
 }
 
 TEST_CASE("PEX copies the linked schematic device netlist") {

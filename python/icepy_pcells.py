@@ -248,6 +248,9 @@ class PackagePcell:
     cap_bottom = "met1"
     cap_top = "met2"
     cap_marker = ""
+    # Marker inset from the bottom plate. PDKs with an enclosure rule (for
+    # example SKY130's 0.14 um capm/m3 enclosure) override this.
+    cap_marker_inset = 100
     res_layer = "res"
     turns = 2
     guard_ring = False
@@ -754,13 +757,14 @@ class PackagePcell:
         top = self.cap_top if self.cap_top in self.layers else "met2"
         self.rect(builder, bottom, 0, 0, length, width)
         if self.cap_marker in self.layers:
+            inset = max(0, int(self.cap_marker_inset))
             self.rect(
                 builder,
                 self.cap_marker,
-                100,
-                100,
-                max(length - 200, 100),
-                max(width - 200, 100),
+                inset,
+                inset,
+                max(length - 2 * inset, 100),
+                max(width - 2 * inset, 100),
             )
         self.rect(
             builder,
@@ -850,9 +854,7 @@ class PackagePcell:
         pad = min(max(self.contact_size + 2 * self.contact_margin, 300), width)
         via = "via" if "via" in self.layers else "via1"
         middle = width // 2 - pad // 2
-        self.rect(
-            builder, "nwell", -length // 2 - 300, -300, length + 600, width + 600
-        )
+        self.rect(builder, "nwell", -length // 2 - 300, -300, length + 600, width + 600)
         self.rect(builder, "diff", 0, 0, length, width)
         self.rect(builder, "poly", -length // 2 - tap, -200, length + tap, width + 400)
         # Gate terminal on the poly finger.
@@ -914,9 +916,7 @@ class PackagePcell:
         self.rect(builder, "met1", -300, middle - 50, 300 + tap + 50, pad + 100)
         # Cathode: contacts on the right end of the diffusion.
         self.contact_stack(builder, width - tap, middle, tap, pad)
-        self.rect(
-            builder, "met1", width - tap - 50, middle - 50, tap + 350, pad + 100
-        )
+        self.rect(builder, "met1", width - tap - 50, middle - 50, tap + 350, pad + 100)
         if "nplus" in self.layers:
             self.rect(builder, "nplus", 0, 0, width // 2, height)
         if "pplus" in self.layers:
@@ -1017,9 +1017,15 @@ class PackagePcell:
         # Terminals are ordered base, collector, emitter so a diode connected
         # device can strap base and collector with one local patch.
         pads = [(x + tap_width // 2 - pad // 2, size // 2 - pad // 2) for x in columns]
-        self.port(builder, "B", "met1", pads[0][0], pads[0][1], pad, pad, "input", "left")
-        self.port(builder, "C", "met1", pads[1][0], pads[1][1], pad, pad, "inout", "top")
-        self.port(builder, "E", "met1", pads[2][0], pads[2][1], pad, pad, "inout", "right")
+        self.port(
+            builder, "B", "met1", pads[0][0], pads[0][1], pad, pad, "input", "left"
+        )
+        self.port(
+            builder, "C", "met1", pads[1][0], pads[1][1], pad, pad, "inout", "top"
+        )
+        self.port(
+            builder, "E", "met1", pads[2][0], pads[2][1], pad, pad, "inout", "right"
+        )
 
     def via_cut_for(self, index: int) -> str:
         """Cut layer joining stack metal ``index`` to ``index + 1``.
