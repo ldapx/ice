@@ -761,4 +761,9 @@ std::string version();
 BuildInfo buildInfo();
 std::string orientationName(Orientation orientation);
 
+// Resolve the directory that holds project.icepro. Accepts a project file, a
+// bare file name, or the project directory itself; a bare file name resolves to
+// the current directory instead of an empty path.
+std::filesystem::path projectRootDirectory(const std::filesystem::path &path);
+
 } // namespace ice

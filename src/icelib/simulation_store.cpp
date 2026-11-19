@@ -38,14 +38,11 @@ std::string sanitizedSlug(const std::string &name) {
 }
 
 std::filesystem::path normalizedProjectRoot(const std::filesystem::path &path) {
-    if (path.empty())
+    try {
+        return projectRootDirectory(path);
+    } catch (const ProjectError &) {
         throw ProjectError("simulation.store.path", "Project root is empty");
-    std::error_code status;
-    if (std::filesystem::is_directory(path, status) && !status)
-        return path;
-    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
-        return path.parent_path();
-    return path;
+    }
 }
 
 std::string utcTimestamp(std::chrono::system_clock::time_point now) {

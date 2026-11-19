@@ -424,6 +424,9 @@ extractPlacedDevice(const LayoutCell &parent, const LayoutInstance &instance, co
     const auto deviceName = child.device.empty() ? child.name : child.device;
     const auto model = parameterValue(child, {"model", "spice_model", "subckt"});
     const auto kind = classifyPlacedDevice(child, deviceName, model);
+    // Device geometry must be written in the units the PDK netlist preamble
+    // selects (`.option scale=1u` for SKY130), not in meters with a suffix.
+    const auto geometryScale = pdkNetlistGeometryScale(parent.pdk);
     if (child.ports.empty()) {
         if (!model.empty() || !child.device.empty())
             notes.push_back("Placed instance '" + instance.name + "' has no terminal pins and was not extracted.");
@@ -492,8 +495,8 @@ extractPlacedDevice(const LayoutCell &parent, const LayoutInstance &instance, co
         const auto length = parameterValue(child, {"l", "length"});
         const auto multiplier = parameterValue(child, {"m", "mult"});
         if (pdkSubckt) {
-            line = appendAttribute(std::move(line), "w", width);
-            line = appendAttribute(std::move(line), "l", length);
+            line = appendAttribute(std::move(line), "w", netlistLengthText(width, geometryScale));
+            line = appendAttribute(std::move(line), "l", netlistLengthText(length, geometryScale));
             line = appendAttribute(std::move(line), "m", multiplier);
         } else {
             line = appendAttribute(std::move(line), "W", width);
@@ -597,6 +600,7 @@ std::vector<PexDevice> extractPlannedDevices(const LayoutCell &layout,
                                              SpiceNameAllocator &names, std::set<std::string> &designators,
                                              std::vector<std::string> &notes) {
     std::vector<PexDevice> devices;
+    const auto geometryScale = pdkNetlistGeometryScale(layout.pdk);
     for (const auto &[_, planned] : layout.plannedDevices) {
         if (planned.placeholder || planned.terminals.empty())
             continue;
@@ -639,8 +643,10 @@ std::vector<PexDevice> extractPlannedDevices(const LayoutCell &layout,
                 model = containsAny(lowerCopy(identity), {"pmos", "pfet"}) ? "PMOS" : "NMOS";
             auto line = makeDeviceDesignator(planned.name, 'X', designators);
             line += " " + drain + " " + gate + " " + source + " " + bulk + " " + model;
-            line = appendAttribute(std::move(line), "w", parameterValue(planned, {"w", "width"}));
-            line = appendAttribute(std::move(line), "l", parameterValue(planned, {"l", "length"}));
+            line = appendAttribute(std::move(line), "w",
+                                   netlistLengthText(parameterValue(planned, {"w", "width"}), geometryScale));
+            line = appendAttribute(std::move(line), "l",
+                                   netlistLengthText(parameterValue(planned, {"l", "length"}), geometryScale));
             line = appendAttribute(std::move(line), "nf", parameterValue(planned, {"nf", "fingers"}));
             line = appendAttribute(std::move(line), "m", parameterValue(planned, {"m", "mult"}));
             device.type = "mos";
@@ -1082,6 +1088,8 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
     Clipper2Adapter kernel;
     std::map<std::string, int> counters;
     std::set<std::string> seen;
+    // Polygon geometry is measured in micrometers; emit it in netlist units.
+    const auto geometryScale = pdkNetlistGeometryScale(layout.pdk);
 
     const auto resolveKeys = [&](const std::vector<std::string> &names, std::vector<std::string> &keys,
                                  const std::string &ruleName, const char *label, bool warn) {
@@ -1247,9 +1255,11 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
                         std::string line = designator + " " + drainNode + " " + gateNode + " " + sourceNode + " " +
                                            bodyNode + " " + rule.model;
                         if (element == 'X') {
-                            line += " w=" + formatNumber(widthUm) + "u l=" + formatNumber(lengthUm) + "u";
+                            line += " w=" + netlistLengthText(formatNumber(widthUm) + "u", geometryScale) +
+                                    " l=" + netlistLengthText(formatNumber(lengthUm) + "u", geometryScale);
                         } else {
-                            line += " W=" + formatNumber(widthUm) + "u L=" + formatNumber(lengthUm) + "u";
+                            line += " W=" + netlistLengthText(formatNumber(widthUm) + "u", geometryScale) +
+                                    " L=" + netlistLengthText(formatNumber(lengthUm) + "u", geometryScale);
                         }
                         PexDevice device;
                         device.name = rule.name + "_" + std::to_string(++counters[rule.name]);
@@ -1817,6 +1827,15 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     int capacitorIndex = 1;
     int internalNodeIndex = 1;
     for (const auto &net : report.nets) {
+        // A net without a device pin or cell port is not connected to the
+        // circuit (for example an isolated well-tap island). Emitting its RC
+        // would add floating nodes that make the extracted deck unsolvable, so
+        // report it as a comment instead.
+        if (net.ports.empty()) {
+            text << "* Net " << net.name
+                 << ": no device terminal or pin; parasitic RC omitted so the deck stays solvable.\n\n";
+            continue;
+        }
         text << "* Net " << net.name;
         if (!net.ports.empty())
             text << " (" << joinNames(net.ports) << ")";

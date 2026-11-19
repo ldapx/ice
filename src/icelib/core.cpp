@@ -1379,17 +1379,26 @@ Project Project::deserialize(const std::string &text) {
     }
 }
 
-namespace {
-
-std::filesystem::path projectRoot(const std::filesystem::path &path) {
+std::filesystem::path projectRootDirectory(const std::filesystem::path &path) {
     if (path.empty())
         throw ProjectError("project.path", "Project path must not be empty");
     std::error_code status;
     if (std::filesystem::is_directory(path, status) && !status)
         return path;
-    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
-        return path.parent_path();
+    if (path.extension() == ".icepro" || path.filename() == "project.icepro") {
+        // A bare file name (for example `ice-cli pex project.icepro ...`) has an
+        // empty parent_path; callers must still target the current directory
+        // instead of trying to create an empty path.
+        auto root = path.parent_path();
+        return root.empty() ? std::filesystem::path{"."} : root;
+    }
     return path;
+}
+
+namespace {
+
+std::filesystem::path projectRoot(const std::filesystem::path &path) {
+    return projectRootDirectory(path);
 }
 
 std::string normalizedRoot(const std::filesystem::path &path) {

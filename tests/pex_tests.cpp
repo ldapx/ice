@@ -96,8 +96,10 @@ TEST_CASE("PEX ignores text and non-conducting layers and separates nets") {
     for (const auto &net : report.nets)
         CHECK(near(net.area, 1.0));
     const auto &text = project.schematicCells.at(report.schematicCell).spiceText;
-    CHECK(text.find("RPEX1 A PEXRC1") != std::string::npos);
-    CHECK(text.find("CPEX1 PEXRC1 0") != std::string::npos);
+    // Nets without a device pin or cell port are floating; their parasitic RC
+    // is reported as a comment instead of unsolvable floating nodes.
+    CHECK(text.find("RPEX1 A PEXRC1") == std::string::npos);
+    CHECK(text.find("no device terminal or pin") != std::string::npos);
 }
 
 TEST_CASE("PEX connects pin-purpose layers to their drawing layer") {
@@ -428,6 +430,48 @@ TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
     CHECK(report.devices[1].spiceLine.find(" B C 3p") != std::string::npos);
     CHECK(project.schematicCells.at(report.schematicCell).spiceText.find("planned layout device(s)") !=
           std::string::npos);
+}
+
+TEST_CASE("PEX keeps planned MOS terminal order without polygon extraction") {
+    ice::Project project;
+    project.identity = "pex-planned-mos";
+    project.name = "pex-planned-mos";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto metal = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto netD = ice::createLayoutNet(project, cell, "DRAIN");
+    const auto netG = ice::createLayoutNet(project, cell, "GATE");
+    const auto netS = ice::createLayoutNet(project, cell, "SOURCE");
+    const auto netB = ice::createLayoutNet(project, cell, "BULK");
+    ice::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netD);
+    ice::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netG);
+    ice::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netS);
+    ice::addRectangle(project, cell, metal, {15000, 0, 1000, 1000}, netB);
+
+    auto &layout = project.layoutCells.at(cell);
+    ice::PlannedDevice mos;
+    mos.id = project.nextId();
+    mos.name = "M1";
+    mos.device = "nfet";
+    mos.model = "sky130_fd_pr__nfet_01v8";
+    mos.parameters.push_back({project.nextId(), "w", "14u"});
+    mos.parameters.push_back({project.nextId(), "l", "1u"});
+    mos.terminals = {{"D", netD}, {"G", netG}, {"S", netS}, {"B", netB}};
+    mos.placeholder = false;
+    layout.plannedDevices.emplace(mos.id, mos);
+
+    // Polygon extraction is disabled: the planned metadata alone must provide
+    // the device, and its D/G/S/B order must come from the pin metadata rather
+    // than from the geometry, so mirrored and rotated instances stay correct.
+    ice::PexOptions options;
+    options.extractPolygonDevices = false;
+    const auto report = ice::runPex(project, cell, options);
+    CHECK(report.devices.size() == 1);
+    if (report.devices.size() != 1)
+        return;
+    CHECK(report.devices[0].type == "mos");
+    const std::vector<std::string> expectedNodes{"DRAIN", "GATE", "SOURCE", "BULK"};
+    CHECK(report.devices[0].nodes == expectedNodes);
+    CHECK(report.devices[0].spiceLine.find(" w=14u l=1u") != std::string::npos);
 }
 
 TEST_CASE("PEX copies the linked schematic device netlist") {

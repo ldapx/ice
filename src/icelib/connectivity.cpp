@@ -61,9 +61,11 @@ bool isNonConductingLayer(const std::string &name, const PdkConnectivity *declar
     const auto base = dot == std::string::npos ? lower : lower.substr(0, dot);
     if (dot != std::string::npos && lower.substr(dot + 1) == "res")
         return true;
+    // "tap" is a bulk-contact layer: it ties a well/substrate to a device
+    // terminal but never routes signal, so it must not create its own net.
     static const std::vector<std::string> markers = {"well",   "implant", "marker", "boundary", "outline",
                                                      "areaid", "mim",     "nsdm",   "psdm",     "nplus",
-                                                     "pplus",  "npc",     "label",  "text"};
+                                                     "pplus",  "npc",     "label",  "text",     "tap"};
     for (const auto &marker : markers) {
         if (base.find(marker) != std::string::npos)
             return true;

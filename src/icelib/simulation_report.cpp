@@ -34,14 +34,11 @@ std::string trimmed(std::string text) {
 }
 
 std::filesystem::path normalizedProjectRoot(const std::filesystem::path &path) {
-    if (path.empty())
+    try {
+        return projectRootDirectory(path);
+    } catch (const ProjectError &) {
         throw ProjectError("report.path", "Project root is empty");
-    std::error_code status;
-    if (std::filesystem::is_directory(path, status) && !status)
-        return path;
-    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
-        return path.parent_path();
-    return path;
+    }
 }
 
 void atomicWriteFile(const std::filesystem::path &path, const std::string &text) {

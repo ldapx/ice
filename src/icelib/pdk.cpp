@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -889,6 +890,56 @@ double pdkNetlistGeometryScale(const std::string &pdkId) {
     } catch (const std::exception &) {
         return 1.0;
     }
+}
+
+std::optional<double> netlistLengthNumber(const std::string &text, double geometryScale) {
+    const auto trimmed = trimCopy(text);
+    if (trimmed.empty())
+        return std::nullopt;
+    char *end = nullptr;
+    const auto number = std::strtod(trimmed.c_str(), &end);
+    if (end == trimmed.c_str())
+        return std::nullopt;
+    const auto suffix = lowerCopy(trimCopy(std::string(end)));
+    if (suffix.empty())
+        return std::nullopt;
+    double multiplier = 1.0;
+    if (suffix == "t")
+        multiplier = 1e12;
+    else if (suffix == "g")
+        multiplier = 1e9;
+    else if (suffix == "meg")
+        multiplier = 1e6;
+    else if (suffix == "k")
+        multiplier = 1e3;
+    else if (suffix == "m")
+        multiplier = 1e-3;
+    else if (suffix == "u")
+        multiplier = 1e-6;
+    else if (suffix == "n")
+        multiplier = 1e-9;
+    else if (suffix == "p")
+        multiplier = 1e-12;
+    else if (suffix == "f")
+        multiplier = 1e-15;
+    else
+        return std::nullopt;
+    if (!(geometryScale > 0.0))
+        return std::nullopt;
+    return number * multiplier / geometryScale;
+}
+
+std::string netlistLengthText(const std::string &text, double geometryScale) {
+    // Without a declared scale the netlist reads plain SPICE lengths, so an SI
+    // suffix is already correct and the text is left alone.
+    if (!(geometryScale > 0.0) || geometryScale == 1.0)
+        return text;
+    const auto value = netlistLengthNumber(text, geometryScale);
+    if (!value)
+        return text;
+    std::ostringstream formatted;
+    formatted << std::setprecision(12) << *value;
+    return formatted.str();
 }
 
 namespace {

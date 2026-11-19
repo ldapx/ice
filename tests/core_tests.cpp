@@ -4105,6 +4105,30 @@ TEST_CASE("project session keeps saving after undo and redo") {
     CHECK(reloaded.schematicCells.size() == 1);
 }
 
+TEST_CASE("netlist length conversion honours the PDK geometry scale") {
+    // SKY130 declares `.option scale=1u`, so device geometry must be written as
+    // a bare micrometer number instead of "14u" (which would scale twice).
+    CHECK(ice::netlistLengthText("14u", 1e-6) == "14");
+    CHECK(ice::netlistLengthText("1", 1e-6) == "1");
+    CHECK(ice::netlistLengthText("0.5u", 1e-6) == "0.5");
+    // No declared scale: keep the SPICE suffix.
+    CHECK(ice::netlistLengthText("14u", 1.0) == "14u");
+    CHECK(ice::netlistLengthText("not-a-length", 1e-6) == "not-a-length");
+    const auto value = ice::netlistLengthNumber("500n", 1e-6);
+    REQUIRE(value.has_value());
+    CHECK(*value > 0.499999);
+    CHECK(*value < 0.500001);
+}
+
+TEST_CASE("project root resolves bare file names to the current directory") {
+    // `ice-cli ... project.icepro` has an empty parent_path; the root must
+    // still be a real directory so saves and run artifacts do not fail.
+    CHECK(ice::projectRootDirectory("project.icepro") == std::filesystem::path("."));
+    CHECK(ice::projectRootDirectory("design.icepro") == std::filesystem::path("."));
+    CHECK(ice::projectRootDirectory("/tmp/design/project.icepro") == std::filesystem::path("/tmp/design"));
+    CHECK_THROWS_AS(ice::projectRootDirectory(""), ice::ProjectError);
+}
+
 TEST_CASE("replacing a session from disk leaves it clean") {
     const auto root = std::filesystem::temp_directory_path() / "ice-session-replace-test";
     std::filesystem::remove_all(root);
