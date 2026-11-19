@@ -596,12 +596,7 @@ std::string readStdin() {
 }
 
 std::filesystem::path projectRootForCli(const std::filesystem::path &path) {
-    std::error_code status;
-    if (std::filesystem::is_directory(path, status) && !status)
-        return path;
-    if (path.extension() == ".icepro" || path.filename() == "project.icepro")
-        return path.parent_path();
-    return path;
+    return ice::projectRootDirectory(path);
 }
 
 std::filesystem::path defaultProjectPath() {
@@ -3393,10 +3388,24 @@ int main(int argc, char **argv) {
             }
             if (args.size() >= 5 && !mixedSignal)
                 simulation.analysis = normalizeAnalysisName(args[4]);
-            if (args.size() >= 6)
-                simulation.stop = parseDouble(args[5], "stop time");
-            if (args.size() >= 7)
-                simulation.step = parseDouble(args[6], "step time");
+            // Frequency-domain analyses take [stop] as the sweep end and [step]
+            // as points per decade; time-domain analyses take stop/step.
+            if (args.size() >= 6) {
+                if (simulation.analysis == "ac")
+                    simulation.acStop = parseDouble(args[5], "ac stop frequency");
+                else if (simulation.analysis == "noise")
+                    simulation.noiseStop = parseDouble(args[5], "noise stop frequency");
+                else
+                    simulation.stop = parseDouble(args[5], "stop time");
+            }
+            if (args.size() >= 7) {
+                if (simulation.analysis == "ac")
+                    simulation.acPoints = std::max(1, static_cast<int>(parseDouble(args[6], "ac points per decade")));
+                else if (simulation.analysis == "noise")
+                    simulation.noisePoints = std::max(1, static_cast<int>(parseDouble(args[6], "noise points per decade")));
+                else
+                    simulation.step = parseDouble(args[6], "step time");
+            }
             if (args.size() >= 8) {
                 std::string signals;
                 for (std::size_t index = 7; index < args.size(); ++index) {

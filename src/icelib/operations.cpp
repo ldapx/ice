@@ -39,46 +39,10 @@ std::string trimLine(const std::string &text) {
     return text.substr(first, last - first + 1);
 }
 
-// Converts a length parameter to the units the netlist expects when a PDK
-// declares `.option scale=...`. Values with an SI suffix ("1u") are converted;
-// a bare number is already written in the netlist's own units (SKY130 writes
-// "60" meaning 60 um) and must be left untouched. Returns nullopt when the text
-// is not a plain length, so the caller can emit it verbatim.
+// Length conversion lives in pdk.cpp so PEX and the schematic netlister agree
+// on the units selected by `.option scale=...`.
 std::optional<double> scaledNetlistLength(const std::string &text, double geometryScale) {
-    const auto trimmed = trimLine(text);
-    if (trimmed.empty())
-        return std::nullopt;
-    char *end = nullptr;
-    const auto number = std::strtod(trimmed.c_str(), &end);
-    if (end == trimmed.c_str())
-        return std::nullopt;
-    const auto suffix = lower(trimLine(std::string(end)));
-    if (suffix.empty())
-        return std::nullopt;
-    double multiplier = 1.0;
-    if (suffix == "t")
-        multiplier = 1e12;
-    else if (suffix == "g")
-        multiplier = 1e9;
-    else if (suffix == "meg")
-        multiplier = 1e6;
-    else if (suffix == "k")
-        multiplier = 1e3;
-    else if (suffix == "m")
-        multiplier = 1e-3;
-    else if (suffix == "u")
-        multiplier = 1e-6;
-    else if (suffix == "n")
-        multiplier = 1e-9;
-    else if (suffix == "p")
-        multiplier = 1e-12;
-    else if (suffix == "f")
-        multiplier = 1e-15;
-    else
-        return std::nullopt;
-    if (!(geometryScale > 0.0))
-        return std::nullopt;
-    return number * multiplier / geometryScale;
+    return netlistLengthNumber(text, geometryScale);
 }
 
 bool isOwnedAnalysisDirective(const std::string &line) {

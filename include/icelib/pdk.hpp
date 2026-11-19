@@ -193,6 +193,18 @@ PdkSimulationSetup pdkSimulationSetupFor(const std::string &pdkId);
 // be resolved. Never throws, so netlist construction keeps working offline.
 double pdkNetlistGeometryScale(const std::string &pdkId);
 
+// Converts a length parameter to the units the netlist expects when a PDK
+// declares `.option scale=...`. Values with an SI suffix ("1u") are converted;
+// a bare number is already written in the netlist's own units (SKY130 writes
+// "60" meaning 60 um) and is left untouched. Returns nullopt when the text is
+// not a plain length so the caller can emit it verbatim.
+std::optional<double> netlistLengthNumber(const std::string &text, double geometryScale);
+
+// Same conversion, returning the text to emit. Unparseable values are returned
+// unchanged. This is what netlist writers should use so device geometry is not
+// scaled twice by a PDK preamble such as `.option scale=1u`.
+std::string netlistLengthText(const std::string &text, double geometryScale);
+
 // Returns the SPICE node names of a package subcircuit (for example the
 // terminal order of a bipolar model), read from the package model files. Used
 // to instantiate three and four terminal devices with the right node count.
