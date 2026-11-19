@@ -128,8 +128,11 @@ and Layout:
 - **Left:** a compact run row with the run selector and icon actions, followed
   by the `Runs` tree and a `Display` tree. In the physical workspace the tree
   shows the physical stages (Floorplan, Placement, CTS, Routing, Final) for
-  each run. Selecting a stage row switches the stage pane. The icon actions
-  are **Run stage**, **Run from here**, **Run all**, and **Cancel**; a small
+  each run. Selecting a stage row switches the stage pane. The selected stage
+  row shows a play action next to its status: it runs the flow from the first
+  unfinished stage up to that row (for example CTS runs Floorplan, Placement,
+  and CTS) and updates each stage's status as it goes. The icon actions are
+  **Run all** (Floorplan through Final) and **Cancel**; a small
   contextual hint below the row shows the next prerequisite, the ready action,
   or the last failure. Below the tree, **Open in OpenROAD GUI** launches the
   standalone viewer on the active ODB, and Final places **Import final as
@@ -183,9 +186,12 @@ PDK, creates a run, and runs Yosys
 elaboration; the table shows `elaborating` and then `elaborated`, and the run
 gets an `elaboration.svg` artifact. **Synthesize** prompts for a PDK and
 produces `synthesis.svg` plus the generic synthesized netlist `1_synth.v`.
+When the run's synthesis is already up to date it is disabled until the
+SystemVerilog source changes, so the same RTL cannot be synthesized twice.
 **Export .v** runs the Yosys technology-mapping step against the platform
-Liberty files, writes `synth/2_tech_map.v` directly into the run directory, and
-adds it to the synthesis artifact list. **Show graph** opens the elaboration
+Liberty files on the existing `1_synth.v` netlist — it does not elaborate or
+synthesize the RTL again — writes `synth/2_tech_map.v` directly into the run
+directory, and adds it to the synthesis artifact list. **Show graph** opens the elaboration
 and/or synthesis graph as document tabs. The remove button in a run row deletes
 that run from the project and removes its `build/impl` directory. Graph tabs
 render SVG and recolor Graphviz output to match the active dark or light theme.

@@ -189,6 +189,7 @@ class ImplementationPage : public QWidget {
   private:
     void buildUi();
     void refreshRunTree();
+    void updateStageRunButtons();
     void refreshRunCombo();
     void refreshExplorer();
     void applyHdlFilter(const QString &text);
@@ -201,6 +202,12 @@ class ImplementationPage : public QWidget {
     void updateRunActions();
     ice::ObjectId selectedRunId() const;
     ice::ObjectId actionRunId() const;
+    // First physical stage in floorplan..target that has not succeeded yet, or
+    // target when every stage up to it already succeeded.
+    static ice::ImplementationStage runStartStage(const ice::ImplementationRun &run, ice::ImplementationStage target);
+    // True when the run's RTL sources no longer match the snapshot prepared for
+    // its latest stage run, so a previous synthesis result is stale.
+    bool sourcesChangedSincePrepare(const ice::ImplementationRun &run) const;
     void showRunGraph(ice::ObjectId runId);
     QString runStageLabel(const ice::ImplementationRun &run) const;
     std::optional<std::string> promptPdk(const QString &title, const std::string &current);
@@ -295,9 +302,7 @@ class ImplementationPage : public QWidget {
     QSpinBox *threadsSpin_ = nullptr;
     QSpinBox *timeoutSpin_ = nullptr;
     QPushButton *applyStageButton_ = nullptr;
-    QPushButton *runStageButton_ = nullptr;
     QPushButton *cancelStageButton_ = nullptr;
-    QPushButton *runFromHereButton_ = nullptr;
     QPushButton *runAllButton_ = nullptr;
     QComboBox *runCombo_ = nullptr;
     QLabel *stageHintLabel_ = nullptr;

@@ -3018,10 +3018,12 @@ void ImplementationPage::buildUi() {
         leftTabs_->addTab(explorerPage, QStringLiteral("Explorer"));
     } else {
         runTree_ = new QTreeWidget;
-        runTree_->setHeaderLabels({QStringLiteral("Run / Stage"), QStringLiteral("Status")});
+        runTree_->setHeaderLabels({QStringLiteral("Run / Stage"), QStringLiteral("Status"), QString()});
         runTree_->setRootIsDecorated(true);
         runTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
         runTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        runTree_->header()->setSectionResizeMode(2, QHeaderView::Fixed);
+        runTree_->setColumnWidth(2, 26);
         QWidget *runsPage = nullptr;
         if (physicalStageMode()) {
             runsPage = new QWidget;
@@ -3047,11 +3049,8 @@ void ImplementationPage::buildUi() {
                     runRow->addWidget(button);
                     return button;
                 };
-                runStageButton_ = addIconButton(QStringLiteral("play"), QStringLiteral("Run selected stage"));
-                runFromHereButton_ =
-                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run from this stage through final"));
                 runAllButton_ =
-                    addIconButton(QStringLiteral("grid-3x3"), QStringLiteral("Run floorplan through final"));
+                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run floorplan through final"));
                 cancelStageButton_ = addIconButton(QStringLiteral("x"), QStringLiteral("Cancel the active process"));
                 cancelStageButton_->setEnabled(false);
                 runsLayout->addLayout(runRow);
@@ -3100,12 +3099,11 @@ void ImplementationPage::buildUi() {
             if (!embedded_) {
                 auto *runActions = new QHBoxLayout;
                 runActions->setSpacing(4);
-                const auto runLabel =
-                    stage_ == ice::ImplementationStage::cts ? QStringLiteral("CTS") : stageTitle(stage_).toLower();
-                runStageButton_ = new QPushButton(QStringLiteral("Run %1").arg(runLabel));
+                runAllButton_ = new QPushButton(QStringLiteral("Run all stages"));
+                runAllButton_->setToolTip(QStringLiteral("Run floorplan through final"));
                 cancelStageButton_ = new QPushButton(QStringLiteral("Cancel"));
                 cancelStageButton_->setEnabled(false);
-                runActions->addWidget(runStageButton_, 1);
+                runActions->addWidget(runAllButton_, 1);
                 runActions->addWidget(cancelStageButton_);
                 runsLayout->addLayout(runActions);
             }
@@ -3802,6 +3800,7 @@ void ImplementationPage::buildUi() {
                 exportVerilogCallback_(id);
         });
     } else {
+        QObject::connect(runTree_, &QTreeWidget::currentItemChanged, this, [this] { updateStageRunButtons(); });
         QObject::connect(
             runTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *) {
                 if (!item)
@@ -3850,20 +3849,6 @@ void ImplementationPage::buildUi() {
                     previewCanvas_->setShowBlockages(visible);
             });
         }
-        if (runStageButton_) {
-            QObject::connect(runStageButton_, &QPushButton::clicked, this, [this] {
-                if (!controller_->activeRun() || controller_->busy())
-                    return;
-                controller_->run(stage_, stage_);
-            });
-        }
-        if (runFromHereButton_) {
-            QObject::connect(runFromHereButton_, &QPushButton::clicked, this, [this] {
-                if (!controller_->activeRun() || controller_->busy())
-                    return;
-                controller_->run(stage_, ice::ImplementationStage::final);
-            });
-        }
         if (runAllButton_) {
             QObject::connect(runAllButton_, &QPushButton::clicked, this, [this] {
                 if (!controller_->activeRun() || controller_->busy())
@@ -3887,6 +3872,66 @@ void ImplementationPage::buildUi() {
             QObject::connect(applyStageButton_, &QPushButton::clicked, this, [this] { applyStageForm(); });
         }
     }
+}
+
+ice::ImplementationStage ImplementationPage::runStartStage(const ice::ImplementationRun &run,
+                                                           ice::ImplementationStage target) {
+    for (const auto stage : ice::implementationStages()) {
+        if (static_cast<int>(stage) < static_cast<int>(ice::ImplementationStage::floorplan) ||
+            static_cast<int>(stage) > static_cast<int>(target))
+            continue;
+        const auto state = run.stages.find(stage);
+        if (state == run.stages.end() || state->second.status != ice::ImplementationStageStatus::succeeded)
+            return stage;
+    }
+    return target;
+}
+
+bool ImplementationPage::sourcesChangedSincePrepare(const ice::ImplementationRun &run) const {
+    const auto *project = controller_->project();
+    if (!project || run.directory.empty())
+        return true;
+    const auto projectRoot = std::filesystem::path(controller_->projectRoot().toStdString());
+    const auto readText = [](const std::filesystem::path &path, std::string &text) {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream)
+            return false;
+        text.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+        return true;
+    };
+    // prepareImplementationRun copies every source into build/impl/<run>/rtl/,
+    // so the snapshots tell us what the last stage actually consumed.
+    std::vector<std::string> snapshots;
+    std::error_code status;
+    const auto rtlDirectory = projectRoot / run.directory / "rtl";
+    for (std::filesystem::directory_iterator iterator(rtlDirectory, status), end; !status && iterator != end;
+         iterator.increment(status)) {
+        if (!iterator->is_regular_file())
+            continue;
+        const auto extension = iterator->path().extension();
+        if (extension != ".sv" && extension != ".v")
+            continue;
+        std::string text;
+        if (readText(iterator->path(), text))
+            snapshots.push_back(std::move(text));
+    }
+    const auto contains = [&](const std::string &text) {
+        return std::find(snapshots.begin(), snapshots.end(), text) != snapshots.end();
+    };
+    for (const auto cellId : run.config.sourceCells) {
+        const auto cell = project->schematicCells.find(cellId);
+        if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+            return true;
+        if (!contains(cell->second.systemVerilogText))
+            return true;
+    }
+    for (const auto &source : run.config.sources) {
+        const auto sourcePath = source.is_absolute() ? source : (projectRoot / source).lexically_normal();
+        std::string text;
+        if (!readText(sourcePath, text) || !contains(text))
+            return true;
+    }
+    return false;
 }
 
 void ImplementationPage::refreshRunTree() {
@@ -3977,8 +4022,60 @@ void ImplementationPage::refreshRunTree() {
     if (selection) {
         if (auto *parent = selection->parent())
             parent->setExpanded(true);
+
         runTree_->setCurrentItem(selection);
         runTree_->scrollToItem(selection);
+    }
+    updateStageRunButtons();
+}
+
+void ImplementationPage::updateStageRunButtons() {
+    if (!runTree_)
+        return;
+    const auto *project = controller_->project();
+    const auto *current = runTree_->currentItem();
+    const bool currentIsStage = current && current->data(0, Qt::UserRole + 1).isValid();
+    for (int runIndex = 0; runIndex < runTree_->topLevelItemCount(); ++runIndex) {
+        auto *runItem = runTree_->topLevelItem(runIndex);
+        for (int stageIndex = 0; stageIndex < runItem->childCount(); ++stageIndex) {
+            auto *stageItem = runItem->child(stageIndex);
+            // Only the selected stage row carries the run action.
+            runTree_->removeItemWidget(stageItem, 2);
+            if (!project || !currentIsStage || stageItem != current)
+                continue;
+            const auto id = static_cast<ice::ObjectId>(stageItem->data(0, Qt::UserRole).toULongLong());
+            const auto found = project->implementationRuns.find(id);
+            if (found == project->implementationRuns.end())
+                continue;
+            const auto &run = found->second;
+            const auto stage = static_cast<ice::ImplementationStage>(stageItem->data(0, Qt::UserRole + 1).toInt());
+            const auto synthesis = run.stages.find(ice::ImplementationStage::synthesis);
+            const bool canRun = !controller_->busy() && synthesis != run.stages.end() &&
+                                synthesis->second.status == ice::ImplementationStageStatus::succeeded;
+            const auto from = runStartStage(run, stage);
+            auto *runButton = new QPushButton;
+            runButton->setFixedSize(22, 20);
+            runButton->setFlat(true);
+            runButton->setFocusPolicy(Qt::NoFocus);
+            setLucideIcon(runButton, QStringLiteral("play"), 14);
+            runButton->setEnabled(canRun);
+            runButton->setToolTip(from == stage
+                                      ? QStringLiteral("Run %1").arg(stageTitle(stage))
+                                      : QStringLiteral("Run %1 through %2").arg(stageTitle(from), stageTitle(stage)));
+            runButton->setAccessibleName(runButton->toolTip());
+            QObject::connect(runButton, &QPushButton::clicked, this, [this, id, from, stage] {
+                // The click rebuilds the runs tree via the active-run refresh, so
+                // start the run after the button's signal has finished.
+                QTimer::singleShot(0, this, [this, id, from, stage] {
+                    if (controller_->busy())
+                        return;
+                    if (controller_->activeRunId() != id)
+                        controller_->setActiveRunId(id);
+                    controller_->run(from, stage);
+                });
+            });
+            runTree_->setItemWidget(stageItem, 2, runButton);
+        }
     }
 }
 
@@ -4010,6 +4107,7 @@ void ImplementationPage::selectRunStage(ice::ObjectId runId, std::optional<ice::
     runItem->setExpanded(true);
     runTree_->setCurrentItem(selection);
     runTree_->scrollToItem(selection);
+    updateStageRunButtons();
 }
 
 void ImplementationPage::refreshRunCombo() {
@@ -4132,45 +4230,38 @@ void ImplementationPage::updateStageActions() {
             else if (!mapped)
                 hint = QStringLiteral("Export a technology-mapped netlist from the Synthesis tab first.");
             else
-                hint = QStringLiteral("Run the floorplan stage for the active run.");
+                hint = QStringLiteral("Use the play button on a stage row to run the flow up to that stage.");
         } else if (stage_ == ice::ImplementationStage::placement) {
             ready = status(ice::ImplementationStage::floorplan) == ice::ImplementationStageStatus::succeeded;
-            hint = ready ? QStringLiteral("Run the placement stage for the active run.")
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
                          : QStringLiteral("Run floorplan first.");
         } else if (stage_ == ice::ImplementationStage::cts) {
             if (!run->config.ctsEnabled) {
                 hint = QStringLiteral("CTS is disabled in the stage settings.");
             } else {
                 ready = status(ice::ImplementationStage::placement) == ice::ImplementationStageStatus::succeeded;
-                hint = ready ? QStringLiteral("Run the CTS stage for the active run.")
+                hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
                              : QStringLiteral("Run placement first.");
             }
         } else if (stage_ == ice::ImplementationStage::routing) {
             const auto prerequisite =
                 run->config.ctsEnabled ? ice::ImplementationStage::cts : ice::ImplementationStage::placement;
             ready = status(prerequisite) == ice::ImplementationStageStatus::succeeded;
-            hint = ready ? QStringLiteral("Run the routing stage for the active run.")
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
                          : (run->config.ctsEnabled ? QStringLiteral("Run CTS first.")
                                                    : QStringLiteral("Run placement first."));
         } else if (stage_ == ice::ImplementationStage::final) {
             ready = status(ice::ImplementationStage::routing) == ice::ImplementationStageStatus::succeeded;
-            hint = ready ? QStringLiteral("Run the final extraction and sign-off stage for the active run.")
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
                          : QStringLiteral("Run routing first.");
         }
     }
     stageReady_ = run && ready;
     stageHint_ = hint;
+    // Run all starts at floorplan, which maps the netlist automatically when
+    // synthesis has succeeded, so the run only needs a synthesized design.
     const bool flowReady =
-        run && (status(ice::ImplementationStage::floorplan) == ice::ImplementationStageStatus::succeeded ||
-                (stage_ == ice::ImplementationStage::floorplan && ready));
-    if (runStageButton_) {
-        runStageButton_->setEnabled(run && !busy && ready);
-        runStageButton_->setToolTip(hint);
-    }
-    if (runFromHereButton_) {
-        runFromHereButton_->setEnabled(run && !busy && ready);
-        runFromHereButton_->setToolTip(QStringLiteral("Run %1 through final.").arg(stageTitle(stage_)));
-    }
+        run && status(ice::ImplementationStage::synthesis) == ice::ImplementationStageStatus::succeeded;
     if (runAllButton_) {
         runAllButton_->setEnabled(!busy && flowReady);
         runAllButton_->setToolTip(QStringLiteral("Run floorplan through final."));
@@ -4610,7 +4701,14 @@ void ImplementationPage::updateRunActions() {
         stageStatus(ice::ImplementationStage::elaboration) == ice::ImplementationStageStatus::succeeded;
     const bool synthesized =
         stageStatus(ice::ImplementationStage::synthesis) == ice::ImplementationStageStatus::succeeded;
-    synthesizeButton_->setEnabled(elaborated && !busy);
+    // A successful synthesis stays final until the RTL changes, so do not let
+    // the same sources be synthesized repeatedly.
+    const bool synthesisCurrent = synthesized && !sourcesChangedSincePrepare(*run);
+    synthesizeButton_->setEnabled(elaborated && !busy && !synthesisCurrent);
+    synthesizeButton_->setToolTip(
+        synthesisCurrent ? QStringLiteral("Synthesis is up to date. Edit the SystemVerilog source to synthesize again.")
+        : !elaborated    ? QStringLiteral("Elaborate the design first.")
+                         : QStringLiteral("Synthesize the elaborated design."));
     showGraphButton_->setEnabled((elaborated || synthesized) && !busy);
     exportVerilogButton_->setEnabled(synthesized && !busy);
 }
@@ -5111,8 +5209,9 @@ void ImplementationPage::refresh() {
 
 void ImplementationPage::showEvent(QShowEvent *event) {
     QWidget::showEvent(event);
-    if (previewCanvas_)
-        refreshPreview();
+    // Pick up edits made in other tabs (for example RTL changes that make a
+    // synthesis result stale) without waiting for the next project change.
+    refresh();
 }
 
 void ImplementationPage::refreshMetrics() {

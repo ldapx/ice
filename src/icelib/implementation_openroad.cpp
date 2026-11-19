@@ -616,12 +616,12 @@ ImplementationMapResult mapImplementationRun(ImplementationRun &run, const Imple
         return result;
     }
     const auto runDirectory = projectRoot / run.directory;
-    auto scriptPath = runDirectory / implementationTechnologyMapScriptRelativePath();
-    std::error_code scriptStatus;
-    if (!std::filesystem::is_regular_file(scriptPath, scriptStatus) || scriptStatus)
-        scriptPath = writeTechnologyMapScript(run, platform, projectRoot);
+    // Regenerate the mapping script so mapping always targets the synthesized
+    // netlist and picks up the current Liberty data, even for existing runs.
+    const auto scriptPath = writeTechnologyMapScript(run, platform, projectRoot);
     if (scriptPath.empty()) {
-        result.error = "Unable to generate the technology-mapping script. The run needs RTL sources and Liberty data.";
+        result.error =
+            "Unable to generate the technology-mapping script. The run needs a synthesized netlist and Liberty data.";
         return result;
     }
     const auto toolchain = discoverImplementationToolchain();
