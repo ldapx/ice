@@ -279,7 +279,7 @@ Initial core technologies:
 | **ngspice**       | SPICE simulation                             |
 | **Python**        | User-facing scripting and automation         |
 | **nanobind**      | C++ to Python bindings                       |
-| **gdstk**         | GDSII/OASIS layout interchange               |
+| **zlib**          | OASIS `CBLOCK` decompression                 |
 | **Spatial index** | Fast geometry queries                        |
 | **toml++**        | TOML parsing for packages and configuration  |
 | **spdlog**        | Logging                                      |
@@ -1062,6 +1062,19 @@ ICE Layout DB
 
 The external format should never become the internal database representation.
 
+The current GDSII adapter reads structures as layout cells, including
+`SREF`/`AREF` placement, `BOUNDARY`, `PATH`, `BOX`, `TEXT`, and units. Orthogonal
+references become layout instances; arrays are expanded into instances.
+Non-orthogonal or scaled references are flattened into their parent cell with a
+warning because the canonical layout instance transform is limited to the eight
+orthogonal/mirror orientations. The writer preserves reachable cell hierarchy
+by default and emits `SREF` records; a flattened single-structure export remains
+available. OASIS 1.0 import/export is implemented natively against the same
+internal model: the reader handles cell-name tables, modal placement and
+geometry state, repetitions, properties, trapezoids, circles, and zlib
+`CBLOCK` compression; the writer emits uncompressed hierarchical OASIS with a
+cell-name table. Neither path depends on KLayout or a GDS intermediate file.
+
 ---
 
 ## 24. Package Manager
@@ -1715,7 +1728,7 @@ ICE Application API
 Domain Model
  │
  ├── Schematic
- ├── Layout
+ ├── Layout ──▶ Native GDSII/OASIS interchange
  ├── Simulation
  ├── PDK
  ├── Packages
@@ -1727,7 +1740,6 @@ Backend adapters
  ├── Clipper2
  ├── ALIGN
  ├── ngspice
- ├── GDS/OASIS
  └── other tools
 ```
 
@@ -1789,6 +1801,7 @@ agentsdk-cpp (bundled submodule; shared MCP server + ACP client library; pulls i
 toml++ (TOML parsing)
 spdlog (logging)
 nanobind (C++ to Python bindings)
+zlib (OASIS CBLOCK decompression)
 ```
 
 ### Domain backends
@@ -1796,7 +1809,6 @@ nanobind (C++ to Python bindings)
 ```text
 ngspice
 ALIGN
-gdstk (GDSII/OASIS layout interchange)
 Spatial index
 ```
 

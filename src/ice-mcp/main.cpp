@@ -4028,13 +4028,8 @@ class IceMcpServer {
             const auto cell = resolveLayoutCell(session.project(), arguments);
             const auto path = requiredString(arguments, "path");
             const bool flatten = optionalBoolean(arguments, "flatten", false);
-            if (flatten)
-                ice::LayoutInterchange::exportFlattenedGds(session.project(), cell, path);
-            else
-                ice::LayoutInterchange::exportGds(session.project(), cell, path);
-            // The GDS writer emits a single structure, so instance-bearing
-            // cells are always flattened to preserve child geometry.
-            return {{"cell", cell}, {"path", path}, {"flattened", true}};
+            const auto topCell = ice::LayoutInterchange::exportStream(session.project(), cell, path, flatten);
+            return {{"cell", cell}, {"path", path}, {"flattened", flatten}, {"top_cell", topCell}};
         }
         if (name == "layout_export_lef") {
             const auto cell = resolveLayoutCell(session.project(), arguments);
@@ -5068,14 +5063,13 @@ class IceMcpServer {
                             .with_description("Extract nets from explicit layout nets and same-layer geometry.")
                             .with_string_param("cell", "Layout cell name or id")
                             .build());
-        tools.push_back(
-            tool_builder("layout_export_gds")
-                .with_description("Export a layout cell to GDSII, including pins and labels. "
-                                  "Instance hierarchy is flattened into one structure.")
-                .with_string_param("cell", "Layout cell name or id")
-                .with_string_param("path", "Output GDS path")
-                .with_boolean_param("flatten", "Accepted for compatibility; exports are always flattened", false)
-                .build());
+        tools.push_back(tool_builder("layout_export_gds")
+                            .with_description("Export a layout cell to GDSII or OASIS, including pins and labels. "
+                                              "Instance hierarchy is preserved unless flatten=true.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("path", "Output GDSII/OASIS path")
+                            .with_boolean_param("flatten", "Flatten instance hierarchy into one structure", false)
+                            .build());
         tools.push_back(tool_builder("layout_export_lef")
                             .with_description("Export layout pin metadata as a minimal LEF macro.")
                             .with_string_param("cell", "Layout cell name or id")

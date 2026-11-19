@@ -52,7 +52,8 @@ struct LayoutDrcOptions {
     // Flatten instances before exporting. Normal DRC usually needs this for
     // hierarchical layouts; the default matches the GUI action.
     bool flatten = true;
-    // Empty uses TOP, the cell name written by ICE's GDS exporter.
+    // Empty uses the exported top structure name: TOP for flattened output or
+    // the layout cell's sanitized GDSII name for hierarchical output.
     std::string topCell;
     std::string suite = "main";
     int timeoutSeconds = 0;

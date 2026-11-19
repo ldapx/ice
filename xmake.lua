@@ -105,7 +105,7 @@ target("icelib")
     -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
     -- TODO: replace hardcoded /usr paths with packaged deps or pkg-config checks.
     add_includedirs("/usr/include/toml++", "/usr/include")
-    add_links("crypto")
+    add_links("crypto", "z")
     add_includedirs("/usr/include/ngspice")
     add_links("ngspice")
 

@@ -130,7 +130,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_add_instance` | Instance another layout cell. |
 | `layout_info` | Read a layout cell's pins, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
-| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels. Instance hierarchy is always flattened into one structure so child geometry is preserved. |
+| `layout_export_gds` | Export a layout cell to GDSII or OASIS, including pins and labels. Instance hierarchy is preserved unless `flatten=true`; GDSII and OASIS are written natively. |
 | `layout_export_lef` | Export pins as a minimal LEF macro. |
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
 | `layout_import_def` | Import a routed DEF into the open project as a layout cell. |

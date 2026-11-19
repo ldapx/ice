@@ -30,7 +30,7 @@ CLI invokes the same operations through `ProjectSession`.
 | Create a digital device from final GDS/OASIS | Yes | CLI/MCP/Python | `implementation-import` | `Project.import_implementation_layout` |
 | Stream final GDS | Yes | Physical Design artifacts | `implementation-export-gds` | Core API |
 | Run DRC with a PDK deck | Yes | Tools → Run DRC | `drc` | Core API |
-| Import GDS into Layout | Yes | Layout import | `layout-import-gds` | Core API |
+| Import/export GDSII or OASIS hierarchy | Yes | Layout interchange | `layout-import-gds`, `layout-export-gds` | Core API |
 | Spatial query | Yes | Layout integration | Core API | Core API |
 
 Python bindings are an optional `icepy` build surface because nanobind and

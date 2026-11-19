@@ -1,12 +1,19 @@
 #include "icelib/interchange.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/process.hpp"
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <set>
+#include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 struct InterchangeFixture {
@@ -34,6 +41,51 @@ InterchangeFixture makeFixture() {
 
 std::filesystem::path temporaryPath(const std::string &name) {
     return std::filesystem::temp_directory_path() / ("ice-" + name);
+}
+
+std::optional<std::filesystem::path> findTool(const std::string &name) {
+    const auto check = [](const std::filesystem::path &path) -> std::optional<std::filesystem::path> {
+        std::error_code status;
+        if (std::filesystem::is_regular_file(path, status) && !status)
+            return path;
+        return std::nullopt;
+    };
+    std::string environmentName = "ICE_";
+    for (const char character : name)
+        environmentName.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(character))));
+    if (const auto *overridePath = std::getenv(environmentName.c_str()); overridePath && *overridePath) {
+        if (const auto found = check(overridePath))
+            return found;
+    }
+    if (const auto *path = std::getenv("PATH"); path && *path) {
+        std::stringstream entries(path);
+        std::string entry;
+        while (std::getline(entries, entry, ':')) {
+            if (entry.empty())
+                entry = ".";
+            if (const auto found = check(std::filesystem::path(entry) / name))
+                return found;
+        }
+    }
+    return std::nullopt;
+}
+
+bool runKlayoutScript(const std::filesystem::path &script) {
+    const auto klayout = findTool("klayout");
+    if (!klayout)
+        return false;
+    ice::ProcessOptions options;
+    options.arguments = {klayout->string(), "-b", "-z", "-r", script.string()};
+    options.logPath = script.parent_path() / (script.stem().string() + ".log");
+    options.timeoutSeconds = 300;
+    return ice::runProcess(options).succeeded();
+}
+
+std::filesystem::path writeKlayoutScript(const std::string &name, const std::string &body) {
+    const auto path = temporaryPath(name + ".py");
+    std::ofstream script(path, std::ios::binary | std::ios::trunc);
+    script << body;
+    return path;
 }
 
 std::string readFile(const std::filesystem::path &path) {
@@ -197,4 +249,201 @@ TEST_CASE("GDS import recovers pin labels when a label layer is configured") {
     CHECK(output->label == "VOUT");
     CHECK(input->rectangle.width == 2000);
     CHECK(input->rectangle.height == 3000);
+}
+
+TEST_CASE("GDS import preserves paths, boxes, SREF, and AREF hierarchy") {
+    if (!findTool("klayout"))
+        return;
+    const auto gds = temporaryPath("external-hierarchy.gds");
+    std::ostringstream body;
+    body << "import pya\n"
+         << "layout = pya.Layout()\n"
+         << "layout.dbu = 0.001\n"
+         << "top = layout.create_cell(\"top\")\n"
+         << "leaf = layout.create_cell(\"leaf\")\n"
+         << "leaf.shapes(layout.layer(1, 0)).insert(pya.Box(0, 0, 100, 100))\n"
+         << "top.shapes(layout.layer(2, 0)).insert(pya.Path([pya.Point(0, 0), pya.Point(1000, 0)], 100))\n"
+         << "top.shapes(layout.layer(3, 0)).insert(pya.Box(2000, 0, 2100, 100))\n"
+         << "top.insert(pya.CellInstArray(leaf.cell_index(), pya.Trans(pya.Vector(4000, 0))))\n"
+         << "top.insert(pya.CellInstArray(leaf.cell_index(), pya.Trans(pya.Vector(5000, 0)), "
+            "pya.Vector(200, 0), pya.Vector(0, 200), 2, 2))\n"
+         << "layout.write(\"" << gds.generic_string() << "\")\n";
+    const auto script = writeKlayoutScript("external-hierarchy", body.str());
+    REQUIRE(runKlayoutScript(script));
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    std::filesystem::remove(gds);
+    std::filesystem::remove(script);
+    std::filesystem::remove(script.parent_path() / (script.stem().string() + ".log"));
+
+    REQUIRE(imported.layoutCells.size() == 2);
+    const auto &top = imported.layoutCells.begin()->second;
+    CHECK(top.name == "top");
+    CHECK(top.instances.size() == 5);
+    CHECK(top.shapes.size() == 2);
+    bool foundPath = false;
+    bool foundBox = false;
+    for (const auto &[_, shape] : top.shapes) {
+        if (shape.isPath()) {
+            foundPath = shape.centerline.size() == 2 && shape.width == 100;
+        } else if (shape.rectangle.x == 2000 && shape.rectangle.width == 100 && shape.rectangle.height == 100) {
+            foundBox = true;
+        }
+    }
+    CHECK(foundPath);
+    CHECK(foundBox);
+    std::multiset<std::pair<ice::Coordinate, ice::Coordinate>> positions;
+    for (const auto &[_, instance] : top.instances)
+        positions.emplace(instance.x, instance.y);
+    CHECK(positions.contains({4000, 0}));
+    CHECK(positions.contains({5000, 0}));
+    CHECK(positions.contains({5200, 0}));
+    CHECK(positions.contains({5000, 200}));
+    CHECK(positions.contains({5200, 200}));
+}
+
+TEST_CASE("GDS import scales database units to nanometres") {
+    if (!findTool("klayout"))
+        return;
+    const auto gds = temporaryPath("units.gds");
+    std::ostringstream body;
+    body << "import pya\n"
+         << "layout = pya.Layout()\n"
+         << "layout.dbu = 0.0005\n"
+         << "top = layout.create_cell(\"top\")\n"
+         << "top.shapes(layout.layer(1, 0)).insert(pya.Box(0, 0, 1000, 1000))\n"
+         << "layout.write(\"" << gds.generic_string() << "\")\n";
+    const auto script = writeKlayoutScript("units", body.str());
+    REQUIRE(runKlayoutScript(script));
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    std::filesystem::remove(gds);
+    std::filesystem::remove(script);
+    std::filesystem::remove(script.parent_path() / (script.stem().string() + ".log"));
+    REQUIRE(imported.layoutCells.size() == 1);
+    const auto &cell = imported.layoutCells.begin()->second;
+    REQUIRE(cell.shapes.size() == 1);
+    CHECK(cell.shapes.begin()->second.rectangle.width == 500);
+    CHECK(cell.shapes.begin()->second.rectangle.height == 500);
+}
+
+TEST_CASE("OASIS import and export preserve hierarchy and pins") {
+    ice::Project project;
+    project.identity = "oasis-hierarchy";
+    project.name = "oasis-hierarchy";
+    const auto layer = ice::addLayer(project, "Metal1", 34);
+    const auto leaf = ice::createLayoutCell(project, "leaf");
+    ice::addRectangle(project, leaf, layer, ice::Rect{0, 0, 100, 100});
+    ice::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, ice::PortDirection::input, ice::PortSide::left, 0, "IN");
+    const auto parent = ice::createLayoutCell(project, "parent");
+    ice::addLayoutInstance(project, parent, leaf, "U1", 1000, 2000, ice::Orientation::r90);
+
+    const auto oasis = temporaryPath("hierarchy.oas");
+    ice::LayoutInterchange::exportStream(project, parent, oasis, false);
+    ice::LayoutImportOptions options;
+    options.pinLabelLayer = 34;
+    const auto imported = ice::LayoutInterchange::importOasis(oasis, options);
+    CHECK(imported.layoutCells.size() == 2);
+    const auto &top = imported.layoutCells.begin()->second;
+    CHECK(top.name == "parent");
+    REQUIRE(top.instances.size() == 1);
+    CHECK(top.instances.begin()->second.orientation == ice::Orientation::r90);
+    const auto child = imported.layoutCells.find(top.instances.begin()->second.cell);
+    REQUIRE(child != imported.layoutCells.end());
+    CHECK(child->second.name == "leaf");
+    CHECK(child->second.ports.size() == 1);
+
+    const auto inMemoryFlat = ice::LayoutInterchange::flattenProject(imported, top.id);
+    REQUIRE(inMemoryFlat.layoutCells.size() == 1);
+    CHECK(inMemoryFlat.layoutCells.begin()->second.instances.empty());
+    CHECK(!inMemoryFlat.layoutCells.begin()->second.shapes.empty());
+
+    const auto flat = temporaryPath("hierarchy-flat.oas");
+    ice::LayoutInterchange::exportStream(project, parent, flat, true);
+    const auto flattened = ice::LayoutInterchange::importStream(flat, options);
+    CHECK(flattened.layoutCells.size() == 1);
+    CHECK(flattened.layoutCells.begin()->second.instances.empty());
+    bool foundLeaf = false;
+    for (const auto &[_, shape] : flattened.layoutCells.begin()->second.shapes) {
+        if (shape.rectangle.width == 100 && shape.rectangle.height == 100)
+            foundLeaf = true;
+    }
+    CHECK(foundLeaf);
+    std::filesystem::remove(oasis);
+    std::filesystem::remove(flat);
+}
+
+TEST_CASE("OASIS instance orientations round-trip") {
+    const std::array<ice::Orientation, 8> orientations = {
+        ice::Orientation::r0, ice::Orientation::r90, ice::Orientation::r180, ice::Orientation::r270,
+        ice::Orientation::mx, ice::Orientation::my,  ice::Orientation::m45,  ice::Orientation::m135,
+    };
+    for (const auto orientation : orientations) {
+        ice::Project project;
+        project.identity = "oasis-orientation";
+        project.name = "oasis-orientation";
+        const auto child = ice::createLayoutCell(project, "child");
+        const auto parent = ice::createLayoutCell(project, "parent");
+        ice::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
+        const auto oasis = temporaryPath("orientation.oas");
+        ice::LayoutInterchange::exportStream(project, parent, oasis, false);
+        const auto imported = ice::LayoutInterchange::importStream(oasis);
+        std::filesystem::remove(oasis);
+        REQUIRE(imported.layoutCells.size() == 2);
+        const auto &top = imported.layoutCells.begin()->second;
+        REQUIRE(top.instances.size() == 1);
+        CHECK(top.instances.begin()->second.orientation == orientation);
+        CHECK(top.instances.begin()->second.x == 100);
+        CHECK(top.instances.begin()->second.y == 200);
+    }
+}
+
+TEST_CASE("GDS export and import preserve simple path records") {
+    ice::Project project;
+    project.identity = "gds-path";
+    project.name = "gds-path";
+    const auto layer = ice::addLayer(project, "Metal1", 34);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto pathId = project.nextId();
+    ice::Shape path{pathId, layer, std::nullopt, {0, 0, 1000, 500}, {}};
+    path.centerline = {{0, 0}, {1000, 0}, {1000, 500}};
+    path.width = 100;
+    project.layoutCells.at(cell).shapes.emplace(pathId, path);
+
+    const auto gds = temporaryPath("path.gds");
+    ice::LayoutInterchange::exportGds(project, cell, gds);
+    const auto imported = ice::LayoutInterchange::importGds(gds);
+    std::filesystem::remove(gds);
+    REQUIRE(imported.layoutCells.size() == 1);
+    const auto &importedCell = imported.layoutCells.begin()->second;
+    REQUIRE(importedCell.shapes.size() == 1);
+    const auto &importedPath = importedCell.shapes.begin()->second;
+    CHECK(importedPath.isPath());
+    CHECK(importedPath.width == 100);
+    REQUIRE(importedPath.centerline.size() == 3);
+    CHECK(importedPath.centerline[2].x == 1000);
+    CHECK(importedPath.centerline[2].y == 500);
+}
+
+TEST_CASE("GDS instance orientations round-trip") {
+    const std::array<ice::Orientation, 8> orientations = {
+        ice::Orientation::r0, ice::Orientation::r90, ice::Orientation::r180, ice::Orientation::r270,
+        ice::Orientation::mx, ice::Orientation::my,  ice::Orientation::m45,  ice::Orientation::m135,
+    };
+    for (const auto orientation : orientations) {
+        ice::Project project;
+        project.identity = "gds-orientation";
+        project.name = "gds-orientation";
+        const auto child = ice::createLayoutCell(project, "child");
+        const auto parent = ice::createLayoutCell(project, "parent");
+        ice::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
+        const auto gds = temporaryPath("orientation.gds");
+        ice::LayoutInterchange::exportGds(project, parent, gds);
+        const auto imported = ice::LayoutInterchange::importGds(gds);
+        std::filesystem::remove(gds);
+        REQUIRE(imported.layoutCells.size() == 2);
+        const auto &top = imported.layoutCells.begin()->second;
+        REQUIRE(top.instances.size() == 1);
+        CHECK(top.instances.begin()->second.orientation == orientation);
+        CHECK(top.instances.begin()->second.x == 100);
+        CHECK(top.instances.begin()->second.y == 200);
+    }
 }

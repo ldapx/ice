@@ -849,8 +849,6 @@ TEST_CASE("implementation import creates a native digital device") {
             const auto parentGds = root / "digital-parent.gds";
             bool exported = true;
             try {
-                // Plain exportGds must flatten instance-bearing cells instead
-                // of dropping the digital child geometry.
                 ice::LayoutInterchange::exportGds(loaded, parent.id, parentGds);
             } catch (const std::exception &) {
                 exported = false;
@@ -858,7 +856,34 @@ TEST_CASE("implementation import creates a native digital device") {
             CHECK(exported);
             CHECK(std::filesystem::is_regular_file(parentGds));
             if (exported) {
-                const auto flattened = ice::LayoutInterchange::importGds(parentGds);
+                const auto hierarchical = ice::LayoutInterchange::importGds(parentGds);
+                REQUIRE(hierarchical.layoutCells.size() == 2);
+                const auto &top = hierarchical.layoutCells.begin()->second;
+                CHECK(top.instances.size() == 1);
+                CHECK(top.shapes.size() == 1);
+                if (!top.instances.empty()) {
+                    const auto childId = top.instances.begin()->second.cell;
+                    CHECK(hierarchical.layoutCells.contains(childId));
+                    const auto &childCell = hierarchical.layoutCells.at(childId);
+                    bool digitalShape = false;
+                    for (const auto &[_, shape] : childCell.shapes) {
+                        if (shape.rectangle.width == 1000 && shape.rectangle.height == 1000)
+                            digitalShape = true;
+                    }
+                    CHECK(digitalShape);
+                }
+            }
+
+            const auto flatGds = root / "digital-parent-flat.gds";
+            bool flattenedExport = true;
+            try {
+                ice::LayoutInterchange::exportFlattenedGds(loaded, parent.id, flatGds);
+            } catch (const std::exception &) {
+                flattenedExport = false;
+            }
+            CHECK(flattenedExport);
+            if (flattenedExport) {
+                const auto flattened = ice::LayoutInterchange::importGds(flatGds);
                 REQUIRE(flattened.layoutCells.size() == 1);
                 const auto &flatCell = flattened.layoutCells.begin()->second;
                 CHECK(flatCell.shapes.size() == 2);
@@ -4063,15 +4088,6 @@ TEST_CASE("flattened GDS export preserves child geometry") {
     CHECK(shifted);
     std::filesystem::remove(gds);
 
-    // Plain export must not silently drop instance geometry. The writer emits
-    // one structure, so instance-bearing cells are flattened automatically.
-    const auto plainGds = std::filesystem::temp_directory_path() / "ice-plain-export-test.gds";
-    ice::LayoutInterchange::exportGds(project, parent, plainGds);
-    const auto plain = ice::LayoutInterchange::importGds(plainGds);
-    CHECK(plain.layoutCells.size() == 1);
-    CHECK(plain.layoutCells.begin()->second.shapes.size() == 3);
-    std::filesystem::remove(plainGds);
-
     // Flattening must retain the top cell's logical pins, not only child
     // geometry.
     const auto portId = ice::addPort(project, parent, "OUT", layer, ice::Rect{0, 0, 100, 100},
@@ -4096,6 +4112,76 @@ TEST_CASE("flattened GDS export preserves child geometry") {
         CHECK(port.rectangle.height == 100);
     }
     std::filesystem::remove(portedGds);
+}
+
+TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and ports") {
+    ice::Project project;
+    project.identity = "hierarchical-gds";
+    project.name = "hierarchical-gds";
+    const auto layer = ice::addLayer(project, "Metal1", 34);
+    const auto leaf = ice::createLayoutCell(project, "leaf");
+    ice::addRectangle(project, leaf, layer, ice::Rect{0, 0, 100, 100});
+    ice::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, ice::PortDirection::input, ice::PortSide::left, 0, "IN");
+
+    const auto middle = ice::createLayoutCell(project, "middle");
+    ice::addLayoutInstance(project, middle, leaf, "M1", 250, 30, ice::Orientation::r90);
+
+    const auto parent = ice::createLayoutCell(project, "parent");
+    ice::addLayoutInstance(project, parent, middle, "U1", 1000, 2000, ice::Orientation::r0);
+    ice::addLayoutInstance(project, parent, leaf, "U2", 4000, 0, ice::Orientation::m45);
+
+    const auto gds = std::filesystem::temp_directory_path() / "ice-hierarchical-export-test.gds";
+    ice::LayoutInterchange::exportGds(project, parent, gds);
+    ice::LayoutImportOptions options;
+    options.pinLabelLayer = 34;
+    const auto imported = ice::LayoutInterchange::importGds(gds, options);
+    std::filesystem::remove(gds);
+
+    REQUIRE(imported.layoutCells.size() == 3);
+    CHECK(imported.layoutCells.begin()->second.name == "parent");
+    const auto &top = imported.layoutCells.begin()->second;
+    REQUIRE(top.instances.size() == 2);
+
+    const auto findByName = [&](const std::string &name) -> const ice::LayoutCell * {
+        for (const auto &[_, cell] : imported.layoutCells)
+            if (cell.name == name)
+                return &cell;
+        return nullptr;
+    };
+    const auto *importedLeaf = findByName("leaf");
+    const auto *importedMiddle = findByName("middle");
+    REQUIRE(importedLeaf != nullptr);
+    REQUIRE(importedMiddle != nullptr);
+    CHECK(importedLeaf->shapes.size() >= 1);
+    bool leafGeometry = false;
+    for (const auto &[_, shape] : importedLeaf->shapes) {
+        if (shape.rectangle.width == 100 && shape.rectangle.height == 100)
+            leafGeometry = true;
+    }
+    CHECK(leafGeometry);
+    CHECK(importedLeaf->ports.size() == 1);
+    if (!importedLeaf->ports.empty())
+        CHECK(importedLeaf->ports.begin()->second.name == "IN");
+    REQUIRE(importedMiddle->instances.size() == 1);
+    CHECK(importedMiddle->instances.begin()->second.cell == importedLeaf->id);
+    CHECK(importedMiddle->instances.begin()->second.x == 250);
+    CHECK(importedMiddle->instances.begin()->second.y == 30);
+    CHECK(importedMiddle->instances.begin()->second.orientation == ice::Orientation::r90);
+
+    for (const auto &[_, instance] : top.instances) {
+        if (instance.name == "U1") {
+            CHECK(instance.cell == importedMiddle->id);
+            CHECK(instance.x == 1000);
+            CHECK(instance.y == 2000);
+            CHECK(instance.orientation == ice::Orientation::r0);
+        } else if (instance.name == "U2") {
+            CHECK(instance.cell == importedLeaf->id);
+            CHECK(instance.x == 4000);
+            CHECK(instance.y == 0);
+            CHECK(instance.orientation == ice::Orientation::m45);
+        }
+    }
+    CHECK(imported.validate().empty());
 }
 
 TEST_CASE("layout text persists and exports as GDS text") {
