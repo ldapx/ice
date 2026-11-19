@@ -678,6 +678,12 @@ std::string Project::serialize() const {
             entry["generated_pdk_version"] = layout.generatedPdkVersion;
         if (!layout.generatedOutputHash.empty())
             entry["generated_output_hash"] = layout.generatedOutputHash;
+        if (!layout.generatedLayoutQuality.empty())
+            entry["generated_layout_quality"] = json::parse(layout.generatedLayoutQuality);
+        if (!layout.generatedLayoutPlan.empty())
+            entry["generated_layout_plan"] = json::parse(layout.generatedLayoutPlan);
+        if (!layout.generatedLayoutReview.empty())
+            entry["generated_layout_review"] = json::parse(layout.generatedLayoutReview);
         j["procedural_layouts"].push_back(std::move(entry));
     }
     j["implementation_runs"] = json::array();
@@ -1171,6 +1177,14 @@ Project Project::deserialize(const std::string &text) {
                 entry.generatedParameterHash = layout.value("generated_parameter_hash", std::string{});
                 entry.generatedPdkVersion = layout.value("generated_pdk_version", std::string{});
                 entry.generatedOutputHash = layout.value("generated_output_hash", std::string{});
+                if (const auto quality = layout.find("generated_layout_quality");
+                    quality != layout.end() && quality->is_object())
+                    entry.generatedLayoutQuality = quality->dump();
+                if (const auto plan = layout.find("generated_layout_plan"); plan != layout.end() && plan->is_object())
+                    entry.generatedLayoutPlan = plan->dump();
+                if (const auto review = layout.find("generated_layout_review");
+                    review != layout.end() && review->is_object())
+                    entry.generatedLayoutReview = review->dump();
                 const auto layoutId = entry.id;
                 p.proceduralLayouts.emplace(layoutId, std::move(entry));
             }
@@ -1678,21 +1692,32 @@ std::string generatedAgentsGuidance() {
               "columns. Use `layout.generate` for built-in generators such as `mos_pair`, "
               "`resistor_bank`, `cap_array`, `guard_ring`, `rail`, and `route_bundle`, and "
               "`@layout.generator` for reusable blocks.\n\n"
-           << "Before claiming an analog layout is complete, run the quality check and iterate:\n"
-           << "   1. Call `layout.report(print_report=True)` after placement and routing. The "
-              "report includes cell area, total device area, utilization, and large horizontal gaps.\n"
-           << "   2. Keep `utilization` above roughly 0.20 (higher is better) and "
-              "`max_horizontal_gap_um` below roughly 10 unless routing/DRC requires more. A fixed "
-              "30-60 um routing channel or gap between every device is almost never necessary.\n"
+           << "Before placing devices, declare `layout.plan(devices=..., rows=..., "
+              "target_utilization=0.20, max_gap_um=10, require_composition=True)`. After placement, "
+              "call `layout.finish_placement()` or `layout.compact()`. This is a hard gate: "
+              "`layout.route` and `layout.connect` reject calls until the plan's utilization, row-gap, "
+              "row-count, and composition requirements pass.\n\n"
+           << "Then run the quality check and review:\n"
+           << "   1. Call `layout.report(print_report=True)`. Devices are grouped into rows before "
+              "gaps are measured, so use `rows`, `row_count`, `max_horizontal_gap_um`, and "
+              "`large_gaps` rather than comparing every pair of devices.\n"
+           << "   2. Keep `utilization` above roughly 0.20 (higher is better) and row gaps below "
+              "roughly 10 um unless routing/DRC requires more. A fixed 30-60 um routing channel or "
+              "gap between every device is almost never necessary.\n"
            << "   3. Start from `gap=0` rows and columns; add spacing only where the router or DRC "
               "requires it. Prefer one shared routing channel over per-device padding.\n"
            << "   4. Choose device orientation and finger/multiplier settings that reduce the "
               "dominant row height; tall stacked multiplier devices can make an otherwise compact "
               "floorplan very tall.\n"
-           << "   5. Re-run generation after each compaction and compare the reported area and "
-              "utilization. Run LVS, DRC, and PEX after the layout is compact; report exact results "
-              "and do not claim cleanliness without the reports.\n"
-           << "   6. For an open-loop AC bench, either use a DC-feedback inductor/capacitor or re-run "
+           << "   5. `layout_regenerate` returns structured `layout_quality`, `layout_plan`, and "
+              "`layout_review` objects. Read those directly instead of parsing `generation_log`.\n"
+           << "   6. Run the separate review step with `layout.review(min_utilization=..., "
+              "max_gap_um=..., require_composition=..., require_plan=True)`, or call MCP "
+              "`layout_review`/CLI `layout-review` after regeneration. Reject the layout if the review "
+              "fails.\n"
+           << "   7. Run LVS, DRC, and PEX after the layout is compact and the review passes; report "
+              "exact results and do not claim cleanliness without the reports.\n"
+           << "   8. For an open-loop AC bench, either use a DC-feedback inductor/capacitor or re-run "
               "the operating point and update the input trim after resizing devices. Record the trim "
               "value and verify the output is still in its linear range.\n\n"
            << "For mixed signal, place SystemVerilog cells "

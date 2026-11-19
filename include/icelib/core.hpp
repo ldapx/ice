@@ -383,6 +383,11 @@ struct ProceduralLayout {
     // Provenance for the last successful generation.
     std::string generatedPdkVersion;
     std::string generatedOutputHash;
+    // Structured runner metadata from the last successful generation. These
+    // are JSON objects: placement quality, declared plan, and agent review.
+    std::string generatedLayoutQuality;
+    std::string generatedLayoutPlan;
+    std::string generatedLayoutReview;
 };
 
 enum class ImplementationStage { created, elaboration, synthesis, floorplan, placement, cts, routing, final };

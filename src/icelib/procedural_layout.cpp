@@ -98,6 +98,11 @@ struct ParsedLayout {
     std::vector<ParsedInstance> instances;
     std::vector<ParsedParameter> parameters;
     std::vector<ParsedDevice> devices;
+    // Optional structured agent metadata emitted by the procedural runner.
+    // Stored as JSON text so the core layout model remains unchanged.
+    std::string layoutQuality;
+    std::string layoutPlan;
+    std::string layoutReview;
 };
 
 struct LayerDefaults {
@@ -387,6 +392,23 @@ bool parseGeneratedLayout(const json &root, ParsedLayout &layout, std::string *e
             *error = "The procedural layout output has an unsupported schema version.";
         return false;
     }
+
+    const auto readMetadata = [&](const char *key) {
+        const auto entry = root.find(key);
+        if (entry == root.end() || entry->is_null())
+            return std::string{};
+        if (!entry->is_object()) {
+            if (error)
+                *error = std::string("The procedural layout ") + key + " entry is not an object.";
+            return std::string{};
+        }
+        return entry->dump();
+    };
+    layout.layoutQuality = readMetadata("layout_quality");
+    layout.layoutPlan = readMetadata("layout_plan");
+    layout.layoutReview = readMetadata("layout_review");
+    if (error && !error->empty())
+        return false;
 
     const auto layers = root.value("layers", json::array());
     if (!layers.is_array()) {
@@ -1217,6 +1239,12 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     procedural.generatedParameterHash = proceduralParametersHash(procedural.parameters);
     procedural.generatedPdkVersion = result.pdkVersion;
     procedural.generatedOutputHash = result.outputHash;
+    procedural.generatedLayoutQuality = generated.layoutQuality;
+    procedural.generatedLayoutPlan = generated.layoutPlan;
+    procedural.generatedLayoutReview = generated.layoutReview;
+    result.layoutQuality = std::move(generated.layoutQuality);
+    result.layoutPlan = std::move(generated.layoutPlan);
+    result.layoutReview = std::move(generated.layoutReview);
     result.ok = true;
     cleanup();
     return result;

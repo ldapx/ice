@@ -304,6 +304,94 @@ def test_generator_discovery_command():
         assert entry["description"]
 
 
+def test_layout_plan_gate_and_review():
+    runner = load_runner()
+    layout = runner.Layout()
+    install_fake_device(layout)
+    layout.plan(
+        devices=["M1", "M2"],
+        rows=1,
+        target_utilization=0.0,
+        max_gap_um=10.0,
+        require_composition=True,
+    )
+    first = layout.device("nfet", name="M1")
+    second = layout.device("nfet", name="M2")
+    row = layout.row(gap=0)
+    row.add(first)
+    row.add(second)
+    layout.add(row)
+
+    try:
+        layout.route((0, 5000, 10, 10), (100, 5000, 10, 10), layer="Metal1", width=5)
+    except runner.LayoutQualityError as error:
+        assert "compaction gate" in str(error)
+    else:
+        raise AssertionError("routing must be blocked before the compaction gate")
+
+    quality = layout.finish_placement()
+    assert quality["plan_passed"]
+    assert quality["composition_used"]
+    assert quality["row_count"] == 1
+    route = layout.route(
+        (0, 5000, 10, 10), (100, 5000, 10, 10), layer="Metal1", width=5
+    )
+    assert route.bounds is not None
+
+    review = layout.review(require_plan=True)
+    assert review["passed"]
+    output = layout.to_dict()
+    assert output["layout_quality"]["plan_passed"]
+    assert output["layout_plan"]["passed"]
+    assert output["layout_review"]["passed"]
+
+
+def test_layout_plan_gate_rejects_low_utilization():
+    runner = load_runner()
+    layout = runner.Layout()
+    install_fake_device(layout)
+    layout.plan(
+        devices=["M1", "M2"],
+        rows=1,
+        target_utilization=0.95,
+        max_gap_um=10.0,
+    )
+    first = layout.device("nfet", name="M1")
+    second = layout.device("nfet", name="M2")
+    row = layout.row(gap=1000)
+    row.add(first)
+    row.add(second)
+    layout.add(row)
+    try:
+        layout.finish_placement()
+    except runner.LayoutQualityError as error:
+        assert "below target" in str(error)
+    else:
+        raise AssertionError("the compaction gate should reject low utilization")
+    review = layout.review(min_utilization=0.95)
+    assert not review["passed"]
+    assert any("below review target" in issue for issue in review["issues"])
+
+
+def test_report_groups_rows_before_measuring_gaps():
+    runner = load_runner()
+    layout = runner.Layout()
+    install_fake_device(layout)
+    first = layout.device("nfet", name="M1")
+    second = layout.device("nfet", name="M2")
+    third = layout.device("nfet", name="M3")
+    second.move(500, 0)
+    third.move(0, 1000)
+    report = layout.report()
+    assert report["row_count"] == 2
+    assert report["max_horizontal_gap_um"] == 0.4
+    assert report["large_gaps"] == []
+    assert all(
+        not (gap["left"] == "M1" and gap["right"] == "M3")
+        for gap in report["large_gaps"]
+    )
+
+
 def test_device_composition():
     runner = load_runner()
     layout = runner.Layout()
@@ -375,6 +463,9 @@ def main():
         test_inline_and_builtin_generators,
         test_package_generator_registry,
         test_generator_discovery_command,
+        test_layout_plan_gate_and_review,
+        test_layout_plan_gate_rejects_low_utilization,
+        test_report_groups_rows_before_measuring_gaps,
         test_device_composition,
         test_output_metadata_and_determinism,
     ]

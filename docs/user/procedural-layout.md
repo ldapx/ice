@@ -371,6 +371,32 @@ A layout that routes correctly can still waste most of its area. Start composed
 rows and columns with `gap=0` and add spacing only where routing or DRC needs
 it. Prefer one shared routing channel over fixed padding between every device.
 
+### Planning and the compaction gate
+
+Declare a plan before placing devices:
+
+```python
+layout.plan(
+    devices=["M1", "M2", "M3", "M4"],
+    rows=2,
+    target_utilization=0.25,
+    max_gap_um=10,
+    require_composition=True,
+)
+
+# Place and compact the devices.
+layout.finish_placement()   # or layout.compact()
+```
+
+`layout.finish_placement()` runs the quality report and verifies the declared
+device set, row count, utilization, maximum row gap, and composition
+requirements. When the plan sets `require_gate=True` (the default), `route()`
+and `connect()` are blocked until the gate passes. A failed gate raises an
+error with the failing metrics; compact the placement and call
+`finish_placement()` again.
+
+### Quality report
+
 Call `layout.report()` after placement and routing:
 
 ```python
@@ -380,16 +406,38 @@ layout.report(print_report=True)
 The report includes:
 
 - `cell_area_um2`, `device_area_um2`, and `utilization`;
-- `max_horizontal_gap_um` and `large_gaps` for devices whose rows overlap;
-- shape, port, and device counts;
-- warnings for low utilization and large fixed gaps.
+- row-grouped `rows`, `row_count`, `max_horizontal_gap_um`, and `large_gaps`;
+- `composition_used`, `placement_style`, `manual_move_count`, and
+  `composition` counters;
+- `plan_present`, `plan_passed`, shape, port, and device counts;
+- warnings for low utilization and large gaps inside one row.
 
-`generation_log` returned by `layout_regenerate` includes printed report output.
-A good first target is utilization above roughly 20% with no unexplained
-horizontal gap above roughly 10 µm. If utilization is lower, compact the
-floorplan with rows, columns, abutment, `repeat`, and constraints before adding
-more routing area. Check device orientation and finger/multiplier settings as
-well: tall stacked multiplier devices can dominate the cell height.
+Devices are grouped into row bands by vertical center and similar height before
+gaps are measured. This keeps tall passives such as MIM capacitors from being
+compared with every small transistor in the cell.
+
+### Separate review
+
+After routing and verification, run the independent review step:
+
+```python
+layout.review(
+    min_utilization=0.25,
+    max_gap_um=10,
+    require_composition=True,
+    require_plan=True,
+)
+```
+
+`review()` returns `passed`, `issues`, the placement `quality`, the final
+`cell_quality`, and the declared `plan`. It is also exposed as the MCP tool
+`layout_review` and the CLI command `layout-review`.
+
+The generated JSON now carries `layout_quality`, `layout_plan`, and
+`layout_review`. MCP `layout_regenerate` and CLI `layout-regenerate` return those
+objects directly, so agents do not need to parse the generation log to see
+whether the compaction gate passed. A good first target is utilization above
+roughly 20–25% with no unexplained row gap above roughly 10 µm.
 
 ## Routing
 

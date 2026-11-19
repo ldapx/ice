@@ -105,15 +105,18 @@ and ask the user to rebuild/restart ICE.
 | `layout_create_procedural` | Create a procedural layout and optionally generate it immediately. |
 | `layout_regenerate` | Run a procedural layout script and replace its read-only generated child. |
 | `layout_get_script` | Read a procedural layout script and its generation hashes/stale state. |
+| `layout_review` | Review stored quality, plan, and review metadata against optional utilization, gap, composition, and plan requirements. |
 | `layout_set_script` | Replace a procedural layout script without regenerating. |
 | `layout_set_parameter` | Set a procedural layout parameter value without regenerating. |
 | `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
 | `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
 
-`layout_regenerate` returns `generation_log` from the Python process. Procedural
-scripts can print `layout.report(print_report=True)` to expose area,
-device-area utilization, and large-gap warnings to the agent. Use
-`ice_help(topic="analog-layout")` for the compact-layout workflow.
+`layout_regenerate` returns structured `layout_quality`, `layout_plan`, and
+`layout_review` objects in addition to `generation_log`. Procedural scripts use
+`layout.plan(...)` and `layout.finish_placement()` to make the compaction target
+a hard pre-routing gate, and `layout.review(...)` for the independent review
+step. `layout_review` applies optional thresholds to the stored metadata without
+regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_add_layer` | Add a layout layer with optional GDS datatype/purpose. |
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_text` | Add text to a layout cell on a layer. |

@@ -59,6 +59,16 @@ struct ToolError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+json parsedMetadata(const std::string &text) {
+    if (text.empty())
+        return nullptr;
+    try {
+        return json::parse(text);
+    } catch (const std::exception &) {
+        return json{{"error", "invalid stored metadata"}};
+    }
+}
+
 std::string lowerCopy(std::string text) {
     for (auto &character : text)
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
@@ -525,30 +535,36 @@ json helpJson(const std::string &requestedTopic) {
         {"analog-layout",
          {{"summary", "Build compact procedural analog layouts with composition handles, constraints, and cell "
                       "generators, then verify area utilization, LVS, DRC, and PEX."},
-          {"tools", json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate",
-                                 "layout_get_script", "layout_info", "lvs_run", "drc_run", "pex_run"})},
+          {"tools",
+           json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate", "layout_get_script",
+                        "layout_info", "layout_review", "lvs_run", "drc_run", "pex_run"})},
           {"steps",
-           json::array(
-               {"Create or open the project and create a procedural layout with layout_create_procedural.",
-                "Build devices, then pack them with layout.row/column/grid/repeat and gap=0 instead of "
-                "move loops with large fixed gaps.",
-                "Use layout.constraint(\"Order\", ..., abut=True), layout.align, layout.symmetric, and "
-                "layout.boundary for placement intent.",
-                "Use layout.generate for mos_pair/resistor_bank/cap_array/guard_ring/rail/route_bundle, or "
-                "@layout.generator for reusable blocks.",
-                "Print layout.report(print_report=True) and read generation_log from layout_regenerate.",
-                "Iterate until utilization is reasonable and large gaps are explained; then run LVS, DRC, and PEX."})},
+           json::array({"Create or open the project and create a procedural layout with layout_create_procedural.",
+                        "Declare layout.plan(devices=..., rows=..., target_utilization=..., max_gap_um=...) before "
+                        "placing devices.",
+                        "Build devices, then pack them with layout.row/column/grid/repeat and gap=0 instead of "
+                        "move loops with large fixed gaps.",
+                        "Use layout.constraint(\"Order\", ..., abut=True), layout.align, layout.symmetric, and "
+                        "layout.boundary for placement intent.",
+                        "Use layout.generate for mos_pair/resistor_bank/cap_array/guard_ring/rail/route_bundle, or "
+                        "@layout.generator for reusable blocks.",
+                        "Call layout.finish_placement() or layout.compact() before routing. The plan gate blocks "
+                        "route/connect until utilization and row-gap targets pass.",
+                        "Run layout_regenerate, then inspect structured layout_quality and layout_plan fields; use "
+                        "layout_review for the separate review step.",
+                        "Only after the quality gate and review pass should you run LVS, DRC, and PEX."})},
           {"example", {{"tool", "layout_regenerate"}, {"arguments", {{"layout", "MillerOTA_pcell"}}}}},
           {"notes",
-           json::array(
-               {"Start rows and columns with gap=0; add spacing only where routing or DRC requires it.",
-                "layout.report returns cell_area_um2, device_area_um2, utilization, "
-                "max_horizontal_gap_um, large_gaps, and warnings.",
-                "A fixed 30-60 um gap between every device or one large routing channel for all devices "
-                "usually wastes most of the cell area.",
-                "Use layout.measure, layout.clearance, and layout.overlaps for local checks before "
-                "committing the generated layout.",
-                "layout_regenerate returns generation_log on success so printed reports are visible to the agent."})}}},
+           json::array({"Start rows and columns with gap=0; add spacing only where routing or DRC requires it.",
+                        "layout.report groups devices into rows before measuring gaps, so a tall passive is not "
+                        "compared with every small device.",
+                        "layout_quality includes utilization, row_count, rows, large_gaps, composition_used, "
+                        "placement_style, and plan_passed.",
+                        "layout.plan(...)+layout.finish_placement() is a hard gate: routing is blocked until the "
+                        "declared compaction target passes.",
+                        "layout_review checks the stored quality, plan, and review metadata against optional targets.",
+                        "A fixed 30-60 um gap between every device or one large routing channel for all devices "
+                        "usually wastes most of the cell area."})}}},
         {"mixed-signal",
          {{"summary", "Place a SystemVerilog block with a generated symbol, wire its pins like any other device, "
                       "then let simulation_create auto-select the mixed simulator."},
@@ -3579,6 +3595,9 @@ class IceMcpServer {
                     {"generated_cell", generatedCell},
                     {"generated", run.ok},
                     {"generation_log", run.log},
+                    {"layout_quality", parsedMetadata(run.layoutQuality)},
+                    {"layout_plan", parsedMetadata(run.layoutPlan)},
+                    {"layout_review", parsedMetadata(run.layoutReview)},
                     {"generation_error", run.ok || !shouldRegenerate ? json(nullptr) : json(run.error)},
                     {"needs_regeneration",
                      ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}};
@@ -3598,6 +3617,9 @@ class IceMcpServer {
                     {"output_hash", run.outputHash},
                     {"pdk_version", run.pdkVersion},
                     {"generation_log", run.log},
+                    {"layout_quality", parsedMetadata(run.layoutQuality)},
+                    {"layout_plan", parsedMetadata(run.layoutPlan)},
+                    {"layout_review", parsedMetadata(run.layoutReview)},
                     {"needs_regeneration", false}};
         }
         if (name == "layout_get_script") {
@@ -3617,6 +3639,9 @@ class IceMcpServer {
                     {"generated_parameter_hash", procedural.generatedParameterHash},
                     {"generated_pdk_version", procedural.generatedPdkVersion},
                     {"generated_output_hash", procedural.generatedOutputHash},
+                    {"layout_quality", parsedMetadata(procedural.generatedLayoutQuality)},
+                    {"layout_plan", parsedMetadata(procedural.generatedLayoutPlan)},
+                    {"layout_review", parsedMetadata(procedural.generatedLayoutReview)},
                     {"parameters", std::move(parameters)}};
         }
         if (name == "layout_set_parameter") {
@@ -3834,6 +3859,80 @@ class IceMcpServer {
             });
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
         }
+        if (name == "layout_review") {
+            const auto itemId = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
+            const auto procedural = session.project().proceduralLayouts.find(itemId);
+            if (procedural == session.project().proceduralLayouts.end()) {
+                return {{"id", itemId},
+                        {"available", false},
+                        {"passed", false},
+                        {"issues", json::array({"layout review metadata is only available for procedural layouts"})}};
+            }
+            const auto &layout = procedural->second;
+            const auto quality = parsedMetadata(layout.generatedLayoutQuality);
+            const auto plan = parsedMetadata(layout.generatedLayoutPlan);
+            const auto review = parsedMetadata(layout.generatedLayoutReview);
+            const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(layout);
+            std::vector<std::string> issues;
+            if (!quality.is_object())
+                issues.push_back("no layout quality metadata; regenerate the procedural layout first");
+            if (needsRegeneration)
+                issues.push_back("generated layout is stale; regenerate it before review");
+            const auto optionalNumber = [&](const char *key) -> std::optional<double> {
+                const auto it = arguments.find(key);
+                if (it == arguments.end() || it->is_null())
+                    return std::nullopt;
+                return numberValue(*it, key);
+            };
+            const auto requirePlan = optionalBoolean(arguments, "require_plan", false);
+            if (requirePlan && !plan.is_object())
+                issues.push_back("no layout.plan(...) was recorded");
+            if (plan.is_object() && plan.value("passed", false) == false)
+                issues.push_back("layout compaction plan or gate did not pass");
+            if (quality.is_object()) {
+                if (quality.contains("warnings") && quality["warnings"].is_array()) {
+                    for (const auto &warning : quality["warnings"]) {
+                        if (warning.is_string())
+                            issues.push_back(warning.get<std::string>());
+                    }
+                }
+                auto minUtilization = optionalNumber("min_utilization");
+                if (!minUtilization && plan.is_object() && plan.contains("target_utilization") &&
+                    plan["target_utilization"].is_number())
+                    minUtilization = plan["target_utilization"].get<double>();
+                if (minUtilization && quality.value("utilization", 0.0) < *minUtilization) {
+                    std::ostringstream message;
+                    message << "utilization " << quality.value("utilization", 0.0) << " is below review target "
+                            << *minUtilization;
+                    issues.push_back(message.str());
+                }
+                auto maxGap = optionalNumber("max_gap_um");
+                if (!maxGap && plan.is_object() && plan.contains("max_gap_um") && plan["max_gap_um"].is_number())
+                    maxGap = plan["max_gap_um"].get<double>();
+                if (maxGap && quality.value("max_horizontal_gap_um", 0.0) > *maxGap) {
+                    std::ostringstream message;
+                    message << "largest row gap " << quality.value("max_horizontal_gap_um", 0.0)
+                            << " um exceeds review target " << *maxGap << " um";
+                    issues.push_back(message.str());
+                }
+                bool requireComposition = optionalBoolean(arguments, "require_composition", false);
+                if (!arguments.contains("require_composition") && plan.is_object())
+                    requireComposition = plan.value("require_composition", false);
+                if (requireComposition && !quality.value("composition_used", false))
+                    issues.push_back("composition helpers were required but not used");
+            }
+            std::sort(issues.begin(), issues.end());
+            issues.erase(std::unique(issues.begin(), issues.end()), issues.end());
+            return {{"id", itemId},
+                    {"name", layout.name},
+                    {"available", quality.is_object()},
+                    {"passed", issues.empty()},
+                    {"issues", issues},
+                    {"needs_regeneration", needsRegeneration},
+                    {"layout_quality", quality},
+                    {"layout_plan", plan},
+                    {"layout_review", review}};
+        }
         if (name == "layout_info") {
             const auto itemId = resolveLayoutItem(session.project(), requiredValue(arguments, "cell"));
             if (const auto procedural = session.project().proceduralLayouts.find(itemId);
@@ -3849,6 +3948,9 @@ class IceMcpServer {
                         {"generated_pdk_version", procedural->second.generatedPdkVersion},
                         {"generated_parameter_hash", procedural->second.generatedParameterHash},
                         {"generated_output_hash", procedural->second.generatedOutputHash},
+                        {"layout_quality", parsedMetadata(procedural->second.generatedLayoutQuality)},
+                        {"layout_plan", parsedMetadata(procedural->second.generatedLayoutPlan)},
+                        {"layout_review", parsedMetadata(procedural->second.generatedLayoutReview)},
                         {"parameters",
                          [&] {
                              json parameters = json::array();
@@ -4821,7 +4923,8 @@ class IceMcpServer {
                             .build());
         tools.push_back(tool_builder("layout_regenerate")
                             .with_description("Run a procedural layout script, replace its generated layout, and "
-                                              "return generation_log (including layout.report output).")
+                                              "return generation_log plus structured layout_quality, layout_plan, "
+                                              "and layout_review metadata.")
                             .with_string_param("layout", "Procedural layout name or id")
                             .with_integer_param("timeout_seconds", "Optional timeout in seconds", false)
                             .build());
@@ -4938,6 +5041,15 @@ class IceMcpServer {
         tools.push_back(tool_builder("layout_info")
                             .with_description("Read a layout or procedural layout's metadata and generated state.")
                             .with_string_param("cell", "Layout or procedural layout name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_review")
+                            .with_description("Review stored procedural layout quality, plan, and review metadata "
+                                              "against optional utilization, gap, and composition targets.")
+                            .with_string_param("layout", "Procedural layout name or id")
+                            .with_number_param("min_utilization", "Minimum device-area utilization (0..1)", false)
+                            .with_number_param("max_gap_um", "Maximum row gap in micrometers", false)
+                            .with_boolean_param("require_composition", "Require composition helpers", false)
+                            .with_boolean_param("require_plan", "Require a recorded layout plan", false)
                             .build());
         tools.push_back(tool_builder("layout_connectivity")
                             .with_description("Extract nets from explicit layout nets and same-layer geometry.")

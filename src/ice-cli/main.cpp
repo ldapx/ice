@@ -42,6 +42,16 @@ namespace {
 
 using json = nlohmann::json;
 
+json parsedMetadata(const std::string &text) {
+    if (text.empty())
+        return nullptr;
+    try {
+        return json::parse(text);
+    } catch (const std::exception &) {
+        return json{{"error", "invalid stored metadata"}};
+    }
+}
+
 ice::ProcessCancellation *gActiveCancellation = nullptr;
 
 void handleImplementationSignal(int) {
@@ -1245,6 +1255,8 @@ void printHelp() {
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
+              << "  layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] "
+                 "[--require-composition] [--require-plan]\n"
               << "  layout-remove <project> <cell|procedural>\n"
               << "  layout-add-layer <project> <name> <number> [datatype]\n"
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
@@ -2351,6 +2363,9 @@ int main(int argc, char **argv) {
                        {"generated_cell", generated},
                        {"generated", run.ok},
                        {"generation_error", run.ok ? json(nullptr) : json(run.error)},
+                       {"layout_quality", parsedMetadata(run.layoutQuality)},
+                       {"layout_plan", parsedMetadata(run.layoutPlan)},
+                       {"layout_review", parsedMetadata(run.layoutReview)},
                        {"needs_regeneration",
                         ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))},
                        {"parameters", [&] {
@@ -2406,7 +2421,10 @@ int main(int argc, char **argv) {
                        {"script_hash", run.scriptHash},
                        {"output_hash", run.outputHash},
                        {"pdk_version", run.pdkVersion},
-                       {"log", run.log}});
+                       {"log", run.log},
+                       {"layout_quality", parsedMetadata(run.layoutQuality)},
+                       {"layout_plan", parsedMetadata(run.layoutPlan)},
+                       {"layout_review", parsedMetadata(run.layoutReview)}});
             return 0;
         }
 
@@ -2479,6 +2497,9 @@ int main(int argc, char **argv) {
                            {"generated_parameter_hash", procedural->second.generatedParameterHash},
                            {"generated_pdk_version", procedural->second.generatedPdkVersion},
                            {"generated_output_hash", procedural->second.generatedOutputHash},
+                           {"layout_quality", parsedMetadata(procedural->second.generatedLayoutQuality)},
+                           {"layout_plan", parsedMetadata(procedural->second.generatedLayoutPlan)},
+                           {"layout_review", parsedMetadata(procedural->second.generatedLayoutReview)},
                            {"parameters",
                             [&] {
                                 json parameters = json::array();
@@ -2491,6 +2512,82 @@ int main(int argc, char **argv) {
             } else {
                 printJson(layoutInfo(project, project.layoutCells.at(id)));
             }
+            return 0;
+        }
+
+        if (command == "layout-review") {
+            if (args.size() < 3)
+                argumentError("Usage: ice-cli layout-review <project> <procedural> [--min-utilization <v>] "
+                              "[--max-gap-um <v>] [--require-composition] [--require-plan]");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveProceduralLayout(project, args[2]);
+            const auto &layout = project.proceduralLayouts.at(id);
+            const auto quality = parsedMetadata(layout.generatedLayoutQuality);
+            const auto plan = parsedMetadata(layout.generatedLayoutPlan);
+            const auto review = parsedMetadata(layout.generatedLayoutReview);
+            const bool needsRegeneration = ice::proceduralLayoutNeedsRegeneration(layout);
+            std::optional<double> minUtilization;
+            std::optional<double> maxGap;
+            bool requireComposition = false;
+            bool requirePlan = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--require-composition") {
+                    requireComposition = true;
+                } else if (option == "--require-plan") {
+                    requirePlan = true;
+                } else if (option == "--min-utilization" || option == "--max-gap-um") {
+                    if (++index >= args.size())
+                        argumentError(option + " requires a value");
+                    const auto value = std::stod(args[index]);
+                    if (option == "--min-utilization")
+                        minUtilization = value;
+                    else
+                        maxGap = value;
+                } else {
+                    argumentError("Unknown layout-review option: " + option);
+                }
+            }
+            std::vector<std::string> issues;
+            if (!quality.is_object())
+                issues.push_back("no layout quality metadata; regenerate the procedural layout first");
+            if (needsRegeneration)
+                issues.push_back("generated layout is stale; regenerate it before review");
+            if (requirePlan && !plan.is_object())
+                issues.push_back("no layout.plan(...) was recorded");
+            if (plan.is_object() && !plan.value("passed", false))
+                issues.push_back("layout compaction plan or gate did not pass");
+            if (quality.is_object()) {
+                if (quality.contains("warnings") && quality["warnings"].is_array()) {
+                    for (const auto &warning : quality["warnings"])
+                        if (warning.is_string())
+                            issues.push_back(warning.get<std::string>());
+                }
+                if (!minUtilization && plan.is_object() && plan.contains("target_utilization") &&
+                    plan["target_utilization"].is_number())
+                    minUtilization = plan["target_utilization"].get<double>();
+                if (minUtilization && quality.value("utilization", 0.0) < *minUtilization)
+                    issues.push_back("utilization is below review target");
+                if (!maxGap && plan.is_object() && plan.contains("max_gap_um") && plan["max_gap_um"].is_number())
+                    maxGap = plan["max_gap_um"].get<double>();
+                if (maxGap && quality.value("max_horizontal_gap_um", 0.0) > *maxGap)
+                    issues.push_back("largest row gap exceeds review target");
+                if (!requireComposition && plan.is_object())
+                    requireComposition = plan.value("require_composition", false);
+                if (requireComposition && !quality.value("composition_used", false))
+                    issues.push_back("composition helpers were required but not used");
+            }
+            std::sort(issues.begin(), issues.end());
+            issues.erase(std::unique(issues.begin(), issues.end()), issues.end());
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"available", quality.is_object()},
+                       {"passed", issues.empty()},
+                       {"issues", issues},
+                       {"needs_regeneration", needsRegeneration},
+                       {"layout_quality", quality},
+                       {"layout_plan", plan},
+                       {"layout_review", review}});
             return 0;
         }
 
