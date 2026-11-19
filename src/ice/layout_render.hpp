@@ -146,7 +146,7 @@ struct LayoutPreviewModel {
 };
 
 // Resolves a referenced GDS/OASIS child into a flattened preview model. The
-// UI supplies this because KLayout-backed reference loading is a GUI concern.
+// UI supplies this because reference loading is a GUI concern.
 using LayoutReferencePreviewResolver =
     std::function<std::optional<LayoutPreviewModel>(const LayoutCell &referenceCell)>;
 

@@ -729,10 +729,15 @@ pins with visibility checkboxes and pin details in the tooltip. Child-cell pins
 are drawn read-only inside instances; double-clicking one promotes it to a
 parent pin that keeps the source instance and child port link.
 
-**File → Open Layout Interchange** imports GDSII and asks which layer carries
-pin-label TEXT records; use `-1` to import text as ordinary text shapes only.
-**Save Layout Interchange** writes the active cell as GDSII. LEF and DEF pin
-exchange is available through `ice-cli` and `ice-mcp`.
+**File → Open Layout Interchange** imports GDSII or OASIS. It asks which layer
+carries pin-label TEXT records (`-1` imports text as ordinary text shapes
+only) and optionally a top-cell name for libraries with multiple candidates.
+Structures become layout cells connected by instances; unsupported
+non-orthogonal or scaled references are flattened with a warning. OASIS is
+read and written natively without KLayout or an intermediate file.
+**Save Layout Interchange** writes the active cell as GDSII or OASIS and asks
+whether to flatten the instance hierarchy. The default preserves hierarchy.
+LEF and DEF pin exchange is available through `ice-cli` and `ice-mcp`.
 
 Select a planned device box to highlight it. Double-click it, or right-click it,
 to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
