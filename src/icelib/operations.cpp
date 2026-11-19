@@ -1771,6 +1771,26 @@ std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId
     return lines;
 }
 
+namespace {
+std::string lowerCopy(const std::string &text) {
+    std::string result = text;
+    for (auto &character : result)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return result;
+}
+} // namespace
+
+void requireUniqueSimulationName(const Project &project, const std::string &name, ObjectId except) {
+    const auto wanted = lowerCopy(name);
+    for (const auto &[id, existing] : project.simulations) {
+        if (id == except)
+            continue;
+        if (lowerCopy(existing.name) == wanted)
+            throw ProjectError("simulation.name",
+                               "A simulation named '" + name + "' already exists; choose a different name");
+    }
+}
+
 ObjectId addSimulationGraph(Project &project, ObjectId simulationId, const SimulationGraph &graph) {
     auto simulation = project.simulations.find(simulationId);
     if (simulation == project.simulations.end())

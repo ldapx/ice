@@ -71,6 +71,11 @@ struct SimulationRequest {
     // Optional source/include working directory for HDL compilation. The UI
     // sets this to the project root so `include paths resolve predictably.
     std::filesystem::path workingDirectory;
+    // Wall-clock budget for a single Verilog simulation pass, in seconds.
+    // The runner fills this from the caller's timeout so long algorithmic
+    // testbenches are not cut off by a fixed internal cap. Zero keeps the
+    // adapter default.
+    int wallTimeoutSeconds = 0;
     // Configuration for the iterative ngspice + Icarus mixed-signal adapter.
     // `netlist` is the analog base netlist; HDL blocks are added from this
     // interface description.

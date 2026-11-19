@@ -937,30 +937,42 @@ def _block_from_layout(layout, deep=False):
     )
 
 
+def _remove_identity(records, value):
+    """Remove ``value`` from ``records`` by identity, not by dict equality.
+
+    Two devices created at the same local position produce equal shape dicts.
+    ``list.remove`` compares by value, so it could evict another device's
+    record and leave this one behind in the parent builder (stale geometry
+    with no matching ports after composition).
+    """
+    for index, existing in enumerate(records):
+        if existing is value:
+            del records[index]
+            return True
+    return False
+
+
 def _detach_handle_records(item):
     """Remove a concrete handle's records from its owning builder."""
     owner = getattr(item, "_layout", None)
     if isinstance(item, Shape):
-        if owner is not None and item._record in owner.shapes:
-            owner.shapes.remove(item._record)
+        if owner is not None:
+            _remove_identity(owner.shapes, item._record)
     elif isinstance(item, DevicePlacement):
         if owner is not None:
             for shape in item.shapes:
-                if shape._record in owner.shapes:
-                    owner.shapes.remove(shape._record)
+                _remove_identity(owner.shapes, shape._record)
             for record in getattr(item, "_port_records", []):
-                if record in owner.ports:
-                    owner.ports.remove(record)
+                _remove_identity(owner.ports, record)
             device_record = getattr(item, "_device_record", None)
-            if device_record in owner.devices:
-                owner.devices.remove(device_record)
+            if device_record is not None:
+                _remove_identity(owner.devices, device_record)
             if item in getattr(owner, "_device_handles", []):
                 owner._device_handles.remove(item)
     elif isinstance(item, Route):
         if owner is not None:
             for shape in item.shapes:
-                if shape._record in owner.shapes:
-                    owner.shapes.remove(shape._record)
+                _remove_identity(owner.shapes, shape._record)
             if item in getattr(owner, "_route_handles", []):
                 owner._route_handles.remove(item)
 

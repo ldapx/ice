@@ -2128,6 +2128,7 @@ class IceMcpServer {
                 !schematicCell.systemVerilogSchematic && ice::schematicContainsHdl(session.project(), schematic);
             ice::SimulationItem simulation;
             simulation.name = requiredString(arguments, "name");
+            ice::requireUniqueSimulationName(session.project(), simulation.name);
             simulation.schematic = schematic;
             const auto templateName = lowerCopy(optionalString(arguments, "template"));
             if (!templateName.empty()) {

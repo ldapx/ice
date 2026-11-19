@@ -1229,7 +1229,9 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
 #ifdef _WIN32
     runCommand = "cd /d " + shellQuote(temp.string()) + " && vvp " + shellQuote(executablePath.string());
 #else
-    runCommand = "cd " + shellQuote(temp.string()) + " && timeout 10s vvp " + shellQuote(executablePath.string());
+    const auto wallSeconds = request.wallTimeoutSeconds > 0 ? request.wallTimeoutSeconds : 10;
+    runCommand = "cd " + shellQuote(temp.string()) + " && timeout " + std::to_string(wallSeconds) + "s vvp " +
+                 shellQuote(executablePath.string());
 #endif
     runCommand += " >" + shellQuote(runLogPath.string()) + " 2>&1";
     const auto runStatus = processExitCode(std::system(runCommand.c_str()));
@@ -1312,8 +1314,14 @@ SimulationResult SimulationRunner::run(const SimulationRequest &request, std::ch
     }
     // Copy the adapter so the worker does not depend on `this` outliving the call.
     auto adapter = adapter_;
-    auto future = std::async(std::launch::async,
-                             [adapter, request, token, progress] { return adapter->run(request, *token, progress); });
+    auto effective = request;
+    if (timeout.count() > 0) {
+        const auto seconds = static_cast<int>(std::clamp<long long>((timeout.count() + 999) / 1000, 5, 3600));
+        effective.wallTimeoutSeconds = seconds;
+    }
+    auto future = std::async(std::launch::async, [adapter, effective, token, progress] {
+        return adapter->run(effective, *token, progress);
+    });
     if (future.wait_for(timeout) == std::future_status::timeout) {
         token->cancel();
         // NOTE: std::future from std::async blocks on destruction, so this still

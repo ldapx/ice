@@ -101,6 +101,25 @@ bool parameterValuesEqual(const std::string &left, const std::string &right) {
     return normalizedValue(left) == normalizedValue(right);
 }
 
+bool hasUnitSuffix(const std::string &text) {
+    const auto trimmed = trim(text);
+    return !trimmed.empty() && std::isalpha(static_cast<unsigned char>(trimmed.back())) != 0;
+}
+
+// Layout PCell lengths are conventionally written in micrometres ("2", "0.15")
+// while schematic instances usually carry the SPICE suffix ("2u"). Compare
+// unitless lengths as micrometres so both spellings describe the same device.
+bool lengthParameterValuesEqual(const std::string &left, const std::string &right) {
+    const auto leftQuantity = parseQuantity(left);
+    const auto rightQuantity = parseQuantity(right);
+    if (!leftQuantity || !rightQuantity)
+        return normalizedValue(left) == normalizedValue(right);
+    const auto leftValue = hasUnitSuffix(left) ? *leftQuantity : *leftQuantity * 1.0e-6;
+    const auto rightValue = hasUnitSuffix(right) ? *rightQuantity : *rightQuantity * 1.0e-6;
+    const auto scale = std::max({1.0e-9, std::abs(leftValue), std::abs(rightValue)});
+    return std::abs(leftValue - rightValue) <= 1.0e-9 * scale;
+}
+
 std::map<std::string, std::string> parameterMap(const std::vector<Parameter> &parameters) {
     std::map<std::string, std::string> result;
     for (const auto &parameter : parameters) {
@@ -666,6 +685,10 @@ void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layo
             if (layoutParameter == layoutDevice.parameters.end())
                 continue;
             if (parameterValuesEqual(schematicValue, layoutParameter->second))
+                continue;
+            const auto normalizedName = normalizedIdentifier(name);
+            if ((normalizedName == "w" || normalizedName == "l") &&
+                lengthParameterValuesEqual(schematicValue, layoutParameter->second))
                 continue;
             mismatches.push_back({1, "parameter",
                                   "Device '" + displayName + "' parameter '" + name + "' is '" + schematicValue +

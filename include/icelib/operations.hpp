@@ -111,6 +111,11 @@ void removeSimulationItem(Project &project, ObjectId simulationId);
 
 // Simulation graph metadata is presentation-only but agent-facing: it selects
 // the plotted X/Y signals and optional display limits from captured traces.
+// Reject a simulation name that is already used in the project. Simulation
+// names are the primary lookup key for CLI/MCP/UI actions, so duplicates make
+// those actions ambiguous.
+void requireUniqueSimulationName(const Project &project, const std::string &name, ObjectId except = 0);
+
 ObjectId addSimulationGraph(Project &project, ObjectId simulationId, const SimulationGraph &graph);
 bool updateSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId, const SimulationGraph &graph);
 bool removeSimulationGraph(Project &project, ObjectId simulationId, ObjectId graphId);

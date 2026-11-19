@@ -28,6 +28,16 @@ from pathlib import Path
 PACKAGE_DBU_PER_UM = 1000
 
 
+# Manufacturing grids are finer than the project grid but every PDK we ship
+# uses a 5 nm multiple for device geometry. PCell coordinates must land on it,
+# otherwise KLayout reports *_OFFGRID DRC errors.
+MANUFACTURING_GRID_NM = 5
+
+
+def _snap_grid(value) -> int:
+    return int(round(int(value) / MANUFACTURING_GRID_NM)) * MANUFACTURING_GRID_NM
+
+
 def _length_um(value, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -751,13 +761,15 @@ class PackagePcell:
         )
 
     def build_mim_cap(self, builder):
-        length = max(self.um("l", self.number("w", 2.0)), 500)
-        width = max(self.um("h", self.number("w", 2.0)), 500)
+        length = _snap_grid(max(self.um("l", self.number("w", 2.0)), 500))
+        width = _snap_grid(max(self.um("h", self.number("w", 2.0)), 500))
         bottom = self.cap_bottom if self.cap_bottom in self.layers else "met1"
         top = self.cap_top if self.cap_top in self.layers else "met2"
         self.rect(builder, bottom, 0, 0, length, width)
         if self.cap_marker in self.layers:
-            inset = max(0, int(self.cap_marker_inset))
+            # The marker is inset from the bottom plate so met3 encloses capm
+            # (sky130 capm.3_a).
+            inset = _snap_grid(max(0, int(self.cap_marker_inset)))
             self.rect(
                 builder,
                 self.cap_marker,
@@ -774,22 +786,25 @@ class PackagePcell:
             max(length - 400, 100),
             max(width - 400, 100),
         )
-        # Terminal tabs must overlap their plate. A tab placed flush against an
-        # inset plate leaves a sub-rule gap that only shows up once metal is
-        # routed to the pin (metal spacing / notch violations).
-        self.rect(builder, bottom, -200, width // 2 - 100, 300, 200)
-        self.rect(builder, top, max(length - 300, 0), width // 2 - 100, 300, 200)
+        # Terminal tabs must overlap their plate and obey the metal minimum
+        # width. A 200 nm tall tab violates the 0.3 um met3/met4 width rule, and
+        # a tab centered on ``width // 2 - 100`` is off-grid whenever the plate
+        # dimension is not a multiple of 10 nm.
+        tab = 300
+        tab_y = _snap_grid(width // 2 - tab // 2)
+        self.rect(builder, bottom, -200, tab_y, 300, tab)
+        self.rect(builder, top, max(length - 300, 0), tab_y, 300, tab)
         self.port(
-            builder, "1", bottom, -200, width // 2 - 100, 300, 200, "inout", "left"
+            builder, "1", bottom, -200, tab_y, 300, tab, "inout", "left"
         )
         self.port(
             builder,
             "2",
             top,
             max(length - 300, 0),
-            width // 2 - 100,
+            tab_y,
             300,
-            200,
+            tab,
             "inout",
             "right",
         )
