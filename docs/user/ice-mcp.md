@@ -130,7 +130,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_add_instance` | Instance another layout cell. |
 | `layout_info` | Read a layout cell's pins, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
-| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels; `flatten` merges instances. |
+| `layout_export_gds` | Export a layout cell to GDSII, including pins and labels. Instance hierarchy is always flattened into one structure so child geometry is preserved. |
 | `layout_export_lef` | Export pins as a minimal LEF macro. |
 | `layout_export_def` | Export pins and nets as a minimal DEF design. |
 | `layout_import_def` | Import a routed DEF into the open project as a layout cell. |
@@ -144,7 +144,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `implementation_map` | Technology-map the synthesized netlist with Yosys and Liberty files. |
 | `implementation_log` | Return the bounded log for a stage, optionally as the last N lines. |
 | `implementation_cancel` | Signal the OpenROAD/Yosys process recorded for a run. |
-| `implementation_import_layout` | Create a reusable read-only digital device from the final GDS/OASIS; a missing stream is an error. |
+| `implementation_import_layout` | Create a reusable read-only digital device from the final GDS/OASIS, including top-level DEF pins and pin nets when available; a missing stream is an error. |
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |

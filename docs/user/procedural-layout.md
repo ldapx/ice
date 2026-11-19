@@ -144,7 +144,10 @@ PDK extensions such as dummy fill can inspect the completed builder:
 - `layout.iter_polygons(layer=None)` yields `(layer_name, [(x, y), ...])` for
   rectangles, polygons, and expanded path segments.
 - `layout.bounds(layer=None)` returns `(min_x, min_y, max_x, max_y)` or `None`
-  when no geometry matches.
+  when no geometry matches. Without a layer filter it includes ports and child
+  instances; pass a layer name to restrict the result to shapes on that layer.
+- `layout.cells` is the project layout-cell catalog keyed by cell name. Each
+  entry carries the cell `bounds` and `ports` when ICE supplied the catalog.
 - `layout.layer_number(name)` returns the registered GDS layer number.
 
 ## Ports
@@ -178,7 +181,33 @@ layout.port(
 Use `layout.instance(cell, x, y, orientation="r0", name=None)` to place an
 existing layout cell by name. The generated cell references the target cell;
 geometry is not copied. Targets may be static layout cells, other generated
-cells, or package fixed-device cells.
+cells, imported digital devices, or package fixed-device cells.
+
+`layout.instance(...)` returns a `LayoutInstancePlacement` handle. It reports
+the referenced cell's real `bounds`, `width`, `height`, `ports`, and
+`port_info`, and it can be moved, mirrored, added to rows/columns/grids, or used
+as a routing endpoint:
+
+```python
+block = layout.instance("top_impl device", 0, 0, name="DIGITAL")
+pad = layout.layer("Metal1", 34).rectangle(0, 0, 100, 100)
+
+row = layout.row(gap=0)
+row.add(pad)
+row.add(block)          # packed using the digital cell's real width
+layout.add(row)
+
+print(block.bounds)     # {"x": ..., "y": ..., "width": ..., "height": ...}
+print(block.ports["clk"])
+layout.connect(device, "G", block, "clk", layer="Metal1")
+```
+
+Digital devices imported from an implementation run
+(`implementation-import` or `implementation_import_layout`) are read-only
+layout cells. The import copies the top-level DEF pins, directions, and pin
+nets onto the flattened device, so `layout.instance(...).ports` and
+`layout.connect(...)` can route to them. Use the cell name reported by the
+import, for example `"top_impl device"`.
 
 `layout.array(cell, count, pitch, ...)` places a rectangular array and returns
 the instance names. `count` and `pitch` are `(columns, rows)` and
@@ -405,12 +434,18 @@ layout.report(print_report=True)
 
 The report includes:
 
-- `cell_area_um2`, `device_area_um2`, and `utilization`;
+- `cell_area_um2`, `device_area_um2`, `instance_area_um2`,
+  `occupied_area_um2`, and `utilization`;
+- `device_utilization` for device-only area, and macro-aware `utilization`
+  that includes placed child instances;
 - row-grouped `rows`, `row_count`, `max_horizontal_gap_um`, and `large_gaps`;
 - `composition_used`, `placement_style`, `manual_move_count`, and
   `composition` counters;
-- `plan_present`, `plan_passed`, shape, port, and device counts;
+- `plan_present`, `plan_passed`, shape, port, device, and instance counts;
 - warnings for low utilization and large gaps inside one row.
+
+The plan gate and review use `utilization`, so an imported digital block
+counts toward the area budget even when the layout has no planned devices.
 
 Devices are grouped into row bands by vertical center and similar height before
 gaps are measured. This keeps tall passives such as MIM capacitors from being
@@ -442,7 +477,7 @@ roughly 20–25% with no unexplained row gap above roughly 10 µm.
 ## Routing
 
 The builder includes a deterministic Manhattan router for both points and
-placed device pins.
+placed device or layout-instance pins.
 
 ### Point and rectangle routing
 
@@ -458,16 +493,17 @@ print(route.length, route.bends, route.via_count)
 ```
 
 `start` and `end` may be `(x, y)` points, `(x, y, width, height)` pin
-rectangles, or pin tuples from a `DevicePlacement`. Rectangle endpoints escape
-from `start_side` / `end_side` (or the side nearest the other endpoint) by
-`escape`. The router avoids device bounds and other-net shapes by default and
+rectangles, or pin tuples from a `DevicePlacement` or
+`LayoutInstancePlacement`. Rectangle endpoints escape from `start_side` /
+`end_side` (or the side nearest the other endpoint) by `escape`. The router
+avoids placed device and instance bounds and other-net shapes by default and
 raises an error rather than emitting a short when no legal path exists.
 
-### Connecting device pins
+### Connecting device and instance pins
 
 ```python
 layout.connect(m1, "G", m2, "G", layer="Metal1", net="GATE")
-layout.connect(m1, "D", m2, "D", layer="Metal1", net="OUT")
+layout.connect(m1, "D", digital, "out", layer="Metal1", net="OUT")
 ```
 
 `connect(device_a, pin_a, device_b, pin_b, ...)` reads pin layers, sides, and
@@ -585,6 +621,11 @@ in `assets/layout/procedural_runner.py`.
 
 ```{eval-rst}
 .. autoclass:: procedural_runner.DevicePlacement
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: procedural_runner.LayoutInstancePlacement
    :members:
 ```
 

@@ -41,6 +41,9 @@ struct DefImportOptions {
 
 class LayoutInterchange {
   public:
+    // Exports the cell to GDSII. Cells with instances are flattened into one
+    // structure because the writer emits a single GDS structure; this avoids
+    // silently dropping child geometry.
     static void exportGds(const Project &project, ObjectId cellId, const std::filesystem::path &path);
     // Exports the cell with every instance hierarchy flattened into one cell.
     static void exportFlattenedGds(const Project &project, ObjectId cellId, const std::filesystem::path &path);

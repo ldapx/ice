@@ -36,7 +36,7 @@ import traceback
 
 
 SCHEMA_VERSION = 2
-BUILDER_VERSION = 3
+BUILDER_VERSION = 4
 
 
 class LayoutQualityError(RuntimeError):
@@ -193,18 +193,9 @@ def _mirror_side(side, flip_x, flip_y):
 
 
 def _mirror_orientation(orientation, flip_x, flip_y):
+    # flip_x negates x (mirror about the Y axis); flip_y negates y (mirror
+    # about the X axis). Compose that reflection with the existing placement.
     if flip_x and not flip_y:
-        return {
-            "r0": "mx",
-            "mx": "r0",
-            "r90": "m135",
-            "m135": "r90",
-            "r180": "my",
-            "my": "r180",
-            "r270": "m45",
-            "m45": "r270",
-        }.get(orientation, orientation)
-    if flip_y and not flip_x:
         return {
             "r0": "my",
             "my": "r0",
@@ -214,6 +205,17 @@ def _mirror_orientation(orientation, flip_x, flip_y):
             "mx": "r180",
             "r270": "m135",
             "m135": "r270",
+        }.get(orientation, orientation)
+    if flip_y and not flip_x:
+        return {
+            "r0": "mx",
+            "mx": "r0",
+            "r90": "m135",
+            "m135": "r90",
+            "r180": "my",
+            "my": "r180",
+            "r270": "m45",
+            "m45": "r270",
         }.get(orientation, orientation)
     if flip_x and flip_y:
         return {
@@ -227,6 +229,141 @@ def _mirror_orientation(orientation, flip_x, flip_y):
             "m135": "m45",
         }.get(orientation, orientation)
     return orientation
+
+
+def _orientation_point(orientation, x, y):
+    """Apply a placement orientation about the origin."""
+    orientation = str(orientation or "r0")
+    if orientation == "r0":
+        return x, y
+    if orientation == "r90":
+        return -y, x
+    if orientation == "r180":
+        return -x, -y
+    if orientation == "r270":
+        return y, -x
+    if orientation == "mx":
+        return x, -y
+    if orientation == "my":
+        return -x, y
+    if orientation == "m45":
+        return y, x
+    if orientation == "m135":
+        return -y, -x
+    raise ValueError(f"Unsupported orientation: {orientation}")
+
+
+def _orientation_side(side, orientation):
+    """Return the side after applying a placement orientation."""
+    side = str(side or "left").lower()
+    if orientation in {"r0", ""}:
+        return side
+    if orientation in {"r90", "m45"}:
+        return {
+            "left": "bottom",
+            "right": "top",
+            "top": "left",
+            "bottom": "right",
+        }.get(side, side)
+    if orientation == "r180":
+        return {
+            "left": "right",
+            "right": "left",
+            "top": "bottom",
+            "bottom": "top",
+        }.get(side, side)
+    if orientation == "r270":
+        return {
+            "left": "top",
+            "right": "bottom",
+            "top": "right",
+            "bottom": "left",
+        }.get(side, side)
+    if orientation == "mx":
+        return {"top": "bottom", "bottom": "top"}.get(side, side)
+    if orientation == "my":
+        return {"left": "right", "right": "left"}.get(side, side)
+    if orientation == "m135":
+        return {
+            "left": "top",
+            "right": "bottom",
+            "top": "left",
+            "bottom": "right",
+        }.get(side, side)
+    return side
+
+
+def _instance_local_bounds(record):
+    """Return the referenced cell's bounds relative to its origin."""
+    bounds = record.get("cell_bounds")
+    if isinstance(bounds, dict):
+        return (
+            int(bounds.get("x", 0)),
+            int(bounds.get("y", 0)),
+            int(bounds.get("width", 0)),
+            int(bounds.get("height", 0)),
+        )
+    return (0, 0, 1, 1)
+
+
+def _instance_world_bounds(record):
+    """Return absolute ``(x0, y0, x1, y1)`` bounds for an instance record."""
+    x = int(record.get("x", 0))
+    y = int(record.get("y", 0))
+    bx, by, width, height = _instance_local_bounds(record)
+    points = (
+        (bx, by),
+        (bx + width, by),
+        (bx + width, by + height),
+        (bx, by + height),
+    )
+    transformed = [
+        _orientation_point(record.get("orientation", "r0"), px, py) for px, py in points
+    ]
+    xs = [point[0] for point in transformed]
+    ys = [point[1] for point in transformed]
+    return (min(xs) + x, min(ys) + y, max(xs) + x, max(ys) + y)
+
+
+def _transform_instance_rectangle(record, rectangle):
+    """Transform a child port rectangle into the parent coordinate system."""
+    rect = _route_rect(rectangle)
+    if rect is None:
+        return None
+    x, y, width, height = rect
+    points = ((x, y), (x + width, y), (x + width, y + height), (x, y + height))
+    transformed = [
+        _orientation_point(record.get("orientation", "r0"), px, py) for px, py in points
+    ]
+    xs = [point[0] for point in transformed]
+    ys = [point[1] for point in transformed]
+    offset_x = int(record.get("x", 0))
+    offset_y = int(record.get("y", 0))
+    min_x = min(xs) + offset_x
+    min_y = min(ys) + offset_y
+    return (min_x, min_y, max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _instance_port_info(record, cell_info):
+    """Return absolute port metadata for an instance and its cell catalog entry."""
+    result = {}
+    for port in (cell_info or {}).get("ports", []):
+        name = str(port.get("name", ""))
+        if not name:
+            continue
+        rectangle = _transform_instance_rectangle(record, port.get("rectangle"))
+        if rectangle is None:
+            continue
+        result[name] = {
+            "rectangle": rectangle,
+            "layer": port.get("layer"),
+            "direction": port.get("direction", "inout"),
+            "side": _orientation_side(
+                port.get("side", "left"), record.get("orientation", "r0")
+            ),
+            "net": port.get("net"),
+        }
+    return result
 
 
 def _mirror_ports(ports, flip_x, flip_y, low_x, high_x, low_y, high_y):
@@ -667,6 +804,164 @@ class DevicePlacement:
         raise AttributeError(name)
 
 
+class LayoutInstancePlacement:
+    """Composable handle returned by :meth:`Layout.instance`.
+
+    The instance is already part of the builder. This handle exposes the
+    referenced cell's real bounds and ports, and can be moved, mirrored, added
+    to rows/columns/grids, or used as a routing endpoint. Cell bounds and port
+    metadata come from the project cell catalog supplied by ICE; when the
+    catalog is unavailable, composition falls back to a one-unit bounding box.
+
+    :ivar cell: Referenced layout cell name.
+    :ivar name: Instance name in the generated layout.
+    :ivar x: Instance origin x in database units.
+    :ivar y: Instance origin y in database units.
+    :ivar orientation: Placement orientation (``r0``, ``r90``, ``r180``,
+        ``r270``, ``mx``, ``my``, ``m45``, or ``m135``).
+    :ivar bounds: Absolute bounding box as ``x``, ``y``, ``width``, and
+        ``height`` keys.
+    :ivar ports: Mapping of port name to absolute
+        ``(x, y, width, height)`` rectangles.
+    :ivar port_info: Per-port metadata with ``rectangle``, ``layer``, ``side``,
+        ``direction``, and ``net`` keys.
+    """
+
+    def __init__(self, layout, record, cell_info=None):
+        self._layout = layout
+        self._record = record
+        self._cell_info = cell_info or {}
+
+    @property
+    def cell(self):
+        return str(self._record.get("cell", ""))
+
+    @property
+    def name(self):
+        return str(self._record.get("name", ""))
+
+    @name.setter
+    def name(self, value):
+        self._record["name"] = str(value)
+
+    @property
+    def x(self):
+        return int(self._record.get("x", 0))
+
+    @x.setter
+    def x(self, value):
+        self._record["x"] = _coordinate(value, "instance x")
+
+    @property
+    def y(self):
+        return int(self._record.get("y", 0))
+
+    @y.setter
+    def y(self, value):
+        self._record["y"] = _coordinate(value, "instance y")
+
+    @property
+    def orientation(self):
+        return str(self._record.get("orientation", "r0"))
+
+    @orientation.setter
+    def orientation(self, value):
+        orientations = {"r0", "r90", "r180", "r270", "mx", "my", "m45", "m135"}
+        if str(value) not in orientations:
+            raise ValueError(f"Unsupported orientation: {value}")
+        self._record["orientation"] = str(value)
+
+    @property
+    def bounds(self):
+        """Absolute instance bounding box.
+
+        When the cell catalog has no geometry for the target, the fallback is
+        a one-unit square at the instance origin.
+        """
+        box = _instance_world_bounds(self._record)
+        return {
+            "x": box[0],
+            "y": box[1],
+            "width": box[2] - box[0],
+            "height": box[3] - box[1],
+        }
+
+    @property
+    def width(self):
+        return int(self.bounds.get("width", 0))
+
+    @property
+    def height(self):
+        return int(self.bounds.get("height", 0))
+
+    @property
+    def is_empty(self):
+        """Instances are references, so they are never treated as empty."""
+        return False
+
+    @property
+    def port_info(self):
+        return _instance_port_info(self._record, self._cell_info)
+
+    @property
+    def ports(self):
+        return {name: info["rectangle"] for name, info in self.port_info.items()}
+
+    def pin(self, name):
+        """Return the absolute ``(x, y, width, height)`` port rectangle."""
+        return self.ports[str(name)]
+
+    def anchor(self, name="center"):
+        """Return an anchor point on the instance bounds."""
+        bounds = self.bounds
+        rectangle = (
+            bounds["x"],
+            bounds["y"],
+            bounds["x"] + bounds["width"],
+            bounds["y"] + bounds["height"],
+        )
+        return _anchor_point(rectangle, name)
+
+    def move(self, dx, dy):
+        """Translate the instance origin in place."""
+        if self._layout is not None:
+            self._layout._layout_state["manual_moves"] += 1
+        self.x = self.x + _coordinate(dx, "move dx")
+        self.y = self.y + _coordinate(dy, "move dy")
+        return self
+
+    def mirror(self, axis="y"):
+        """Mirror the instance placement in place."""
+        bounds = self.bounds
+        flip_x, flip_y = _axis_flags(axis)
+        low_x = bounds["x"]
+        high_x = low_x + bounds["width"]
+        low_y = bounds["y"]
+        high_y = low_y + bounds["height"]
+        if flip_x:
+            self.x = low_x + high_x - self.x
+        if flip_y:
+            self.y = low_y + high_y - self.y
+        self._record["orientation"] = _mirror_orientation(
+            self.orientation, flip_x, flip_y
+        )
+        return self
+
+    def refresh(self):
+        """Compatibility hook; the handle always reads the live record."""
+        return self
+
+    def __getitem__(self, key):
+        return self.pin(key)
+
+    def __getattr__(self, name):
+        info = self.__dict__.get("_cell_info") or {}
+        for port in info.get("ports", []):
+            if str(port.get("name", "")) == name:
+                return self.pin(name)
+        raise AttributeError(name)
+
+
 class Route:
     """Handle returned by :meth:`Layout.route` and :meth:`Layout.connect`.
 
@@ -869,13 +1164,7 @@ class _RecordBlock:
     def bounds(self):
         bounds = _bounds_of_records(self.shapes, self.ports)
         instance_boxes = [
-            (
-                int(instance.get("x", 0)),
-                int(instance.get("y", 0)),
-                int(instance.get("x", 0)) + 1,
-                int(instance.get("y", 0)) + 1,
-            )
-            for instance in self.instances
+            _instance_world_bounds(instance) for instance in self.instances
         ]
         return _union_bounds([bounds] + instance_boxes)
 
@@ -975,6 +1264,9 @@ def _detach_handle_records(item):
                 _remove_identity(owner.shapes, shape._record)
             if item in getattr(owner, "_route_handles", []):
                 owner._route_handles.remove(item)
+    elif isinstance(item, LayoutInstancePlacement):
+        if owner is not None:
+            _remove_identity(owner.instances, item._record)
 
 
 def _copy_handle_block(item, detach=False):
@@ -986,7 +1278,9 @@ def _copy_handle_block(item, detach=False):
         for entry in item:
             block.append(_copy_handle_block(entry, detach=detach))
         return block
-    if detach and isinstance(item, (Shape, DevicePlacement, Route)):
+    if detach and isinstance(
+        item, (Shape, DevicePlacement, Route, LayoutInstancePlacement)
+    ):
         _detach_handle_records(item)
     clone = (lambda value: value) if detach else copy.deepcopy
     if isinstance(item, Shape):
@@ -1060,6 +1354,11 @@ def _copy_handle_block(item, detach=False):
         return block
     if isinstance(item, Route):
         block = _RecordBlock([clone(shape._record) for shape in item.shapes])
+        if detach:
+            block.handles.append(item)
+        return block
+    if isinstance(item, LayoutInstancePlacement):
+        block = _RecordBlock(instances=[clone(item._record)])
         if detach:
             block.handles.append(item)
         return block
@@ -1201,7 +1500,7 @@ def _fragment_bounds(fragment):
 def _handle_bounds(item):
     if item is None:
         return None
-    if isinstance(item, (Shape, DevicePlacement, Route)):
+    if isinstance(item, (Shape, DevicePlacement, Route, LayoutInstancePlacement)):
         bounds = item.bounds
         if isinstance(bounds, dict):
             return (
@@ -1223,7 +1522,7 @@ def _handle_bounds(item):
 
 
 def _handle_ports(item):
-    if isinstance(item, DevicePlacement):
+    if isinstance(item, (DevicePlacement, LayoutInstancePlacement)):
         return dict(item.ports)
     if isinstance(item, (Layout, _Container)):
         result = {}
@@ -1240,7 +1539,10 @@ def _handle_ports(item):
 
 
 def _translate_handle(item, dx, dy):
-    if isinstance(item, (Shape, DevicePlacement, Route, Layout, _Container)):
+    if isinstance(
+        item,
+        (Shape, DevicePlacement, Route, LayoutInstancePlacement, Layout, _Container),
+    ):
         item.move(dx, dy)
         return
     if isinstance(item, _Spacer):
@@ -1253,7 +1555,10 @@ def _translate_handle(item, dx, dy):
 
 
 def _mirror_handle(item, axis="y"):
-    if isinstance(item, (Shape, DevicePlacement, Route, Layout, _Container)):
+    if isinstance(
+        item,
+        (Shape, DevicePlacement, Route, LayoutInstancePlacement, Layout, _Container),
+    ):
         item.mirror(axis)
         return
     if isinstance(item, _Spacer):
@@ -1430,6 +1735,9 @@ def _snap_handle(item, pitch):
             dict(via, x=_snap_value(via["x"], pitch), y=_snap_value(via["y"], pitch))
             for via in item.vias
         ]
+    elif isinstance(item, LayoutInstancePlacement):
+        item.x = _snap_value(item.x, pitch)
+        item.y = _snap_value(item.y, pitch)
     elif isinstance(item, Layout):
         for record in item.shapes:
             _snap_record(record, pitch)
@@ -1929,6 +2237,8 @@ class Layout:
     :ivar grid: Project manufacturing/snap grid in database units.
     :ivar params: Current parameter values keyed by parameter name.
     :ivar parameter_specs: Declared parameter metadata keyed by name.
+    :ivar cells: Project layout-cell catalog keyed by cell name. Entries carry
+        ``bounds`` and ``ports`` when ICE supplied the catalog.
     :ivar layers: Registered layer specs keyed by layer name.
     :ivar shapes: Emitted shape records in creation order.
     :ivar ports: Emitted port records in creation order.
@@ -1938,7 +2248,13 @@ class Layout:
     """
 
     def __init__(
-        self, pdk=None, pdk_root=None, db_unit_nm=1.0, grid=1, parameters=None
+        self,
+        pdk=None,
+        pdk_root=None,
+        db_unit_nm=1.0,
+        grid=1,
+        parameters=None,
+        cells=None,
     ):
         self.pdk = pdk
         self.pdk_root = pdk_root
@@ -1948,6 +2264,13 @@ class Layout:
             str(name): "" if value is None else str(value)
             for name, value in (parameters or {}).items()
         }
+        self.cells = {}
+        for entry in cells or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            if name:
+                self.cells[name] = entry
         self.parameter_specs = {}
         self.layers = {}
         self.shapes = []
@@ -2346,7 +2669,8 @@ class Layout:
 
         Instances are named ``<name>_<column>_<row>`` and reference ``cell``
         rather than copying its geometry. The target may be a static layout
-        cell, another generated cell, or a package fixed-device cell.
+        cell, another generated cell, an imported digital device, or a package
+        fixed-device cell.
 
         :param cell: Layout cell name.
         :param count: ``(columns, rows)``, both positive.
@@ -2469,8 +2793,15 @@ class Layout:
         """Place an instance of an existing layout cell.
 
         The instance references another cell in the project, including static
-        layouts, read-only generated procedurals, and package fixed devices.
-        Geometry is not copied into the generated cell.
+        layouts, other generated procedurals, imported digital devices, and
+        package fixed devices. Geometry is not copied into the generated cell.
+        The returned handle is already part of the builder and can be moved,
+        mirrored, composed with :meth:`add`/row/column helpers, or used as a
+        routing endpoint.
+
+        Cell names are validated against the project cell catalog when ICE
+        supplies one. Matching is case-insensitive and the canonical project
+        name is stored in the instance.
 
         :param cell: Non-empty layout cell name.
         :param x: Placement x origin in database units.
@@ -2478,7 +2809,7 @@ class Layout:
         :param orientation: ``r0``, ``r90``, ``r180``, ``r270``, ``mx``,
             ``my``, ``m45``, or ``m135``.
         :param name: Optional instance name.
-        :returns: ``None``. The instance is stored on the builder.
+        :returns: A :class:`LayoutInstancePlacement` handle.
         """
         if not isinstance(cell, str) or not cell.strip():
             raise ValueError("Instance cell must be a non-empty layout cell name")
@@ -2490,15 +2821,34 @@ class Layout:
             name = f"instance_{len(self.instances) + 1}"
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Instance name must be a non-empty string")
-        self.instances.append(
-            {
-                "cell": cell.strip(),
-                "name": name.strip(),
-                "x": _coordinate(x, "instance x"),
-                "y": _coordinate(y, "instance y"),
-                "orientation": orientation,
-            }
-        )
+        requested = cell.strip()
+        canonical = requested
+        info = self.cells.get(requested) if self.cells else None
+        if info is None and self.cells:
+            lowered = requested.lower()
+            for candidate_name, candidate in self.cells.items():
+                if candidate_name.lower() == lowered:
+                    canonical = candidate_name
+                    info = candidate
+                    break
+        if info is None and self.cells:
+            available = ", ".join(sorted(self.cells)[:20])
+            if len(self.cells) > 20:
+                available += ", ..."
+            raise ValueError(
+                f"Unknown layout cell '{requested}'. Available cells: {available}"
+            )
+        record = {
+            "cell": canonical,
+            "name": name.strip(),
+            "x": _coordinate(x, "instance x"),
+            "y": _coordinate(y, "instance y"),
+            "orientation": orientation,
+        }
+        if isinstance(info, dict) and isinstance(info.get("bounds"), dict):
+            record["cell_bounds"] = copy.deepcopy(info["bounds"])
+        self.instances.append(record)
+        return LayoutInstancePlacement(self, record, info)
 
     def parameter(self, name, default="", description=""):
         """Declare a user-editable parameter and return its current value.
@@ -3154,6 +3504,24 @@ class Layout:
             for info in (device.get("port_info") or {}).values():
                 if _route_rect(info.get("rectangle")) == rectangle:
                     return device, info
+        for instance in self.instances:
+            cell_info = self.cells.get(str(instance.get("cell", "")))
+            ports = _instance_port_info(instance, cell_info)
+            for info in ports.values():
+                if _route_rect(info.get("rectangle")) != rectangle:
+                    continue
+                box = _instance_world_bounds(instance)
+                owner = {
+                    "name": instance.get("name", ""),
+                    "bounds": {
+                        "x": box[0],
+                        "y": box[1],
+                        "width": box[2] - box[0],
+                        "height": box[3] - box[1],
+                    },
+                    "port_info": ports,
+                }
+                return owner, info
         return None, None
 
     def _device_bounds_for_rectangle(self, rectangle):
@@ -3190,6 +3558,12 @@ class Layout:
                     int(bounds.get("height", 0)),
                 )
                 if rectangle in excluded:
+                    continue
+                obstacles.append(rectangle)
+            for instance in self.instances:
+                box = _instance_world_bounds(instance)
+                rectangle = (box[0], box[1], box[2] - box[0], box[3] - box[1])
+                if rectangle in excluded or rectangle[2] <= 0 or rectangle[3] <= 0:
                     continue
                 obstacles.append(rectangle)
         if include_shapes:
@@ -3715,10 +4089,11 @@ class Layout:
         via_enclosure=None,
         via_cost=None,
     ):
-        """Route directly between two pins of placed package devices.
+        """Route directly between two pins of placed devices or layout instances.
 
-        ``device_a`` and ``device_b`` are the :class:`DevicePlacement`
-        objects returned by :meth:`device`. For a single-layer connection,
+        ``device_a`` and ``device_b`` may be :class:`DevicePlacement` objects
+        returned by :meth:`device` or :class:`LayoutInstancePlacement` handles
+        returned by :meth:`instance`. For a single-layer connection,
         ``layer`` is optional when both pins already share a layer. For pins
         on different layers, pass ``layers=[...]`` in vertical stack order
         and, if the package does not expose inferable via names, a
@@ -3726,9 +4101,9 @@ class Layout:
         when ``net`` is omitted, and connecting pins on different nets is
         rejected.
 
-        :param device_a: First placed device.
+        :param device_a: First placed device or layout instance.
         :param pin_a: Pin name on ``device_a`` (for example ``"G"``).
-        :param device_b: Second placed device.
+        :param device_b: Second placed device or layout instance.
         :param pin_b: Pin name on ``device_b``.
         :param layer: Single routing layer for a same-layer connection.
         :param width: Route width in database units (default 0.4 µm).
@@ -3746,17 +4121,16 @@ class Layout:
         :param via_enclosure: Via enclosure in database units.
         :param via_cost: Cost of changing layers.
         :returns: A :class:`Route` describing the emitted connection.
-        :raises TypeError: If an argument is not a ``DevicePlacement``.
+        :raises TypeError: If an argument is not a device or layout instance.
         :raises ValueError: If a pin or layer is unknown, or the pins belong
             to different nets.
         :raises RuntimeError: If no legal path or via transition exists.
         """
         self._check_compaction_gate()
-        if not isinstance(device_a, DevicePlacement) or not isinstance(
-            device_b, DevicePlacement
-        ):
+        placements = (DevicePlacement, LayoutInstancePlacement)
+        if not isinstance(device_a, placements) or not isinstance(device_b, placements):
             raise TypeError(
-                "connect expects DevicePlacement objects from layout.device()"
+                "connect expects DevicePlacement or LayoutInstancePlacement objects"
             )
         info_a = device_a.port_info.get(str(pin_a))
         info_b = device_b.port_info.get(str(pin_b))
@@ -4123,7 +4497,12 @@ class Layout:
                 "generator",
             )
         )
-        bounds = _bounds_of_records(self.shapes, self.ports)
+        instance_boxes = [
+            _instance_world_bounds(instance) for instance in self.instances
+        ]
+        bounds = _union_bounds(
+            [_bounds_of_records(self.shapes, self.ports)] + instance_boxes
+        )
         if bounds is None:
             bounds = _fragment_bounds(self)
         device_boxes = []
@@ -4149,10 +4528,14 @@ class Layout:
                 "height_um": 0.0,
                 "cell_area_um2": 0.0,
                 "device_area_um2": 0.0,
+                "instance_area_um2": 0.0,
+                "occupied_area_um2": 0.0,
+                "device_utilization": 0.0,
                 "utilization": 0.0,
                 "shape_count": 0,
                 "port_count": 0,
                 "device_count": 0,
+                "instance_count": 0,
                 "row_count": 0,
                 "rows": [],
                 "max_horizontal_gap_um": 0.0,
@@ -4173,6 +4556,10 @@ class Layout:
             area = width * height
             area_scale = (self.db_unit_nm * self.db_unit_nm) / 1_000_000.0
             device_area = sum(box[3] * box[4] for box in device_boxes)
+            instance_area = sum(
+                (box[2] - box[0]) * (box[3] - box[1]) for box in instance_boxes
+            )
+            occupied_area = device_area + instance_area
             threshold = (
                 self.um(10)
                 if gap_threshold is None
@@ -4265,11 +4652,12 @@ class Layout:
                     }
                 )
 
-            utilization = device_area / area if area else 0.0
+            utilization = occupied_area / area if area else 0.0
+            device_utilization = device_area / area if area else 0.0
             warnings = []
-            if device_boxes and utilization < 0.20:
+            if (device_boxes or instance_boxes) and utilization < 0.20:
                 warnings.append(
-                    f"device area is only {utilization * 100:.1f}% of cell area; "
+                    f"occupied area is only {utilization * 100:.1f}% of cell area; "
                     "compact rows/columns and remove fixed routing channels"
                 )
             if maximum_gap > threshold:
@@ -4280,7 +4668,7 @@ class Layout:
             placement_style = (
                 "composed"
                 if composition_used
-                else ("manual" if device_boxes else "empty")
+                else ("manual" if (device_boxes or instance_boxes) else "empty")
             )
             report = {
                 "bounds": bounds,
@@ -4290,10 +4678,14 @@ class Layout:
                 "height_um": round(height * self.db_unit_nm / 1000.0, 3),
                 "cell_area_um2": round(area * area_scale, 3),
                 "device_area_um2": round(device_area * area_scale, 3),
+                "instance_area_um2": round(instance_area * area_scale, 3),
+                "occupied_area_um2": round(occupied_area * area_scale, 3),
+                "device_utilization": round(device_utilization, 4),
                 "utilization": round(utilization, 4),
                 "shape_count": len(self.shapes),
                 "port_count": len(self.ports),
                 "device_count": len(device_boxes),
+                "instance_count": len(instance_boxes),
                 "row_count": len(row_reports),
                 "rows": row_reports,
                 "max_horizontal_gap_um": round(
@@ -5129,7 +5521,18 @@ class Layout:
                 yield shape["layer"], points
 
     def bounds(self, layer=None):
-        """Return ``(min_x, min_y, max_x, max_y)`` for the selected geometry."""
+        """Return ``(min_x, min_y, max_x, max_y)`` for the selected geometry.
+
+        With no layer filter the result includes ports and child instances, so
+        a layout containing only an imported macro still reports its real
+        extent. Passing a layer name limits the result to shapes on that layer.
+        """
+        if layer is None:
+            record_bounds = _bounds_of_records(self.shapes, self.ports)
+            instance_boxes = [
+                _instance_world_bounds(instance) for instance in self.instances
+            ]
+            return _union_bounds([record_bounds] + instance_boxes)
         min_x = math.inf
         min_y = math.inf
         max_x = -math.inf
@@ -5264,6 +5667,7 @@ class Group(Layout):
             parent.db_unit_nm,
             parent.grid,
             parent.params,
+            parent.cells,
         )
         self.name = str(name) if name is not None else ""
         self._parent = parent
@@ -5277,12 +5681,7 @@ class Group(Layout):
     @property
     def bounds(self):
         """Axis-aligned bounds of the group fragment."""
-        bounds = Layout.bounds(self)
-        instance_boxes = [
-            (instance["x"], instance["y"], instance["x"] + 1, instance["y"] + 1)
-            for instance in self.instances
-        ]
-        return _union_bounds([bounds] + instance_boxes)
+        return Layout.bounds(self)
 
     def __repr__(self):
         return f"Group({self.name or 'unnamed'}, {len(self.shapes)} shapes)"
@@ -5815,7 +6214,9 @@ class Repeat(_Container):
         if self._unit is None:
             self._refresh()
             return
-        if isinstance(self._unit, (Shape, DevicePlacement, Route)):
+        if isinstance(
+            self._unit, (Shape, DevicePlacement, Route, LayoutInstancePlacement)
+        ):
             _detach_handle_records(self._unit)
         horizontal = self.axis in {"x", "horizontal", "h"}
         pitch_text = str(self.pitch).lower()
@@ -5898,6 +6299,10 @@ def main():
     parser.add_argument(
         "--params-file", help="Optional procedural parameter values (JSON object)"
     )
+    parser.add_argument(
+        "--cells-file",
+        help="Optional project layout-cell catalog (JSON array) for instances",
+    )
     parser.add_argument("--pdk", default=None, help="Active PDK identifier")
     parser.add_argument("--pdk-root", default=None, help="Installed PDK package root")
     parser.add_argument(
@@ -5940,7 +6345,19 @@ def main():
             ) from error
         if not isinstance(parameters, dict):
             raise RuntimeError("Procedural parameters must be a JSON object")
-    builder = Layout(args.pdk, args.pdk_root, args.db_unit_nm, args.grid, parameters)
+    cells = []
+    if args.cells_file:
+        try:
+            cells = json.loads(Path(args.cells_file).read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"Unable to read the layout cell catalog: {error}"
+            ) from error
+        if not isinstance(cells, list):
+            raise RuntimeError("Layout cell catalog must be a JSON array")
+    builder = Layout(
+        args.pdk, args.pdk_root, args.db_unit_nm, args.grid, parameters, cells
+    )
     with open(args.script, "r", encoding="utf-8") as handle:
         source = handle.read()
     globals_dict = {

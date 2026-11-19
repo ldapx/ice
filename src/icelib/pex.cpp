@@ -320,6 +320,11 @@ PlacedDeviceKind classifyDeviceIdentity(const std::string &deviceName, const std
 
 PlacedDeviceKind classifyPlacedDevice(const LayoutCell &child, const std::string &deviceName,
                                       const std::string &model) {
+    // Imported digital blocks are library macros, not extractable devices.
+    // Check the explicit marker before name-based passives such as "cap" or
+    // "res" can match a run name.
+    if (child.device.starts_with("digital:"))
+        return PlacedDeviceKind::unknown;
     const auto device = lowerCopy(deviceName);
     const auto modelName = lowerCopy(model);
     const auto matches = [&](std::initializer_list<const char *> needles) {

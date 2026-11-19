@@ -23,6 +23,7 @@
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <thread>
 
 namespace {
@@ -725,6 +726,7 @@ TEST_CASE("implementation import creates a native digital device") {
     std::filesystem::remove_all(root);
     const auto runDirectory = root / "build" / "impl" / "counter-1";
     std::filesystem::create_directories(runDirectory / "final");
+    std::filesystem::create_directories(runDirectory / "def");
     {
         ice::Project source;
         source.identity = "counter-source";
@@ -733,6 +735,18 @@ TEST_CASE("implementation import creates a native digital device") {
         const auto sourceCell = ice::createLayoutCell(source, "counter");
         ice::addRectangle(source, sourceCell, layer, ice::Rect{0, 0, 1000, 1000});
         ice::LayoutInterchange::exportGds(source, sourceCell, runDirectory / "final" / "6_final.gds");
+    }
+    {
+        std::ofstream def(runDirectory / "def" / "6_final.def", std::ios::binary | std::ios::trunc);
+        def << "VERSION 5.8 ;\n"
+               "DESIGN counter ;\n"
+               "UNITS DISTANCE MICRONS 1000 ;\n"
+               "DIEAREA ( 0 0 ) ( 1000 1000 ) ;\n"
+               "PINS 2 ;\n"
+               "- clk + NET clk + DIRECTION INPUT + USE SIGNAL + LAYER Metal1 ( 0 0 ) ( 100 100 ) ;\n"
+               "- out + NET out + DIRECTION OUTPUT + USE SIGNAL + LAYER Metal1 ( 900 900 ) ( 1000 1000 ) ;\n"
+               "END PINS\n"
+               "END DESIGN\n";
     }
 
     ice::Project project;
@@ -744,6 +758,7 @@ TEST_CASE("implementation import creates a native digital device") {
     package.version = "1.0.0";
     package.pdk = ice::PackagePdk{};
     package.pdk->id = "example.pdk";
+    package.pdk->layers.push_back(ice::PackageLayer{"Metal1", 34, 0});
 
     ice::ImplementationRun run;
     run.name = "counter";
@@ -762,10 +777,33 @@ TEST_CASE("implementation import creates a native digital device") {
     CHECK(!cell.reference.has_value());
     CHECK(!cell.shapes.empty());
     CHECK(cell.instances.empty());
+    CHECK(cell.ports.size() == 2);
+    CHECK(cell.nets.size() == 2);
+    const auto portNamed = [&](const std::string &name) -> const ice::Port * {
+        for (const auto &[_, port] : cell.ports) {
+            if (port.name == name)
+                return &port;
+        }
+        return nullptr;
+    };
+    const auto *clockPort = portNamed("clk");
+    const auto *outputPort = portNamed("out");
+    CHECK(clockPort != nullptr);
+    CHECK(outputPort != nullptr);
+    if (clockPort && outputPort) {
+        CHECK(clockPort->direction == ice::PortDirection::input);
+        CHECK(outputPort->direction == ice::PortDirection::output);
+        CHECK(clockPort->net != 0);
+        CHECK(outputPort->net != 0);
+        CHECK(cell.nets.at(clockPort->net).name == "clk");
+        CHECK(cell.nets.at(outputPort->net).name == "out");
+        CHECK(clockPort->rectangle.x == 0);
+        CHECK(outputPort->rectangle.x == 900);
+    }
     CHECK(project.validate().empty());
 
     project.save(root);
-    const auto loaded = ice::Project::load(root);
+    auto loaded = ice::Project::load(root);
     const auto loadedCell = loaded.layoutCells.find(imported.layout);
     CHECK(loadedCell != loaded.layoutCells.end());
     if (loadedCell != loaded.layoutCells.end()) {
@@ -774,6 +812,74 @@ TEST_CASE("implementation import creates a native digital device") {
         CHECK(loadedCell->second.library);
         CHECK(loadedCell->second.device == "digital:counter");
         CHECK(!loadedCell->second.shapes.empty());
+
+        // A procedural layout resolves imported digital devices by cell name,
+        // sees their bounds and pins, and composes them like other fragments.
+        const auto script = "lay = layout.layer(\"Metal1\", 34)\n"
+                            "pad = lay.rectangle(0, 0, 100, 100, name=\"pad\")\n"
+                            "block = layout.instance(\"" +
+                            loadedCell->second.name +
+                            "\", 0, 0, name=\"DIGITAL\")\n"
+                            "assert block.bounds[\"width\"] == 1000\n"
+                            "assert block.bounds[\"height\"] == 1000\n"
+                            "assert \"clk\" in block.ports\n"
+                            "row = layout.row(gap=0)\n"
+                            "row.add(pad)\n"
+                            "row.add(block)\n"
+                            "layout.add(row)\n";
+        const auto proceduralId = ice::createProceduralLayout(loaded, "digital_parent", ice::genericPdkId, script);
+        const auto generated = ice::regenerateProceduralLayout(loaded, proceduralId);
+        CHECK(generated.ok);
+        if (generated.ok) {
+            const auto &parent = loaded.layoutCells.at(loaded.proceduralLayouts.at(proceduralId).generatedCell);
+            REQUIRE(parent.instances.size() == 1);
+            CHECK(parent.instances.begin()->second.cell == imported.layout);
+            CHECK(parent.instances.begin()->second.name == "DIGITAL");
+            CHECK(parent.instances.begin()->second.x == 100);
+            CHECK(parent.instances.begin()->second.y == 0);
+            CHECK(parent.shapes.size() == 1);
+            CHECK(loaded.validate().empty());
+
+            const auto quality = nlohmann::json::parse(generated.layoutQuality);
+            CHECK(quality.at("instance_count") == 1);
+            CHECK(std::abs(quality.at("instance_area_um2").get<double>() - 1.0) < 1.0e-9);
+            CHECK(quality.at("utilization").get<double>() > 0.9);
+            CHECK(std::abs(quality.at("device_utilization").get<double>()) < 1.0e-9);
+
+            const auto parentGds = root / "digital-parent.gds";
+            bool exported = true;
+            try {
+                // Plain exportGds must flatten instance-bearing cells instead
+                // of dropping the digital child geometry.
+                ice::LayoutInterchange::exportGds(loaded, parent.id, parentGds);
+            } catch (const std::exception &) {
+                exported = false;
+            }
+            CHECK(exported);
+            CHECK(std::filesystem::is_regular_file(parentGds));
+            if (exported) {
+                const auto flattened = ice::LayoutInterchange::importGds(parentGds);
+                REQUIRE(flattened.layoutCells.size() == 1);
+                const auto &flatCell = flattened.layoutCells.begin()->second;
+                CHECK(flatCell.shapes.size() == 2);
+                bool digitalGeometry = false;
+                for (const auto &[_, shape] : flatCell.shapes) {
+                    if (shape.rectangle.width == 1000 && shape.rectangle.height == 1000)
+                        digitalGeometry = true;
+                }
+                CHECK(digitalGeometry);
+            }
+
+            // Re-importing with replace must keep the same cell id so the
+            // procedural instance continues to reference the refreshed device.
+            const auto replaced = ice::importImplementationLayout(loaded, run, package, root, "", true);
+            CHECK(replaced.layout == imported.layout);
+            CHECK(loaded.layoutCells.at(replaced.layout).ports.size() == 2);
+            CHECK(loaded.layoutCells.at(loaded.proceduralLayouts.at(proceduralId).generatedCell)
+                      .instances.begin()
+                      ->second.cell == imported.layout);
+            CHECK(loaded.validate().empty());
+        }
     }
 
     std::filesystem::remove(root / "build" / "impl" / "counter-1" / "final" / "6_final.gds");
@@ -3956,6 +4062,40 @@ TEST_CASE("flattened GDS export preserves child geometry") {
     }
     CHECK(shifted);
     std::filesystem::remove(gds);
+
+    // Plain export must not silently drop instance geometry. The writer emits
+    // one structure, so instance-bearing cells are flattened automatically.
+    const auto plainGds = std::filesystem::temp_directory_path() / "ice-plain-export-test.gds";
+    ice::LayoutInterchange::exportGds(project, parent, plainGds);
+    const auto plain = ice::LayoutInterchange::importGds(plainGds);
+    CHECK(plain.layoutCells.size() == 1);
+    CHECK(plain.layoutCells.begin()->second.shapes.size() == 3);
+    std::filesystem::remove(plainGds);
+
+    // Flattening must retain the top cell's logical pins, not only child
+    // geometry.
+    const auto portId = ice::addPort(project, parent, "OUT", layer, ice::Rect{0, 0, 100, 100},
+                                     ice::PortDirection::output, ice::PortSide::left, 0, "OUT");
+    CHECK(portId != 0);
+    const auto portedGds = std::filesystem::temp_directory_path() / "ice-ported-export-test.gds";
+    ice::LayoutInterchange::exportFlattenedGds(project, parent, portedGds);
+    ice::LayoutImportOptions options;
+    options.pinLabelLayer = 34;
+    options.pinWidth = 100;
+    options.pinHeight = 100;
+    const auto ported = ice::LayoutInterchange::importGds(portedGds, options);
+    REQUIRE(ported.layoutCells.size() == 1);
+    const auto &portedCell = ported.layoutCells.begin()->second;
+    CHECK(portedCell.ports.size() == 1);
+    if (!portedCell.ports.empty()) {
+        const auto &port = portedCell.ports.begin()->second;
+        CHECK(port.name == "OUT");
+        CHECK(port.rectangle.x == 0);
+        CHECK(port.rectangle.y == 0);
+        CHECK(port.rectangle.width == 100);
+        CHECK(port.rectangle.height == 100);
+    }
+    std::filesystem::remove(portedGds);
 }
 
 TEST_CASE("layout text persists and exports as GDS text") {

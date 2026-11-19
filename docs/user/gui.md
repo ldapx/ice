@@ -134,9 +134,10 @@ and Layout:
   or the last failure. Below the tree, **Open in OpenROAD GUI** launches the
   standalone viewer on the active ODB, and Final places **Import final as
   device** next to it. **Import final as device** flattens the final GDS/OASIS into one read-only
-  device cell shown under **Layout > Devices > Digital**. Create a layout and
-  place the device as many times as needed. Missing final streams are reported
-  as an error. The `Display`
+  device cell shown under **Layout > Devices > Digital**, copying top-level DEF
+  pins and pin nets when a DEF checkpoint exists. Create a layout and place the
+  device as many times as needed. Missing final streams are reported as an
+  error. The `Display`
   tree toggles layers, net types, instance categories, special nets, ports,
   route guides, rows, and blockages. Fill,
   endcap, tap, antenna, and cover cells are hidden by default; changing

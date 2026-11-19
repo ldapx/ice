@@ -11,6 +11,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <set>
 #include <sstream>
 
 namespace ice {
@@ -173,6 +174,134 @@ std::filesystem::path flattenImplementationStream(const std::filesystem::path &s
     return output;
 }
 
+std::filesystem::path findImplementationDef(const std::filesystem::path &runDirectory) {
+    for (const auto *candidate :
+         {"def/6_final.def", "def/5_route.def", "def/4_cts.def", "def/3_place.def", "def/2_floorplan.def"}) {
+        const auto path = runDirectory / candidate;
+        std::error_code status;
+        if (std::filesystem::is_regular_file(path, status) && !status)
+            return path;
+    }
+    return {};
+}
+
+ObjectId findImportedLayer(const Project &project, int number, int datatype, const std::string &pdk,
+                           const std::string &stack) {
+    ObjectId fallback = 0;
+    for (const auto &[id, layer] : project.layers) {
+        if (layer.layout != 0 || layer.number != number || layer.datatype != datatype)
+            continue;
+        if (!layer.pdk.empty() && layer.pdk != pdk)
+            continue;
+        if (!layer.stack.empty() && layer.stack != stack)
+            continue;
+        // Prefer the layer that belongs to the target PDK/stack. A generic
+        // layer is still usable when no PDK-specific copy exists.
+        if (layer.pdk == pdk && layer.stack == stack)
+            return id;
+        if (fallback == 0)
+            fallback = id;
+    }
+    return fallback;
+}
+
+// The final stream is flattened for a compact reusable device. The DEF
+// checkpoint still carries the top-level pin names, directions, nets, and
+// geometry, so import those into the same cell as its logical interface.
+int copyDefPins(Project &project, LayoutCell &cell, const std::filesystem::path &defPath, const PackageSpec &package,
+                const std::string &pdk, const std::string &stack) {
+    if (!package.pdk)
+        return 0;
+    DefImportOptions options;
+    options.pdk = pdk;
+    options.stack = stack;
+    options.cellName = cell.name + " pins";
+    options.importMasters = false;
+    options.importRoutes = false;
+    for (const auto &layer : package.pdk->layers)
+        options.layers[lowercase(layer.name)] = InterchangeLayerDefinition{layer.number, layer.datatype};
+
+    Project temp;
+    temp.identity = options.cellName;
+    temp.name = options.cellName;
+    const auto tempCellId = LayoutInterchange::importDefIntoProject(temp, defPath, options);
+    const auto tempCell = temp.layoutCells.find(tempCellId);
+    if (tempCell == temp.layoutCells.end())
+        return 0;
+
+    std::map<ObjectId, ObjectId> layers;
+    const auto layerFor = [&](ObjectId tempLayerId) -> ObjectId {
+        if (const auto existing = layers.find(tempLayerId); existing != layers.end())
+            return existing->second;
+        const auto tempLayer = temp.layers.find(tempLayerId);
+        if (tempLayer == temp.layers.end())
+            return 0;
+        auto target = findImportedLayer(project, tempLayer->second.number, tempLayer->second.datatype, pdk, stack);
+        if (target == 0)
+            target = addLayer(project, tempLayer->second.name, tempLayer->second.number, 0, pdk,
+                              tempLayer->second.datatype, stack);
+        layers.emplace(tempLayerId, target);
+        return target;
+    };
+
+    const auto normalizedName = [](std::string value) {
+        for (auto &character : value)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        return value;
+    };
+    std::map<std::string, ObjectId> nets;
+    for (const auto &[id, net] : cell.nets)
+        nets[normalizedName(net.name)] = id;
+    const auto ensureNet = [&](const std::string &name) -> ObjectId {
+        if (name.empty())
+            return 0;
+        const auto key = normalizedName(name);
+        if (const auto existing = nets.find(key); existing != nets.end())
+            return existing->second;
+        const auto id = createLayoutNet(project, cell.id, name);
+        nets.emplace(key, id);
+        return id;
+    };
+
+    std::set<std::string> portNames;
+    for (const auto &[_, port] : cell.ports)
+        portNames.insert(normalizedName(port.name));
+    int copied = 0;
+    for (const auto &[_, port] : tempCell->second.ports) {
+        if (!port.rectangle.valid())
+            continue;
+        const auto layer = layerFor(port.layer);
+        if (layer == 0)
+            continue;
+        const auto baseName = port.name.empty() ? port.label : port.name;
+        if (baseName.empty())
+            continue;
+        auto name = baseName;
+        auto key = normalizedName(name);
+        for (int suffix = 2; portNames.contains(key); ++suffix) {
+            name = baseName + "_" + std::to_string(suffix);
+            key = normalizedName(name);
+        }
+        auto copy = port;
+        copy.id = project.nextId();
+        copy.name = name;
+        copy.label = port.label.empty() ? name : port.label;
+        copy.layer = layer;
+        copy.net = 0;
+        copy.sourceInstance = 0;
+        copy.sourcePort = 0;
+        copy.schematicInstance = 0;
+        if (port.net != 0) {
+            if (const auto net = tempCell->second.nets.find(port.net); net != tempCell->second.nets.end())
+                copy.net = ensureNet(net->second.name);
+        }
+        portNames.insert(key);
+        cell.ports.emplace(copy.id, std::move(copy));
+        ++copied;
+    }
+    return copied;
+}
+
 void copyFlattenedStream(Project &project, LayoutCell &cell, const std::filesystem::path &flattened,
                          const PackageSpec &package, const std::string &pdk, const std::string &stack) {
     auto imported = LayoutInterchange::importGds(flattened);
@@ -181,17 +310,7 @@ void copyFlattenedStream(Project &project, LayoutCell &cell, const std::filesyst
     const auto &source = imported.layoutCells.begin()->second;
     std::map<ObjectId, ObjectId> layers;
     for (const auto &[id, layer] : imported.layers) {
-        ObjectId target = 0;
-        for (const auto &[candidateId, candidate] : project.layers) {
-            if (candidate.layout != 0 || candidate.number != layer.number || candidate.datatype != layer.datatype)
-                continue;
-            if (!candidate.pdk.empty() && candidate.pdk != pdk)
-                continue;
-            if (!candidate.stack.empty() && candidate.stack != stack)
-                continue;
-            target = candidateId;
-            break;
-        }
+        auto target = findImportedLayer(project, layer.number, layer.datatype, pdk, stack);
         if (target == 0) {
             std::string name = layer.name;
             if (package.pdk) {
@@ -352,6 +471,34 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
                                                        run.config.timeoutSeconds);
     copyFlattenedStream(project, cell, flattened, package, pdk, stack);
 
+    std::vector<Diagnostic> pinDiagnostics;
+    const auto def = findImplementationDef(projectRoot / run.directory);
+    if (!def.empty()) {
+        // Keep the import transactional if a malformed DEF pin section fails
+        // after some ports/nets were already copied.
+        const auto portsBackup = cell.ports;
+        const auto netsBackup = cell.nets;
+        try {
+            const auto pins = copyDefPins(project, cell, def, package, pdk, stack);
+            if (pins == 0)
+                pinDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.pins",
+                                          "No top-level pin geometry was found in " + def.filename().string() +
+                                              "; the digital device has no ports.",
+                                          std::nullopt});
+        } catch (const std::exception &error) {
+            cell.ports = portsBackup;
+            cell.nets = netsBackup;
+            pinDiagnostics.push_back(
+                {Diagnostic::Severity::warning, "implementation.pins",
+                 std::string("Unable to import top-level pins from ") + def.filename().string() + ": " + error.what(),
+                 std::nullopt});
+        }
+    } else {
+        pinDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.pins",
+                                  "No DEF checkpoint was found; the digital device has no top-level ports.",
+                                  std::nullopt});
+    }
+
     run.resultLayout = cellId;
     run.updatedAt = nowUtc();
     const auto artifact = stream.lexically_relative(projectRoot).generic_string();
@@ -362,6 +509,7 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
     ImplementationLayoutImport result;
     result.layout = cellId;
     result.referencePath = stream;
+    result.diagnostics = std::move(pinDiagnostics);
     return result;
 }
 

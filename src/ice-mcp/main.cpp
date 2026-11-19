@@ -4032,7 +4032,9 @@ class IceMcpServer {
                 ice::LayoutInterchange::exportFlattenedGds(session.project(), cell, path);
             else
                 ice::LayoutInterchange::exportGds(session.project(), cell, path);
-            return {{"cell", cell}, {"path", path}, {"flattened", flatten}};
+            // The GDS writer emits a single structure, so instance-bearing
+            // cells are always flattened to preserve child geometry.
+            return {{"cell", cell}, {"path", path}, {"flattened", true}};
         }
         if (name == "layout_export_lef") {
             const auto cell = resolveLayoutCell(session.project(), arguments);
@@ -4348,6 +4350,7 @@ class IceMcpServer {
             const bool replace = optionalBoolean(arguments, "replace", false);
             ice::ObjectId layoutId = 0;
             std::filesystem::path importedStream;
+            std::vector<ice::Diagnostic> importedDiagnostics;
             session.execute("mcp implementation-import-layout", [&](ice::Project &project) {
                 auto found = project.implementationRuns.find(runId);
                 if (found == project.implementationRuns.end())
@@ -4356,8 +4359,16 @@ class IceMcpServer {
                                                                 layoutName, replace);
                 layoutId = imported.layout;
                 importedStream = imported.referencePath;
+                importedDiagnostics = std::move(imported.diagnostics);
             });
             const auto &layout = session.project().layoutCells.at(layoutId);
+            json diagnostics = json::array();
+            for (const auto &diagnostic : importedDiagnostics) {
+                diagnostics.push_back(
+                    json{{"severity", diagnostic.severity == ice::Diagnostic::Severity::error ? "error" : "warning"},
+                         {"code", diagnostic.code},
+                         {"message", diagnostic.message}});
+            }
             return {{"layout", layoutId},
                     {"name", layout.name},
                     {"pdk", layout.pdk},
@@ -4370,6 +4381,7 @@ class IceMcpServer {
                     {"ports", layout.ports.size()},
                     {"nets", layout.nets.size()},
                     {"instances", layout.instances.size()},
+                    {"diagnostics", std::move(diagnostics)},
                     {"run", ice::implementationRunJson(session.project().implementationRuns.at(runId))}};
         }
         if (name == "implementation_export_gds") {
@@ -5056,12 +5068,14 @@ class IceMcpServer {
                             .with_description("Extract nets from explicit layout nets and same-layer geometry.")
                             .with_string_param("cell", "Layout cell name or id")
                             .build());
-        tools.push_back(tool_builder("layout_export_gds")
-                            .with_description("Export a layout cell to GDSII, including pins and labels.")
-                            .with_string_param("cell", "Layout cell name or id")
-                            .with_string_param("path", "Output GDS path")
-                            .with_boolean_param("flatten", "Flatten instance hierarchy into one cell", false)
-                            .build());
+        tools.push_back(
+            tool_builder("layout_export_gds")
+                .with_description("Export a layout cell to GDSII, including pins and labels. "
+                                  "Instance hierarchy is flattened into one structure.")
+                .with_string_param("cell", "Layout cell name or id")
+                .with_string_param("path", "Output GDS path")
+                .with_boolean_param("flatten", "Accepted for compatibility; exports are always flattened", false)
+                .build());
         tools.push_back(tool_builder("layout_export_lef")
                             .with_description("Export layout pin metadata as a minimal LEF macro.")
                             .with_string_param("cell", "Layout cell name or id")
@@ -5208,7 +5222,8 @@ class IceMcpServer {
                             .with_string_param("run", "Implementation run name or id")
                             .build());
         tools.push_back(tool_builder("implementation_import_layout")
-                            .with_description("Create a reusable read-only digital device from the final GDS/OASIS.")
+                            .with_description("Create a reusable read-only digital device from the final GDS/OASIS, "
+                                              "including top-level DEF pins and pin nets when available.")
                             .with_string_param("run", "Implementation run name or id")
                             .with_string_param("layout_name", "Optional imported device name", false)
                             .with_boolean_param("replace", "Replace the layout previously produced by this run", false)

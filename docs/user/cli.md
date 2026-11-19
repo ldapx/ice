@@ -185,7 +185,8 @@ generation hashes, parameter values, and stale state. `layout-review` applies
 optional utilization, row-gap, composition, and plan checks to that stored
 metadata without regenerating the layout. `layout-set-parameter` edits a
 declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
-TEXT label. `layout-connectivity` merges objects assigned to the same layout
+TEXT label and always flattens instance hierarchy into one structure, so child geometry is preserved; `--flatten`
+is accepted for compatibility. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
 layers also connect overlapping layers. Resistor bodies marked with a `*.res`
 purpose layer (or identified by planned-device metadata) are excluded from
@@ -297,11 +298,15 @@ that the process is OpenROAD or Yosys.
 `implementation-log` prints the bounded merged log for one stage; `--tail` keeps
 only the last N lines. `implementation-import` looks for a final GDS/OASIS stream
 (`final/6_final.gds`, `.gdsii`, `.oas`, or `.oasis`) and flattens it into a
-read-only **digital device** cell. The device appears under Layout > Devices >
-Digital; create a layout and place instances of it. No top-level layout is
-created. Missing streams are an error; run `implementation-export-gds` or
-complete the final stage first. `--layout-name` names the device and `--replace`
-updates the previously imported device instead of creating another cell.
+read-only **digital device** cell. When the run has a DEF checkpoint, its
+top-level pins and pin nets are copied onto the device so layouts can place and
+route to them. The device appears under Layout > Devices > Digital; create a
+layout and place instances of it. No top-level layout is created. Missing
+streams are an error; run `implementation-export-gds` or complete the final
+stage first. `--layout-name` names the device and `--replace` updates the
+previously imported device instead of creating another cell. The JSON response
+reports the imported shape, port, net, and instance counts plus any pin
+extraction warnings.
 
 `implementation-toolchain` reports the resolved `openroad`, `yosys`, and
 `klayout` executables. Set `ICE_OPENROAD`, `ICE_YOSYS`, or `ICE_KLAYOUT` to
