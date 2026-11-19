@@ -793,12 +793,15 @@ perimeter, total resistance, and capacitance in the generated SPICE text
 schematic. A text SPICE cell named `<layout> PEX` is created — or updated on a
 later run — and selected in the Schematic tab, so it appears in the project
 hierarchy. Single-terminal nets use a series resistance with the capacitance to
-ground; multi-terminal nets use a resistance star between pins. Placed
-device-library instances are extracted first: their terminal pin rectangles are
+ground; multi-terminal nets use a resistance star between pins. Planned
+devices from procedural layouts are extracted first using their model,
+parameters, and terminal-net metadata, so flattened PCell resistors,
+capacitors, and transistors remain in the post-layout netlist. Placed
+device-library instances are extracted next: their terminal pin rectangles are
 transformed into parent coordinates, matched to the parent nets they overlap,
 and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
-placed devices are recognized, PEX falls back to copying the inferred source
-schematic's device netlist. Devices drawn purely as polygons are recognized
+planned or placed devices are recognized, PEX falls back to copying the inferred
+source schematic's device netlist. Devices drawn purely as polygons are recognized
 through the PDK package's `technology/extraction.json` rules: PEX cuts active under
 gates, finds source/drain terminal nets, and emits MOS devices with geometric
 W/L. The same rules can describe simple resistors and capacitors. Use LVS to

@@ -85,6 +85,70 @@ TEST_CASE("via cuts only connect their own layer pair") {
     CHECK(groupFor(groups, lower) == groupFor(groups, viaCut));
 }
 
+TEST_CASE("resistor bodies do not alias the nets at their terminals") {
+    ice::Project project;
+    project.identity = "connectivity-resistor";
+    project.name = "connectivity-resistor";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto poly = ice::addLayer(project, "poly.drawing", 66, 0, {}, 20);
+    const auto polyRes = ice::addLayer(project, "poly.res", 66, 0, {}, 13);
+    const auto li1 = ice::addLayer(project, "li1.drawing", 67, 0, {}, 20);
+    const auto met1 = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto licon = ice::addLayer(project, "licon1.drawing", 66, 0, {}, 44);
+    const auto mcon = ice::addLayer(project, "mcon.drawing", 67, 0, {}, 44);
+    const auto netA = ice::createLayoutNet(project, cell, "A");
+    const auto netB = ice::createLayoutNet(project, cell, "B");
+
+    const auto left = ice::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
+    const auto right = ice::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
+    ice::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
+    ice::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
+    ice::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
+    ice::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
+    ice::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
+    ice::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
+    const auto body = ice::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
+
+    // A marker is the normal way a PDK identifies a resistor body.
+    ice::addRectangle(project, cell, polyRes, {0, 0, 4000, 1000});
+    auto groups = ice::extractLayoutNets(project, cell);
+    CHECK(groupFor(groups, left) != nullptr);
+    CHECK(groupFor(groups, right) != nullptr);
+    CHECK(groupFor(groups, left) != groupFor(groups, right));
+    CHECK(groupFor(groups, body) == nullptr);
+    if (groupFor(groups, left) != nullptr)
+        CHECK(groupFor(groups, left)->aliases.empty());
+
+    // Procedural layouts may not carry purpose markers; planned-device
+    // metadata identifies the same body for connectivity extraction.
+    auto &cellData = project.layoutCells.at(cell);
+    cellData.shapes.clear();
+    const auto left2 = ice::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
+    const auto right2 = ice::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
+    ice::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
+    ice::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
+    ice::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
+    ice::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
+    ice::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
+    ice::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
+    ice::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
+    ice::PlannedDevice planned;
+    planned.id = project.nextId();
+    planned.name = "R1";
+    planned.device = "res_poly";
+    planned.model = "sky130_fd_pr__res_high_po";
+    planned.x = 0;
+    planned.y = 0;
+    planned.width = 4000;
+    planned.height = 1000;
+    planned.placeholder = false;
+    cellData.plannedDevices.emplace(planned.id, planned);
+    groups = ice::extractLayoutNets(project, cell);
+    CHECK(groupFor(groups, left2) != nullptr);
+    CHECK(groupFor(groups, right2) != nullptr);
+    CHECK(groupFor(groups, left2) != groupFor(groups, right2));
+}
+
 TEST_CASE("explicit layout nets merge distant shapes and pins") {
     auto fixture = makeFixture();
     const auto net = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");

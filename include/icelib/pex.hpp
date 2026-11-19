@@ -31,6 +31,10 @@ struct PexOptions {
     // Extract devices from placed layout instances whose child cells carry
     // device metadata (device-library cells with model parameters and pins).
     bool extractPlacedDevices = true;
+    // Extract devices recorded as planned-device metadata. Procedural layouts
+    // flatten PCell geometry but keep model, parameter, and terminal-net
+    // metadata so passives and devices can still be included in PEX.
+    bool extractPlannedDevices = true;
     // Extract devices drawn directly as polygons using the PDK extraction
     // rules. The rules are loaded from the installed package's
     // technology/extraction.json, or from extractionRulesPath when non-empty.

@@ -182,9 +182,11 @@ and `layout-info` reports its generation hashes, parameter values, and stale
 state. `layout-set-parameter` edits a declared parameter without regenerating. `layout-export-gds` writes each visible pin as a boundary plus a GDSII
 TEXT label. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
-layers also connect overlapping layers. When unlabeled geometry (for example a
-poly resistor body) joins two explicitly named nets, the group keeps the first
-name and lists the rest under `aliases` instead of dropping them.
+layers also connect overlapping layers. Resistor bodies marked with a `*.res`
+purpose layer (or identified by planned-device metadata) are excluded from
+geometric net merging so their terminals do not alias. When other unlabeled
+geometry joins two explicitly named nets, the group keeps the first name and
+lists the rest under `aliases` instead of dropping them.
 `layout-export-lef` and `layout-export-def` write minimal pin metadata for
 place-and-route exchange.
 `layout-import-gds` creates a new project and, when a pin-label layer is given,

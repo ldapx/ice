@@ -4009,6 +4009,7 @@ class IceMcpServer {
             optionalNumber("area_capacitance", options.areaCapacitance);
             optionalNumber("perimeter_capacitance", options.perimeterCapacitance);
             options.extractPlacedDevices = optionalBoolean(arguments, "extract_placed_devices", true);
+            options.extractPlannedDevices = optionalBoolean(arguments, "extract_planned_devices", true);
             options.extractPolygonDevices = optionalBoolean(arguments, "extract_polygon_devices", true);
             options.includeLinkedSchematic = optionalBoolean(arguments, "include_linked_schematic", true);
             const auto extractionRulesPath = optionalString(arguments, "extraction_rules_path");
@@ -4979,8 +4980,8 @@ class IceMcpServer {
                 .build());
         tools.push_back(
             tool_builder("pex_run")
-                .with_description("Extract placed and PDK-rule polygon devices plus first-order layout parasitics into "
-                                  "a text SPICE schematic.")
+                .with_description("Extract planned, placed, and PDK-rule polygon devices plus first-order layout "
+                                  "parasitics into a text SPICE schematic.")
                 .with_string_param("layout", "Layout cell name or id")
                 .with_string_param("name", "Optional text schematic name", false)
                 .with_number_param("metal_sheet_resistance", "Optional metal sheet resistance (ohm/square)", false)
@@ -4992,6 +4993,8 @@ class IceMcpServer {
                 .with_number_param("perimeter_capacitance", "Optional perimeter capacitance (fF/um)", false)
                 .with_boolean_param("extract_placed_devices",
                                     "Extract devices from placed layout instances (default true)", false)
+                .with_boolean_param("extract_planned_devices",
+                                    "Extract planned-device metadata from procedural layouts (default true)", false)
                 .with_boolean_param("extract_polygon_devices", "Extract polygon devices using PDK rules (default true)",
                                     false)
                 .with_string_param("extraction_rules_path", "Optional override for technology/extraction.json", false)
