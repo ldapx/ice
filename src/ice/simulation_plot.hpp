@@ -10,6 +10,7 @@
 #include <QString>
 #include <QWidget>
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -27,6 +28,10 @@ class QWheelEvent;
 // simulation data.
 class SimulationPlot : public QWidget {
   public:
+    // Number of min/max buckets used for the view-independent trace envelope.
+    // The display path is rebuilt from this envelope during pan/zoom instead of
+    // rescanning every stored sample.
+    static constexpr std::size_t envelopeBuckets = 8192;
     // One additional run drawn in the same graph. Labels identify corners or
     // experiment variants in the legend.
     struct Overlay {
@@ -93,13 +98,48 @@ class SimulationPlot : public QWidget {
     void contextMenuEvent(QContextMenuEvent *event) override;
 
   private:
-    struct DisplayTrace {
+    struct EnvelopeBucket {
+        double minY = 0.0;
+        double maxY = 0.0;
+        bool valid = false;
+    };
+
+    struct PreparedTrace {
         std::string signal;
         QString label;
         QString xUnit;
         QString yUnit;
         std::vector<double> x;
         std::vector<double> y;
+        bool xSorted = false;
+        // Sorted sample indices for large non-monotonic X/Y curves so cursor
+        // lookup does not scan the whole trace on every mouse move.
+        std::vector<std::size_t> nearestOrder;
+        bool dashed = false;
+        int colorIndex = 0;
+        // View-independent min/max envelope over the full X range.
+        std::vector<EnvelopeBucket> envelope;
+        double envelopeMinX = 0.0;
+        double envelopeMaxX = 0.0;
+    };
+
+    struct PreparedCache {
+        bool valid = false;
+        std::vector<PreparedTrace> traces;
+        std::vector<QString> warnings;
+        bool haveData = false;
+        double dataXMin = 0.0;
+        double dataXMax = 1.0;
+        double dataYMin = 0.0;
+        double dataYMax = 1.0;
+    };
+
+    struct DisplayTrace {
+        std::string signal;
+        QString label;
+        QString xUnit;
+        QString yUnit;
+        std::size_t preparedIndex = 0;
         QPainterPath path;
         bool dashed = false;
         int colorIndex = 0;
@@ -135,7 +175,10 @@ class SimulationPlot : public QWidget {
 
     const std::vector<double> *valuesForSignal(const std::string &signal) const;
     void invalidateDisplayCache();
+    void invalidatePreparedCache();
+    void ensurePreparedCache() const;
     void ensureDisplayCache() const;
+    QPainterPath buildTracePath(const PreparedTrace &trace, double xMin, double xMax, int columns) const;
     void editLabel(const std::string &signal, const QString &currentLabel);
     bool inTraceArea(const QPointF &position) const;
     double xAtPosition(double x) const;
@@ -153,6 +196,7 @@ class SimulationPlot : public QWidget {
     ice::SimulationGraph graph_;
     bool gridVisible_ = true;
     Tool tool_ = Tool::pan;
+    mutable PreparedCache prepared_;
     mutable DisplayCache cache_;
     std::optional<double> viewXMin_;
     std::optional<double> viewXMax_;
