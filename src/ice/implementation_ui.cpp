@@ -2941,7 +2941,10 @@ void ImplementationPage::buildUi() {
     contentLayout->setSpacing(6);
 
     leftTabs_ = new QTabWidget;
+    // Keep the editor visible when the splitter is dragged right, like the
+    // Simulation tab's side panel.
     leftTabs_->setMinimumWidth(180);
+    leftTabs_->setMaximumWidth(280);
     if (hdlMode() || synthesisMode()) {
         auto *explorerPage = new QWidget;
         auto *explorerLayout = new QVBoxLayout(explorerPage);
@@ -3128,7 +3131,19 @@ void ImplementationPage::buildUi() {
         if (runsPage && embedded_)
             leftTabs_->setCurrentWidget(runsPage);
     }
-    contentLayout->addWidget(leftTabs_, 0);
+    // The explorer sits in a splitter so it can be retracted, matching the
+    // Simulation tab.
+    auto *contentSplit = new QSplitter(Qt::Horizontal);
+    contentSplit->addWidget(leftTabs_);
+    auto *workspace = new QWidget;
+    auto *workspaceLayout = new QHBoxLayout(workspace);
+    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setSpacing(6);
+    contentSplit->addWidget(workspace);
+    contentSplit->setStretchFactor(0, 0);
+    contentSplit->setStretchFactor(1, 1);
+    contentSplit->setSizes({240, 1000});
+    contentLayout->addWidget(contentSplit, 1);
 
     middleTabs_ = new QTabWidget;
     middleTabs_->setDocumentMode(true);
@@ -3366,7 +3381,7 @@ void ImplementationPage::buildUi() {
         previewToolbarLayout->addStretch(1);
         previewToolbarLayout->addWidget(previewToolbar, 0, Qt::AlignHCenter);
         previewToolbarLayout->addStretch(1);
-        contentLayout->addWidget(previewToolbarColumn, 0);
+        workspaceLayout->addWidget(previewToolbarColumn, 0);
 
         QObject::connect(fitTool, &QAction::triggered, this, [this] {
             if (previewCanvas_)
@@ -3456,7 +3471,7 @@ void ImplementationPage::buildUi() {
         const auto previewIndex = middleTabs_->addTab(previewPage, QStringLiteral("Preview"));
         middleTabs_->tabBar()->setTabButton(previewIndex, QTabBar::RightSide, nullptr);
     }
-    contentLayout->addWidget(middleTabs_, 1);
+    workspaceLayout->addWidget(middleTabs_, 1);
 
     rightTabs_ = new QTabWidget;
     rightTabs_->setMinimumWidth(240);
@@ -3683,7 +3698,7 @@ void ImplementationPage::buildUi() {
             rightTabs_->setCurrentIndex(0);
         }
     }
-    contentLayout->addWidget(rightTabs_, 0);
+    workspaceLayout->addWidget(rightTabs_, 0);
 
     layout->addWidget(content, 1);
 

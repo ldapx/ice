@@ -332,6 +332,11 @@ inductors. Source values are shown to the right, with sine sources displaying
 amplitude and period. Selecting a symbol highlights its artwork, reference
 label, and value text without drawing a selection rectangle. Hovering over a
 symbol highlights its artwork, and hovering over a net highlights its wires.
+Opening a project opens its first schematic; the create-schematic page is only
+shown for projects that have no schematics at all. The **Hierarchy** and
+**Devices** panel, like the side panel of every workspace tab, sits in a
+splitter that can be dragged shut to give the editor the full width.
+
 The **+** button in Schematic **Hierarchy** offers **Schematic**, **Text SPICE
 Schematic**, and **SystemVerilog Block**. Text SPICE schematics use a
 notebook-text icon, appear in the schematic tab bar with a `.sp` extension, and
@@ -1014,6 +1019,12 @@ Appearance** allows overriding this with **System Theme**, **Light Theme**, or
 **Dark Theme**; the choice is persisted with `QSettings`. Custom-painted views
 such as the schematic, layout, and simulation plot derive their colors from the
 active QPalette so they stay consistent with the surrounding widgets.
+
+The workspace tabs (Schematic, HDL Schematic, Synthesis, Physical Design,
+Layout, Simulation, and Digital Testbenches) are locked in their default order.
+**Settings → Movable Tabs** enables reordering them by dragging; the choice is
+persisted with `QSettings`. Reordering only changes their order, not which
+project file each tab shows.
 
 ## Interaction conventions
 
