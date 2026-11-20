@@ -5,6 +5,16 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("spdlog", "nlohmann_json", "clipper2")
 
+-- System dependency locations. These defaults match Debian/Ubuntu; override
+-- them in environments with versioned or non-standard prefixes.
+local python_version = os.getenv("ICE_PYTHON_VERSION") or "3.14"
+local python_include = os.getenv("ICE_PYTHON_INCLUDE") or ("/usr/include/python" .. python_version)
+local nanobind_root = os.getenv("NANOBIND_ROOT") or
+                          ("/usr/lib/python" .. python_version .. "/site-packages/nanobind")
+local qt_include = os.getenv("ICE_QT_INCLUDE") or "/usr/include/qt6"
+local ngspice_include = os.getenv("ICE_NGSPICE_INCLUDE") or "/usr/include/ngspice"
+local toml_include = os.getenv("ICE_TOML_INCLUDE") or "/usr/include/toml++"
+
 -- Bake a small build fingerprint into icelib so MCP clients can detect a
 -- long-lived server that was started before the last install.
 --
@@ -103,10 +113,10 @@ target("icelib")
     add_cxxflags(first_party_warnings)
     add_packages("spdlog", "nlohmann_json", "clipper2")
     -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
-    -- TODO: replace hardcoded /usr paths with packaged deps or pkg-config checks.
-    add_includedirs("/usr/include/toml++", "/usr/include")
+    -- The include directories are overridable through the environment.
+    add_includedirs(toml_include, "/usr/include")
     add_links("crypto", "z")
-    add_includedirs("/usr/include/ngspice")
+    add_includedirs(ngspice_include)
     add_links("ngspice")
 
 if has_agentsdk then
@@ -132,9 +142,8 @@ target("ice")
     add_files("src/ice/*.cpp")
     add_deps("icelib", "ice-openroad")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_includedirs("include", "/usr/include/qt6", "/usr/include/qt6/QtCore",
-                    "/usr/include/qt6/QtGui", "/usr/include/qt6/QtWidgets",
-                    "/usr/include/qt6/QtSvg", "/usr/include/qt6/QtSvgWidgets")
+    add_includedirs("include", qt_include, qt_include .. "/QtCore", qt_include .. "/QtGui",
+                    qt_include .. "/QtWidgets", qt_include .. "/QtSvg", qt_include .. "/QtSvgWidgets")
     add_syslinks("Qt6Widgets", "Qt6Gui", "Qt6Core", "Qt6Svg", "Qt6SvgWidgets")
     add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
     add_cxxflags("-fPIC", {force = true})
@@ -201,13 +210,11 @@ target("doctest")
 target("icepy")
     set_kind("shared")
     set_prefixname("")
-    add_files("src/icepy/module.cpp", "/usr/lib/python3.14/site-packages/nanobind/src/nb_combined.cpp")
+    add_files("src/icepy/module.cpp", nanobind_root .. "/src/nb_combined.cpp")
     add_deps("icelib")
     add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_includedirs("include", "/usr/include/python3.14",
-                    "/usr/lib/python3.14/site-packages/nanobind/include",
-                    "/usr/lib/python3.14/site-packages/nanobind/src")
-    add_links("python3.14", "dl")
+    add_includedirs("include", python_include, nanobind_root .. "/include", nanobind_root .. "/src")
+    add_links("python" .. python_version, "dl")
     add_installfiles("python/icepy_pcells.py", {prefixdir = "share/ice/python"})
     add_installfiles("python/icepy_sim.py", {prefixdir = "share/ice/python"})
     add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/ice/assets/simulation"})
@@ -220,6 +227,18 @@ task("test")
         os.exec("xmake run doctest")
     end)
     set_menu {usage = "Run the doctest-compatible icelib test target"}
+
+task("test-python")
+    on_run(function ()
+        os.exec("python3 tests/mcp_tools_smoke.py")
+        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_api_tests.py")
+        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_smoke.py")
+        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_sim_tests.py")
+        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/package_pcells_test.py")
+        os.exec("python3 tests/procedural_composition_test.py")
+        os.exec("python3 tests/procedural_router_test.py")
+    end)
+    set_menu {usage = "Run MCP and Python integration tests"}
 
 task("format")
     on_run(function ()

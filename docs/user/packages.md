@@ -39,9 +39,11 @@ repository does not already provide one. It does not execute package scripts.
 The lockfile records exact versions, sources, trust declarations, capabilities,
 canonical `pdk_id`, and SHA-256 content hashes.
 
-Package code is untrusted by default. A package's `[trust] trusted = true`
-metadata is recorded for policy decisions but does not grant execution
-permission by itself.
+Package code is untrusted by default. Procedural layouts refuse to execute a
+PDK package's device generator unless the package declares `[trust] trusted =
+true`, or the caller explicitly sets `ICE_ALLOW_PACKAGE_CODE=1` for that
+invocation. The trust flag is advisory metadata, not a signature; use the
+environment override only for packages you have reviewed.
 
 ## Build and verify a PDK
 

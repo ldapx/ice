@@ -27,6 +27,7 @@ import heapq
 import importlib.util
 import json
 import math
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -2954,6 +2955,11 @@ class Layout:
         generator_path = Path(self.pdk_root) / "layout" / "devices" / "generator.py"
         if not generator_path.is_file():
             raise RuntimeError(f"Device generator is missing: {generator_path}")
+        if os.environ.get("ICE_ALLOW_PACKAGE_CODE", "1") == "0":
+            raise RuntimeError(
+                "Package device generators require explicit permission. "
+                "Mark the package trusted or set ICE_ALLOW_PACKAGE_CODE=1."
+            )
         with tempfile.TemporaryDirectory(prefix="ice-device-") as directory:
             params_path = Path(directory) / "params.json"
             output_path = Path(directory) / "geometry.json"

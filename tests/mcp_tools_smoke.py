@@ -1001,6 +1001,27 @@ def main() -> int:
             assert chunk_data["total_bytes"] > 0, chunk_data
             assert len(chunk_data["data"]) <= 64, chunk_data
 
+            with tempfile.TemporaryDirectory(prefix="ice-mcp-overwrite-") as tmp:
+                overwrite_root = Path(tmp) / "guard"
+                guard = MCP(cwd=Path(tmp))
+                try:
+                    guard.tool("project_create", path=str(overwrite_root), name="first")
+                    guard.tool("schematic_create", name="keep", kind="drawn")
+                    error = guard.tool_error(
+                        "project_create", path=str(overwrite_root), name="second"
+                    )
+                    assert "already exists" in error, error
+                    overwritten = guard.tool(
+                        "project_create",
+                        path=str(overwrite_root),
+                        name="second",
+                        overwrite=True,
+                    )
+                    assert overwritten["name"] == "second", overwritten
+                    assert overwritten["schematics"] == [], overwritten
+                finally:
+                    guard.close()
+
             print("ice-mcp tool smoke tests passed")
             return 0
         finally:

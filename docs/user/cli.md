@@ -46,7 +46,7 @@ ice-cli schematic-add-cell <project> <name> [pdk]
 ice-cli schematic-add-text <project> <name> [pdk] [spice-file]
 ice-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
 ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
-ice-cli schematic-set-text <project> <cell> [--kind text|systemverilog] [--convert] <file|->
+ice-cli schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] [--convert] <file|->
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
 ice-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
@@ -116,7 +116,11 @@ same generated pins. `schematic-remove --dry-run` lists dependencies;
 `--cascade` removes dependent simulations and hierarchical symbols too. A
 blocked deletion prints `deleted: false` and exits with status `1`.
 `schematic-set-text` replaces a text SPICE or SystemVerilog cell's source; use
-`--convert` only for an empty drawn cell.
+`--convert` only for an empty drawn cell. A source cell cannot switch between
+SPICE and SystemVerilog in place. Generated parent symbols are updated by pin
+name, and removing a connected pin fails instead of silently changing
+connectivity. `--source-path` retains the base path used by relative SPICE
+includes.
 
 `schematic-add-text` accepts either the positional `[pdk] [spice-file]` form or
 the unambiguous `--pdk <pdk> --file <spice-file>` form. If a file path is passed
@@ -179,9 +183,9 @@ ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
 ice-cli layout-export-def <project> <cell> <output.def>
-ice-cli layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>]
-ice-cli layout-import-lef <input.lef> <project>
-ice-cli layout-import-def <input.def> <project>
+ice-cli layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]
+ice-cli layout-import-lef <input.lef> <project> [--force]
+ice-cli layout-import-def <input.def> <project> [--force]
 ```
 
 Pin options are `--direction input|output|inout|power|ground`, `--side
@@ -222,7 +226,8 @@ matching TEXT records become pins on their containing cells. `--top-cell`
 selects a specific top structure; otherwise the last unreferenced structure is
 used. The JSON response includes `top_cell` and any import `warnings`.
 `layout-import-lef` and `layout-import-def` create a new project from a macro or
-design's pins and nets.
+design's pins and nets. All three import commands refuse to replace an existing
+project unless `--force` is passed.
 
 ## Implementation runs
 

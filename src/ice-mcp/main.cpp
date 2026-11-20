@@ -2303,6 +2303,12 @@ class IceMcpServer {
         if (name == "project_create") {
             const auto path = std::filesystem::path(requiredString(arguments, "path"));
             const auto projectName = requiredString(arguments, "name");
+            const bool overwrite = optionalBoolean(arguments, "overwrite", false);
+            std::error_code status;
+            const auto projectFile = ice::projectRootDirectory(path) / "project.icepro";
+            if (std::filesystem::exists(projectFile, status) && !status && !overwrite)
+                throw ToolError("A project already exists at " + projectFile.string() +
+                                ". Use project_open, choose another path, or pass overwrite=true to replace it.");
             if (path.has_parent_path())
                 std::filesystem::create_directories(path.parent_path());
             ice::Project project;
@@ -2317,6 +2323,10 @@ class IceMcpServer {
         }
 
         if (name == "project_open") {
+            const bool discard = optionalBoolean(arguments, "discard", false);
+            if (session_ && session_->dirty() && !discard)
+                throw ToolError("The open project has unsaved changes. Pass discard=true to close it and open another "
+                                "project.");
             std::filesystem::path path;
             if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null()) {
                 path = std::filesystem::path(requiredString(arguments, "path"));
@@ -2352,6 +2362,8 @@ class IceMcpServer {
             return result;
         }
         if (name == "project_repair") {
+            if (session_ && session_->dirty() && !optionalBoolean(arguments, "discard", false))
+                throw ToolError("The open project has unsaved changes. Pass discard=true to repair from disk.");
             auto path = projectPath_;
             if (const auto value = arguments.find("path"); value != arguments.end() && !value->is_null())
                 path = std::filesystem::path(requiredString(arguments, "path"));
@@ -3139,6 +3151,13 @@ class IceMcpServer {
                                    {"symbol", dependency.symbol},
                                    {"symbol_name", dependency.symbolName},
                                    {"instances", dependency.instances}});
+            json layouts = json::array();
+            for (const auto &dependency : plan.layouts)
+                layouts.push_back({{"layout", dependency.layout},
+                                   {"layout_name", dependency.layoutName},
+                                   {"devices", dependency.devices},
+                                   {"instances", dependency.instances},
+                                   {"ports", dependency.ports}});
             json suggested = json::array();
             for (const auto &simulation : plan.simulations)
                 suggested.push_back({{"tool", "simulation_delete"}, {"arguments", {{"simulation", simulation.name}}}});
@@ -3150,6 +3169,7 @@ class IceMcpServer {
                         {"blocked", plan.blocked()},
                         {"simulations", std::move(simulations)},
                         {"symbols", std::move(symbols)},
+                        {"layouts", std::move(layouts)},
                         {"suggested_calls", std::move(suggested)}};
             if (plan.blocked() && !cascade)
                 return {{"id", id},
@@ -3158,6 +3178,7 @@ class IceMcpServer {
                         {"blocked", true},
                         {"simulations", std::move(simulations)},
                         {"symbols", std::move(symbols)},
+                        {"layouts", std::move(layouts)},
                         {"suggested_calls", std::move(suggested)}};
             session.execute("mcp schematic-delete", [&](ice::Project &project) {
                 if (cascade)
@@ -3237,41 +3258,24 @@ class IceMcpServer {
             const bool systemVerilog = kind == "systemverilog" || kind == "sv";
             if (kind != "text" && kind != "spice" && !systemVerilog)
                 throw ToolError("schematic_set_text kind must be 'text' or 'systemverilog'");
-            if (cell.isTextSource() && systemVerilogCell != systemVerilog) {
-                throw ToolError("Schematic '" + cell.name + "' is a " +
-                                (systemVerilogCell ? "SystemVerilog" : "text SPICE") +
-                                " cell; use the matching kind instead of converting between source languages");
-            }
-            const bool wasSource = cell.isTextSource();
             const bool convert = optionalBoolean(arguments, "convert", false);
-            if (!cell.isTextSource()) {
-                const bool empty =
-                    cell.symbols.empty() && cell.instances.empty() && cell.nets.empty() && cell.parameters.empty();
-                if (!convert || !empty) {
-                    throw ToolError("Schematic '" + cell.name +
-                                    "' is a drawn schematic, not a source cell. Use schematic_create with "
-                                    "kind='text' or kind='systemverilog' for a new source cell. To convert an empty "
-                                    "drawn cell, pass convert=true. Do not edit sch/*.icesch by hand.");
-                }
-            }
             const auto text = requiredStringAllowEmpty(arguments, "text");
+            const auto sourcePath = optionalString(arguments, "source_path");
+            ice::SchematicSourceEditResult edit;
             session.execute("mcp schematic-set-text", [&](ice::Project &project) {
-                auto &target = project.schematicCells.at(id);
-                target.textSchematic = !systemVerilog;
-                target.systemVerilogSchematic = systemVerilog;
-                if (systemVerilog) {
-                    target.systemVerilogText = text;
-                    target.spiceText.clear();
-                } else {
-                    target.spiceText = text;
-                    target.systemVerilogText.clear();
-                }
+                edit = ice::setSchematicSourceText(project, id, systemVerilog, text, sourcePath, convert);
             });
+            json notes = json::array();
+            for (const auto &note : edit.notes)
+                notes.push_back(note);
             return {{"id", id},
                     {"name", cell.name},
                     {"kind", systemVerilog ? "systemverilog" : "text"},
                     {"text", text},
-                    {"converted", !wasSource}};
+                    {"converted", edit.converted},
+                    {"added_pins", edit.addedPins},
+                    {"removed_pins", edit.removedPins},
+                    {"notes", std::move(notes)}};
         }
         if (name == "schematic_list") {
             json result = json::array();
@@ -4971,20 +4975,26 @@ class IceMcpServer {
                             .with_string_param("pdk", "PDK id, package name, or package path")
                             .build());
         tools.push_back(tool_builder("project_create")
-                            .with_description("Create and open a new ICE project.")
+                            .with_description("Create and open a new ICE project. Refuses to replace an existing "
+                                              "project unless overwrite is true.")
                             .with_string_param("path", "Project folder or project.icepro path")
                             .with_string_param("name", "Project name")
+                            .with_boolean_param("overwrite", "Replace an existing project at the path", false)
                             .build());
-        tools.push_back(tool_builder("project_open")
-                            .with_description("Open an ICE project; without path, searches cwd and parents for "
-                                              "exactly one project.icepro.")
-                            .with_string_param("path", "Optional project folder or project.icepro path", false)
-                            .with_boolean_param("recover", "Quarantine invalid sidecar files and open the rest", false)
-                            .build());
-        tools.push_back(tool_builder("project_repair")
-                            .with_description("Recover a project by quarantining invalid sidecar files and saving it.")
-                            .with_string_param("path", "Optional project folder or project.icepro path", false)
-                            .build());
+        tools.push_back(
+            tool_builder("project_open")
+                .with_description("Open an ICE project; without path, searches cwd and parents for "
+                                  "exactly one project.icepro.")
+                .with_string_param("path", "Optional project folder or project.icepro path", false)
+                .with_boolean_param("recover", "Quarantine invalid sidecar files and open the rest", false)
+                .with_boolean_param("discard", "Discard unsaved changes in the currently open project", false)
+                .build());
+        tools.push_back(
+            tool_builder("project_repair")
+                .with_description("Recover a project by quarantining invalid sidecar files and saving it.")
+                .with_string_param("path", "Optional project folder or project.icepro path", false)
+                .with_boolean_param("discard", "Discard unsaved changes in the currently open project", false)
+                .build());
         tools.push_back(
             tool_builder("project_summary")
                 .with_description("Summarize the open project and its cells; when closed, return candidate paths. "
@@ -5299,6 +5309,7 @@ class IceMcpServer {
             R"("description":"Schematic name or id"},"text":{"type":"string","description":"Source text"},)"
             R"("kind":{"type":"string","enum":["text","spice","systemverilog","sv"],)"
             R"("description":"Source language of the cell; defaults to its existing language"},)"
+            R"("source_path":{"type":"string","description":"Optional SPICE source path for relative includes"},)"
             R"("convert":{"type":"boolean","description":"Convert an empty drawn cell to a source cell"}},)"
             R"("required":["schematic","text"]})";
         tools.push_back(std::move(setTextTool));

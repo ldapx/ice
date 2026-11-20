@@ -35,7 +35,7 @@ CLI invokes the same operations through `ProjectSession`.
 | Run DRC with a PDK deck | Yes | Tools → Run DRC | `drc` | `run_layout_drc`, `LocalVerificationAdapter` |
 | Package discovery, install, and lockfiles | Yes | Package manager | `ice-pkg` | `PackageManager` |
 | Import/export GDSII or OASIS hierarchy | Yes | Layout interchange | `layout-import-gds`, `layout-export-gds` | Core API |
-| Spatial query | Yes | Layout integration | Core API | Core API |
+| Spatial query | Planned | Layout integration | Core API | Core API |
 
 Python bindings are an optional `icepy` build surface because nanobind and
 Python development headers are not required by the core, GUI, or CLI builds.
