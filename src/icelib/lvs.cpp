@@ -1,3 +1,5 @@
+#include "icelib/connectivity.hpp"
+#include "icelib/geometry.hpp"
 #include "icelib/hdl.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/spice.hpp"
@@ -133,6 +135,56 @@ std::map<std::string, std::string> parameterMap(const std::vector<Parameter> &pa
     return result;
 }
 
+std::optional<std::string> findParameter(const std::map<std::string, std::string> &parameters,
+                                         const std::string &name) {
+    if (const auto exact = parameters.find(name); exact != parameters.end())
+        return exact->second;
+    static const std::map<std::string, std::vector<std::string>> aliases = {
+        {"resistance", {"resistance", "value", "r"}},
+        {"value", {"value", "resistance", "capacitance", "inductance"}},
+        {"capacitance", {"capacitance", "value", "c"}},
+        {"inductance", {"inductance", "value", "l"}},
+        {"w", {"w", "width"}},
+        {"width", {"width", "w"}},
+        {"l", {"l", "length"}},
+        {"length", {"length", "l"}},
+        {"m", {"m", "multiplicity", "parallel", "mult"}},
+        {"multiplicity", {"multiplicity", "m", "parallel", "mult"}},
+        {"parallel", {"parallel", "m", "multiplicity", "mult"}},
+    };
+    const auto alias = aliases.find(name);
+    if (alias == aliases.end())
+        return std::nullopt;
+    for (const auto &candidate : alias->second) {
+        if (const auto found = parameters.find(candidate); found != parameters.end())
+            return found->second;
+    }
+    return std::nullopt;
+}
+
+bool rectanglesOverlapOrTouch(const Rect &left, const Rect &right) {
+    if (!left.valid() || !right.valid())
+        return false;
+    return left.x <= right.x + right.width && right.x <= left.x + left.width && left.y <= right.y + right.height &&
+           right.y <= left.y + left.height;
+}
+
+Rect transformRectangle(const Rect &rectangle, const Transform &transform) {
+    if (!rectangle.valid())
+        return {};
+    const auto first = transform.apply({rectangle.x, rectangle.y});
+    const auto second = transform.apply({rectangle.x + rectangle.width, rectangle.y});
+    const auto third = transform.apply({rectangle.x, rectangle.y + rectangle.height});
+    const auto fourth = transform.apply({rectangle.x + rectangle.width, rectangle.y + rectangle.height});
+    const auto minX = std::min({first.x, second.x, third.x, fourth.x});
+    const auto maxX = std::max({first.x, second.x, third.x, fourth.x});
+    const auto minY = std::min({first.y, second.y, third.y, fourth.y});
+    const auto maxY = std::max({first.y, second.y, third.y, fourth.y});
+    if (maxX <= minX || maxY <= minY)
+        return {};
+    return {minX, minY, maxX - minX, maxY - minY};
+}
+
 std::string instanceType(const SchematicCell &cell, ObjectId instanceId) {
     const auto instance = cell.instances.find(instanceId);
     if (instance == cell.instances.end())
@@ -182,7 +234,10 @@ struct LayoutLogicalSide {
 
 LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<LvsMismatch> &mismatches) {
     LogicalSide side;
-    auto document = parseSpiceDocument(cell.spiceText);
+    std::vector<std::string> includeWarnings;
+    auto document = parseSpiceDocumentResolved(cell.spiceText, cell.spiceSourcePath, &includeWarnings);
+    for (const auto &warning : includeWarnings)
+        mismatches.push_back({1, "spice-include", warning, std::nullopt, std::nullopt, VerificationSeverity::error});
     const auto *selected = findSpiceSubcircuit(document, cell.name);
     if (!selected && document.elements.empty()) {
         if (document.subcircuits.size() == 1)
@@ -305,7 +360,7 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
     }
 
     for (const auto &[name, devices] : netDevices) {
-        if (devices.size() < 2)
+        if (devices.empty())
             continue;
         side.nets.push_back({name, devices, nextNet++});
     }
@@ -313,11 +368,58 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
 }
 
 LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
-    LogicalSide side;
     const auto parsed = parseSystemVerilogModule(cell);
     if (!parsed.ok)
         throw ProjectError("lvs.hdl", "SystemVerilog parse failed for '" + cell.name + "': " + parsed.error);
+    const auto netlist = parseStructuralSystemVerilog(cell.systemVerilogText, parsed.module.name);
+    if (!netlist.ok)
+        throw ProjectError("lvs.hdl", "SystemVerilog LVS failed for '" + cell.name + "': " + netlist.error);
+    if (!netlist.structural)
+        throw ProjectError("lvs.hdl", netlist.error);
+
+    std::map<std::string, std::string> parent;
+    std::function<std::string(const std::string &)> find = [&](const std::string &name) -> std::string {
+        const auto entry = parent.find(name);
+        if (entry == parent.end()) {
+            parent[name] = name;
+            return name;
+        }
+        if (entry->second == name)
+            return name;
+        const auto root = find(entry->second);
+        parent[name] = root;
+        return root;
+    };
+    const auto unite = [&](const std::string &left, const std::string &right) {
+        const auto leftRoot = find(left);
+        const auto rightRoot = find(right);
+        if (leftRoot != rightRoot)
+            parent[rightRoot] = leftRoot;
+    };
+    for (const auto &[alias, target] : netlist.netAliases)
+        unite(alias, target);
+
+    std::set<std::string> usedNets;
+    for (const auto &instance : netlist.instances) {
+        for (const auto &net : instance.nets)
+            usedNets.insert(find(normalizedIdentifier(net)));
+    }
+
+    LogicalSide side;
+    std::map<std::string, std::set<ObjectId>> netDevices;
     ObjectId nextObject = 1;
+    for (const auto &instance : netlist.instances) {
+        LogicalDevice device;
+        device.object = nextObject++;
+        device.name = instance.name;
+        device.type = instance.type;
+        device.sourceCell = cell.id;
+        device.hasParameters = false;
+        for (const auto &net : instance.nets)
+            netDevices[find(normalizedIdentifier(net))].insert(device.object);
+        side.devices.emplace(device.object, std::move(device));
+    }
+
     const auto directionName = [](HdlPortDirection direction) {
         switch (direction) {
         case HdlPortDirection::input:
@@ -333,11 +435,21 @@ LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
         if (port.width > 1 && port.widthKnown && !port.real) {
             for (int bit = 0; bit < port.width; ++bit) {
                 const auto name = port.name + "[" + std::to_string(bit) + "]";
-                side.ports.push_back({nextObject++, name, directionName(port.direction), name});
+                const auto canonical = find(normalizedIdentifier(name));
+                side.ports.push_back({nextObject++, name, directionName(port.direction),
+                                      usedNets.contains(canonical) ? canonical : normalizedIdentifier(name)});
             }
             continue;
         }
-        side.ports.push_back({nextObject++, port.name, directionName(port.direction), port.name});
+        const auto canonical = find(normalizedIdentifier(port.name));
+        side.ports.push_back({nextObject++, port.name, directionName(port.direction),
+                              usedNets.contains(canonical) ? canonical : normalizedIdentifier(port.name)});
+    }
+
+    for (auto &[net, devices] : netDevices) {
+        if (devices.empty())
+            continue;
+        side.nets.push_back({net, std::move(devices), nextObject++});
     }
     return side;
 }
@@ -406,7 +518,7 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
             continue;
         device.name = instance.name.empty() ? symbolName + " " + std::to_string(id) : instance.name;
         device.parameters = parameterMap(instance.parameters);
-        device.hasParameters = true;
+        device.hasParameters = !instance.parameters.empty();
         if (const auto model = device.parameters.find("model");
             model != device.parameters.end() && !model->second.empty())
             device.type = model->second;
@@ -457,7 +569,7 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
             for (const auto owner : owners->second)
                 devices.insert(owner);
         }
-        if (devices.size() < 2)
+        if (devices.empty())
             continue;
         side.nets.push_back({net.name.empty() ? "N" + std::to_string(id) : net.name, std::move(devices), id});
     }
@@ -471,7 +583,7 @@ LogicalDevice actualLayoutDevice(const LayoutInstance &instance, const LayoutCel
     device.type = child.device.empty() ? child.name : child.device;
     device.childCell = child.id;
     device.parameters = parameterMap(child.parameters);
-    device.hasParameters = true;
+    device.hasParameters = !child.parameters.empty();
     device.schematicInstance = instance.schematicInstance;
     return device;
 }
@@ -607,10 +719,192 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         result.side.devices.emplace(entry.instance, std::move(entry.device));
     }
 
-    // Layout connectivity comes from planned connections. Named connections
-    // keep their logical net name; unnamed connections are merged by connected
-    // component. This preserves parallel nets between the same device pair
-    // when the layout carries net names.
+    // Layout connectivity combines explicit/planned metadata with real
+    // geometry. The geometric groups catch routed shapes, vias, and layout
+    // devices whose terminals only touch metal; planned connections and
+    // terminal maps remain authoritative for procedural layouts.
+    const auto logicalId = [&](ObjectId id) {
+        const auto logical = result.plannedToLogical.find(id);
+        return logical != result.plannedToLogical.end() ? logical->second : id;
+    };
+    const auto netKeyFor = [&](ObjectId netId) {
+        if (netId == 0)
+            return std::string{};
+        if (const auto net = cell.nets.find(netId); net != cell.nets.end() && !net->second.name.empty())
+            return "name:" + normalizedIdentifier(net->second.name);
+        return "net:" + std::to_string(netId);
+    };
+    const auto netNameFor = [&](ObjectId netId) {
+        if (netId == 0)
+            return std::string{};
+        if (const auto net = cell.nets.find(netId); net != cell.nets.end() && !net->second.name.empty())
+            return net->second.name;
+        return "N" + std::to_string(netId);
+    };
+
+    struct NetAccumulator {
+        std::string name;
+        ObjectId object = 0;
+        std::set<ObjectId> devices;
+    };
+    std::map<std::string, NetAccumulator> nets;
+    const auto addToNet = [&](const std::string &key, const std::string &name, ObjectId object, ObjectId device) {
+        if (key.empty() || !result.side.devices.contains(device))
+            return;
+        auto &net = nets[key];
+        if (net.name.empty())
+            net.name = name;
+        if (net.object == 0)
+            net.object = object;
+        net.devices.insert(device);
+    };
+
+    const auto geometryGroups = extractLayoutNets(project, cellId);
+    std::map<ObjectId, std::size_t> groupByPort;
+    std::vector<Rect> groupBounds(geometryGroups.size());
+    const auto shapeBounds = [](const Shape &shape) {
+        if (shape.rectangle.valid())
+            return shape.rectangle;
+        if (shape.centerline.empty())
+            return Rect{};
+        const auto expansion = std::max<Coordinate>(1, shape.width) / 2;
+        auto minX = shape.centerline.front().x - expansion;
+        auto minY = shape.centerline.front().y - expansion;
+        auto maxX = shape.centerline.front().x + expansion;
+        auto maxY = shape.centerline.front().y + expansion;
+        for (const auto &point : shape.centerline) {
+            minX = std::min(minX, point.x - expansion);
+            minY = std::min(minY, point.y - expansion);
+            maxX = std::max(maxX, point.x + expansion);
+            maxY = std::max(maxY, point.y + expansion);
+        }
+        return Rect{minX, minY, maxX - minX, maxY - minY};
+    };
+    const auto includeBounds = [](Rect &target, const Rect &rectangle) {
+        if (!rectangle.valid())
+            return;
+        if (!target.valid()) {
+            target = rectangle;
+            return;
+        }
+        const auto maxX = std::max(target.x + target.width, rectangle.x + rectangle.width);
+        const auto maxY = std::max(target.y + target.height, rectangle.y + rectangle.height);
+        target.x = std::min(target.x, rectangle.x);
+        target.y = std::min(target.y, rectangle.y);
+        target.width = maxX - target.x;
+        target.height = maxY - target.y;
+    };
+    for (std::size_t index = 0; index < geometryGroups.size(); ++index) {
+        for (const auto shapeId : geometryGroups[index].shapes) {
+            if (const auto shape = cell.shapes.find(shapeId); shape != cell.shapes.end())
+                includeBounds(groupBounds[index], shapeBounds(shape->second));
+        }
+        for (const auto portId : geometryGroups[index].ports) {
+            groupByPort[portId] = index;
+            if (const auto port = cell.ports.find(portId); port != cell.ports.end())
+                includeBounds(groupBounds[index], port->second.rectangle);
+        }
+    }
+    const auto groupKey = [&](std::size_t index) {
+        const auto &group = geometryGroups[index];
+        if (group.net != 0)
+            return netKeyFor(group.net);
+        if (!group.name.empty() && !group.name.starts_with("N"))
+            return "name:" + normalizedIdentifier(group.name);
+        return "geom:" + std::to_string(index);
+    };
+    const auto groupName = [&](std::size_t index) {
+        const auto &group = geometryGroups[index];
+        if (group.net != 0)
+            return netNameFor(group.net);
+        if (!group.name.empty())
+            return group.name;
+        return "geom " + std::to_string(index);
+    };
+
+    for (std::size_t index = 0; index < geometryGroups.size(); ++index) {
+        const auto &group = geometryGroups[index];
+        for (const auto &alias : group.aliases) {
+            mismatches.push_back(
+                {1, "layout-short",
+                 "Layout net '" + groupName(index) + "' is shorted to '" + alias + "' through unlabeled geometry",
+                 group.net != 0 ? std::optional<ObjectId>(group.net) : std::nullopt, std::nullopt,
+                 VerificationSeverity::error});
+        }
+        if (group.shapes.empty() && group.ports.empty())
+            continue;
+        result.hasConnectivity = true;
+        if (group.net != 0) {
+            const auto key = groupKey(index);
+            for (const auto &[plannedId, planned] : cell.plannedDevices) {
+                for (const auto &[_, netId] : planned.terminals) {
+                    if (netId == group.net)
+                        addToNet(key, groupName(index), group.net, logicalId(plannedId));
+                }
+            }
+        }
+    }
+
+    // Placed layout instances connect through the child ports transformed into
+    // parent coordinates. Any overlapping parent group becomes a terminal net.
+    const auto layerKeysMatch = [&](ObjectId left, ObjectId right) {
+        const auto leftLayer = project.layers.find(left);
+        const auto rightLayer = project.layers.find(right);
+        if (leftLayer == project.layers.end() || rightLayer == project.layers.end())
+            return true;
+        return layoutLayerConnectivityKey(leftLayer->second) == layoutLayerConnectivityKey(rightLayer->second);
+    };
+    for (const auto &[instanceId, instance] : cell.instances) {
+        const auto child = project.layoutCells.find(instance.cell);
+        if (child == project.layoutCells.end())
+            continue;
+        const Transform transform{instance.x, instance.y, instance.orientation};
+        for (const auto &[_, childPort] : child->second.ports) {
+            const auto rectangle = transformRectangle(childPort.rectangle, transform);
+            if (!rectangle.valid())
+                continue;
+            for (std::size_t index = 0; index < geometryGroups.size(); ++index) {
+                if (!rectanglesOverlapOrTouch(rectangle, groupBounds[index]))
+                    continue;
+                bool matched = false;
+                for (const auto shapeId : geometryGroups[index].shapes) {
+                    const auto shape = cell.shapes.find(shapeId);
+                    if (shape == cell.shapes.end() || !rectanglesOverlapOrTouch(rectangle, shapeBounds(shape->second)))
+                        continue;
+                    if (!layerKeysMatch(childPort.layer, shape->second.layer))
+                        continue;
+                    matched = true;
+                    break;
+                }
+                if (!matched) {
+                    for (const auto portId : geometryGroups[index].ports) {
+                        const auto port = cell.ports.find(portId);
+                        if (port == cell.ports.end() || !rectanglesOverlapOrTouch(rectangle, port->second.rectangle))
+                            continue;
+                        if (!layerKeysMatch(childPort.layer, port->second.layer))
+                            continue;
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched)
+                    addToNet(groupKey(index), groupName(index), geometryGroups[index].net, logicalId(instanceId));
+            }
+        }
+    }
+
+    // Planned devices may carry terminal nets directly. Procedural layouts use
+    // this because their PCell geometry is flattened but the device identity
+    // and pin nets are still known.
+    for (const auto &[plannedId, planned] : cell.plannedDevices) {
+        for (const auto &[_, netId] : planned.terminals) {
+            if (netId == 0)
+                continue;
+            result.hasConnectivity = true;
+            addToNet(netKeyFor(netId), netNameFor(netId), netId, logicalId(plannedId));
+        }
+    }
+
     std::map<ObjectId, ObjectId> parent;
     for (const auto &[plannedId, _] : cell.plannedDevices)
         parent[plannedId] = plannedId;
@@ -637,12 +931,6 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     };
 
     bool validConnection = false;
-    const auto logicalId = [&](ObjectId id) {
-        const auto logical = result.plannedToLogical.find(id);
-        return logical != result.plannedToLogical.end() ? logical->second : id;
-    };
-    std::map<std::string, std::set<ObjectId>> namedGroups;
-    std::map<std::string, ObjectId> namedObjects;
     std::set<ObjectId> unnamedMembers;
     std::map<ObjectId, ObjectId> unnamedObjects;
     for (const auto &[_, connection] : cell.plannedConnections) {
@@ -655,70 +943,23 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             continue;
         }
         validConnection = true;
-        const auto layoutNet = cell.nets.find(connection.net);
-        const std::string netName =
-            layoutNet != cell.nets.end() && !layoutNet->second.name.empty() ? layoutNet->second.name : std::string{};
-        if (!netName.empty()) {
-            auto &members = namedGroups[netName];
-            members.insert(logicalId(connection.from));
-            members.insert(logicalId(connection.to));
-            const auto [entry, inserted] = namedObjects.emplace(netName, connection.id);
-            if (!inserted && connection.id < entry->second)
-                entry->second = connection.id;
+        if (connection.net != 0) {
+            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.from));
+            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.to));
         } else {
             unite(connection.from, connection.to);
             unnamedMembers.insert(connection.from);
             unnamedMembers.insert(connection.to);
-            const auto root = findRoot(connection.from);
-            const auto [entry, inserted] = unnamedObjects.emplace(root, connection.id);
+            const auto [entry, inserted] = unnamedObjects.emplace(findRoot(connection.from), connection.id);
             if (!inserted && connection.id < entry->second)
                 entry->second = connection.id;
         }
     }
     result.hasConnectivity = result.hasConnectivity || validConnection;
 
-    // Planned devices may carry terminal nets directly. Procedural layouts use
-    // this because their PCell geometry is flattened but the device identity
-    // and pin nets are still known.
-    std::map<ObjectId, std::set<ObjectId>> terminalGroups;
-    for (const auto &[plannedId, planned] : cell.plannedDevices) {
-        const auto logical = result.plannedToLogical.find(plannedId);
-        const auto logicalId = logical != result.plannedToLogical.end() ? logical->second : plannedId;
-        for (const auto &[_, netId] : planned.terminals) {
-            if (netId != 0)
-                terminalGroups[netId].insert(logicalId);
-        }
-    }
-    if (!terminalGroups.empty())
-        result.hasConnectivity = true;
-    for (const auto &[netId, members] : terminalGroups) {
-        if (members.size() < 2)
-            continue;
-        LogicalNet net;
-        net.object = netId;
-        if (const auto netIt = cell.nets.find(netId); netIt != cell.nets.end())
-            net.name = netIt->second.name;
-        if (net.name.empty())
-            net.name = "N" + std::to_string(netId);
-        net.devices = members;
-        result.side.nets.push_back(std::move(net));
-    }
-
-    for (const auto &[name, members] : namedGroups) {
-        LogicalNet net;
-        net.name = name;
-        net.object = namedObjects.at(name);
-        for (const auto id : members) {
-            if (result.side.devices.contains(id))
-                net.devices.insert(id);
-        }
-        if (net.devices.size() >= 2)
-            result.side.nets.push_back(std::move(net));
-    }
-
     std::map<ObjectId, std::vector<ObjectId>> unnamedComponents;
-    for (const auto plannedId : unnamedMembers)
-        unnamedComponents[findRoot(plannedId)].push_back(plannedId);
+    for (const auto member : unnamedMembers)
+        unnamedComponents[findRoot(member)].push_back(member);
     for (const auto &[root, members] : unnamedComponents) {
         std::set<ObjectId> logicalMembers;
         for (const auto member : members) {
@@ -726,13 +967,22 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             if (result.side.devices.contains(logical))
                 logicalMembers.insert(logical);
         }
-        if (logicalMembers.size() < 2)
+        if (logicalMembers.empty())
             continue;
-        LogicalNet net;
+        auto &net = nets["unnamed:" + std::to_string(root)];
         net.name = "net " + std::to_string(*std::min_element(logicalMembers.begin(), logicalMembers.end()));
         net.object = unnamedObjects.contains(root) ? unnamedObjects.at(root) : 0;
         net.devices = std::move(logicalMembers);
-        result.side.nets.push_back(std::move(net));
+    }
+
+    for (auto &[_, net] : nets) {
+        if (net.devices.empty())
+            continue;
+        LogicalNet logicalNet;
+        logicalNet.name = net.name.empty() ? "net" : net.name;
+        logicalNet.object = net.object;
+        logicalNet.devices = std::move(net.devices);
+        result.side.nets.push_back(std::move(logicalNet));
     }
 
     const auto isConvertedSupplyPin = [&](const Port &port) {
@@ -753,6 +1003,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         if (port.net != 0) {
             if (const auto net = cell.nets.find(port.net); net != cell.nets.end())
                 netName = net->second.name;
+        } else if (const auto group = groupByPort.find(port.id); group != groupByPort.end()) {
+            netName = groupName(group->second);
         }
         result.side.ports.push_back({port.id, port.name, portDirectionName(port.direction), netName});
     }
@@ -786,6 +1038,110 @@ bool compatibleType(const std::string &left, const std::string &right) {
     // PDK device names commonly extend a primitive name (nmos ->
     // nmos_lowvt). Treat that as the same device class.
     return a.starts_with(b + "_") || b.starts_with(a + "_");
+}
+
+int deviceMultiplicity(const LogicalDevice &device) {
+    const auto value = findParameter(device.parameters, "m");
+    if (!value)
+        return 1;
+    const auto trimmed = trim(*value);
+    char *end = nullptr;
+    const auto parsed = std::strtol(trimmed.c_str(), &end, 10);
+    if (end == trimmed.c_str() || parsed <= 0 || parsed > 1024)
+        return 1;
+    return static_cast<int>(parsed);
+}
+
+void expandMultiplicity(LogicalSide &side) {
+    ObjectId nextObject = 1;
+    for (const auto &[id, _] : side.devices)
+        nextObject = std::max(nextObject, id + 1);
+    std::map<ObjectId, std::vector<ObjectId>> expanded;
+    for (auto &[id, device] : side.devices) {
+        const auto multiplicity = deviceMultiplicity(device);
+        if (multiplicity <= 1)
+            continue;
+        for (auto parameter = device.parameters.begin(); parameter != device.parameters.end();) {
+            const auto normalized = normalizedIdentifier(parameter->first);
+            if (normalized == "m" || normalized == "multiplicity" || normalized == "parallel" || normalized == "mult")
+                parameter = device.parameters.erase(parameter);
+            else
+                ++parameter;
+        }
+        for (int index = 1; index < multiplicity; ++index) {
+            auto clone = device;
+            clone.object = nextObject++;
+            clone.name =
+                (device.name.empty() ? "device" + std::to_string(id) : device.name) + "#" + std::to_string(index + 1);
+            clone.schematicInstance = 0;
+            expanded[id].push_back(clone.object);
+            side.devices.emplace(clone.object, std::move(clone));
+        }
+    }
+    for (auto &net : side.nets) {
+        std::set<ObjectId> additions;
+        for (const auto id : net.devices) {
+            if (const auto found = expanded.find(id); found != expanded.end())
+                additions.insert(found->second.begin(), found->second.end());
+        }
+        net.devices.insert(additions.begin(), additions.end());
+    }
+}
+
+std::string topologySignature(const LogicalSide &side, ObjectId deviceId) {
+    const auto device = side.devices.find(deviceId);
+    if (device == side.devices.end())
+        return {};
+    const auto type = normalizedIdentifier(device->second.type);
+    if (type.empty() || type == "unknown")
+        return {};
+    std::vector<std::string> netSignatures;
+    for (const auto &net : side.nets) {
+        if (!net.devices.contains(deviceId))
+            continue;
+        std::vector<std::string> types;
+        types.reserve(net.devices.size());
+        for (const auto member : net.devices) {
+            const auto memberDevice = side.devices.find(member);
+            if (memberDevice != side.devices.end())
+                types.push_back(normalizedIdentifier(memberDevice->second.type));
+        }
+        std::sort(types.begin(), types.end());
+        netSignatures.push_back(joinNames(types));
+    }
+    std::sort(netSignatures.begin(), netSignatures.end());
+    return type + "|" + joinNames(netSignatures);
+}
+
+void matchByTopology(const LogicalSide &schematic, const LogicalSide &layout,
+                     std::map<ObjectId, ObjectId> &schematicToLayout, std::map<ObjectId, ObjectId> &layoutToSchematic) {
+    std::map<std::string, std::vector<ObjectId>> unmatchedLayout;
+    for (const auto &[layoutId, _] : layout.devices) {
+        if (layoutToSchematic.contains(layoutId))
+            continue;
+        const auto signature = topologySignature(layout, layoutId);
+        if (!signature.empty())
+            unmatchedLayout[signature].push_back(layoutId);
+    }
+    for (auto &[_, candidates] : unmatchedLayout)
+        std::sort(candidates.begin(), candidates.end());
+    for (const auto &[schematicId, _] : schematic.devices) {
+        if (schematicToLayout.contains(schematicId))
+            continue;
+        const auto signature = topologySignature(schematic, schematicId);
+        if (signature.empty())
+            continue;
+        const auto found = unmatchedLayout.find(signature);
+        if (found == unmatchedLayout.end())
+            continue;
+        for (const auto layoutId : found->second) {
+            if (layoutToSchematic.contains(layoutId))
+                continue;
+            schematicToLayout.emplace(schematicId, layoutId);
+            layoutToSchematic.emplace(layoutId, schematicId);
+            break;
+        }
+    }
 }
 
 void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layout, const LvsOptions &options,
@@ -848,21 +1204,44 @@ void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layo
                                       "' in the schematic but '" + kindName(false, layoutDevice) + "' in the layout",
                                   schematicId, layoutId, VerificationSeverity::error});
         }
-        if (!options.compareParameters || !layoutDevice.hasParameters)
+        if (!options.compareParameters)
             continue;
+        if (schematicDevice.parameters.empty() && layoutDevice.parameters.empty())
+            continue;
+        if (!layoutDevice.hasParameters) {
+            mismatches.push_back({1, "parameter-unavailable",
+                                  "Layout device '" + displayName +
+                                      "' has no parameter metadata; schematic parameters were not compared",
+                                  schematicId, layoutId, VerificationSeverity::error});
+            continue;
+        }
         for (const auto &[name, schematicValue] : schematicDevice.parameters) {
-            const auto layoutParameter = layoutDevice.parameters.find(name);
-            if (layoutParameter == layoutDevice.parameters.end())
-                continue;
-            if (parameterValuesEqual(schematicValue, layoutParameter->second))
-                continue;
             const auto normalizedName = normalizedIdentifier(name);
-            if ((normalizedName == "w" || normalizedName == "l") &&
-                lengthParameterValuesEqual(schematicValue, layoutParameter->second))
+            if (normalizedName == "model" || normalizedName == "spice_model" || normalizedName == "subckt" ||
+                normalizedName == "symbol" || normalizedName == "device" || normalizedName == "type" ||
+                normalizedName == "cell" || normalizedName == "name")
+                continue;
+            if ((normalizedName == "m" || normalizedName == "multiplicity" || normalizedName == "parallel" ||
+                 normalizedName == "mult") &&
+                parameterValuesEqual(schematicValue, "1"))
+                continue;
+            const auto layoutParameter = findParameter(layoutDevice.parameters, normalizedName);
+            if (!layoutParameter) {
+                mismatches.push_back(
+                    {1, "parameter-missing",
+                     "Device '" + displayName + "' parameter '" + name + "' is missing from the layout device",
+                     schematicId, layoutId, VerificationSeverity::error});
+                continue;
+            }
+            if (parameterValuesEqual(schematicValue, *layoutParameter))
+                continue;
+            if ((normalizedName == "w" || normalizedName == "l" || normalizedName == "width" ||
+                 normalizedName == "length") &&
+                lengthParameterValuesEqual(schematicValue, *layoutParameter))
                 continue;
             mismatches.push_back({1, "parameter",
                                   "Device '" + displayName + "' parameter '" + name + "' is '" + schematicValue +
-                                      "' in the schematic but '" + layoutParameter->second + "' in the layout",
+                                      "' in the schematic but '" + *layoutParameter + "' in the layout",
                                   schematicId, layoutId, VerificationSeverity::error});
         }
     }
@@ -1103,6 +1482,8 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
 
     auto schematic = collectSchematicSide(project, schematicCellId, report.mismatches);
     auto layout = collectLayoutSide(project, layoutCellId, schematicIt->second, report.mismatches);
+    expandMultiplicity(schematic);
+    expandMultiplicity(layout.side);
     report.portsMatched = comparePorts(schematic, layout.side, report.mismatches);
 
     std::map<std::string, std::vector<ObjectId>> schematicByName;
@@ -1143,6 +1524,7 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
             break;
         }
     }
+    matchByTopology(schematic, layout.side, schematicToLayout, layoutToSchematic);
 
     std::map<ObjectId, std::string> schematicKeys;
     std::map<ObjectId, std::string> layoutKeys;

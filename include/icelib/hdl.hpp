@@ -33,6 +33,32 @@ struct HdlParseResult {
     std::string error;
 };
 
+// One structural gate or module instance extracted from a SystemVerilog
+// module body. LVS uses this instead of treating a source module as a set of
+// ports only. `portNames` are gate terminals (Y/A/B) or named module ports;
+// positional module connections use their decimal index.
+struct HdlNetlistInstance {
+    std::string name;
+    std::string type;
+    std::vector<std::string> portNames;
+    std::vector<std::string> nets;
+};
+
+struct HdlNetlist {
+    bool ok = false;
+    bool structural = false;
+    std::string error;
+    std::vector<std::string> warnings;
+    std::vector<HdlNetlistInstance> instances;
+    // Simple continuous-assignment aliases (`assign out = in;`).
+    std::map<std::string, std::string> netAliases;
+};
+
+// Parses a gate-level/structural module body for LVS. Behavioral constructs
+// (always, initial, generate, expressions, unsupported statements) are
+// rejected explicitly so LVS cannot report a false match from ports alone.
+HdlNetlist parseStructuralSystemVerilog(const std::string &source, const std::string &moduleName);
+
 struct HdlSymbolTemplate {
     std::string artwork;
     std::vector<Pin> pins;

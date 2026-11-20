@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -236,6 +237,55 @@ TEST_CASE("flattened GDS export includes transformed instance geometry") {
 
 TEST_CASE("invalid lyrdb input is rejected") {
     CHECK_THROWS_AS(ice::parseGdsCheckLyrdbText("<not-a-report/>"), ice::ProjectError);
+}
+
+TEST_CASE("truncated lyrdb reports are rejected") {
+    CHECK_THROWS_AS(ice::parseGdsCheckLyrdbText("<report-database><items></items>"), ice::ProjectError);
+    CHECK_THROWS_AS(
+        ice::parseGdsCheckLyrdbText("<report-database><categories></categories><items><item><category>A</category>"),
+        ice::ProjectError);
+    CHECK(ice::parseGdsCheckLyrdbText("<report-database><categories></categories><items></items></report-database>")
+              .drc.empty());
+}
+
+TEST_CASE("layout DRC rejects a nonzero tool exit with a clean report") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-drc-status-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto script = root / "gdscheck";
+    std::ofstream(script) << "#!/bin/sh\n"
+                             "report=\"\"\n"
+                             "while [ $# -gt 0 ]; do\n"
+                             "  if [ \"$1\" = \"--report\" ]; then shift; report=\"$1\"; fi\n"
+                             "  shift\n"
+                             "done\n"
+                             "if [ -n \"$report\" ]; then\n"
+                             "  printf '<report-database><categories></categories><items></items></report-database>' > "
+                             "\"$report\"\n"
+                             "fi\n"
+                             "exit 3\n";
+    std::filesystem::permissions(script,
+                                 std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                                     std::filesystem::perms::others_exec,
+                                 std::filesystem::perm_options::add);
+    const auto previousPath = std::getenv("PATH") ? std::string(std::getenv("PATH")) : std::string{};
+    setenv("PATH", (root.string() + ":" + previousPath).c_str(), 1);
+
+    ice::Project project;
+    project.identity = "drc-status";
+    project.name = "drc-status";
+    const auto cell = ice::createLayoutCell(project, "top", "ihp.sg13g2");
+    const auto layer = ice::addLayer(project, "Activ", 1);
+    ice::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
+    ice::LayoutDrcOptions options;
+    options.workDirectory = root / "work";
+    options.engine = "gdscheck";
+    const auto result = ice::runLayoutDrc(project, cell, options);
+
+    setenv("PATH", previousPath.c_str(), 1);
+    std::filesystem::remove_all(root);
+    CHECK(!result.ok);
+    CHECK(result.error.find("no DRC violations") != std::string::npos);
 }
 
 TEST_CASE("package DRC configuration declares the gdscheck process") {

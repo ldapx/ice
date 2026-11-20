@@ -439,7 +439,11 @@ std::vector<Diagnostic> validateSchematic(const Project &project, ObjectId cellI
     }
 
     if (cell->second.textSchematic) {
-        const auto document = parseSpiceDocument(cell->second.spiceText);
+        std::vector<std::string> includeWarnings;
+        const auto document =
+            parseSpiceDocumentResolved(cell->second.spiceText, cell->second.spiceSourcePath, &includeWarnings);
+        for (const auto &warning : includeWarnings)
+            addDiagnostic(diagnostics, Diagnostic::Severity::warning, "schematic.spice.include", warning, cellId);
         for (const auto &warning : document.warnings)
             addDiagnostic(diagnostics, Diagnostic::Severity::warning, "schematic.spice.parse", warning, cellId);
         if (document.subcircuits.empty() && document.elements.empty()) {
@@ -650,11 +654,14 @@ FileSymbol resolveSchematicSymbol(const std::string &pdk, const std::string &nam
 }
 
 SpiceImportResult createSchematicFromSpice(Project &project, std::string name, std::string pdk,
-                                           const std::string &source, bool drawn) {
+                                           const std::string &source, bool drawn, const std::string &sourcePath) {
     if (!drawn) {
-        SpiceImportResult result{createTextSchematicCell(project, std::move(name), std::move(pdk), source), {}};
-        const auto document = parseSpiceDocument(source);
-        result.warnings = document.warnings;
+        SpiceImportResult result{createTextSchematicCell(project, std::move(name), std::move(pdk), source, sourcePath),
+                                 {}};
+        std::vector<std::string> includeWarnings;
+        const auto document = parseSpiceDocumentResolved(source, sourcePath, &includeWarnings);
+        result.warnings = std::move(includeWarnings);
+        result.warnings.insert(result.warnings.end(), document.warnings.begin(), document.warnings.end());
         auto &cell = project.schematicCells.at(result.cell);
         std::string error;
         if (const auto *subcircuit = preferredSpiceSubcircuit(document, cell.name, &error)) {

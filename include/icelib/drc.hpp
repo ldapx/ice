@@ -77,9 +77,11 @@ struct LayoutDrcResult {
 };
 
 // Exports a layout, runs gdscheck with the process deck derived from its PDK,
-// and parses the resulting .lyrdb report. `ok` means the report was produced
-// and parsed successfully; violations are reported separately and do not by
-// themselves turn a completed DRC run into a process failure.
+// and parses the resulting .lyrdb report. `ok` means the process completed and
+// the report was complete and parsed successfully; violations are reported
+// separately and do not by themselves turn a completed DRC run into a process
+// failure. Timeouts, cancellation, crashes, and nonzero exits with a clean or
+// truncated report are failures.
 LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, const LayoutDrcOptions &options = {},
                              const ProcessCancellation *cancellation = nullptr,
                              const ProcessOutputCallback &onOutput = {});

@@ -1573,10 +1573,16 @@ The LVS system should eventually identify:
 * Other topology mismatches
 
 The current comparator accepts drawn schematics, parsed text SPICE netlists
-(including recursively flattened `.subckt` instances), and SystemVerilog source
-cells. Text SPICE device identity, parameters, and terminal nets feed the same
-device/net comparison engine as drawn schematics. SystemVerilog cells contribute
-module ports and are compared at the port level.
+(including recursively flattened `.subckt` instances and resolved
+`.include`/`.lib` files), and structural SystemVerilog cells. Text SPICE device
+identity, parameters, and terminal nets feed the same device/net comparison
+engine as drawn schematics. Layout connectivity combines planned connections
+and terminal metadata with geometry-derived nets from shapes, routed paths,
+vias, and placed-device port overlaps; shorts through unlabeled geometry are
+reported explicitly. Device matching uses schematic links and names first, then
+a topology fallback after `m=` multiplicity expansion. Behavioral
+SystemVerilog is rejected for LVS instead of being compared as ports only;
+gate-level module instances and primitives are compared device by device.
 
 ---
 
@@ -1606,8 +1612,11 @@ The current implementation is a first-order lumped extractor. It groups layout
 geometry with the same connectivity rules as the layout connectivity view,
 recognizes conducting layers by name (`Metal*`, `GatPoly`/`Poly*`,
 `Activ`/diffusion, and via/contact layers), and creates or updates a text SPICE
-schematic named `<layout> PEX` in the project hierarchy. The generated deck
-reports area, perimeter, total resistance, and total capacitance to ground for
+schematic named `<layout> PEX` in the project hierarchy. Each net gets one
+effective resistance from a small series/parallel conductor graph: touching
+shapes merge at shared endpoints, parallel wires combine as conductances, and
+via arrays at one location divide their resistance. The generated deck reports
+area, perimeter, effective resistance, and total capacitance to ground for
 each net. Single-terminal nets model the extracted resistance in series with
 their capacitance to ground; multi-terminal nets use a resistance star between
 their layout pins. Planned-device metadata from procedural layouts is extracted
