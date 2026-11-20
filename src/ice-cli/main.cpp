@@ -1230,6 +1230,7 @@ void printHelp() {
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
               << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
               << "  schematic-add-sv <project> <name> [pdk] [source-file]\n"
+              << "  schematic-set-text <project> <cell> [--kind text|systemverilog] [--convert] <file|->\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]\n"
@@ -1255,13 +1256,15 @@ void printHelp() {
               << "  layout-add-cell <project> <name> [pdk] [stack]\n"
               << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
               << "  layout-regenerate <project> <procedural> [timeout-seconds]\n"
+              << "  layout-get-script <project> <procedural>\n"
+              << "  layout-set-script <project> <procedural> <script-file|->\n"
               << "  layout-set-parameter <project> <procedural> <name> <value>\n"
               << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
               << "  layout-list <project>\n"
               << "  layout-info <project> <cell|procedural>\n"
               << "  layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] "
                  "[--require-composition] [--require-plan]\n"
-              << "  layout-remove <project> <cell|procedural>\n"
+              << "  layout-remove <project> <cell|procedural> [--dry-run]\n"
               << "  layout-add-layer <project> <name> <number> [datatype]\n"
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
@@ -1302,7 +1305,7 @@ void printHelp() {
               << "  implementation-import <project> <run> [--layout-name <name>] [--replace]\n"
               << "  implementation-export-gds <project> <run> [--output <path>]\n"
               << "  implementation-toolchain\n"
-              << "  implementation-delete <project> <run> [--purge]\n\n"
+              << "  implementation-delete <project> <run> [--purge] [--dry-run]\n\n"
               << "Verification:\n"
               << "  lvs <project> <schematic> <layout>\n"
               << "  lvs-auto <project> <layout>\n"
@@ -1317,7 +1320,7 @@ void printHelp() {
                  "[--ac-points n] [--noise-output n] [--tf-output n] [--param name=value] "
                  "[--source name=value]...\n"
               << "  simulation-list <project>\n"
-              << "  simulation-remove <project> <simulation>\n"
+              << "  simulation-remove <project> <simulation> [--dry-run]\n"
               << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
               << "  simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]\n"
               << "  simulation-corner-defaults <project> <simulation>\n"
@@ -1359,7 +1362,7 @@ void printHelp() {
               << "  script-read <project> <script>\n"
               << "  script-write <project> <script> <source-file|->\n"
               << "  script-run <project> <script> [timeout-ms] [--json]\n"
-              << "  script-delete <project> <script> [--purge]\n\n"
+              << "  script-delete <project> <script> [--purge] [--dry-run]\n\n"
               << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n";
 }
 
@@ -1674,6 +1677,64 @@ int main(int argc, char **argv) {
                 result["warning"] = "No PDK was specified; the text schematic was stored with the generic PDK. "
                                     "Pass --pdk <pdk> if this cell belongs to a PDK-specific design.";
             printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-set-text") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-set-text <project> <cell> [--kind text|systemverilog] "
+                            "[--convert] <source-file|->");
+            std::string kind;
+            bool convert = false;
+            std::string file;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--kind" && index + 1 < args.size())
+                    kind = args[++index];
+                else if (args[index] == "--convert")
+                    convert = true;
+                else if (file.empty())
+                    file = args[index];
+                else
+                    argumentError("Too many schematic-set-text arguments");
+            }
+            if (file.empty())
+                argumentError("A source file or '-' is required");
+            auto project = ice::Project::load(args[1]);
+            const auto cellId = resolveSchematic(project, args[2]);
+            auto &target = project.schematicCells.at(cellId);
+            const bool requestedSystemVerilog = kind == "systemverilog" || kind == "sv";
+            if (!kind.empty() && kind != "text" && kind != "spice" && !requestedSystemVerilog)
+                argumentError("--kind must be text or systemverilog");
+            const bool systemVerilog = kind.empty() ? target.systemVerilogSchematic : requestedSystemVerilog;
+            if (!target.isTextSource()) {
+                const bool empty = target.symbols.empty() && target.instances.empty() && target.nets.empty() &&
+                                   target.parameters.empty();
+                if (!convert || !empty)
+                    throw ice::ProjectError("schematic.convert",
+                                            "Schematic '" + target.name +
+                                                "' is a drawn schematic; pass --convert only for an empty cell");
+            }
+            const auto text = file == "-" ? readStdin() : readTextFile(file);
+            ice::ProjectSession session(project);
+            session.execute("schematic-set-text", [&](ice::Project &p) {
+                auto &cell = p.schematicCells.at(cellId);
+                cell.textSchematic = !systemVerilog;
+                cell.systemVerilogSchematic = systemVerilog;
+                cell.spiceSourcePath.clear();
+                if (systemVerilog) {
+                    cell.systemVerilogText = text;
+                    cell.spiceText.clear();
+                } else {
+                    cell.spiceText = text;
+                    cell.systemVerilogText.clear();
+                }
+            });
+            session.save(args[1]);
+            printJson({{"id", cellId},
+                       {"name", session.project().schematicCells.at(cellId).name},
+                       {"kind", systemVerilog ? "systemverilog" : "text"},
+                       {"text_length", text.size()},
+                       {"converted", !target.isTextSource()}});
             return 0;
         }
 
@@ -2161,7 +2222,7 @@ int main(int argc, char **argv) {
                            {"blocked", true},
                            {"simulations", std::move(simulations)},
                            {"symbols", std::move(symbols)}});
-                return 0;
+                return 1;
             }
             ice::ProjectSession session(project);
             session.execute("remove schematic", [&](ice::Project &p) {
@@ -2443,6 +2504,48 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "layout-get-script") {
+            expectArguments(args, 3, 3, "layout-get-script <project> <procedural>");
+            const auto project = ice::Project::load(args[1]);
+            const auto id = resolveProceduralLayout(project, args[2]);
+            const auto &layout = project.proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"pdk", layout.pdk},
+                       {"stack", layout.stack},
+                       {"script", layout.script},
+                       {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)},
+                       {"generated_cell", layout.generatedCell},
+                       {"generated_script_hash", layout.generatedScriptHash},
+                       {"generated_parameter_hash", layout.generatedParameterHash},
+                       {"generated_pdk_version", layout.generatedPdkVersion},
+                       {"generated_output_hash", layout.generatedOutputHash},
+                       {"layout_quality", parsedMetadata(layout.generatedLayoutQuality)},
+                       {"layout_plan", parsedMetadata(layout.generatedLayoutPlan)},
+                       {"layout_review", parsedMetadata(layout.generatedLayoutReview)},
+                       {"parameters", std::move(parameters)}});
+            return 0;
+        }
+
+        if (command == "layout-set-script") {
+            expectArguments(args, 4, 4, "layout-set-script <project> <procedural> <script-file|->");
+            ice::ProjectSession session(ice::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            const auto script = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            session.execute("set procedural script",
+                            [&](ice::Project &project) { project.proceduralLayouts.at(id).script = script; });
+            session.save(args[1]);
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"script_length", script.size()},
+                       {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(layout)}});
+            return 0;
+        }
+
         if (command == "layout-regenerate") {
             expectArguments(args, 3, 4, "layout-regenerate <project> <procedural> [timeout-seconds]");
             ice::ProjectSession session(ice::Project::load(args[1]));
@@ -2632,15 +2735,61 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-remove") {
-            expectArguments(args, 3, 3, "layout-remove <project> <cell|procedural>");
+            expectArguments(args, 3, 4, "layout-remove <project> <cell|procedural> [--dry-run]");
+            bool dryRun = false;
+            if (args.size() == 4) {
+                if (args[3] != "--dry-run")
+                    argumentError("Unknown layout-remove option: " + args[3]);
+                dryRun = true;
+            }
             auto project = ice::Project::load(args[1]);
             const auto id = resolveLayoutItem(project, args[2]);
             std::string name;
+            json references = json::array();
+            std::string reason;
             if (const auto procedural = project.proceduralLayouts.find(id);
-                procedural != project.proceduralLayouts.end())
+                procedural != project.proceduralLayouts.end()) {
                 name = procedural->second.name;
-            else
-                name = project.layoutCells.at(id).name;
+                const auto generatedId = procedural->second.generatedCell;
+                for (const auto &[otherId, otherCell] : project.layoutCells) {
+                    if (otherId == generatedId)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == generatedId)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty())
+                    reason = "The generated layout is used as an instance";
+            } else {
+                const auto &cell = project.layoutCells.at(id);
+                name = cell.name;
+                if (cell.library || (cell.readOnly && !cell.reference))
+                    reason = "Read-only layout cells cannot be removed";
+                else if (cell.generatedBy != 0 && project.proceduralLayouts.contains(cell.generatedBy))
+                    reason = "The layout is generated by a procedural layout; remove the procedural layout instead";
+                for (const auto &[otherId, otherCell] : project.layoutCells) {
+                    if (otherId == id)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == id)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty() && reason.empty())
+                    reason = "The layout is used as an instance";
+            }
+            const bool blocked = !reason.empty() || !references.empty();
+            if (dryRun || blocked) {
+                printJson({{"id", id},
+                           {"name", name},
+                           {"deleted", false},
+                           {"dry_run", dryRun},
+                           {"blocked", blocked},
+                           {"reason", reason},
+                           {"references", std::move(references)}});
+                return blocked ? 1 : 0;
+            }
             ice::ProjectSession session(project);
             session.execute("remove layout", [&](ice::Project &p) { ice::removeLayoutItem(p, id); });
             session.save(args[1]);
@@ -3409,15 +3558,30 @@ int main(int argc, char **argv) {
         }
 
         if (command == "implementation-delete") {
-            if (args.size() < 3 || args.size() > 4)
-                argumentError("Usage: ice-cli implementation-delete <project> <run> [--purge]");
+            expectArguments(args, 3, 5, "implementation-delete <project> <run> [--purge] [--dry-run]");
             auto project = ice::Project::load(args[1]);
             const auto runId = resolveImplementationRun(project, args[2]);
             const auto name = project.implementationRuns.at(runId).name;
             const auto directory = project.implementationRuns.at(runId).directory;
-            const bool purge = args.size() == 4 && args[3] == "--purge";
-            if (args.size() == 4 && !purge)
-                argumentError("Unknown implementation-delete option: " + args[3]);
+            bool purge = false;
+            bool dryRun = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--purge")
+                    purge = true;
+                else if (args[index] == "--dry-run")
+                    dryRun = true;
+                else
+                    argumentError("Unknown implementation-delete option: " + args[index]);
+            }
+            if (dryRun) {
+                printJson({{"id", runId},
+                           {"name", name},
+                           {"directory", directory},
+                           {"purge", purge},
+                           {"deleted", false},
+                           {"dry_run", true}});
+                return 0;
+            }
             ice::ProjectSession session(project);
             session.execute("remove implementation run",
                             [&](ice::Project &p) { ice::removeImplementationRun(p, runId); });
@@ -3520,10 +3684,25 @@ int main(int argc, char **argv) {
         }
 
         if (command == "simulation-remove") {
-            expectArguments(args, 3, 3, "simulation-remove <project> <simulation>");
+            expectArguments(args, 3, 4, "simulation-remove <project> <simulation> [--dry-run]");
+            bool dryRun = false;
+            if (args.size() == 4) {
+                if (args[3] != "--dry-run")
+                    argumentError("Unknown simulation-remove option: " + args[3]);
+                dryRun = true;
+            }
             auto project = ice::Project::load(args[1]);
             const auto id = resolveSimulation(project, args[2]);
-            const auto name = project.simulations.at(id).name;
+            const auto &simulation = project.simulations.at(id);
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", simulation.name},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"graphs", simulation.graphs.size()}});
+                return 0;
+            }
+            const auto name = simulation.name;
             ice::ProjectSession session(project);
             session.execute("remove simulation", [&](ice::Project &p) { ice::removeSimulationItem(p, id); });
             session.save(args[1]);
@@ -4597,13 +4776,29 @@ int main(int argc, char **argv) {
         }
 
         if (command == "script-delete") {
-            expectArguments(args, 3, 4, "script-delete <project> <script> [--purge]");
+            expectArguments(args, 3, 5, "script-delete <project> <script> [--purge] [--dry-run]");
             auto project = ice::Project::load(args[1]);
             const auto id = resolveReport(project, args[2]);
             const auto report = project.reports.at(id);
-            const bool purge = args.size() == 4 && args[3] == "--purge";
-            if (args.size() == 4 && !purge)
-                argumentError("Usage: ice-cli script-delete <project> <script> [--purge]");
+            bool purge = false;
+            bool dryRun = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--purge")
+                    purge = true;
+                else if (args[index] == "--dry-run")
+                    dryRun = true;
+                else
+                    argumentError("Unknown script-delete option: " + args[index]);
+            }
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"purge", purge}});
+                return 0;
+            }
             project.reports.erase(id);
             project.save(args[1]);
             if (purge) {

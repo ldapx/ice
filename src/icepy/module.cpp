@@ -1,10 +1,13 @@
+#include "icelib/agent_api.hpp"
 #include "icelib/core.hpp"
+#include "icelib/drc.hpp"
 #include "icelib/implementation.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
 #include "icelib/procedural_layout.hpp"
+#include "icelib/simulation.hpp"
 #include "icelib/verification.hpp"
 
 #include <nanobind/nanobind.h>
@@ -209,6 +212,144 @@ class LayoutBuilder {
     ObjectId cellId_ = 0;
 };
 
+PinDirection parsePinDirection(const std::string &text) {
+    if (text == "left")
+        return PinDirection::left;
+    if (text == "right")
+        return PinDirection::right;
+    if (text == "up")
+        return PinDirection::up;
+    if (text == "down")
+        return PinDirection::down;
+    throw ProjectError("icepy.pin", "Unknown pin direction: " + text);
+}
+
+class SchematicBuilder {
+  public:
+    SchematicBuilder(Project &project, ObjectId cellId) : project_(&project), cellId_(cellId) {}
+
+    ObjectId id() const { return cellId_; }
+    std::string name() const { return cell().name; }
+
+    ObjectId symbol(const std::string &name, const std::string &artwork = {}, ObjectId sourceCell = 0) {
+        return ice::addSymbol(*project_, cellId_, name, artwork, sourceCell);
+    }
+
+    ObjectId pin(ObjectId symbolId, const std::string &name, const std::string &direction = "right", Coordinate x = 0,
+                 Coordinate y = 0, int width = 1, bool widthKnown = true) {
+        auto &cell = project_->schematicCells.at(cellId_);
+        const auto symbol = cell.symbols.find(symbolId);
+        if (symbol == cell.symbols.end())
+            throw ProjectError("icepy.pin", "Symbol does not exist");
+        const auto id = project_->nextId();
+        symbol->second.pins.push_back({id, name, x, y, parsePinDirection(direction), width, widthKnown});
+        return id;
+    }
+
+    ObjectId instance(ObjectId symbolId, const std::string &name, Coordinate x = 0, Coordinate y = 0) {
+        return ice::addSchematicInstance(*project_, cellId_, symbolId, name, x, y);
+    }
+
+    ObjectId net(const std::string &name, const std::vector<ObjectId> &pins, Coordinate x = 0, Coordinate y = 0) {
+        return ice::addNet(*project_, cellId_, name, pins, x, y);
+    }
+
+    ObjectId component(const std::string &type, const std::string &name, Coordinate x = 0, Coordinate y = 0,
+                       const std::map<std::string, std::string> &parameters = {}) {
+        ComponentRequest request;
+        request.type = type;
+        request.name = name;
+        request.x = x;
+        request.y = y;
+        for (const auto &[parameterName, value] : parameters)
+            request.parameters.push_back({0, parameterName, value});
+        return ice::addSchematicComponent(*project_, cellId_, request).instance;
+    }
+
+    void set_parameter(ObjectId instanceId, const std::string &name, const std::string &value) {
+        ice::setSchematicParameter(*project_, cellId_, instanceId, name, value);
+    }
+
+    void set_cell_parameter(const std::string &name, const std::string &value) {
+        ice::setSchematicCellParameter(*project_, cellId_, name, value);
+    }
+
+    bool remove_cell_parameter(const std::string &name) {
+        return ice::removeSchematicCellParameter(*project_, cellId_, name);
+    }
+
+    std::vector<std::string> netlist(bool mixed = false) const {
+        const auto &cell = project_->schematicCells.at(cellId_);
+        if (cell.textSchematic)
+            return ice::buildSimulationNetlist(*project_, cellId_);
+        return ice::buildSchematicNetlist(*project_, cellId_, nullptr,
+                                          mixed ? SchematicNetlistMode::mixed : SchematicNetlistMode::analog,
+                                          ice::pdkNetlistGeometryScale(cell.pdk));
+    }
+
+    SchematicCell cell() const {
+        const auto it = project_->schematicCells.find(cellId_);
+        if (it == project_->schematicCells.end())
+            throw ProjectError("icepy.cell", "Schematic cell no longer exists");
+        return it->second;
+    }
+
+  private:
+    Project *project_ = nullptr;
+    ObjectId cellId_ = 0;
+};
+
+std::optional<SchematicCell> findSchematicCell(const Project &project, const std::string &name) {
+    for (const auto &[_, cell] : project.schematicCells) {
+        if (cell.name == name)
+            return cell;
+    }
+    return std::nullopt;
+}
+
+std::optional<LayoutCell> findLayoutCell(const Project &project, const std::string &name);
+
+ObjectId resolveSchematicId(const Project &project, const std::string &text) {
+    if (const auto cell = findSchematicCell(project, text))
+        return cell->id;
+    try {
+        std::size_t consumed = 0;
+        const auto id = static_cast<ObjectId>(std::stoull(text, &consumed));
+        if (consumed == text.size() && project.schematicCells.contains(id))
+            return id;
+    } catch (const std::exception &) {
+    }
+    throw ProjectError("icepy.schematic", "Schematic does not exist: " + text);
+}
+
+ObjectId resolveSimulationId(const Project &project, const std::string &text) {
+    for (const auto &[id, simulation] : project.simulations) {
+        if (simulation.name == text)
+            return id;
+    }
+    try {
+        std::size_t consumed = 0;
+        const auto id = static_cast<ObjectId>(std::stoull(text, &consumed));
+        if (consumed == text.size() && project.simulations.contains(id))
+            return id;
+    } catch (const std::exception &) {
+    }
+    throw ProjectError("icepy.simulation", "Simulation does not exist: " + text);
+}
+
+ObjectId resolveLayoutId(const Project &project, const std::string &text) {
+    if (const auto cell = findLayoutCell(project, text))
+        return cell->id;
+    try {
+        std::size_t consumed = 0;
+        const auto id = static_cast<ObjectId>(std::stoull(text, &consumed));
+        if (consumed == text.size() && project.layoutCells.contains(id))
+            return id;
+    } catch (const std::exception &) {
+    }
+    throw ProjectError("icepy.layout", "Layout does not exist: " + text);
+}
+
 std::optional<LayoutCell> findLayoutCell(const Project &project, const std::string &name) {
     for (const auto &[_, cell] : project.layoutCells) {
         if (cell.name == name)
@@ -350,6 +491,12 @@ NB_MODULE(icepy, module) {
         .def_rw("text", &Shape::text)
         .def_rw("name", &Shape::name)
         .def_prop_ro("is_path", &Shape::isPath);
+
+    nb::enum_<PinDirection>(module, "PinDirection")
+        .value("left", PinDirection::left)
+        .value("right", PinDirection::right)
+        .value("up", PinDirection::up)
+        .value("down", PinDirection::down);
 
     nb::enum_<PortDirection>(module, "PortDirection")
         .value("input", PortDirection::input)
@@ -615,6 +762,367 @@ NB_MODULE(icepy, module) {
         .def("set_device", &LayoutBuilder::set_device, nb::arg("device"))
         .def("cell", &LayoutBuilder::cell);
 
+    nb::class_<Pin>(module, "Pin")
+        .def(nb::init<>())
+        .def_rw("id", &Pin::id)
+        .def_rw("name", &Pin::name)
+        .def_rw("x", &Pin::x)
+        .def_rw("y", &Pin::y)
+        .def_rw("direction", &Pin::direction)
+        .def_rw("width", &Pin::width)
+        .def_rw("width_known", &Pin::widthKnown);
+
+    nb::class_<Symbol>(module, "Symbol")
+        .def(nb::init<>())
+        .def_rw("id", &Symbol::id)
+        .def_rw("name", &Symbol::name)
+        .def_rw("artwork", &Symbol::artwork)
+        .def_rw("source_cell", &Symbol::sourceCell)
+        .def_rw("pins", &Symbol::pins);
+
+    nb::class_<SchematicInstance>(module, "SchematicInstance")
+        .def(nb::init<>())
+        .def_rw("id", &SchematicInstance::id)
+        .def_rw("symbol", &SchematicInstance::symbol)
+        .def_rw("name", &SchematicInstance::name)
+        .def_rw("x", &SchematicInstance::x)
+        .def_rw("y", &SchematicInstance::y)
+        .def_rw("orientation", &SchematicInstance::orientation)
+        .def_rw("parameters", &SchematicInstance::parameters);
+
+    nb::class_<Net>(module, "Net")
+        .def(nb::init<>())
+        .def_rw("id", &Net::id)
+        .def_rw("name", &Net::name)
+        .def_rw("pins", &Net::pins)
+        .def_rw("x", &Net::x)
+        .def_rw("y", &Net::y);
+
+    nb::class_<SchematicCell>(module, "SchematicCell")
+        .def(nb::init<>())
+        .def_prop_ro("id", [](const SchematicCell &cell) { return cell.id; })
+        .def_prop_rw(
+            "name", [](const SchematicCell &cell) { return cell.name; },
+            [](SchematicCell &cell, const std::string &name) { cell.name = name; })
+        .def_prop_rw(
+            "pdk", [](const SchematicCell &cell) { return cell.pdk; },
+            [](SchematicCell &cell, const std::string &pdk) { cell.pdk = pdk; })
+        .def_rw("parameters", &SchematicCell::parameters)
+        .def_prop_ro("symbols",
+                     [](const SchematicCell &cell) {
+                         std::vector<Symbol> symbols;
+                         symbols.reserve(cell.symbols.size());
+                         for (const auto &[_, symbol] : cell.symbols)
+                             symbols.push_back(symbol);
+                         return symbols;
+                     })
+        .def_prop_ro("instances",
+                     [](const SchematicCell &cell) {
+                         std::vector<SchematicInstance> instances;
+                         instances.reserve(cell.instances.size());
+                         for (const auto &[_, instance] : cell.instances)
+                             instances.push_back(instance);
+                         return instances;
+                     })
+        .def_prop_ro("nets",
+                     [](const SchematicCell &cell) {
+                         std::vector<Net> nets;
+                         nets.reserve(cell.nets.size());
+                         for (const auto &[_, net] : cell.nets)
+                             nets.push_back(net);
+                         return nets;
+                     })
+        .def_prop_ro("text_schematic", [](const SchematicCell &cell) { return cell.textSchematic; })
+        .def_prop_ro("systemverilog_schematic", [](const SchematicCell &cell) { return cell.systemVerilogSchematic; })
+        .def_prop_ro("is_text_source", [](const SchematicCell &cell) { return cell.isTextSource(); })
+        .def_prop_ro("spice_source_path", [](const SchematicCell &cell) { return cell.spiceSourcePath; })
+        .def_prop_ro("source", [](const SchematicCell &cell) { return cell.sourceText(); });
+
+    nb::class_<SchematicBuilder>(module, "SchematicBuilder")
+        .def_prop_ro("id", &SchematicBuilder::id)
+        .def_prop_ro("name", &SchematicBuilder::name)
+        .def("symbol", &SchematicBuilder::symbol, nb::arg("name"), nb::arg("artwork") = "", nb::arg("source_cell") = 0)
+        .def("pin", &SchematicBuilder::pin, nb::arg("symbol"), nb::arg("name"), nb::arg("direction") = "right",
+             nb::arg("x") = 0, nb::arg("y") = 0, nb::arg("width") = 1, nb::arg("width_known") = true)
+        .def("instance", &SchematicBuilder::instance, nb::arg("symbol"), nb::arg("name"), nb::arg("x") = 0,
+             nb::arg("y") = 0)
+        .def("net", &SchematicBuilder::net, nb::arg("name"), nb::arg("pins"), nb::arg("x") = 0, nb::arg("y") = 0)
+        .def("component", &SchematicBuilder::component, nb::arg("type"), nb::arg("name") = "", nb::arg("x") = 0,
+             nb::arg("y") = 0, nb::arg("parameters") = std::map<std::string, std::string>{})
+        .def("set_parameter", &SchematicBuilder::set_parameter, nb::arg("instance"), nb::arg("name"), nb::arg("value"))
+        .def("set_cell_parameter", &SchematicBuilder::set_cell_parameter, nb::arg("name"), nb::arg("value"))
+        .def("remove_cell_parameter", &SchematicBuilder::remove_cell_parameter, nb::arg("name"))
+        .def("netlist", &SchematicBuilder::netlist, nb::arg("mixed") = false)
+        .def("cell", &SchematicBuilder::cell);
+
+    nb::class_<SimulationDerivedTrace>(module, "SimulationDerivedTrace")
+        .def(nb::init<>())
+        .def_rw("name", &SimulationDerivedTrace::name)
+        .def_rw("expression", &SimulationDerivedTrace::expression);
+
+    nb::class_<SimulationOverlayRun>(module, "SimulationOverlayRun")
+        .def(nb::init<>())
+        .def_rw("run_id", &SimulationOverlayRun::runId)
+        .def_rw("label", &SimulationOverlayRun::label);
+
+    nb::class_<SimulationGraphMarker>(module, "SimulationGraphMarker")
+        .def(nb::init<>())
+        .def_rw("label", &SimulationGraphMarker::label)
+        .def_rw("signal", &SimulationGraphMarker::signal)
+        .def_rw("x", &SimulationGraphMarker::x)
+        .def_rw("y", &SimulationGraphMarker::y)
+        .def_rw("has_y", &SimulationGraphMarker::hasY);
+
+    nb::class_<SimulationGraph>(module, "SimulationGraph")
+        .def(nb::init<>())
+        .def_rw("id", &SimulationGraph::id)
+        .def_rw("name", &SimulationGraph::name)
+        .def_rw("x_axis", &SimulationGraph::xAxis)
+        .def_rw("y_signals", &SimulationGraph::ySignals)
+        .def_rw("signal_labels", &SimulationGraph::signalLabels)
+        .def_rw("y_axis_label", &SimulationGraph::yAxisLabel)
+        .def_rw("x_min", &SimulationGraph::xMin)
+        .def_rw("x_max", &SimulationGraph::xMax)
+        .def_rw("y_min", &SimulationGraph::yMin)
+        .def_rw("y_max", &SimulationGraph::yMax)
+        .def_rw("view", &SimulationGraph::view)
+        .def_rw("fft", &SimulationGraph::fft)
+        .def_rw("fft_window", &SimulationGraph::fftWindow)
+        .def_rw("fft_points", &SimulationGraph::fftPoints)
+        .def_rw("show_measurements", &SimulationGraph::showMeasurements)
+        .def_rw("derived_traces", &SimulationGraph::derivedTraces)
+        .def_rw("overlays", &SimulationGraph::overlays)
+        .def_rw("markers", &SimulationGraph::markers);
+
+    nb::class_<SimulationCorner>(module, "SimulationCorner")
+        .def(nb::init<>())
+        .def_rw("name", &SimulationCorner::name)
+        .def_rw("model_section", &SimulationCorner::modelSection)
+        .def_rw("temperature", &SimulationCorner::temperature)
+        .def_rw("source_overrides", &SimulationCorner::sourceOverrides)
+        .def_rw("parameters", &SimulationCorner::parameters);
+
+    nb::class_<SimulationSweep>(module, "SimulationSweep")
+        .def(nb::init<>())
+        .def_rw("parameter", &SimulationSweep::parameter)
+        .def_rw("values", &SimulationSweep::values);
+
+    nb::class_<SimulationMonteCarloOptions>(module, "SimulationMonteCarloOptions")
+        .def(nb::init<>())
+        .def_rw("enabled", &SimulationMonteCarloOptions::enabled)
+        .def_rw("samples", &SimulationMonteCarloOptions::samples)
+        .def_rw("temperature_sigma", &SimulationMonteCarloOptions::temperatureSigma)
+        .def_rw("supply_sigma_percent", &SimulationMonteCarloOptions::supplySigmaPercent)
+        .def_rw("supply_source", &SimulationMonteCarloOptions::supplySource)
+        .def_rw("supply_nominal", &SimulationMonteCarloOptions::supplyNominal)
+        .def_rw("parameter_sigma_percent", &SimulationMonteCarloOptions::parameterSigmaPercent)
+        .def_rw("seed", &SimulationMonteCarloOptions::seed);
+
+    nb::class_<SimulationMeasurementSpec>(module, "SimulationMeasurementSpec")
+        .def(nb::init<>())
+        .def_rw("name", &SimulationMeasurementSpec::name)
+        .def_rw("metric", &SimulationMeasurementSpec::metric)
+        .def_rw("signal", &SimulationMeasurementSpec::signal)
+        .def_rw("input", &SimulationMeasurementSpec::input)
+        .def_rw("voltage", &SimulationMeasurementSpec::voltage)
+        .def_rw("threshold", &SimulationMeasurementSpec::threshold)
+        .def_rw("tolerance", &SimulationMeasurementSpec::tolerance);
+
+    nb::class_<SimulationItem>(module, "SimulationItem")
+        .def(nb::init<>())
+        .def_rw("id", &SimulationItem::id)
+        .def_rw("name", &SimulationItem::name)
+        .def_rw("schematic", &SimulationItem::schematic)
+        .def_rw("simulator", &SimulationItem::simulator)
+        .def_rw("analysis", &SimulationItem::analysis)
+        .def_rw("start", &SimulationItem::start)
+        .def_rw("stop", &SimulationItem::stop)
+        .def_rw("step", &SimulationItem::step)
+        .def_rw("use_initial_conditions", &SimulationItem::use_initial_conditions)
+        .def_rw("directives", &SimulationItem::directives)
+        .def_rw("temperature", &SimulationItem::temperature)
+        .def_rw("model_section", &SimulationItem::modelSection)
+        .def_rw("parameters", &SimulationItem::parameters)
+        .def_rw("source_overrides", &SimulationItem::sourceOverrides)
+        .def_rw("dc_source", &SimulationItem::dcSource)
+        .def_rw("dc_start", &SimulationItem::dcStart)
+        .def_rw("dc_stop", &SimulationItem::dcStop)
+        .def_rw("dc_step", &SimulationItem::dcStep)
+        .def_rw("ac_variation", &SimulationItem::acVariation)
+        .def_rw("ac_points", &SimulationItem::acPoints)
+        .def_rw("ac_start", &SimulationItem::acStart)
+        .def_rw("ac_stop", &SimulationItem::acStop)
+        .def_rw("noise_output", &SimulationItem::noiseOutput)
+        .def_rw("noise_input", &SimulationItem::noiseInput)
+        .def_rw("noise_variation", &SimulationItem::noiseVariation)
+        .def_rw("noise_points", &SimulationItem::noisePoints)
+        .def_rw("noise_start", &SimulationItem::noiseStart)
+        .def_rw("noise_stop", &SimulationItem::noiseStop)
+        .def_rw("tf_output", &SimulationItem::tfOutput)
+        .def_rw("tf_source", &SimulationItem::tfSource)
+        .def_rw("capture_signals", &SimulationItem::captureSignals)
+        .def_rw("corners", &SimulationItem::corners)
+        .def_rw("sweeps", &SimulationItem::sweeps)
+        .def_rw("monte_carlo", &SimulationItem::monteCarlo)
+        .def_rw("measurements", &SimulationItem::measurements)
+        .def_rw("graphs", &SimulationItem::graphs);
+
+    nb::enum_<JobState>(module, "JobState")
+        .value("queued", JobState::queued)
+        .value("running", JobState::running)
+        .value("succeeded", JobState::succeeded)
+        .value("failed", JobState::failed)
+        .value("cancelled", JobState::cancelled)
+        .value("timed_out", JobState::timed_out);
+
+    nb::class_<SimulationTrace>(module, "SimulationTrace")
+        .def(nb::init<>())
+        .def_rw("name", &SimulationTrace::name)
+        .def_rw("values", &SimulationTrace::values);
+
+    nb::class_<SimulationMeasurementResult>(module, "SimulationMeasurementResult")
+        .def(nb::init<>())
+        .def_rw("name", &SimulationMeasurementResult::name)
+        .def_rw("metric", &SimulationMeasurementResult::metric)
+        .def_rw("value", &SimulationMeasurementResult::value)
+        .def_rw("unit", &SimulationMeasurementResult::unit)
+        .def_rw("valid", &SimulationMeasurementResult::valid)
+        .def_rw("error", &SimulationMeasurementResult::error);
+
+    nb::class_<SimulationResult>(module, "SimulationResult")
+        .def(nb::init<>())
+        .def_rw("state", &SimulationResult::state)
+        .def_rw("analysis", &SimulationResult::analysis)
+        .def_rw("x_axis", &SimulationResult::xAxis)
+        .def_rw("x_unit", &SimulationResult::xUnit)
+        .def_rw("time", &SimulationResult::time)
+        .def_rw("traces", &SimulationResult::traces)
+        .def_rw("scalars", &SimulationResult::scalars)
+        .def_rw("measurements", &SimulationResult::measurements)
+        .def_rw("simulator", &SimulationResult::simulator)
+        .def_rw("simulator_version", &SimulationResult::simulator_version)
+        .def_rw("error", &SimulationResult::error)
+        .def_rw("warnings", &SimulationResult::warnings);
+
+    nb::class_<DrcViolation>(module, "DrcViolation")
+        .def(nb::init<>())
+        .def_rw("schema_version", &DrcViolation::schemaVersion)
+        .def_rw("severity", &DrcViolation::severity)
+        .def_rw("rule", &DrcViolation::rule)
+        .def_rw("message", &DrcViolation::message)
+        .def_rw("object", &DrcViolation::object)
+        .def_rw("location", &DrcViolation::location)
+        .def_rw("cell", &DrcViolation::cell);
+
+    nb::class_<ParasiticElement>(module, "ParasiticElement")
+        .def(nb::init<>())
+        .def_rw("schema_version", &ParasiticElement::schemaVersion)
+        .def_rw("net", &ParasiticElement::net)
+        .def_rw("resistance", &ParasiticElement::resistance)
+        .def_rw("capacitance", &ParasiticElement::capacitance);
+
+    nb::class_<VerificationReport>(module, "VerificationReport")
+        .def(nb::init<>())
+        .def_rw("schema_version", &VerificationReport::schemaVersion)
+        .def_rw("drc", &VerificationReport::drc)
+        .def_rw("lvs", &VerificationReport::lvs)
+        .def_rw("pex", &VerificationReport::pex);
+
+    nb::class_<LocalVerificationAdapter>(module, "LocalVerificationAdapter")
+        .def(nb::init<>())
+        .def(
+            "run",
+            [](LocalVerificationAdapter &adapter, const Project &project, std::optional<ObjectId> cell) {
+                return adapter.run(project, cell);
+            },
+            nb::arg("project"), nb::arg("cell") = nb::none());
+
+    nb::class_<LayoutDrcOptions>(module, "LayoutDrcOptions")
+        .def(nb::init<>())
+        .def_rw("work_directory", &LayoutDrcOptions::workDirectory)
+        .def_rw("flatten", &LayoutDrcOptions::flatten)
+        .def_rw("top_cell", &LayoutDrcOptions::topCell)
+        .def_rw("suite", &LayoutDrcOptions::suite)
+        .def_rw("timeout_seconds", &LayoutDrcOptions::timeoutSeconds)
+        .def_rw("engine", &LayoutDrcOptions::engine)
+        .def_rw("deck", &LayoutDrcOptions::deck);
+
+    nb::class_<LayoutDrcResult>(module, "LayoutDrcResult")
+        .def(nb::init<>())
+        .def_rw("ok", &LayoutDrcResult::ok)
+        .def_rw("layout", &LayoutDrcResult::layout)
+        .def_rw("layout_name", &LayoutDrcResult::layoutName)
+        .def_rw("engine", &LayoutDrcResult::engine)
+        .def_rw("deck_path", &LayoutDrcResult::deckPath)
+        .def_rw("gds_path", &LayoutDrcResult::gdsPath)
+        .def_rw("report_path", &LayoutDrcResult::reportPath)
+        .def_rw("log_path", &LayoutDrcResult::logPath)
+        .def_rw("report", &LayoutDrcResult::report)
+        .def_rw("error", &LayoutDrcResult::error);
+
+    nb::class_<PackageSpec>(module, "PackageSpec")
+        .def(nb::init<>())
+        .def_rw("schema_version", &PackageSpec::schemaVersion)
+        .def_rw("name", &PackageSpec::name)
+        .def_rw("version", &PackageSpec::version)
+        .def_rw("description", &PackageSpec::description)
+        .def_rw("license", &PackageSpec::license)
+        .def_rw("dependencies", &PackageSpec::dependencies)
+        .def_rw("capabilities", &PackageSpec::capabilities)
+        .def_rw("trusted", &PackageSpec::trusted)
+        .def_rw("source_type", &PackageSpec::sourceType)
+        .def_rw("source_url", &PackageSpec::sourceUrl)
+        .def_rw("source_revision", &PackageSpec::sourceRevision)
+        .def_rw("root", &PackageSpec::root)
+        .def_prop_ro("pdk_id", [](const PackageSpec &spec) { return spec.pdk ? spec.pdk->id : std::string{}; });
+
+    nb::class_<LockedPackage>(module, "LockedPackage")
+        .def(nb::init<>())
+        .def_rw("name", &LockedPackage::name)
+        .def_rw("version", &LockedPackage::version)
+        .def_rw("source", &LockedPackage::source)
+        .def_rw("content_hash", &LockedPackage::contentHash)
+        .def_rw("trusted", &LockedPackage::trusted)
+        .def_rw("capabilities", &LockedPackage::capabilities)
+        .def_rw("pdk_id", &LockedPackage::pdkId);
+
+    nb::class_<Lockfile>(module, "Lockfile")
+        .def(nb::init<>())
+        .def_rw("schema_version", &Lockfile::schemaVersion)
+        .def_rw("ice_version", &Lockfile::iceVersion)
+        .def_rw("packages", &Lockfile::packages);
+
+    nb::class_<PackageIndexEntry>(module, "PackageIndexEntry")
+        .def(nb::init<>())
+        .def_rw("spec", &PackageIndexEntry::spec)
+        .def_rw("root", &PackageIndexEntry::root)
+        .def_rw("logo", &PackageIndexEntry::logo)
+        .def_rw("repository_url", &PackageIndexEntry::repositoryUrl)
+        .def_rw("repository_revision", &PackageIndexEntry::repositoryRevision);
+
+    nb::class_<ProvenanceDiagnostic>(module, "ProvenanceDiagnostic")
+        .def(nb::init<>())
+        .def_rw("code", &ProvenanceDiagnostic::code)
+        .def_rw("message", &ProvenanceDiagnostic::message)
+        .def_rw("package", &ProvenanceDiagnostic::package);
+
+    nb::class_<PackageManager>(module, "PackageManager")
+        .def_static("read_manifest", &PackageManager::readManifest, nb::arg("package_root"))
+        .def_static("content_hash", &PackageManager::contentHash, nb::arg("package_root"))
+        .def_static("install_git", &PackageManager::installGit, nb::arg("repository"), nb::arg("name"),
+                    nb::arg("version"), nb::arg("url"), nb::arg("revision") = "")
+        .def_static("install_git_package", &PackageManager::installGitPackage, nb::arg("repository"), nb::arg("url"),
+                    nb::arg("revision") = "")
+        .def_static("uninstall", &PackageManager::uninstallPackage, nb::arg("repository"), nb::arg("name"))
+        .def_static("scan_index", &PackageManager::scanPackageIndex, nb::arg("index_root"))
+        .def_static("resolve", &PackageManager::resolve, nb::arg("repositories"), nb::arg("requested"),
+                    nb::arg("ice_version"))
+        .def_static("write_lockfile", &PackageManager::writeLockfile, nb::arg("path"), nb::arg("lockfile"))
+        .def_static("read_lockfile", &PackageManager::readLockfile, nb::arg("path"))
+        .def_static("verify_lockfile", &PackageManager::verifyLockfile, nb::arg("lockfile"), nb::arg("repositories"))
+        .def_static("capabilities", &PackageManager::capabilities, nb::arg("package"))
+        .def_static("provenance", &PackageManager::provenance, nb::arg("lockfile"), nb::arg("repositories"));
+
     nb::class_<Project>(module, "Project")
         .def(nb::init<>())
         .def_rw("name", &Project::name)
@@ -642,6 +1150,130 @@ NB_MODULE(icepy, module) {
         .def("layout_cell",
              [](const Project &project, const std::string &name) { return findLayoutCell(project, name); })
         .def("layout_cell_by_id", [](const Project &project, ObjectId id) { return findLayoutCell(project, id); })
+        .def_prop_ro("schematic_cells",
+                     [](const Project &project) {
+                         std::vector<SchematicCell> cells;
+                         cells.reserve(project.schematicCells.size());
+                         for (const auto &[_, cell] : project.schematicCells)
+                             cells.push_back(cell);
+                         return cells;
+                     })
+        .def("schematic_cell",
+             [](const Project &project, const std::string &name) {
+                 const auto cell = findSchematicCell(project, name);
+                 if (!cell)
+                     throw ProjectError("icepy.schematic", "Schematic does not exist: " + name);
+                 return *cell;
+             })
+        .def("schematic_cell_by_id",
+             [](const Project &project, ObjectId id) {
+                 const auto cell = project.schematicCells.find(id);
+                 if (cell == project.schematicCells.end())
+                     throw ProjectError("icepy.schematic", "Schematic does not exist");
+                 return cell->second;
+             })
+        .def(
+            "create_schematic_cell",
+            [](Project &project, const std::string &name, const std::string &pdk) {
+                const auto id = ice::createSchematicCell(project, name, pdk);
+                return SchematicBuilder(project, id);
+            },
+            nb::arg("name"), nb::arg("pdk") = genericPdkId, nb::keep_alive<0, 1>())
+        .def(
+            "create_text_schematic_cell",
+            [](Project &project, const std::string &name, const std::string &text, const std::string &pdk,
+               const std::string &sourcePath) {
+                const auto id = ice::createTextSchematicCell(project, name, pdk, text, sourcePath);
+                return SchematicBuilder(project, id);
+            },
+            nb::arg("name"), nb::arg("text") = "", nb::arg("pdk") = genericPdkId, nb::arg("source_path") = "",
+            nb::keep_alive<0, 1>())
+        .def(
+            "create_systemverilog_cell",
+            [](Project &project, const std::string &name, const std::string &source, const std::string &pdk) {
+                const auto id = ice::createSystemVerilogCell(project, name, pdk, source);
+                return SchematicBuilder(project, id);
+            },
+            nb::arg("name"), nb::arg("source") = "", nb::arg("pdk") = genericPdkId, nb::keep_alive<0, 1>())
+        .def(
+            "edit_schematic_cell",
+            [](Project &project, ObjectId id) {
+                if (!project.schematicCells.contains(id))
+                    throw ProjectError("icepy.cell", "Schematic cell does not exist");
+                return SchematicBuilder(project, id);
+            },
+            nb::arg("id"), nb::keep_alive<0, 1>())
+        .def("remove_schematic_cell",
+             [](Project &project, ObjectId id) {
+                 ice::removeSchematicCell(project, id);
+                 return true;
+             })
+        .def(
+            "schematic_netlist",
+            [](const Project &project, ObjectId id, bool mixed) {
+                const auto cell = project.schematicCells.find(id);
+                if (cell == project.schematicCells.end())
+                    throw ProjectError("icepy.schematic", "Schematic does not exist");
+                if (cell->second.textSchematic)
+                    return ice::buildSimulationNetlist(project, id);
+                return ice::buildSchematicNetlist(project, id, nullptr,
+                                                  mixed ? SchematicNetlistMode::mixed : SchematicNetlistMode::analog,
+                                                  ice::pdkNetlistGeometryScale(cell->second.pdk));
+            },
+            nb::arg("schematic"), nb::arg("mixed") = false)
+        .def_prop_ro("simulations",
+                     [](const Project &project) {
+                         std::vector<SimulationItem> simulations;
+                         simulations.reserve(project.simulations.size());
+                         for (const auto &[_, simulation] : project.simulations)
+                             simulations.push_back(simulation);
+                         return simulations;
+                     })
+        .def("simulation",
+             [](const Project &project, const std::string &name) {
+                 return project.simulations.at(resolveSimulationId(project, name));
+             })
+        .def(
+            "create_simulation",
+            [](Project &project, SimulationItem simulation) {
+                if (simulation.name.empty())
+                    throw ProjectError("icepy.simulation", "Simulation name is required");
+                ice::requireUniqueSimulationName(project, simulation.name);
+                simulation.id = project.nextId();
+                const auto id = simulation.id;
+                project.simulations.emplace(id, std::move(simulation));
+                return project.simulations.at(id);
+            },
+            nb::arg("simulation"))
+        .def(
+            "update_simulation",
+            [](Project &project, SimulationItem simulation) {
+                if (!project.simulations.contains(simulation.id))
+                    throw ProjectError("icepy.simulation", "Simulation does not exist");
+                ice::requireUniqueSimulationName(project, simulation.name, simulation.id);
+                const auto id = simulation.id;
+                project.simulations.at(id) = std::move(simulation);
+                return project.simulations.at(id);
+            },
+            nb::arg("simulation"))
+        .def("remove_simulation",
+             [](Project &project, const std::string &simulation) {
+                 const auto id = resolveSimulationId(project, simulation);
+                 ice::removeSimulationItem(project, id);
+                 return true;
+             })
+        .def(
+            "run_simulation",
+            [](const Project &project, const std::string &simulation, const std::string &projectRoot, int timeoutMs) {
+                const auto id = resolveSimulationId(project, simulation);
+                std::vector<std::string> notes;
+                const auto request = ice::simulationRequestForItem(
+                    project, project.simulations.at(id),
+                    projectRoot.empty() ? std::filesystem::path{} : std::filesystem::path(projectRoot), &notes);
+                ice::SimulationRunner runner;
+                return runner.run(request, std::chrono::milliseconds(std::max(1, timeoutMs)));
+            },
+            nb::arg("simulation"), nb::arg("project_root") = "", nb::arg("timeout_ms") = 60000)
         .def_prop_ro("procedural_layouts",
                      [](const Project &project) {
                          std::vector<ProceduralLayout> layouts;
@@ -932,6 +1564,44 @@ NB_MODULE(icepy, module) {
             return runLvs(project, schematic, layout);
         },
         nb::arg("project"), nb::arg("schematic"), nb::arg("layout"));
+
+    module.def(
+        "run_layout_drc",
+        [](const Project &project, ObjectId layout, const LayoutDrcOptions &options) {
+            return runLayoutDrc(project, layout, options);
+        },
+        nb::arg("project"), nb::arg("layout"), nb::arg("options") = LayoutDrcOptions{});
+    module.def(
+        "run_layout_drc_named",
+        [](const Project &project, const std::string &layout, const LayoutDrcOptions &options) {
+            return runLayoutDrc(project, resolveLayoutId(project, layout), options);
+        },
+        nb::arg("project"), nb::arg("layout"), nb::arg("options") = LayoutDrcOptions{});
+    module.def("parse_lyrdb_text", &parseGdsCheckLyrdbText, nb::arg("text"));
+    module.def("parse_lyrdb", &parseGdsCheckLyrdb, nb::arg("path"));
+    module.def("verification_report_json", &serializeVerificationReport, nb::arg("report"));
+    module.def(
+        "run_local_verification",
+        [](const Project &project, std::optional<ObjectId> cell) {
+            LocalVerificationAdapter adapter;
+            return adapter.run(project, cell);
+        },
+        nb::arg("project"), nb::arg("cell") = nb::none());
+    module.def("package_matches_pdk", &packageMatchesPdk, nb::arg("package"), nb::arg("pdk"));
+    module.def(
+        "resolve_pdk_stack",
+        [](const std::string &pdk, const std::string &requested) {
+            if (pdk.empty() || pdk == genericPdkId)
+                return requested;
+            const auto pdks = findPdks(pdk);
+            if (pdks.empty())
+                return requested;
+            const auto manifest = PackageManager::readManifest(pdks.front().packageRoot);
+            if (!manifest.pdk)
+                return requested;
+            return resolvePdkStack(*manifest.pdk, requested);
+        },
+        nb::arg("pdk"), nb::arg("requested") = "");
 
     module.def("load_project", [](const std::string &path) { return Project::load(path); });
     module.def("new_project", [](const std::string &name) {
