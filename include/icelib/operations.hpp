@@ -15,7 +15,7 @@ ObjectId createSchematicCell(Project &project, std::string name, std::string pdk
 // Creates a schematic cell whose source is a raw SPICE text document. The cell
 // still participates in the schematic hierarchy and project serialization.
 ObjectId createTextSchematicCell(Project &project, std::string name, std::string pdk = genericPdkId,
-                                 std::string spiceText = {});
+                                 std::string spiceText = {}, std::string spiceSourcePath = {});
 // Creates a schematic cell whose source is SystemVerilog. It appears in the
 // schematic hierarchy and in the simulation selector.
 ObjectId createSystemVerilogCell(Project &project, std::string name, std::string pdk = genericPdkId,

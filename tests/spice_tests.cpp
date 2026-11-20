@@ -5,7 +5,10 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 TEST_CASE("SPICE parser builds subcircuit hierarchy and parameter defaults") {
     const std::string source = R"(
@@ -182,6 +185,56 @@ TEST_CASE("Text SPICE bus ports expand into scalar block pins") {
     CHECK(pins[3].name == "out[1]");
     const auto lines = ice::buildSchematicNetlist(project, parent);
     CHECK(std::find(lines.begin(), lines.end(), "X1 0 0 0 0 bus_block") != lines.end());
+}
+
+TEST_CASE("Text SPICE resolves includes and library sections") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-spice-include-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "models");
+    std::ofstream(root / "models" / "devices.inc") << ".subckt inc_block A B\nR1 A B 2k\n.ends inc_block\n";
+    std::ofstream(root / "models" / "devices.lib")
+        << ".lib tt\n.model nch nmos (vto=0.5)\n.subckt lib_block X Y\nR2 X Y 3k\n.ends lib_block\n.endl tt\n";
+    const std::string source = ".include \"models/devices.inc\"\n"
+                               ".lib \"models/devices.lib\" tt\n"
+                               ".subckt top IN OUT\n"
+                               "X1 IN OUT inc_block\n"
+                               ".ends top\n";
+    const auto sourcePath = root / "top.sp";
+    std::vector<std::string> warnings;
+    const auto document = ice::parseSpiceDocumentResolved(source, sourcePath, &warnings);
+    CHECK(warnings.empty());
+    CHECK(ice::findSpiceSubcircuit(document, "inc_block") != nullptr);
+    CHECK(ice::findSpiceSubcircuit(document, "lib_block") != nullptr);
+    CHECK(document.models.size() == 1);
+    CHECK(ice::findSpiceSubcircuit(document, "top") != nullptr);
+
+    const auto interface = ice::spiceInterfaceForText(source, "top", sourcePath);
+    REQUIRE(interface.ok);
+    CHECK((interface.ports == std::vector<std::string>{"IN", "OUT"}));
+    CHECK(interface.warnings.empty());
+
+    const auto lines = ice::spiceSourceLinesForHierarchy(source, sourcePath);
+    const auto hasAbsoluteInclude = std::any_of(lines.begin(), lines.end(), [&](const std::string &line) {
+        return line.find("devices.inc") != std::string::npos && line.find(root.string()) != std::string::npos;
+    });
+    CHECK(hasAbsoluteInclude);
+
+    const auto missing = ice::spiceInterfaceForText(".include \"missing.inc\"\n.subckt top A B\nR1 A B 1\n.ends top\n",
+                                                    "top", sourcePath);
+    CHECK(missing.ok);
+    CHECK(!missing.warnings.empty());
+    CHECK(missing.warnings.front().find("not found") != std::string::npos);
+
+    ice::Project project;
+    project.identity = "spice-includes";
+    project.name = "spice-includes";
+    const auto cell = ice::createTextSchematicCell(project, "top", ice::genericPdkId, source, sourcePath.string());
+    const auto cellInterface = ice::spiceInterfaceForCell(project.schematicCells.at(cell));
+    CHECK(cellInterface.ok);
+    CHECK(cellInterface.subcircuitName == "top");
+    const auto serialized = project.serialize();
+    CHECK(serialized.find("spice_source_path") != std::string::npos);
+    std::filesystem::remove_all(root);
 }
 
 TEST_CASE("SPICE element helpers expose LVS-facing types and values") {

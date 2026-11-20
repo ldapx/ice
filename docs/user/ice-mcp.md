@@ -183,8 +183,12 @@ the cell's `pdk` and `stack`; `layout_create` and
 the same PDK and stack as their parent layout. `lvs_run` accepts a
 layout name or id and an optional schematic; when the schematic is omitted, ICE
 infers it from planned-device links or matching layout/schematic names. The
-schematic may be drawn, text SPICE, or a SystemVerilog source cell. Parsed SPICE
-subcircuits are flattened recursively; SystemVerilog comparison is port-level.
+schematic may be drawn, text SPICE, or a structural SystemVerilog source cell.
+Parsed SPICE subcircuits and includes are flattened recursively. Gate-level
+SystemVerilog instances and primitives are compared device by device;
+behavioral RTL is rejected rather than compared as ports only. Layout
+connectivity combines planned metadata with shapes, routed paths, vias, and
+placed-device port overlaps, and `m=` multiplicity is expanded before matching.
 `pex_run` accepts a layout plus optional coefficient overrides
 (`metal_sheet_resistance`, `poly_sheet_resistance`,
 `diffusion_sheet_resistance`, `via_resistance`, `area_capacitance`,
@@ -193,7 +197,9 @@ It extracts placed device-library instances by default; set
 `extract_placed_devices=false` to skip them. It also recognizes polygon devices
 through the PDK's `technology/extraction.json`; set `extract_polygon_devices=false`
 to disable that pass, or `extraction_rules_path` to override the package file.
-If no layout devices are recognized, it copies the inferred source schematic
+Net resistance is an effective value from a series/parallel conductor graph;
+parallel conductors and via arrays at one location combine instead of adding
+in series. If no layout devices are recognized, it copies the inferred source schematic
 netlist by default; set `include_linked_schematic=false` to emit only the
 extracted RC network. The response includes `devices`, `devices_from_layout`,
 and `devices_from_schematic`.

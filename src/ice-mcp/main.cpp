@@ -504,7 +504,7 @@ json schematicJson(const ice::SchematicCell &cell) {
     for (const auto &[id, net] : cell.nets)
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
     if (cell.textSchematic) {
-        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name);
+        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
         result["spice_ready"] = interface.ok;
         result["spice_subcircuit"] = interface.subcircuitName;
         result["spice_ports"] = interface.ports;
@@ -3153,6 +3153,7 @@ class IceMcpServer {
             const auto schematicName = requiredString(arguments, "name");
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             std::string source = optionalString(arguments, "source");
+            std::string sourcePath;
             if (const auto file = optionalString(arguments, "file"); !file.empty()) {
                 std::filesystem::path path(file);
                 std::error_code status;
@@ -3167,6 +3168,7 @@ class IceMcpServer {
                 std::ostringstream contents;
                 contents << input.rdbuf();
                 source = contents.str();
+                sourcePath = path.string();
             }
             if (source.empty())
                 throw ToolError("Argument 'source' or a readable 'file' is required.");
@@ -3178,7 +3180,7 @@ class IceMcpServer {
                 drawn = ice::spiceNetlistSupportsDrawn(source);
             ice::SpiceImportResult imported;
             session.execute("mcp schematic-import-spice", [&](ice::Project &project) {
-                imported = ice::createSchematicFromSpice(project, schematicName, pdk, source, drawn);
+                imported = ice::createSchematicFromSpice(project, schematicName, pdk, source, drawn, sourcePath);
             });
             return {{"id", imported.cell},
                     {"name", schematicName},

@@ -150,6 +150,86 @@ TEST_CASE("PEX recognizes polygon and via geometry") {
     CHECK(near(extracted.capacitance, 0.4288));
 }
 
+TEST_CASE("PEX combines parallel conductors instead of summing them") {
+    ice::Project project;
+    project.identity = "pex-parallel";
+    project.name = "pex-parallel";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto metal = ice::addLayer(project, "Metal1", 8);
+    const auto net = ice::createLayoutNet(project, cell, "VIN");
+    ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, net);
+    ice::addRectangle(project, cell, metal, {0, 2000, 10000, 1000}, net);
+    ice::addPort(project, cell, "P1", metal, {0, 0, 1000, 3000}, ice::PortDirection::input, ice::PortSide::left, net,
+                 "P1");
+    ice::addPort(project, cell, "P2", metal, {10000, 0, 1000, 3000}, ice::PortDirection::output, ice::PortSide::right,
+                 net, "P2");
+    const auto report = ice::runPex(project, cell);
+    REQUIRE(report.nets.size() == 1);
+    CHECK(near(report.nets.front().resistance, 0.25));
+}
+
+TEST_CASE("PEX combines via arrays in parallel") {
+    ice::Project project;
+    project.identity = "pex-via-array";
+    project.name = "pex-via-array";
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto poly = ice::addLayer(project, "GatPoly", 5);
+    const auto via = ice::addLayer(project, "Via1", 19);
+    const auto net = ice::createLayoutNet(project, cell, "GATE");
+    ice::addPolygon(project, cell, poly, {{0, 0}, {10000, 0}, {10000, 1000}, {0, 1000}}, net);
+    for (int index = 0; index < 4; ++index)
+        ice::addRectangle(project, cell, via, {1000, 0, 200, 200}, net);
+    const auto report = ice::runPex(project, cell);
+    REQUIRE(report.nets.size() == 1);
+    CHECK(report.nets.front().viaCount == 4);
+    CHECK(near(report.nets.front().resistance, 50.125));
+}
+
+TEST_CASE("PEX merges duplicate planned and placed devices without dropping distinct ones") {
+    ice::Project project;
+    project.identity = "pex-mixed-devices";
+    project.name = "pex-mixed-devices";
+    const auto metal = ice::addLayer(project, "Metal1", 8);
+    const auto child = ice::createLayoutCell(project, "res_dev");
+    auto &deviceCell = project.layoutCells.at(child);
+    deviceCell.library = true;
+    deviceCell.device = "resistor";
+    deviceCell.parameters.push_back({project.nextId(), "resistance", "1k"});
+    ice::addPort(project, child, "A", metal, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
+    ice::addPort(project, child, "B", metal, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
+
+    const auto layout = ice::createLayoutCell(project, "top");
+    ice::addLayoutInstance(project, layout, child, "R1", 0, 0);
+    ice::addLayoutInstance(project, layout, child, "R2", 3000, 0);
+    const auto netA = ice::createLayoutNet(project, layout, "A");
+    const auto netB = ice::createLayoutNet(project, layout, "B");
+    const auto netC = ice::createLayoutNet(project, layout, "C");
+    const auto netD = ice::createLayoutNet(project, layout, "D");
+    ice::addRectangle(project, layout, metal, {0, 0, 200, 200}, netA);
+    ice::addRectangle(project, layout, metal, {1000, 0, 200, 200}, netB);
+    ice::addRectangle(project, layout, metal, {3000, 0, 200, 200}, netC);
+    ice::addRectangle(project, layout, metal, {4000, 0, 200, 200}, netD);
+
+    ice::PlannedDevice planned;
+    planned.id = project.nextId();
+    planned.name = "R1";
+    planned.device = "resistor";
+    planned.x = 0;
+    planned.y = 0;
+    planned.width = 1200;
+    planned.height = 200;
+    planned.parameters.push_back({project.nextId(), "resistance", "1k"});
+    planned.terminals = {{"A", netA}, {"B", netB}};
+    planned.placeholder = false;
+    project.layoutCells.at(layout).plannedDevices.emplace(planned.id, planned);
+
+    const auto report = ice::runPex(project, layout);
+    CHECK(report.devices.size() == 2);
+    CHECK(std::any_of(report.notes.begin(), report.notes.end(), [](const std::string &note) {
+        return note.find("duplicate placed device 'R1'") != std::string::npos;
+    }));
+}
+
 TEST_CASE("PEX extracts placed MOS devices and prefers them over the schematic") {
     ice::Project project;
     project.identity = "pex-placed-device";

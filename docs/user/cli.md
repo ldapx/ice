@@ -105,6 +105,9 @@ connectivity, component values, PDK setup, and mixed-signal hierarchy.
 schematic with `--mode drawn`. `--mode auto` chooses drawn only when the source
 is a flat supported netlist. Text imports retain parsed `.subckt` port and
 parameter declarations, so the cell can be placed as a hierarchical block.
+Relative `.include`, `.inc`, and `.lib` paths are resolved against the imported
+file and emitted as absolute paths, so simulation and LVS do not depend on the
+process working directory.
 `schematic-add-spice-instance` generates a symbol from a text SPICE
 subcircuit's ports and places it; instance parameters such as `R=2k` override
 the subcircuit defaults. `schematic-add-symbol` with a text source cell uses the
@@ -352,17 +355,20 @@ degraded state so `project_repair` and `project_open(recover=true)` remain
 callable.
 
 `lvs` compares a schematic against a layout and prints the LVS report as JSON.
-The schematic may be drawn, text SPICE, or a SystemVerilog source cell. Parsed
-SPICE subcircuits are flattened recursively with parameter defaults applied;
-SystemVerilog comparison is port-level. `lvs-auto` infers the schematic from
-planned-device links, then prefers a `<layout>_lvs`, `<layout>_dut`, or
-`<layout>_layout` cell before a plain name match, so a testbench named after the
-block does not hide its DUT view.
+The schematic may be drawn, text SPICE, or a structural SystemVerilog source
+cell. Parsed SPICE subcircuits and `.include`/`.lib` files are flattened
+recursively with parameter defaults applied. Gate-level SystemVerilog module
+instances and primitives are compared device by device; behavioral RTL is
+rejected instead of being compared as ports only. `lvs-auto` infers the
+schematic from planned-device links, then prefers a `<layout>_lvs`,
+`<layout>_dut`, or `<layout>_layout` cell before a plain name match, so a
+testbench named after the block does not hide its DUT view.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
-device types, shared device parameters, net topology from planned connections
-or procedural device terminal metadata, and top-level pins matched by name,
-direction, and bound net. The JSON report
+device types, shared device parameters including parameters missing from the
+layout, net topology from planned metadata plus shapes/routed paths/vias, and
+top-level pins matched by name, direction, and bound net. `m=` multiplicity is
+expanded, and renamed devices are matched by a topology fallback. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.
 
@@ -374,18 +380,23 @@ deck or a gdscheck process; SKY130 resolves the SkyWater KLayout deck from
 variant when the package declares one. The work directory defaults to
 `build/drc/<layout>/` and contains `layout.gds`, `drc.lyrdb`, and `drc.log`.
 The JSON result reports `engine`, `deck`, `suite`, and normalized violations.
-The command exits with status `1` when the report cannot be produced or
-contains error-severity violations; warnings alone keep status `0`.
+The command exits with status `1` when the report cannot be produced, when the
+deck process times out, crashes, or exits nonzero without a clean report, or
+when the report contains error-severity violations. A truncated report database
+is rejected; warnings alone keep status `0`.
 
 `pex` extracts placed device-library instances, PDK-rule polygon devices, and
 first-order per-net resistance and capacitance from layout geometry, then
-creates or updates a text SPICE schematic in the project hierarchy. Polygon
-device rules come from the installed package's `technology/extraction.json`. When no
-layout devices are recognized it falls back to the inferred source schematic
-device netlist. The report JSON
-includes the layout and schematic ids, per-net area, perimeter, resistance,
-capacitance, extracted devices, and the complete generated SPICE source. An
-optional third argument overrides the generated cell name.
+creates or updates a text SPICE schematic in the project hierarchy. Net
+resistance is an effective value from a series/parallel conductor graph;
+parallel wires and via arrays at one location combine instead of adding in
+series. Capacitance remains a lumped area/perimeter estimate to ground. Polygon
+device rules come from the installed package's `technology/extraction.json`.
+When no layout devices are recognized it falls back to the inferred source
+schematic device netlist. The report JSON includes the layout and schematic ids,
+per-net area, perimeter, resistance, capacitance, extracted devices, and the
+complete generated SPICE source. An optional third argument overrides the
+generated cell name.
 
 ## PDK setup
 

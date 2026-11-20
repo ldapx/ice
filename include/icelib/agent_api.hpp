@@ -101,7 +101,7 @@ struct SpiceImportResult {
 // netlist. Text cells retain parsed `.subckt` defaults and can be placed as
 // hierarchical blocks.
 SpiceImportResult createSchematicFromSpice(Project &project, std::string name, std::string pdk,
-                                           const std::string &source, bool drawn);
+                                           const std::string &source, bool drawn, const std::string &sourcePath = {});
 
 // True when a flat SPICE source only contains constructs supported by the
 // drawn importer (R/C/L/V/I/D and simple directives).

@@ -12,9 +12,11 @@ namespace ice {
 // coordinates in database units; the extractor converts them to micrometers
 // before applying these coefficients.
 //
-// These are intentionally simple lumped estimates: every net gets one total
-// resistance and one total capacitance to ground. They are useful for early
-// post-layout exploration, not for sign-off.
+// These are intentionally simple lumped estimates: every net gets one effective
+// resistance and one total capacitance to ground. Conductive shapes are
+// combined through a small series/parallel graph, and vias at the same
+// location combine in parallel. They are useful for early post-layout
+// exploration, not for sign-off.
 struct PexOptions {
     // Sheet resistance for metal layers, in ohm/square.
     double metalSheetResistance = 0.05;
@@ -72,6 +74,9 @@ struct PexDevice {
     std::vector<std::string> pins;
     std::vector<std::string> nodes;
     std::string spiceLine;
+    // Layout bounds when known. Used to recognize the same physical device
+    // when planned, placed, and polygon extraction all see it.
+    Rect bounds;
 };
 
 struct PexReport {
