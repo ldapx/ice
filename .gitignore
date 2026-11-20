@@ -25,3 +25,4 @@ Thumbs.db
 
 # Tooling output
 compile_commands.json
+makefile

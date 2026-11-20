@@ -50,6 +50,8 @@ struct SpiceDocument {
     std::string title;
     std::vector<std::string> includes;
     std::vector<std::string> libraries;
+    // `.global` node names, already unquoted.
+    std::vector<std::string> globals;
     std::vector<SpiceParameter> parameters;
     std::vector<SpiceModel> models;
     std::vector<SpiceSubcircuit> subcircuits;

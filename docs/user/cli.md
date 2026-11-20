@@ -46,6 +46,7 @@ ice-cli schematic-add-cell <project> <name> [pdk]
 ice-cli schematic-add-text <project> <name> [pdk] [spice-file]
 ice-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
 ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
+ice-cli schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] [--convert] <file|->
 ice-cli schematic-list <project>
 ice-cli schematic-info <project> <cell>
 ice-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
@@ -112,7 +113,14 @@ process working directory.
 subcircuit's ports and places it; instance parameters such as `R=2k` override
 the subcircuit defaults. `schematic-add-symbol` with a text source cell uses the
 same generated pins. `schematic-remove --dry-run` lists dependencies;
-`--cascade` removes dependent simulations and hierarchical symbols too.
+`--cascade` removes dependent simulations and hierarchical symbols too. A
+blocked deletion prints `deleted: false` and exits with status `1`.
+`schematic-set-text` replaces a text SPICE or SystemVerilog cell's source; use
+`--convert` only for an empty drawn cell. A source cell cannot switch between
+SPICE and SystemVerilog in place. Generated parent symbols are updated by pin
+name, and removing a connected pin fails instead of silently changing
+connectivity. `--source-path` retains the base path used by relative SPICE
+includes.
 
 `schematic-add-text` accepts either the positional `[pdk] [spice-file]` form or
 the unambiguous `--pdk <pdk> --file <spice-file>` form. If a file path is passed
@@ -157,7 +165,9 @@ ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
 ice-cli layout-list <project>
 ice-cli layout-info <project> <cell|procedural>
 ice-cli layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] [--require-composition] [--require-plan]
-ice-cli layout-remove <project> <cell|procedural>
+ice-cli layout-get-script <project> <procedural>
+ice-cli layout-set-script <project> <procedural> <script-file|->
+ice-cli layout-remove <project> <cell|procedural> [--dry-run]
 ice-cli layout-add-layer <project> <name> <number> [datatype]
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
 ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
@@ -173,9 +183,9 @@ ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
 ice-cli layout-export-def <project> <cell> <output.def>
-ice-cli layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>]
-ice-cli layout-import-lef <input.lef> <project>
-ice-cli layout-import-def <input.def> <project>
+ice-cli layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]
+ice-cli layout-import-lef <input.lef> <project> [--force]
+ice-cli layout-import-def <input.def> <project> [--force]
 ```
 
 Pin options are `--direction input|output|inout|power|ground`, `--side
@@ -183,10 +193,12 @@ left|right|top|bottom`, `--net <name-or-id>`, `--label <text>`, `--hidden`,
 `--locked`, and for updates `--unlocked`, `--visible`, `--name`, `--x`, `--y`,
 `--width`, and `--height`. Coordinates are integer database units.
 
-`layout-remove` accepts either a static layout cell or a procedural layout;
-removing a procedural layout also removes its generated static child. Removal
-is blocked when instances reference the layout, and library cells cannot be
-removed. `layout-add-procedural` generates the default script or the supplied
+`layout-get-script` and `layout-set-script` read and replace a procedural
+layout's Python source without regenerating it. `layout-remove` accepts either
+a static layout cell or a procedural layout; removing a procedural layout also
+removes its generated static child. Removal is blocked when instances reference
+the layout, and library cells cannot be removed. `--dry-run` reports the
+references and blocking reason. `layout-add-procedural` generates the default script or the supplied
 script immediately and reports `generated`, `generation_error`, and
 `needs_regeneration`. `layout-regenerate` reruns an existing script and returns
 structured `layout_quality`, `layout_plan`, and `layout_review` objects; the
@@ -214,7 +226,8 @@ matching TEXT records become pins on their containing cells. `--top-cell`
 selects a specific top structure; otherwise the last unreferenced structure is
 used. The JSON response includes `top_cell` and any import `warnings`.
 `layout-import-lef` and `layout-import-def` create a new project from a macro or
-design's pins and nets.
+design's pins and nets. All three import commands refuse to replace an existing
+project unless `--force` is passed.
 
 ## Implementation runs
 
@@ -247,7 +260,7 @@ ice-cli implementation-cancel <project> <run>
 ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]
 ice-cli implementation-export-gds <project> <run> [--output <path>]
 ice-cli implementation-toolchain
-ice-cli implementation-delete <project> <run> [--purge]
+ice-cli implementation-delete <project> <run> [--purge] [--dry-run]
 ```
 
 `implementation-create` resolves the package default stack when `--stack` is
@@ -435,7 +448,7 @@ before trying to simulate a transistor-level circuit.
 ```sh
 ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
 ice-cli simulation-list <project>
-ice-cli simulation-remove <project> <simulation>
+ice-cli simulation-remove <project> <simulation> [--dry-run]
 ice-cli simulation-configure <project> <simulation> [analysis options]
 ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
 ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
@@ -576,7 +589,7 @@ ice-cli script-info <project> <script>
 ice-cli script-read <project> <script>
 ice-cli script-write <project> <script> <source-file|->
 ice-cli script-run <project> <script> [timeout-ms]
-ice-cli script-delete <project> <script>
+ice-cli script-delete <project> <script> [--purge] [--dry-run]
 ```
 
 `script-add` creates a new Python file under `scripts/` from the built-in

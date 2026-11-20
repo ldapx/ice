@@ -206,6 +206,7 @@ struct ActivityPanel::AgentBackend {
 namespace {
 
 constexpr int kDrcViolationIndexRole = Qt::UserRole + 1;
+constexpr int kLvsMismatchIndexRole = Qt::UserRole + 2;
 
 // Fill a layout-stack selector for the selected PDK. Returns true when the
 // package declares at least one stack, so callers can hide the row otherwise.
@@ -599,16 +600,45 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     copyLvsButton->setFixedSize(24, 24);
     lvsHeader->addWidget(copyLvsButton, 0, Qt::AlignTop);
     lvsLayout->addLayout(lvsHeader);
-    lvsReport_ = new QPlainTextEdit;
-    lvsReport_->setReadOnly(true);
-    lvsReport_->setAccessibleName(QStringLiteral("LVS report"));
-    lvsReport_->setPlaceholderText(
-        QStringLiteral("LVS report will appear here after a layout-versus-schematic check."));
-    lvsReport_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    lvsLayout->addWidget(lvsReport_, 1);
+    lvsTable_ = new QTableWidget(0, 5);
+    lvsTable_->setAccessibleName(QStringLiteral("LVS mismatches"));
+    lvsTable_->setHorizontalHeaderLabels({QStringLiteral("Severity"), QStringLiteral("Category"),
+                                          QStringLiteral("Message"), QStringLiteral("Schematic object"),
+                                          QStringLiteral("Layout object")});
+    lvsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    lvsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    lvsTable_->setAlternatingRowColors(true);
+    lvsTable_->verticalHeader()->setVisible(false);
+    lvsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    lvsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    lvsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    lvsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    lvsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    connect(lvsTable_, &QTableWidget::cellClicked, this, [this](int row, int) {
+        if (!onLvsMismatchActivated_)
+            return;
+        const auto *item = lvsTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(kLvsMismatchIndexRole).toInt();
+        if (index < 0 || index >= static_cast<int>(lvsMismatches_.size()))
+            return;
+        onLvsMismatchActivated_(lvsMismatches_[static_cast<std::size_t>(index)]);
+    });
+    lvsLayout->addWidget(lvsTable_, 1);
     connect(copyLvsButton, &QPushButton::clicked, this, [this] {
-        if (lvsReport_)
-            QApplication::clipboard()->setText(lvsReport_->toPlainText());
+        if (!lvsTable_)
+            return;
+        QStringList lines;
+        for (int row = 0; row < lvsTable_->rowCount(); ++row) {
+            QStringList fields;
+            for (int column = 0; column < lvsTable_->columnCount(); ++column) {
+                const auto *item = lvsTable_->item(row, column);
+                fields.push_back(item ? item->text() : QString());
+            }
+            lines.push_back(fields.join(QLatin1Char('\t')));
+        }
+        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
     });
 
     auto *timingPage = new QWidget;
@@ -2478,53 +2508,49 @@ void ActivityPanel::showReportPage(int index) {
 void ActivityPanel::showDrcTab() { showReportPage(drcPageIndex_); }
 
 void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
-    if (!lvsReport_)
+    if (!lvsTable_)
         return;
+    lvsTable_->setRowCount(0);
+    lvsMismatches_.clear();
+    lvsMismatches_.reserve(report.mismatches.size());
     int errors = 0;
     int warnings = 0;
     int infos = 0;
-    QStringList lines;
-    lines << (report.matched() ? QStringLiteral("LVS matched.") : QStringLiteral("LVS found mismatches."));
-    lines << QStringLiteral("Schematic: %1").arg(QString::fromStdString(report.schematic));
-    lines << QStringLiteral("Layout: %1").arg(QString::fromStdString(report.layout));
-    lines << QString();
-    if (report.mismatches.empty()) {
-        lines << QStringLiteral("No mismatches found.");
-    } else {
-        for (const auto &mismatch : report.mismatches) {
-            switch (mismatch.severity) {
-            case ice::VerificationSeverity::error:
-                ++errors;
-                break;
-            case ice::VerificationSeverity::warning:
-                ++warnings;
-                break;
-            case ice::VerificationSeverity::info:
-                ++infos;
-                break;
-            }
-            lines << QStringLiteral("[%1] %2: %3")
-                         .arg(drcSeverityLabel(mismatch.severity), QString::fromStdString(mismatch.category),
-                              QString::fromStdString(mismatch.message));
-            if (mismatch.schematicObject)
-                lines << QStringLiteral("  schematic object: %1").arg(*mismatch.schematicObject);
-            if (mismatch.layoutObject)
-                lines << QStringLiteral("  layout object: %1").arg(*mismatch.layoutObject);
+    for (const auto &mismatch : report.mismatches) {
+        const auto index = static_cast<int>(lvsMismatches_.size());
+        lvsMismatches_.push_back(mismatch);
+        switch (mismatch.severity) {
+        case ice::VerificationSeverity::error:
+            ++errors;
+            break;
+        case ice::VerificationSeverity::warning:
+            ++warnings;
+            break;
+        case ice::VerificationSeverity::info:
+            ++infos;
+            break;
         }
-        lines << QString();
-        lines << QStringLiteral("Summary: %1 error(s), %2 warning(s), %3 info item(s).")
-                     .arg(errors)
-                     .arg(warnings)
-                     .arg(infos);
+        const int row = lvsTable_->rowCount();
+        lvsTable_->insertRow(row);
+        auto *severity = new QTableWidgetItem(drcSeverityLabel(mismatch.severity));
+        severity->setData(kLvsMismatchIndexRole, index);
+        lvsTable_->setItem(row, 0, severity);
+        lvsTable_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(mismatch.category)));
+        lvsTable_->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(mismatch.message)));
+        lvsTable_->setItem(
+            row, 3,
+            new QTableWidgetItem(mismatch.schematicObject ? QString::number(*mismatch.schematicObject) : QString()));
+        lvsTable_->setItem(
+            row, 4, new QTableWidgetItem(mismatch.layoutObject ? QString::number(*mismatch.layoutObject) : QString()));
     }
-    lvsReport_->setPlainText(lines.join(QLatin1Char('\n')));
     QString summary;
     if (lvsSummary_) {
         if (report.mismatches.empty()) {
             summary = QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
                           .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout));
         } else {
-            summary = QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s).")
+            summary = QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s). "
+                                     "Select a row to focus its schematic or layout object.")
                           .arg(errors)
                           .arg(warnings)
                           .arg(infos);
@@ -2545,10 +2571,15 @@ void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
     showLvsTab();
 }
 
+void ActivityPanel::setOnLvsMismatchActivated(std::function<void(const ice::LvsMismatch &)> callback) {
+    onLvsMismatchActivated_ = std::move(callback);
+}
+
 void ActivityPanel::setLvsError(const QString &message) {
-    if (!lvsReport_)
+    if (!lvsTable_)
         return;
-    lvsReport_->setPlainText(message);
+    lvsTable_->setRowCount(0);
+    lvsMismatches_.clear();
     if (lvsSummary_)
         lvsSummary_->setText(message);
     if (auto logger = spdlog::get(ice::logging::lvs))

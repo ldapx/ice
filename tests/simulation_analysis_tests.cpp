@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -203,8 +205,8 @@ TEST_CASE("simulation analysis and experiment settings round-trip through the pr
     ice::Project project;
     project.identity = "sim-settings";
     project.name = "sim-settings";
-    const auto cell = ice::createTextSchematicCell(project, "rc", "generic",
-                                                   "* RC\nV1 in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1u\n");
+    const auto cell =
+        ice::createTextSchematicCell(project, "rc", "generic", "* RC\nV1 in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1u\n");
     ice::SimulationItem simulation;
     simulation.id = project.nextId();
     simulation.name = "corner_sim";
@@ -257,4 +259,27 @@ TEST_CASE("simulation analysis and experiment settings round-trip through the pr
     CHECK(loaded.monteCarlo.parameterSigmaPercent.at("w") == 3.0);
     REQUIRE(loaded.measurements.size() == 1);
     CHECK(loaded.measurements.front().metric == "gain");
+}
+
+TEST_CASE("SimulationRunner async cancellation reaches the active adapter") {
+    class BlockingAdapter final : public ice::SimulatorAdapter {
+      public:
+        ice::SimulationResult run(const ice::SimulationRequest &, const ice::CancellationToken &token,
+                                  const ice::ProgressCallback &) override {
+            for (int index = 0; index < 500 && !token.cancelled(); ++index)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            ice::SimulationResult result;
+            result.state = token.cancelled() ? ice::JobState::cancelled : ice::JobState::succeeded;
+            result.error = token.cancelled() ? "simulation cancelled" : "";
+            return result;
+        }
+    };
+
+    auto adapter = std::make_shared<BlockingAdapter>();
+    ice::SimulationRunner runner(adapter);
+    auto future = runner.runAsync(ice::SimulationRequest{}, std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    runner.cancel();
+    const auto result = future.get();
+    CHECK(result.state == ice::JobState::cancelled);
 }

@@ -23,16 +23,19 @@ CLI invokes the same operations through `ProjectSession`.
 | Interactive waveform analysis | Yes | Graph zoom/pan, cursors, FFT/dB/phase, derived traces, run overlays, markers | `simulation-graph-update`, `simulation-graph-derive`, `simulation-graph-overlay`, `simulation-graph-marker-add`, `simulation-runs` | `buildWaveformSeries`, `computeSpectrum` |
 | High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
 | Parameterized schematic cells | Yes | Schematic Properties parameters | `schematic-set-cell-parameter`, `schematic-remove-cell-parameter`, `schematic-set-parameter` | `setSchematicCellParameter`, `setSchematicParameter` |
+| Schematic editing | Yes | Schematic canvas | Schematic commands | `Project.create_schematic_cell`, `SchematicBuilder` |
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
+| Simulation configuration and execution | Yes | Analysis selector + experiment dialog | Simulation commands | `Project.create_simulation`, `run_simulation` |
 | SPICE import and hierarchy | Yes | Schematic import | `schematic-import-spice`, `schematic-add-spice-instance` | Core API |
 | Stored waveform sampling | Yes | Graph/result inspection | `simulation-trace` | Core API |
 | Create/inspect implementation runs | Yes | Physical Design | `implementation-create`, `implementation-update`, `implementation-list`, `implementation-status` | `Project.create_implementation`, `Project.implementation_runs` |
 | Prepare and execute OpenROAD/Yosys stages | Yes | Physical Design (run-to-stage per row / Run all / Cancel) | `implementation-prepare`, `implementation-map`, `implementation-run`, `implementation-log`, `implementation-cancel` | `Project.run_implementation` |
 | Create a digital device from final GDS/OASIS | Yes | CLI/MCP/Python | `implementation-import` | `Project.import_implementation_layout` |
 | Stream final GDS | Yes | Physical Design artifacts | `implementation-export-gds` | Core API |
-| Run DRC with a PDK deck | Yes | Tools → Run DRC | `drc` | Core API |
+| Run DRC with a PDK deck | Yes | Tools → Run DRC | `drc` | `run_layout_drc`, `LocalVerificationAdapter` |
+| Package discovery, install, and lockfiles | Yes | Package manager | `ice-pkg` | `PackageManager` |
 | Import/export GDSII or OASIS hierarchy | Yes | Layout interchange | `layout-import-gds`, `layout-export-gds` | Core API |
-| Spatial query | Yes | Layout integration | Core API | Core API |
+| Spatial query | Planned | Layout integration | Core API | Core API |
 
 Python bindings are an optional `icepy` build surface because nanobind and
 Python development headers are not required by the core, GUI, or CLI builds.

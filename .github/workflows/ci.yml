@@ -16,6 +16,9 @@ jobs:
           sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
           sudo chmod +x /usr/local/bin/bazelisk
       - run: xmake build doctest ice-cli ice-pkg ice-mcp
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y ngspice iverilog
       - run: xmake run doctest
+      - run: python3 tests/mcp_tools_smoke.py
       - run: python3 -m pip install -r docs/requirements.txt
       - run: sphinx-build -b html docs docs/_build -W --keep-going

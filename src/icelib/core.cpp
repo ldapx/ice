@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -158,6 +159,14 @@ std::vector<Diagnostic> Project::validate() const {
                                   "Simulation name '" + simulation.name + "' is used more than once", simulationId});
         }
     }
+    const auto normalizedName = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    };
+    std::unordered_set<std::string> schematicNames;
+    std::unordered_set<std::string> layoutNames;
+    std::unordered_set<std::string> proceduralNames;
     std::unordered_set<std::string> dependencyNames;
     for (const auto &dependency : packageDependencies) {
         if (dependency.empty()) {
@@ -170,12 +179,24 @@ std::vector<Diagnostic> Project::validate() const {
                               "Package dependency is listed more than once: " + dependency, std::nullopt});
     }
     for (const auto &[cellId, cell] : schematicCells) {
+        if (cell.name.empty())
+            result.push_back({Diagnostic::Severity::error, "schematic.name", "Schematic name is required", cellId});
+        else if (!schematicNames.insert(normalizedName(cell.name)).second)
+            result.push_back({Diagnostic::Severity::error, "schematic.name.duplicate",
+                              "Schematic name is listed more than once: " + cell.name, cellId});
         if (cell.pdk.empty() || cell.pdk.find_first_of("/\\") != std::string::npos)
             result.push_back({Diagnostic::Severity::error, "schematic.pdk", "Schematic PDK is invalid", cellId});
         if (cell.textSchematic && cell.systemVerilogSchematic)
             result.push_back({Diagnostic::Severity::error, "schematic.source",
                               "A schematic cell cannot be both SPICE text and SystemVerilog", cellId});
+        std::unordered_set<std::string> instanceNames;
         for (const auto &[instanceId, instance] : cell.instances) {
+            if (instance.name.empty())
+                result.push_back(
+                    {Diagnostic::Severity::error, "schematic.instance.name", "Instance name is required", instanceId});
+            else if (!instanceNames.insert(normalizedName(instance.name)).second)
+                result.push_back({Diagnostic::Severity::error, "schematic.instance.name.duplicate",
+                                  "Instance name is listed more than once: " + instance.name, instanceId});
             if (!cell.symbols.contains(instance.symbol))
                 result.push_back({Diagnostic::Severity::error, "schematic.instance.symbol",
                                   "Instance references a missing symbol", instanceId});
@@ -209,6 +230,26 @@ std::vector<Diagnostic> Project::validate() const {
         return value;
     };
     for (const auto &[cellId, cell] : layoutCells) {
+        if (cell.name.empty())
+            result.push_back({Diagnostic::Severity::error, "layout.name", "Layout name is required", cellId});
+        else if (!layoutNames.insert(normalizedName(cell.name)).second)
+            result.push_back({Diagnostic::Severity::error, "layout.name.duplicate",
+                              "Layout name is listed more than once: " + cell.name, cellId});
+        std::unordered_set<std::string> instanceNames;
+        for (const auto &[instanceId, instance] : cell.instances) {
+            if (instance.name.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.instance.name",
+                                  "Layout instance name is required", instanceId});
+            else if (!instanceNames.insert(normalizedName(instance.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.instance.name.duplicate",
+                                  "Layout instance name is listed more than once: " + instance.name, instanceId});
+            if (!layoutCells.contains(instance.cell))
+                result.push_back({Diagnostic::Severity::error, "layout.instance.cell",
+                                  "Layout instance references a missing cell", instanceId});
+            else if (instance.cell == cellId)
+                result.push_back({Diagnostic::Severity::error, "layout.instance.cycle",
+                                  "Layout cell cannot instantiate itself", instanceId});
+        }
         if (cell.reference) {
             if (cell.reference->path.empty())
                 result.push_back({Diagnostic::Severity::error, "layout.reference.path",
@@ -355,6 +396,10 @@ std::vector<Diagnostic> Project::validate() const {
         if (layout.name.empty())
             result.push_back({Diagnostic::Severity::error, "layout.procedural.name",
                               "Procedural layout name is required", layoutId});
+        else if (!proceduralNames.insert(normalizedName(layout.name)).second ||
+                 layoutNames.contains(normalizedName(layout.name)))
+            result.push_back({Diagnostic::Severity::error, "layout.name.duplicate",
+                              "Layout name is listed more than once: " + layout.name, layoutId});
         if (layout.pdk.empty() || layout.pdk.find_first_of("/\\") != std::string::npos)
             result.push_back(
                 {Diagnostic::Severity::error, "layout.procedural.pdk", "Procedural layout PDK is invalid", layoutId});
@@ -932,6 +977,19 @@ std::optional<PortSide> parsePortSide(const std::string &value) {
     return it->second;
 }
 
+namespace {
+
+template <typename Map, typename Value> void insertUnique(Map &map, ObjectId id, Value &&value, const char *kind) {
+    if (!map.emplace(id, std::forward<Value>(value)).second)
+        throw ProjectError("project.duplicate", std::string("Duplicate ") + kind + " id: " + std::to_string(id));
+}
+
+json inventoryEntry(ObjectId id, const std::string &name, const std::string &file) {
+    return {{"id", id}, {"name", name}, {"file", file}};
+}
+
+} // namespace
+
 Project Project::deserialize(const std::string &text) {
     try {
         auto j = json::parse(text);
@@ -981,7 +1039,7 @@ Project Project::deserialize(const std::string &text) {
                     parsedPin.widthKnown = pin.value("width_known", true);
                     symbol.pins.push_back(std::move(parsedPin));
                 }
-                cell.symbols.emplace(symbol.id, std::move(symbol));
+                insertUnique(cell.symbols, symbol.id, std::move(symbol), "schematic symbol");
             }
             for (const auto &i : c.at("instances")) {
                 SchematicInstance instance{i.at("id"), i.at("symbol"), i.at("name"),
@@ -991,7 +1049,7 @@ Project Project::deserialize(const std::string &text) {
                         instance.parameters.push_back(
                             {parameter.at("id"), parameter.at("name"), parameter.at("value")});
                 }
-                cell.instances.emplace(instance.id, std::move(instance));
+                insertUnique(cell.instances, instance.id, std::move(instance), "schematic instance");
             }
             for (const auto &n : c.at("nets")) {
                 Net net{n.at("id"), n.at("name"), n.at("pins").get<std::vector<ObjectId>>(), n.value("x", 0),
@@ -1006,14 +1064,17 @@ Project Project::deserialize(const std::string &text) {
                     if (parsed.fromPin != 0 && parsed.toPin != 0 && parsed.fromPin != parsed.toPin)
                         net.labelAnchor = parsed;
                 }
-                cell.nets.emplace(net.id, std::move(net));
+                insertUnique(cell.nets, net.id, std::move(net), "schematic net");
             }
             if (c.contains("comments") && c.at("comments").is_array()) {
-                for (const auto &cm : c.at("comments"))
-                    cell.comments.emplace(
-                        cm.at("id"), SchematicComment{cm.at("id"), cm.at("text"), cm.value("x", 0), cm.value("y", 0)});
+                for (const auto &cm : c.at("comments")) {
+                    const auto id = cm.at("id").get<ObjectId>();
+                    insertUnique(cell.comments, id,
+                                 SchematicComment{id, cm.at("text"), cm.value("x", 0), cm.value("y", 0)},
+                                 "schematic comment");
+                }
             }
-            p.schematicCells.emplace(cell.id, std::move(cell));
+            insertUnique(p.schematicCells, cell.id, std::move(cell), "schematic cell");
         }
         for (const auto &l : j.at("layers")) {
             const auto name = l.at("name").get<std::string>();
@@ -1028,7 +1089,7 @@ Project Project::deserialize(const std::string &text) {
                         l.value("pattern", -1)};
             layer.stack = l.value("stack", std::string{});
             layer.minimumWidth = l.value("minimum_width", Coordinate{0});
-            p.layers.emplace(layer.id, std::move(layer));
+            insertUnique(p.layers, layer.id, std::move(layer), "layer");
         }
         for (const auto &c : j.at("layout_cells")) {
             LayoutCell cell{c.at("id"), c.at("name")};
@@ -1085,10 +1146,12 @@ Project Project::deserialize(const std::string &text) {
                 shape.textGroup = s.value("text_group", ObjectId{0});
                 shape.textSource = s.value("text_source", std::string{});
                 shape.routedConnection = s.value("routed_connection", ObjectId{0});
-                cell.shapes.emplace(shape.id, shape);
+                insertUnique(cell.shapes, shape.id, shape, "layout shape");
             }
-            for (const auto &net : c.at("nets"))
-                cell.nets.emplace(net.at("id"), LayoutNet{net.at("id"), net.at("name")});
+            for (const auto &net : c.at("nets")) {
+                const auto id = net.at("id").get<ObjectId>();
+                insertUnique(cell.nets, id, LayoutNet{id, net.at("name")}, "layout net");
+            }
             for (const auto &port : c.at("ports")) {
                 Port value{port.at("id"), port.at("name"), port.at("layer"),
                            Rect{port.at("rectangle").at("x"), port.at("rectangle").at("y"),
@@ -1107,13 +1170,13 @@ Project Project::deserialize(const std::string &text) {
                 value.sourceInstance = port.at("source_instance").get<ObjectId>();
                 value.sourcePort = port.at("source_port").get<ObjectId>();
                 value.schematicInstance = port.value("schematic_instance", ObjectId{0});
-                cell.ports.emplace(value.id, std::move(value));
+                insertUnique(cell.ports, value.id, std::move(value), "layout port");
             }
             for (const auto &i : c.at("instances")) {
                 LayoutInstance instance{i.at("id"), i.at("cell"), i.at("name"),
                                         i.at("x"),  i.at("y"),    parseOrientation(i.at("orientation"))};
                 instance.schematicInstance = i.value("schematic_instance", ObjectId{0});
-                cell.instances.emplace(instance.id, std::move(instance));
+                insertUnique(cell.instances, instance.id, std::move(instance), "layout instance");
             }
             if (c.contains("planned_devices")) {
                 for (const auto &d : c.at("planned_devices")) {
@@ -1142,8 +1205,7 @@ Project Project::deserialize(const std::string &text) {
                             device.terminals[terminal] = netId.get<ObjectId>();
                     }
                     device.placeholder = d.value("placeholder", true);
-                    const auto deviceId = device.id;
-                    cell.plannedDevices.emplace(deviceId, std::move(device));
+                    insertUnique(cell.plannedDevices, device.id, std::move(device), "planned device");
                 }
             }
             if (c.contains("planned_connections")) {
@@ -1162,11 +1224,10 @@ Project Project::deserialize(const std::string &text) {
                     if (connection.contains("to_side"))
                         planned.toSide = parsePortSide(connection.at("to_side").get<std::string>());
                     planned.routed = connection.value("routed", false);
-                    const auto connectionId = planned.id;
-                    cell.plannedConnections.emplace(connectionId, std::move(planned));
+                    insertUnique(cell.plannedConnections, planned.id, std::move(planned), "planned connection");
                 }
             }
-            p.layoutCells.emplace(cell.id, std::move(cell));
+            insertUnique(p.layoutCells, cell.id, std::move(cell), "layout cell");
         }
         if (j.contains("procedural_layouts")) {
             for (const auto &layout : j.at("procedural_layouts")) {
@@ -1203,14 +1264,14 @@ Project Project::deserialize(const std::string &text) {
                     review != layout.end() && review->is_object())
                     entry.generatedLayoutReview = review->dump();
                 const auto layoutId = entry.id;
-                p.proceduralLayouts.emplace(layoutId, std::move(entry));
+                insertUnique(p.proceduralLayouts, layoutId, std::move(entry), "procedural layout");
             }
         }
         if (j.contains("implementation_runs")) {
             for (const auto &run : j.at("implementation_runs")) {
                 auto entry = implementationRunFromJson(run);
                 const auto runId = entry.id;
-                p.implementationRuns.emplace(runId, std::move(entry));
+                insertUnique(p.implementationRuns, runId, std::move(entry), "implementation run");
             }
         }
         if (j.contains("simulations")) {
@@ -1375,7 +1436,7 @@ Project Project::deserialize(const std::string &text) {
                         sim.graphs.push_back(std::move(graph));
                     }
                 }
-                p.simulations.emplace(sim.id, std::move(sim));
+                insertUnique(p.simulations, sim.id, std::move(sim), "simulation");
             }
         }
         for (const auto &report : j.at("simulation_scripts")) {
@@ -1383,7 +1444,7 @@ Project Project::deserialize(const std::string &text) {
             entry.id = report.at("id");
             entry.name = report.at("name");
             entry.path = report.at("path");
-            p.reports.emplace(entry.id, std::move(entry));
+            insertUnique(p.reports, entry.id, std::move(entry), "simulation script");
         }
         auto diagnostics = p.validate();
         if (!diagnostics.empty())
@@ -1569,14 +1630,19 @@ void writeJsonFile(const std::filesystem::path &path, const json &value) {
     }
 }
 
-void prepareDirectory(const std::filesystem::path &path, const std::string &extension) {
-    std::filesystem::create_directories(path);
+void ensureDirectory(const std::filesystem::path &path) { std::filesystem::create_directories(path); }
+
+// Removes stale sidecars only after the new metadata has been written. Readers
+// that understand the inventory ignore unlisted files, so a crash between the
+// metadata write and this cleanup leaves an openable project.
+void pruneDirectory(const std::filesystem::path &path, const std::string &extension,
+                    const std::set<std::string> &keep) {
     std::error_code status;
     for (std::filesystem::directory_iterator iterator(path, status), end; !status && iterator != end;
          iterator.increment(status)) {
-        if (!iterator->is_regular_file())
+        if (!iterator->is_regular_file() || iterator->path().extension() != extension)
             continue;
-        if (iterator->path().extension() == extension)
+        if (!keep.contains(iterator->path().filename().string()))
             std::filesystem::remove(iterator->path(), status);
         status.clear();
     }
@@ -1844,42 +1910,64 @@ void Project::save(const std::filesystem::path &path) const {
     projectJson.erase("implementation_runs");
     projectJson.erase("simulations");
 
-    std::filesystem::create_directories(root);
+    ensureDirectory(root);
     const auto schematicDir = root / "sch";
     const auto layoutDir = root / "lay";
     const auto implementationDir = root / "impl";
     const auto simulationDir = root / "sim";
-    prepareDirectory(schematicDir, ".icesch");
-    prepareDirectory(layoutDir, ".icelay");
-    prepareDirectory(implementationDir, ".iceimpl");
-    prepareDirectory(simulationDir, ".icesim");
-    std::filesystem::create_directories(root / "scripts");
-    std::filesystem::create_directories(root / "build");
+    ensureDirectory(schematicDir);
+    ensureDirectory(layoutDir);
+    ensureDirectory(implementationDir);
+    ensureDirectory(simulationDir);
+    ensureDirectory(root / "scripts");
+    ensureDirectory(root / "build");
 
-    writeJsonFile(root / "project.icepro", projectJson);
-    ensureGitignore(root);
-    ensureAgentsFile(root, name);
+    struct PendingFile {
+        std::filesystem::path path;
+        json document;
+    };
+    std::vector<PendingFile> pending;
+    std::set<std::string> schematicFiles;
+    std::set<std::string> layoutFiles;
+    std::set<std::string> implementationFiles;
+    std::set<std::string> simulationFiles;
+
+    auto inventory = json::object();
+    const auto inventoryFor = [&](const char *kind) -> json & {
+        if (!inventory.contains(kind))
+            inventory[kind] = json::array();
+        return inventory[kind];
+    };
 
     std::set<std::string> usedSchematics;
     for (const auto &cell : schematicCells) {
         const auto id = cell.at("id").get<ObjectId>();
-        const auto stem = uniqueStem(cell.value("name", std::string{}), id, usedSchematics);
-        writeJsonFile(schematicDir / (stem + ".icesch"),
-                      json{{"format", "ice-schematic"}, {"schema_version", 1}, {"cell", cell}});
+        const auto cellName = cell.value("name", std::string{});
+        const auto filename = uniqueStem(cellName, id, usedSchematics) + ".icesch";
+        schematicFiles.insert(filename);
+        inventoryFor("schematics").push_back(inventoryEntry(id, cellName, "sch/" + filename));
+        pending.push_back(
+            {schematicDir / filename, json{{"format", "ice-schematic"}, {"schema_version", 1}, {"cell", cell}}});
     }
 
     std::set<std::string> usedLayouts;
     for (const auto &cell : layoutCells) {
         const auto id = cell.at("id").get<ObjectId>();
-        const auto stem = uniqueStem(cell.value("name", std::string{}), id, usedLayouts);
-        writeJsonFile(layoutDir / (stem + ".icelay"),
-                      json{{"format", "ice-layout"}, {"schema_version", 2}, {"layout", cell}});
+        const auto cellName = cell.value("name", std::string{});
+        const auto filename = uniqueStem(cellName, id, usedLayouts) + ".icelay";
+        layoutFiles.insert(filename);
+        inventoryFor("layouts").push_back(inventoryEntry(id, cellName, "lay/" + filename));
+        pending.push_back(
+            {layoutDir / filename, json{{"format", "ice-layout"}, {"schema_version", 2}, {"layout", cell}}});
     }
     for (const auto &layout : proceduralLayouts) {
         const auto id = layout.at("id").get<ObjectId>();
-        const auto stem = uniqueStem(layout.value("name", std::string{}), id, usedLayouts);
-        writeJsonFile(layoutDir / (stem + ".icelay"),
-                      json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", layout}});
+        const auto layoutName = layout.value("name", std::string{});
+        const auto filename = uniqueStem(layoutName, id, usedLayouts) + ".icelay";
+        layoutFiles.insert(filename);
+        inventoryFor("procedural_layouts").push_back(inventoryEntry(id, layoutName, "lay/" + filename));
+        pending.push_back({layoutDir / filename,
+                           json{{"format", "ice-layout"}, {"schema_version", 2}, {"procedural_layout", layout}}});
     }
 
     for (const auto &run : implementationRuns) {
@@ -1887,18 +1975,38 @@ void Project::save(const std::filesystem::path &path) const {
         ImplementationRun summary;
         summary.id = id;
         summary.name = run.value("name", std::string{});
-        const auto stem = implementationRunStem(summary);
-        writeJsonFile(implementationDir / (stem + ".iceimpl"),
-                      json{{"format", "ice-implementation"}, {"schema_version", 1}, {"run", run}});
+        const auto filename = implementationRunStem(summary) + ".iceimpl";
+        implementationFiles.insert(filename);
+        inventoryFor("implementation_runs").push_back(inventoryEntry(id, summary.name, "impl/" + filename));
+        pending.push_back({implementationDir / filename,
+                           json{{"format", "ice-implementation"}, {"schema_version", 1}, {"run", run}}});
     }
 
     std::set<std::string> usedSimulations;
     for (const auto &simulation : simulations) {
         const auto id = simulation.at("id").get<ObjectId>();
-        const auto stem = uniqueStem(simulation.value("name", std::string{}), id, usedSimulations);
-        writeJsonFile(simulationDir / (stem + ".icesim"),
-                      json{{"format", "ice-simulation"}, {"schema_version", 1}, {"simulation", simulation}});
+        const auto simulationName = simulation.value("name", std::string{});
+        const auto filename = uniqueStem(simulationName, id, usedSimulations) + ".icesim";
+        simulationFiles.insert(filename);
+        inventoryFor("simulation_entries").push_back(inventoryEntry(id, simulationName, "sim/" + filename));
+        pending.push_back({simulationDir / filename,
+                           json{{"format", "ice-simulation"}, {"schema_version", 1}, {"simulation", simulation}}});
     }
+
+    projectJson["inventory"] = {{"schema_version", 1}, {"entries", std::move(inventory)}};
+    ensureGitignore(root);
+    ensureAgentsFile(root, name);
+
+    // Write sidecars first, then publish the inventory. A crash before the
+    // metadata write leaves the previous metadata in place; recovery can
+    // quarantine files that the old inventory does not know about.
+    for (const auto &file : pending)
+        writeJsonFile(file.path, file.document);
+    writeJsonFile(root / "project.icepro", projectJson);
+    pruneDirectory(schematicDir, ".icesch", schematicFiles);
+    pruneDirectory(layoutDir, ".icelay", layoutFiles);
+    pruneDirectory(implementationDir, ".iceimpl", implementationFiles);
+    pruneDirectory(simulationDir, ".icesim", simulationFiles);
     sourceRoot_ = root;
     sourceRevision_ = projectRevision(root);
     spdlog::info("Saved project {}", (root / "project.icepro").string());
@@ -2028,6 +2136,29 @@ std::filesystem::path Project::saveCellFile(ObjectId id) const {
         throw ProjectError("project.save", "Unable to serialize project cell " + std::to_string(id));
 
     writeJsonFile(path, envelope);
+    // Single-cell saves must also publish the sidecar in the project
+    // inventory; otherwise the next load would treat it as a stale file.
+    const char *kind = schematic ? "schematics" : (layout ? "layouts" : "procedural_layouts");
+    const auto cellName =
+        schematic ? schematicCells.at(id).name : (layout ? layoutCells.at(id).name : proceduralLayouts.at(id).name);
+    const auto relative = path.lexically_relative(root).generic_string();
+    auto metadata = readJsonFile(root / "project.icepro");
+    // Legacy projects have no inventory. Leave them in legacy mode until the
+    // next full save; a partial inventory would hide all other cell files.
+    if (metadata.contains("inventory") && metadata.at("inventory").is_object()) {
+        auto &inventory = metadata["inventory"];
+        if (!inventory.contains("entries") || !inventory.at("entries").is_object())
+            inventory["entries"] = json::object();
+        auto &entries = inventory["entries"];
+        if (!entries.contains(kind) || !entries.at(kind).is_array())
+            entries[kind] = json::array();
+        auto &cells = entries[kind];
+        cells.erase(std::remove_if(cells.begin(), cells.end(),
+                                   [&](const auto &entry) { return entry.value("id", ObjectId{0}) == id; }),
+                    cells.end());
+        cells.push_back(inventoryEntry(id, cellName, relative));
+        writeJsonFile(root / "project.icepro", metadata);
+    }
     sourceRoot_ = root;
     sourceRevision_ = projectRevision(root);
     return path;
@@ -2054,6 +2185,40 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
     full["procedural_layouts"] = json::array();
     full["implementation_runs"] = json::array();
     full["simulations"] = json::array();
+
+    // Inventory-aware projects know exactly which sidecars they own. Legacy
+    // projects without an inventory keep loading every file in the expected
+    // directories, preserving the old behavior during migration.
+    struct InventoryEntry {
+        ObjectId id = 0;
+        std::string name;
+        std::filesystem::path file;
+    };
+    std::map<std::string, std::vector<InventoryEntry>> inventory;
+    bool hasInventory = false;
+    if (full.contains("inventory") && full.at("inventory").is_object()) {
+        const auto &envelope = full.at("inventory");
+        if (envelope.contains("entries") && envelope.at("entries").is_object()) {
+            hasInventory = true;
+            for (auto kind = envelope.at("entries").begin(); kind != envelope.at("entries").end(); ++kind) {
+                if (!kind.value().is_array())
+                    continue;
+                for (const auto &entry : kind.value()) {
+                    if (!entry.is_object() || !entry.contains("id"))
+                        continue;
+                    InventoryEntry parsed;
+                    parsed.id = entry.at("id").get<ObjectId>();
+                    parsed.name = entry.value("name", std::string{});
+                    parsed.file = entry.value("file", std::string{});
+                    if (parsed.file.empty() || parsed.file.is_absolute() ||
+                        parsed.file.lexically_normal().string().starts_with(".."))
+                        throw ProjectError("project.inventory", "Project inventory contains an invalid sidecar path: " +
+                                                                    parsed.file.string() + recoveryHint());
+                    inventory[kind.key()].push_back(std::move(parsed));
+                }
+            }
+        }
+    }
 
     const auto quarantine = [&](const std::filesystem::path &file, const std::string &message) {
         auto relative = file.lexically_relative(root);
@@ -2082,14 +2247,23 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
     };
 
     const auto readDirectory = [&](const std::filesystem::path &directory, const std::string &extension,
-                                   const auto &consume) {
+                                   const std::set<std::string> *expected, const auto &consume) {
         std::vector<std::filesystem::path> files;
         std::error_code status;
         if (std::filesystem::is_directory(directory, status) && !status) {
             for (std::filesystem::directory_iterator iterator(directory, status), end; !status && iterator != end;
                  iterator.increment(status)) {
-                if (iterator->is_regular_file() && iterator->path().extension() == extension)
-                    files.push_back(iterator->path());
+                if (!iterator->is_regular_file() || iterator->path().extension() != extension)
+                    continue;
+                const auto relative = iterator->path().lexically_relative(root).generic_string();
+                if (expected && !expected->contains(relative)) {
+                    const auto message = "Unexpected project file outside the project inventory: '" + relative + "'";
+                    if (!options.recover)
+                        throw ProjectError("project.inventory.extra", message + recoveryHint());
+                    quarantine(iterator->path(), message);
+                    continue;
+                }
+                files.push_back(iterator->path());
             }
         }
         std::sort(files.begin(), files.end());
@@ -2106,40 +2280,111 @@ Project Project::load(const std::filesystem::path &path, const ProjectLoadOption
         }
     };
 
-    readDirectory(root / "sch", ".icesch", [&](const json &document) {
-        if (document.value("format", std::string{}) != "ice-schematic" || !document.contains("cell"))
-            throw ProjectError("project.format",
-                               "Invalid schematic file: expected an 'ice-schematic' envelope with a 'cell' object");
-        full["schematic_cells"].push_back(document.at("cell"));
-    });
-    readDirectory(root / "lay", ".icelay", [&](const json &document) {
-        if (document.value("format", std::string{}) != "ice-layout")
-            throw ProjectError("project.format", "Invalid layout file: expected format 'ice-layout'");
-        if (document.value("schema_version", 0) != 2)
-            throw ProjectError("project.schema", "Unsupported layout schema version");
-        if (document.contains("layout"))
-            full["layout_cells"].push_back(document.at("layout"));
-        else if (document.contains("procedural_layout"))
-            full["procedural_layouts"].push_back(document.at("procedural_layout"));
-        else
-            throw ProjectError("project.format",
-                               "Invalid layout file: expected a 'layout' or 'procedural_layout' object");
-    });
-    readDirectory(root / "impl", ".iceimpl", [&](const json &document) {
-        if (document.value("format", std::string{}) != "ice-implementation" ||
-            document.value("schema_version", 0) != 1 || !document.contains("run"))
-            throw ProjectError("project.format",
-                               "Invalid implementation file: expected an 'ice-implementation' envelope with a "
-                               "'run' object");
-        full["implementation_runs"].push_back(document.at("run"));
-    });
-    readDirectory(root / "sim", ".icesim", [&](const json &document) {
-        if (document.value("format", std::string{}) != "ice-simulation" || !document.contains("simulation"))
-            throw ProjectError(
-                "project.format",
-                "Invalid simulation file: expected an 'ice-simulation' envelope with a 'simulation' object");
-        full["simulations"].push_back(document.at("simulation"));
-    });
+    const auto expectedFiles = [&](const char *kind) {
+        std::set<std::string> files;
+        const auto entries = inventory.find(kind);
+        if (entries == inventory.end())
+            return files;
+        for (const auto &entry : entries->second) {
+            std::error_code status;
+            if (!std::filesystem::is_regular_file(root / entry.file, status) || status) {
+                const auto message = "Project inventory is missing sidecar '" + entry.file.generic_string() + "'";
+                if (!options.recover)
+                    throw ProjectError("project.inventory.missing", message + recoveryHint());
+                if (report)
+                    report->warnings.push_back(message);
+                continue;
+            }
+            files.insert(entry.file.generic_string());
+        }
+        return files;
+    };
+    const auto schematicExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("schematics")) : std::nullopt;
+    const auto layoutExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("layouts")) : std::nullopt;
+    const auto proceduralExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("procedural_layouts")) : std::nullopt;
+    const auto implementationExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("implementation_runs")) : std::nullopt;
+    const auto simulationExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("simulation_entries")) : std::nullopt;
+
+    // Layout cells and procedural layouts share lay/ but have separate
+    // inventory sections, so merge their expected files for the directory read.
+    std::optional<std::set<std::string>> layoutDirectoryExpected = layoutExpected;
+    if (proceduralExpected) {
+        if (!layoutDirectoryExpected)
+            layoutDirectoryExpected.emplace();
+        layoutDirectoryExpected->insert(proceduralExpected->begin(), proceduralExpected->end());
+    }
+
+    readDirectory(
+        root / "sch", ".icesch", schematicExpected ? &*schematicExpected : nullptr, [&](const json &document) {
+            if (document.value("format", std::string{}) != "ice-schematic" || !document.contains("cell"))
+                throw ProjectError("project.format",
+                                   "Invalid schematic file: expected an 'ice-schematic' envelope with a 'cell' object");
+            full["schematic_cells"].push_back(document.at("cell"));
+        });
+    readDirectory(root / "lay", ".icelay", layoutDirectoryExpected ? &*layoutDirectoryExpected : nullptr,
+                  [&](const json &document) {
+                      if (document.value("format", std::string{}) != "ice-layout")
+                          throw ProjectError("project.format", "Invalid layout file: expected format 'ice-layout'");
+                      if (document.value("schema_version", 0) != 2)
+                          throw ProjectError("project.schema", "Unsupported layout schema version");
+                      if (document.contains("layout"))
+                          full["layout_cells"].push_back(document.at("layout"));
+                      else if (document.contains("procedural_layout"))
+                          full["procedural_layouts"].push_back(document.at("procedural_layout"));
+                      else
+                          throw ProjectError("project.format",
+                                             "Invalid layout file: expected a 'layout' or 'procedural_layout' object");
+                  });
+    readDirectory(root / "impl", ".iceimpl", implementationExpected ? &*implementationExpected : nullptr,
+                  [&](const json &document) {
+                      if (document.value("format", std::string{}) != "ice-implementation" ||
+                          document.value("schema_version", 0) != 1 || !document.contains("run"))
+                          throw ProjectError("project.format",
+                                             "Invalid implementation file: expected an 'ice-implementation' "
+                                             "envelope with a 'run' object");
+                      full["implementation_runs"].push_back(document.at("run"));
+                  });
+    readDirectory(
+        root / "sim", ".icesim", simulationExpected ? &*simulationExpected : nullptr, [&](const json &document) {
+            if (document.value("format", std::string{}) != "ice-simulation" || !document.contains("simulation"))
+                throw ProjectError("project.format",
+                                   "Invalid simulation file: expected an 'ice-simulation' envelope with a "
+                                   "'simulation' object");
+            full["simulations"].push_back(document.at("simulation"));
+        });
+
+    // An inventory that names an id which was not loaded indicates a corrupt
+    // or misnamed sidecar. Without this check the project would silently lose
+    // the cell while still looking healthy.
+    const auto verifyInventory = [&](const char *kind, const json &loaded) {
+        const auto entries = inventory.find(kind);
+        if (!hasInventory || entries == inventory.end())
+            return;
+        std::set<ObjectId> loadedIds;
+        for (const auto &entry : loaded)
+            if (entry.contains("id"))
+                loadedIds.insert(entry.at("id").get<ObjectId>());
+        for (const auto &entry : entries->second) {
+            if (loadedIds.contains(entry.id))
+                continue;
+            const auto message =
+                "Project inventory sidecar '" + entry.file.generic_string() + "' does not contain the expected object";
+            if (!options.recover)
+                throw ProjectError("project.inventory.object", message + recoveryHint());
+            if (report)
+                report->warnings.push_back(message);
+        }
+    };
+    verifyInventory("schematics", full.at("schematic_cells"));
+    verifyInventory("layouts", full.at("layout_cells"));
+    verifyInventory("procedural_layouts", full.at("procedural_layouts"));
+    verifyInventory("implementation_runs", full.at("implementation_runs"));
+    verifyInventory("simulation_entries", full.at("simulations"));
 
     auto project = deserialize(full.dump());
     project.sourceRoot_ = root;
@@ -2159,6 +2404,11 @@ void ProjectSession::setLastHistoryLabel(std::string label) {
 }
 void ProjectSession::replaceProject(Project project, bool markDirty) {
     project_ = std::move(project);
+    historyStates_.assign(1, project_);
+    historyLabels_.clear();
+    historyPosition_ = 0;
+    transactionSnapshot_.reset();
+    transactionLabel_.clear();
     dirty_ = markDirty;
     notify();
 }
@@ -2182,6 +2432,18 @@ void ProjectSession::commitTransaction() {
         historyLabels_.push_back(transactionLabel_);
         historyStates_.push_back(project_);
         ++historyPosition_;
+
+        // Long-lived sessions must not retain every intermediate state of a
+        // large layout. Keep a bounded undo window and drop the oldest states.
+        constexpr std::size_t maxHistoryStates = 256;
+        if (historyStates_.size() > maxHistoryStates) {
+            const auto drop = historyStates_.size() - maxHistoryStates;
+            historyStates_.erase(historyStates_.begin(), historyStates_.begin() + static_cast<std::ptrdiff_t>(drop));
+            const auto labelDrop = std::min(drop, historyLabels_.size());
+            historyLabels_.erase(historyLabels_.begin(),
+                                 historyLabels_.begin() + static_cast<std::ptrdiff_t>(labelDrop));
+            historyPosition_ = historyPosition_ >= drop ? historyPosition_ - drop : 0;
+        }
         dirty_ = true;
         notify();
     }

@@ -77,13 +77,22 @@ struct SchematicDependency {
     std::string name;
 };
 
+struct SchematicLayoutDependency {
+    ObjectId layout = 0;
+    std::string layoutName;
+    std::size_t devices = 0;
+    std::size_t instances = 0;
+    std::size_t ports = 0;
+};
+
 struct SchematicDeletePlan {
     ObjectId cell = 0;
     std::string name;
     std::vector<SchematicDependency> simulations;
     std::vector<SchematicSymbolDependency> symbols;
+    std::vector<SchematicLayoutDependency> layouts;
 
-    bool blocked() const { return !simulations.empty() || !symbols.empty(); }
+    bool blocked() const { return !simulations.empty() || !symbols.empty() || !layouts.empty(); }
 };
 
 SchematicDeletePlan planSchematicDeletion(const Project &project, ObjectId cellId);

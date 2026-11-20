@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <set>
@@ -1691,8 +1692,20 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
                 continue;
             edges.push_back({conductor.firstNode, conductor.secondNode, conductor.resistance});
         }
-        for (std::size_t left = 0; left < conductors.size(); ++left) {
-            for (std::size_t right = left + 1; right < conductors.size(); ++right) {
+        std::vector<std::size_t> conductorOrder(conductors.size());
+        std::iota(conductorOrder.begin(), conductorOrder.end(), std::size_t{0});
+        std::sort(conductorOrder.begin(), conductorOrder.end(), [&](std::size_t left, std::size_t right) {
+            if (conductors[left].bounds.x != conductors[right].bounds.x)
+                return conductors[left].bounds.x < conductors[right].bounds.x;
+            return left < right;
+        });
+        for (std::size_t position = 0; position < conductorOrder.size(); ++position) {
+            const auto left = conductorOrder[position];
+            const auto leftMaxX = conductors[left].bounds.x + conductors[left].bounds.width;
+            for (std::size_t next = position + 1; next < conductorOrder.size(); ++next) {
+                const auto right = conductorOrder[next];
+                if (conductors[right].bounds.x > leftMaxX)
+                    break;
                 if (conductors[left].layerKey != conductors[right].layerKey ||
                     !rectanglesOverlapOrTouch(conductors[left].bounds, conductors[right].bounds))
                     continue;

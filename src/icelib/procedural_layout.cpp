@@ -1308,13 +1308,21 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     }
 
     std::filesystem::path pdkRoot;
+    bool allowPackageCode = true;
     if (procedural.pdk != genericPdkId) {
         const auto pdks = findPdks(procedural.pdk);
         if (!pdks.empty()) {
             pdkRoot = pdks.front().packageRoot;
             result.pdkVersion = pdks.front().packageVersion;
+            try {
+                allowPackageCode = PackageManager::readManifest(pdkRoot).trusted;
+            } catch (const std::exception &) {
+                allowPackageCode = false;
+            }
         }
     }
+    if (const char *configured = std::getenv("ICE_ALLOW_PACKAGE_CODE"); configured && *configured)
+        allowPackageCode = std::string(configured) != "0";
     double nanometersPerUnit = 1.0;
     if (project.units.denominator > 0)
         nanometersPerUnit =
@@ -1335,6 +1343,7 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
         options.arguments.push_back("--pdk-root");
         options.arguments.push_back(pdkRoot.string());
     }
+    options.environment["ICE_ALLOW_PACKAGE_CODE"] = allowPackageCode ? "1" : "0";
     options.workingDirectory = directory;
     options.logPath = logPath;
     options.timeoutSeconds = std::max(0, timeoutSeconds);
