@@ -598,6 +598,14 @@ std::string readStdin() {
 
 std::filesystem::path projectRootForCli(const std::filesystem::path &path) { return ice::projectRootDirectory(path); }
 
+void requireImportTargetAvailable(const std::filesystem::path &path, bool force) {
+    std::error_code status;
+    const auto projectFile = projectRootForCli(path) / "project.icepro";
+    if (!force && std::filesystem::exists(projectFile, status) && !status)
+        throw ice::ProjectError("project.exists", "A project already exists at " + projectFile.string() +
+                                                      "; choose another path or pass --force to replace it.");
+}
+
 std::filesystem::path defaultProjectPath() {
     if (const auto *configured = std::getenv("ICE_PROJECT"); configured && *configured)
         return configured;
@@ -1230,7 +1238,8 @@ void printHelp() {
               << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
               << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
               << "  schematic-add-sv <project> <name> [pdk] [source-file]\n"
-              << "  schematic-set-text <project> <cell> [--kind text|systemverilog] [--convert] <file|->\n"
+              << "  schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] "
+                 "[--convert] <file|->\n"
               << "  schematic-list <project>\n"
               << "  schematic-info <project> <cell>\n"
               << "  schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]\n"
@@ -1280,9 +1289,9 @@ void printHelp() {
               << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
               << "  layout-export-def <project> <cell> <output.def>\n"
-              << "  layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>]\n"
-              << "  layout-import-lef <input.lef> <project>\n"
-              << "  layout-import-def <input.def> <project>\n\n"
+              << "  layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]\n"
+              << "  layout-import-lef <input.lef> <project> [--force]\n"
+              << "  layout-import-def <input.def> <project> [--force]\n\n"
               << "Implementation:\n"
               << "  implementation-create <project> <name> --top <module> --pdk <pdk> [--stack <stack>] "
                  "[--source <file>]... [--source-cell <cell>]... [--sdc <file>] [--std-cell-lib <name>] "
@@ -1683,13 +1692,16 @@ int main(int argc, char **argv) {
         if (command == "schematic-set-text") {
             expectArguments(args, 4, static_cast<std::size_t>(-1),
                             "schematic-set-text <project> <cell> [--kind text|systemverilog] "
-                            "[--convert] <source-file|->");
+                            "[--source-path <path>] [--convert] <source-file|->");
             std::string kind;
+            std::string sourcePath;
             bool convert = false;
             std::string file;
             for (std::size_t index = 3; index < args.size(); ++index) {
                 if (args[index] == "--kind" && index + 1 < args.size())
                     kind = args[++index];
+                else if (args[index] == "--source-path" && index + 1 < args.size())
+                    sourcePath = args[++index];
                 else if (args[index] == "--convert")
                     convert = true;
                 else if (file.empty())
@@ -1716,25 +1728,22 @@ int main(int argc, char **argv) {
             }
             const auto text = file == "-" ? readStdin() : readTextFile(file);
             ice::ProjectSession session(project);
+            ice::SchematicSourceEditResult edit;
             session.execute("schematic-set-text", [&](ice::Project &p) {
-                auto &cell = p.schematicCells.at(cellId);
-                cell.textSchematic = !systemVerilog;
-                cell.systemVerilogSchematic = systemVerilog;
-                cell.spiceSourcePath.clear();
-                if (systemVerilog) {
-                    cell.systemVerilogText = text;
-                    cell.spiceText.clear();
-                } else {
-                    cell.spiceText = text;
-                    cell.systemVerilogText.clear();
-                }
+                edit = ice::setSchematicSourceText(p, cellId, systemVerilog, text, sourcePath, convert);
             });
             session.save(args[1]);
+            json notes = json::array();
+            for (const auto &note : edit.notes)
+                notes.push_back(note);
             printJson({{"id", cellId},
                        {"name", session.project().schematicCells.at(cellId).name},
                        {"kind", systemVerilog ? "systemverilog" : "text"},
                        {"text_length", text.size()},
-                       {"converted", !target.isTextSource()}});
+                       {"converted", edit.converted},
+                       {"added_pins", edit.addedPins},
+                       {"removed_pins", edit.removedPins},
+                       {"notes", std::move(notes)}});
             return 0;
         }
 
@@ -2205,6 +2214,13 @@ int main(int argc, char **argv) {
                                    {"symbol", dependency.symbol},
                                    {"symbol_name", dependency.symbolName},
                                    {"instances", dependency.instances}});
+            json layouts = json::array();
+            for (const auto &dependency : plan.layouts)
+                layouts.push_back({{"layout", dependency.layout},
+                                   {"layout_name", dependency.layoutName},
+                                   {"devices", dependency.devices},
+                                   {"instances", dependency.instances},
+                                   {"ports", dependency.ports}});
             if (dryRun) {
                 printJson({{"id", id},
                            {"name", plan.name},
@@ -2212,7 +2228,8 @@ int main(int argc, char **argv) {
                            {"dry_run", true},
                            {"blocked", plan.blocked()},
                            {"simulations", std::move(simulations)},
-                           {"symbols", std::move(symbols)}});
+                           {"symbols", std::move(symbols)},
+                           {"layouts", std::move(layouts)}});
                 return 0;
             }
             if (plan.blocked() && !cascade) {
@@ -2221,7 +2238,8 @@ int main(int argc, char **argv) {
                            {"deleted", false},
                            {"blocked", true},
                            {"simulations", std::move(simulations)},
-                           {"symbols", std::move(symbols)}});
+                           {"symbols", std::move(symbols)},
+                           {"layouts", std::move(layouts)}});
                 return 1;
             }
             ice::ProjectSession session(project);
@@ -3073,21 +3091,21 @@ int main(int argc, char **argv) {
         if (command == "layout-import-gds") {
             if (args.size() < 3)
                 argumentError("Usage: ice-cli layout-import-gds <input.gds|oas> <project> "
-                              "[pin-label-layer] [--top-cell <name>]");
+                              "[pin-label-layer] [--top-cell <name>] [--force]");
             ice::LayoutImportOptions options;
+            bool force = false;
             for (std::size_t index = 3; index < args.size(); ++index) {
                 if (args[index] == "--top-cell") {
                     if (++index >= args.size())
                         argumentError("Missing value for --top-cell");
                     options.topCell = args[index];
+                } else if (args[index] == "--force") {
+                    force = true;
                 } else {
-                    try {
-                        options.pinLabelLayer = std::stoi(args[index]);
-                    } catch (const std::exception &) {
-                        argumentError("Unknown layout-import-gds option: " + args[index]);
-                    }
+                    options.pinLabelLayer = static_cast<int>(parseInteger(args[index], "pin-label-layer"));
                 }
             }
+            requireImportTargetAvailable(args[2], force);
             std::vector<std::string> warnings;
             options.warnings = &warnings;
             auto project = ice::LayoutInterchange::importStream(args[1], options);
@@ -3110,7 +3128,11 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-import-lef") {
-            expectArguments(args, 3, 3, "layout-import-lef <input.lef> <project>");
+            expectArguments(args, 3, 4, "layout-import-lef <input.lef> <project> [--force]");
+            const bool force = args.size() == 4 && args[3] == "--force";
+            if (args.size() == 4 && !force)
+                argumentError("Unknown layout-import-lef option: " + args[3]);
+            requireImportTargetAvailable(args[2], force);
             auto project = ice::LayoutInterchange::importLef(args[1]);
             project.identity = "project-" + project.name;
             project.save(args[2]);
@@ -3122,7 +3144,11 @@ int main(int argc, char **argv) {
         }
 
         if (command == "layout-import-def") {
-            expectArguments(args, 3, 3, "layout-import-def <input.def> <project>");
+            expectArguments(args, 3, 4, "layout-import-def <input.def> <project> [--force]");
+            const bool force = args.size() == 4 && args[3] == "--force";
+            if (args.size() == 4 && !force)
+                argumentError("Unknown layout-import-def option: " + args[3]);
+            requireImportTargetAvailable(args[2], force);
             auto project = ice::LayoutInterchange::importDef(args[1]);
             project.identity = "project-" + project.name;
             project.save(args[2]);

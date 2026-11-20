@@ -624,8 +624,23 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
     // contact layers also connect overlapping objects on different layers. Two
     // objects already assigned to different explicit nets are kept separate so
     // a short between distinct logical nets remains visible as a conflict.
-    for (std::size_t left = 0; left < objects.size(); ++left) {
-        for (std::size_t right = left + 1; right < objects.size(); ++right) {
+    std::vector<std::size_t> order(objects.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+        if (objects[left].rectangle.x != objects[right].rectangle.x)
+            return objects[left].rectangle.x < objects[right].rectangle.x;
+        return left < right;
+    });
+    for (std::size_t position = 0; position < order.size(); ++position) {
+        const auto left = order[position];
+        const auto leftMaxX = objects[left].rectangle.x + objects[left].rectangle.width;
+        for (std::size_t next = position + 1; next < order.size(); ++next) {
+            const auto right = order[next];
+            if (objects[right].rectangle.x > leftMaxX)
+                break;
+            if (objects[left].rectangle.y > objects[right].rectangle.y + objects[right].rectangle.height ||
+                objects[right].rectangle.y > objects[left].rectangle.y + objects[left].rectangle.height)
+                continue;
             const bool sameLayer = objects[left].connectKey == objects[right].connectKey;
             bool connected = sameLayer;
             if (!connected) {

@@ -15,9 +15,10 @@ content hashes. The content hash covers the package model files, so a PDK
 package version plus hash pins the simulation stack.
 
 Package code is untrusted by default. A package's `[trust] trusted = true`
-metadata is recorded for policy decisions but does not grant execution
-permission by itself. Scripts and plugins must remain behind an explicit
-permission boundary.
+metadata is recorded for policy decisions and gates package device generators;
+an explicit `ICE_ALLOW_PACKAGE_CODE=1` overrides the check for one invocation.
+The flag is advisory metadata, not a cryptographic signature. Scripts and
+plugins must remain behind an explicit permission boundary.
 
 The example packages under `examples/packages` demonstrate a minimal PDK,
 library dependency, symbol metadata, and SVG artwork. The default index ships

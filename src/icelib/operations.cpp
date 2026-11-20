@@ -393,6 +393,186 @@ ObjectId createSystemVerilogCell(Project &project, std::string name, std::string
     cell.systemVerilogText = std::move(source);
     return id;
 }
+namespace {
+
+void applySourceDefaults(std::vector<Parameter> &parameters, const std::vector<Parameter> &oldDefaults,
+                         const std::vector<Parameter> &newDefaults, Project &project) {
+    std::map<std::string, std::string> oldByName;
+    for (const auto &parameter : oldDefaults)
+        oldByName[lower(parameter.name)] = parameter.value;
+    for (const auto &defaultParameter : newDefaults) {
+        if (defaultParameter.name.empty())
+            continue;
+        const auto key = lower(defaultParameter.name);
+        const auto existing = std::find_if(parameters.begin(), parameters.end(),
+                                           [&](const Parameter &candidate) { return lower(candidate.name) == key; });
+        if (existing == parameters.end()) {
+            parameters.push_back({project.nextId(), defaultParameter.name, defaultParameter.value});
+            continue;
+        }
+        const auto old = oldByName.find(key);
+        if (existing->value.empty() || (old != oldByName.end() && existing->value == old->second))
+            existing->value = defaultParameter.value;
+    }
+}
+
+void updateInstanceDefaults(Project &project, SchematicCell &parent, ObjectId symbolId,
+                            const std::vector<Parameter> &oldDefaults, const std::vector<Parameter> &newDefaults) {
+    for (auto &[_, instance] : parent.instances) {
+        if (instance.symbol == symbolId)
+            applySourceDefaults(instance.parameters, oldDefaults, newDefaults, project);
+    }
+}
+
+} // namespace
+
+SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cellId, bool systemVerilog,
+                                                 std::string text, std::string sourcePath, bool convertEmptyDrawn) {
+    auto &cell = require(project.schematicCells, cellId, "schematic.cell", "Schematic cell does not exist");
+    SchematicSourceEditResult result;
+    if (cell.isTextSource() && cell.systemVerilogSchematic != systemVerilog)
+        throw ProjectError("schematic.source.kind", "Schematic '" + cell.name + "' is already a " +
+                                                        (cell.systemVerilogSchematic ? "SystemVerilog" : "text SPICE") +
+                                                        " cell; create a new cell to use the other source language");
+    if (!cell.isTextSource()) {
+        const bool empty =
+            cell.symbols.empty() && cell.instances.empty() && cell.nets.empty() && cell.parameters.empty();
+        if (!convertEmptyDrawn || !empty)
+            throw ProjectError("schematic.source.convert",
+                               "Schematic '" + cell.name +
+                                   "' is a drawn schematic; pass --convert only for an empty cell");
+        result.converted = true;
+    }
+
+    std::vector<Parameter> oldDefaults;
+    if (cell.textSchematic) {
+        const auto oldInterface = spiceInterfaceForCell(cell);
+        if (oldInterface.ok) {
+            for (const auto &parameter : oldInterface.parameters)
+                oldDefaults.push_back({0, parameter.name, parameter.value});
+        }
+    }
+
+    cell.textSchematic = !systemVerilog;
+    cell.systemVerilogSchematic = systemVerilog;
+    cell.spiceSourcePath.clear();
+    if (systemVerilog) {
+        cell.systemVerilogText = std::move(text);
+        cell.spiceText.clear();
+    } else {
+        cell.spiceText = std::move(text);
+        cell.systemVerilogText.clear();
+        if (!sourcePath.empty()) {
+            std::error_code status;
+            const auto absolute = std::filesystem::absolute(sourcePath, status);
+            cell.spiceSourcePath = (status ? std::filesystem::path(sourcePath) : absolute).lexically_normal().string();
+        }
+    }
+
+    std::vector<Parameter> newDefaults;
+    std::function<std::vector<Pin>(const Symbol &)> pinsForSymbol;
+    if (systemVerilog) {
+        const auto parsed = parseSystemVerilogModule(cell);
+        if (!parsed.ok) {
+            result.notes.push_back("SystemVerilog parse failed: " + parsed.error);
+        } else {
+            result.notes.insert(result.notes.end(), parsed.warnings.begin(), parsed.warnings.end());
+            pinsForSymbol = [parsed](const Symbol &symbol) {
+                const bool hasBus =
+                    std::any_of(parsed.module.ports.begin(), parsed.module.ports.end(),
+                                [](const HdlPort &port) { return port.widthKnown && port.width > 1 && !port.real; });
+                bool flatten = false;
+                if (hasBus) {
+                    flatten = std::any_of(symbol.pins.begin(), symbol.pins.end(), [](const Pin &pin) {
+                        return pin.name.find('[') != std::string::npos || pin.name.find(']') != std::string::npos;
+                    });
+                    if (!flatten) {
+                        std::size_t expanded = 0;
+                        for (const auto &port : parsed.module.ports)
+                            expanded +=
+                                port.widthKnown && !port.real ? static_cast<std::size_t>(std::max(1, port.width)) : 1;
+                        flatten = symbol.pins.size() == expanded;
+                    }
+                }
+                return makeHdlSymbolTemplate(parsed.module, flatten).pins;
+            };
+        }
+    } else {
+        const auto interface = spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
+        result.notes.insert(result.notes.end(), interface.warnings.begin(), interface.warnings.end());
+        if (!interface.ok) {
+            result.notes.push_back("SPICE interface is not ready: " + interface.error);
+        } else {
+            for (const auto &parameter : interface.parameters)
+                newDefaults.push_back({0, parameter.name, parameter.value});
+            pinsForSymbol = [interface](const Symbol &) { return spiceSubcircuitPins(interface); };
+        }
+    }
+
+    if (pinsForSymbol) {
+        for (auto &[parentId, parent] : project.schematicCells) {
+            (void)parentId;
+            for (auto &[symbolId, symbol] : parent.symbols) {
+                if (symbol.sourceCell != cellId)
+                    continue;
+                const auto targets = pinsForSymbol(symbol);
+                if (targets.empty())
+                    continue;
+
+                std::set<ObjectId> connectedPins;
+                for (const auto &[_, net] : parent.nets)
+                    connectedPins.insert(net.pins.begin(), net.pins.end());
+
+                std::map<std::string, const Pin *> existingByName;
+                for (const auto &pin : symbol.pins)
+                    existingByName.emplace(lower(pin.name), &pin);
+
+                std::set<std::string> targetNames;
+                std::vector<Pin> reconciled;
+                reconciled.reserve(targets.size());
+                for (const auto &target : targets) {
+                    targetNames.insert(lower(target.name));
+                    const auto existing = existingByName.find(lower(target.name));
+                    if (existing == existingByName.end()) {
+                        Pin pin = target;
+                        pin.id = project.nextId();
+                        reconciled.push_back(pin);
+                        ++result.addedPins;
+                        continue;
+                    }
+                    Pin pin = *existing->second;
+                    pin.name = target.name;
+                    pin.direction = target.direction;
+                    pin.width = target.width;
+                    pin.widthKnown = target.widthKnown;
+                    reconciled.push_back(std::move(pin));
+                }
+
+                std::set<ObjectId> removedPins;
+                for (const auto &pin : symbol.pins) {
+                    if (targetNames.contains(lower(pin.name)))
+                        continue;
+                    if (connectedPins.contains(pin.id))
+                        throw ProjectError("schematic.source.connected_pin",
+                                           "Cannot change the source of '" + cell.name + "': pin '" + pin.name +
+                                               "' is still connected in '" + parent.name + "'");
+                    removedPins.insert(pin.id);
+                    ++result.removedPins;
+                }
+                for (auto &[_, net] : parent.nets) {
+                    std::erase_if(net.pins, [&](ObjectId pin) { return removedPins.contains(pin); });
+                }
+                std::erase_if(parent.nets, [](const auto &entry) { return entry.second.pins.size() < 2; });
+                symbol.pins = std::move(reconciled);
+                updateInstanceDefaults(project, parent, symbolId, oldDefaults, newDefaults);
+            }
+        }
+    }
+
+    applySourceDefaults(cell.parameters, oldDefaults, newDefaults, project);
+    return result;
+}
+
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork, ObjectId sourceCell) {
     if (name.empty())
         throw ProjectError("schematic.symbol", "Symbol name must not be empty");
@@ -1578,14 +1758,11 @@ std::vector<std::string> buildSchematicNetlistImpl(const Project &project, Objec
                         }
                         ++portIndex;
                     }
-                    if (!matchedByName)
-                        note("SPICE block symbol '" + symbol->second.name + "' pins do not match the ports of '" +
-                             child->second.name + "'; connecting by position");
-                    if (symbol->second.pins.size() > interface->second.ports.size())
-                        note("SPICE block symbol '" + symbol->second.name + "' declares " +
-                             std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name +
-                             "' has " + std::to_string(interface->second.ports.size()) +
-                             " ports; extra pins are ignored");
+                    if (!matchedByName || symbol->second.pins.size() != interface->second.ports.size())
+                        throw ProjectError("schematic.netlist.port_mismatch",
+                                           "SPICE block symbol '" + symbol->second.name +
+                                               "' pins do not match the ports of '" + child->second.name +
+                                               "'. Edit the source cell again or recreate the hierarchical symbol.");
                     body << interface->second.subcircuitName;
                     std::set<std::string> declaredNames;
                     for (const auto &parameter : interface->second.parameters) {
@@ -1660,13 +1837,11 @@ std::vector<std::string> buildSchematicNetlistImpl(const Project &project, Objec
                         }
                         ++portIndex;
                     }
-                    if (!matchedByName)
-                        note("hierarchical symbol '" + symbol->second.name + "' pins do not match the ports of '" +
-                             child->second.name + "'; flattening by position");
-                    if (symbol->second.pins.size() > childPorts.size())
-                        note("hierarchical symbol '" + symbol->second.name + "' declares " +
-                             std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name +
-                             "' has " + std::to_string(childPorts.size()) + " ports; extra pins are ignored");
+                    if (!matchedByName || symbol->second.pins.size() != childPorts.size())
+                        throw ProjectError("schematic.netlist.port_mismatch",
+                                           "Hierarchical symbol '" + symbol->second.name +
+                                               "' pins do not match the ports of '" + child->second.name +
+                                               "'. Edit the source cell again or recreate the hierarchical symbol.");
                     const auto scope = spiceIdentifier(instance.name);
                     visiting.insert(child->first);
                     body << emitBody(child->second, childPortMap, false, instancePrefix + scope + "_",
@@ -1725,13 +1900,11 @@ std::vector<std::string> buildSchematicNetlistImpl(const Project &project, Objec
                     }
                     ++portIndex;
                 }
-                if (!matchedByName)
-                    note("hierarchical symbol '" + symbol->second.name + "' pins do not match the ports of '" +
-                         child->second.name + "'; connecting by position");
-                if (symbol->second.pins.size() > childPorts.size())
-                    note("hierarchical symbol '" + symbol->second.name + "' declares " +
-                         std::to_string(symbol->second.pins.size()) + " pins but '" + child->second.name + "' has " +
-                         std::to_string(childPorts.size()) + " ports; extra pins are ignored");
+                if (!matchedByName || symbol->second.pins.size() != childPorts.size())
+                    throw ProjectError("schematic.netlist.port_mismatch",
+                                       "Hierarchical symbol '" + symbol->second.name +
+                                           "' pins do not match the ports of '" + child->second.name +
+                                           "'. Edit the source cell again or recreate the hierarchical symbol.");
                 body << spiceIdentifier(child->second.name);
                 // Pass matching instance parameters as subcircuit overrides.
                 const auto &childParameters = parametersFor(child->second);

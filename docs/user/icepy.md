@@ -92,8 +92,8 @@ Use `run_lvs(project, schematic_id, layout_id)` when object ids are already
 known, or `run_lvs_named(...)` with cell names.
 
 LVS compares device presence, reference names, device types, shared parameters
-on placed device instances, and net topology from planned connections. Text
-SPICE schematics are not supported yet.
+on placed device instances, terminal-aware net topology, and text SPICE or
+structural SystemVerilog source cells.
 
 `icepy.run_pex(project, layout, options)` extracts first-order per-net
 parasitics from a layout and creates or updates a text SPICE schematic in the

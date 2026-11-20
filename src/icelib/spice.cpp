@@ -613,6 +613,17 @@ SpiceElement parseElement(const LogicalLine &logical, SpiceDocument &document) {
     }
     case 'e':
     case 'g': {
+        const auto behavioralKeyword = [](const std::string &token) {
+            const auto lowered = lowerCopy(token);
+            return lowered.starts_with("value") || lowered.starts_with("table") || lowered.starts_with("laplace") ||
+                   lowered.starts_with("poly") || lowered.starts_with("cur") || lowered.starts_with("vol");
+        };
+        const bool behavioral = tokens.size() >= 4 && (behavioralKeyword(tokens[3]) || firstAssignment(tokens, 1) == 3);
+        if (behavioral) {
+            element.nodes = {tokens[1], tokens[2]};
+            element.value = joinTokens(tokens, 3);
+            break;
+        }
         if (tokens.size() < 6) {
             document.warnings.push_back("Malformed controlled source '" + element.name + "' on line " +
                                         std::to_string(logical.line) + " was skipped");
@@ -754,12 +765,21 @@ SpiceDocument parseSpiceDocument(const std::string &source) {
             document.title += joinTokens(tokens, 1);
             continue;
         }
+        if (directive == ".global") {
+            for (std::size_t index = 1; index < tokens.size(); ++index) {
+                const auto node = unquoteSpiceToken(tokens[index]);
+                if (!node.empty() &&
+                    std::find(document.globals.begin(), document.globals.end(), node) == document.globals.end())
+                    document.globals.push_back(node);
+            }
+            continue;
+        }
         if (directive == ".end")
             break;
-        if (directive == ".global" || directive == ".options" || directive == ".option" || directive == ".temp" ||
-            directive == ".save" || directive == ".ic" || directive == ".nodeset" || directive == ".width" ||
-            directive == ".protect" || directive == ".unprotect" || directive == ".four" || directive == ".plot" ||
-            directive == ".print" || directive == ".probe" || directive == ".meas" || directive == ".measure")
+        if (directive == ".options" || directive == ".option" || directive == ".temp" || directive == ".save" ||
+            directive == ".ic" || directive == ".nodeset" || directive == ".width" || directive == ".protect" ||
+            directive == ".unprotect" || directive == ".four" || directive == ".plot" || directive == ".print" ||
+            directive == ".probe" || directive == ".meas" || directive == ".measure")
             continue;
         if (directive == ".noise" || directive == ".tf" || directive == ".tran" || directive == ".dc" ||
             directive == ".ac" || directive == ".op")
@@ -968,6 +988,23 @@ std::vector<std::string> spiceSourceLinesForHierarchy(const std::string &source,
         if (directive == ".end" || directive == ".title" || directive == ".tran" || directive == ".dc" ||
             directive == ".ac" || directive == ".op" || directive == ".noise" || directive == ".tf")
             continue;
+        if (directive == ".subckt" && tokens.size() >= 2) {
+            // ngspice has no vector subcircuit ports. Expand `data[7:0]` in the
+            // declaration so it matches the scalar pins and parent X nodes.
+            std::ostringstream rebuilt;
+            rebuilt << tokens[0] << " " << tokens[1];
+            std::size_t index = 2;
+            for (; index < tokens.size(); ++index) {
+                if (lowerCopy(tokens[index]) == "params:" || isAssignmentToken(tokens[index]))
+                    break;
+                for (const auto &bit : expandSpiceBus(tokens[index]))
+                    rebuilt << " " << bit;
+            }
+            for (; index < tokens.size(); ++index)
+                rebuilt << " " << tokens[index];
+            lines.push_back(rebuilt.str());
+            continue;
+        }
         lines.push_back(logical.text);
     }
     return lines;

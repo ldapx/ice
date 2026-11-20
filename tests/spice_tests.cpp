@@ -184,7 +184,69 @@ TEST_CASE("Text SPICE bus ports expand into scalar block pins") {
     CHECK(pins[2].name == "out[0]");
     CHECK(pins[3].name == "out[1]");
     const auto lines = ice::buildSchematicNetlist(project, parent);
+    CHECK(std::find(lines.begin(), lines.end(), ".subckt bus_block data[0] data[1] out[0] out[1]") != lines.end());
     CHECK(std::find(lines.begin(), lines.end(), "X1 0 0 0 0 bus_block") != lines.end());
+}
+
+TEST_CASE("SPICE parser accepts behavioral controlled sources") {
+    const auto document = ice::parseSpiceDocument(
+        ".subckt amp IN OUT\nE1 OUT 0 VALUE={V(IN)*2}\nG1 0 OUT TABLE {V(IN)}=(0,0) (1,1)\n.ends amp\n");
+    CHECK(document.warnings.empty());
+    REQUIRE(document.subcircuits.size() == 1);
+    REQUIRE(document.subcircuits.front().elements.size() == 2);
+    CHECK((document.subcircuits.front().elements[0].nodes == std::vector<std::string>{"OUT", "0"}));
+    CHECK(document.subcircuits.front().elements[0].value.find("VALUE") != std::string::npos);
+    CHECK((document.subcircuits.front().elements[1].nodes == std::vector<std::string>{"0", "OUT"}));
+}
+
+TEST_CASE("SPICE parser records global nets") {
+    const auto document = ice::parseSpiceDocument(".global VDD VSS\n.subckt block A\nR1 A VDD 1k\n.ends block\n");
+    REQUIRE(document.globals.size() == 2);
+    CHECK(document.globals[0] == "VDD");
+    CHECK(document.globals[1] == "VSS");
+}
+
+TEST_CASE("Editing text SPICE source reconciles parent symbol pins") {
+    ice::Project project;
+    project.identity = "spice-edit";
+    project.name = "spice-edit";
+    const auto source = ice::createTextSchematicCell(project, "block", ice::genericPdkId,
+                                                     ".subckt block A B\nR1 A B 1k\n.ends block\n");
+    const auto parent = ice::createSchematicCell(project, "top");
+    ice::ObjectId symbolId = 0;
+    ice::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
+    const auto changed =
+        ice::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n");
+    CHECK(changed.addedPins == 2);
+    CHECK(changed.removedPins == 2);
+    const auto &pins = project.schematicCells.at(parent).symbols.at(symbolId).pins;
+    REQUIRE(pins.size() == 2);
+    CHECK(pins[0].name == "C");
+    CHECK(pins[1].name == "D");
+    const auto netlist = ice::buildSchematicNetlist(project, parent);
+    CHECK(std::find(netlist.begin(), netlist.end(), "X1 0 0 block") != netlist.end());
+}
+
+TEST_CASE("Editing text SPICE source rejects removing connected pins") {
+    ice::Project project;
+    project.identity = "spice-edit-connected";
+    project.name = "spice-edit-connected";
+    const auto source = ice::createTextSchematicCell(project, "block", ice::genericPdkId,
+                                                     ".subckt block A B\nR1 A B 1k\n.ends block\n");
+    const auto parent = ice::createSchematicCell(project, "top");
+    ice::ObjectId symbolId = 0;
+    ice::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
+    auto &parentCell = project.schematicCells.at(parent);
+    const auto other = ice::addSymbol(project, parent, "resistor");
+    const auto otherPin = project.nextId();
+    parentCell.symbols.at(other).pins.push_back({otherPin, "A", 0, 0});
+    const auto otherPinB = project.nextId();
+    parentCell.symbols.at(other).pins.push_back({otherPinB, "B", 0, 0});
+    const auto blockPin = parentCell.symbols.at(symbolId).pins.front().id;
+    const auto netId = project.nextId();
+    parentCell.nets.emplace(netId, ice::Net{netId, "net", {blockPin, otherPin}});
+    CHECK_THROWS_AS(ice::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n"),
+                    ice::ProjectError);
 }
 
 TEST_CASE("Text SPICE resolves includes and library sections") {

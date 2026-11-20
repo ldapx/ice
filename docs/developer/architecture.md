@@ -1489,10 +1489,13 @@ project/
 ```
 
 The `.icepro` file contains identity, name, units, grid, package
-dependencies, layer metadata, and project-level simulation script associations.
-It does not contain schematic, layout, implementation-run, or simulation
-objects. Simulation scripts are project source files; generated simulation and
-implementation artifacts go under `build/` and are ignored by Git.
+dependencies, layer metadata, project-level simulation script associations, and
+an inventory of the sidecar files that belong to the project. It does not
+contain the sidecar objects themselves. The inventory lets `Project::load`
+detect a missing cell file instead of silently opening a smaller project, and
+detect or quarantine stale files left by an interrupted save. Simulation
+scripts are project source files; generated simulation and implementation
+artifacts go under `build/` and are ignored by Git.
 
 A lockfile should eventually record exact package/PDK versions used by the project.
 

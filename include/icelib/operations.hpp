@@ -20,6 +20,20 @@ ObjectId createTextSchematicCell(Project &project, std::string name, std::string
 // schematic hierarchy and in the simulation selector.
 ObjectId createSystemVerilogCell(Project &project, std::string name, std::string pdk = genericPdkId,
                                  std::string source = {});
+
+// Replaces the source of a text SPICE or SystemVerilog cell and reconciles the
+// generated hierarchical symbols placed in parent schematics. Existing pins
+// are matched by name and keep their ids and positions; removed pins that are
+// still connected make the edit fail instead of silently changing connectivity.
+struct SchematicSourceEditResult {
+    bool converted = false;
+    std::size_t addedPins = 0;
+    std::size_t removedPins = 0;
+    std::vector<std::string> notes;
+};
+SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cellId, bool systemVerilog,
+                                                 std::string text, std::string sourcePath = {},
+                                                 bool convertEmptyDrawn = false);
 ObjectId addSymbol(Project &project, ObjectId cellId, std::string name, std::string artwork = {},
                    ObjectId sourceCell = 0);
 // Replaces the icon of a user-created schematic block symbol. Every symbol in

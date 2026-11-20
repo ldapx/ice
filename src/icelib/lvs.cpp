@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <optional>
 #include <set>
@@ -29,6 +30,12 @@ std::string trim(std::string text) {
         return {};
     const auto last = text.find_last_not_of(" \t\r\n");
     return text.substr(first, last - first + 1);
+}
+
+std::string lowerCopy(std::string text) {
+    for (auto &character : text)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    return text;
 }
 
 std::string normalizedIdentifier(const std::string &text) {
@@ -96,6 +103,226 @@ std::optional<double> parseQuantity(const std::string &text) {
     return number * multiplier;
 }
 
+std::string normalizedPinName(std::string name) {
+    const auto lowered = normalizedIdentifier(name);
+    static const std::map<std::string, std::string> aliases = {
+        {"drain", "d"}, {"gate", "g"},      {"source", "s"},    {"bulk", "b"},  {"body", "b"},
+        {"sub", "b"},   {"substrate", "b"}, {"collector", "c"}, {"base", "b"},  {"emitter", "e"},
+        {"anode", "a"}, {"cathode", "k"},   {"plus", "p"},      {"minus", "n"},
+    };
+    const auto alias = aliases.find(lowered);
+    return alias == aliases.end() ? lowered : alias->second;
+}
+
+bool isMultiTerminalType(const std::string &type) {
+    const auto lowered = normalizedIdentifier(type);
+    return lowered.find("nmos") != std::string::npos || lowered.find("pmos") != std::string::npos ||
+           lowered.find("nfet") != std::string::npos || lowered.find("pfet") != std::string::npos ||
+           lowered.find("mosfet") != std::string::npos || lowered.find("npn") != std::string::npos ||
+           lowered.find("pnp") != std::string::npos || lowered.find("bjt") != std::string::npos ||
+           lowered.find("hbt") != std::string::npos || lowered.find("jfet") != std::string::npos;
+}
+
+std::vector<std::string> elementPinNames(const SpiceElement &element) {
+    switch (element.kind) {
+    case 'm':
+        return {"D", "G", "S", "B"};
+    case 'q':
+        return element.nodes.size() >= 4 ? std::vector<std::string>{"C", "B", "E", "S"}
+                                         : std::vector<std::string>{"C", "B", "E"};
+    case 'j':
+        return {"D", "G", "S"};
+    default:
+        return {};
+    }
+}
+
+bool isGroundNetName(const std::string &name) {
+    const auto normalized = normalizedIdentifier(name);
+    return name == "0" || normalized == "gnd" || normalized == "ground" || normalized == "vss";
+}
+
+std::string portKey(const std::string &name) {
+    // Bracket-aware encoding keeps `data[0]` distinct from `data_0`.
+    std::string result;
+    bool pendingSeparator = false;
+    for (const auto character : name) {
+        const auto value = static_cast<unsigned char>(character);
+        if (character == '[')
+            result += "_lb_";
+        else if (character == ']')
+            result += "_rb_";
+        else if (character == ':')
+            result += "_colon_";
+        else if (std::isalnum(value)) {
+            if (pendingSeparator && !result.empty())
+                result.push_back('_');
+            pendingSeparator = false;
+            result.push_back(static_cast<char>(std::tolower(value)));
+        } else {
+            pendingSeparator = !result.empty();
+        }
+    }
+    return result;
+}
+
+class SpiceExpressionEvaluator {
+  public:
+    SpiceExpressionEvaluator(std::string text, const std::map<std::string, std::string> &parameters, int depth)
+        : text_(std::move(text)), parameters_(parameters), depth_(depth) {}
+
+    std::optional<double> evaluate() {
+        skipSpace();
+        const auto value = parseExpression();
+        skipSpace();
+        if (!value || position_ != text_.size())
+            return std::nullopt;
+        return value;
+    }
+
+  private:
+    std::optional<double> parseExpression() {
+        auto left = parseTerm();
+        if (!left)
+            return std::nullopt;
+        for (;;) {
+            skipSpace();
+            if (position_ >= text_.size() || (text_[position_] != '+' && text_[position_] != '-'))
+                return left;
+            const auto operation = text_[position_++];
+            const auto right = parseTerm();
+            if (!right)
+                return std::nullopt;
+            *left = operation == '+' ? *left + *right : *left - *right;
+        }
+    }
+
+    std::optional<double> parseTerm() {
+        auto left = parsePower();
+        if (!left)
+            return std::nullopt;
+        for (;;) {
+            skipSpace();
+            if (position_ >= text_.size() || (text_[position_] != '*' && text_[position_] != '/'))
+                return left;
+            if (text_[position_] == '*' && position_ + 1 < text_.size() && text_[position_ + 1] == '*')
+                return left; // handled by parsePower
+            const auto operation = text_[position_++];
+            const auto right = parsePower();
+            if (!right || (operation == '/' && *right == 0.0))
+                return std::nullopt;
+            *left = operation == '*' ? *left * *right : *left / *right;
+        }
+    }
+
+    std::optional<double> parsePower() {
+        auto left = parsePrimary();
+        if (!left)
+            return std::nullopt;
+        for (;;) {
+            skipSpace();
+            bool power = false;
+            if (position_ < text_.size() && text_[position_] == '^') {
+                ++position_;
+                power = true;
+            } else if (position_ + 1 < text_.size() && text_[position_] == '*' && text_[position_ + 1] == '*') {
+                position_ += 2;
+                power = true;
+            }
+            if (!power)
+                return left;
+            const auto right = parsePrimary();
+            if (!right)
+                return std::nullopt;
+            *left = std::pow(*left, *right);
+        }
+    }
+
+    std::optional<double> parsePrimary() {
+        skipSpace();
+        if (position_ >= text_.size())
+            return std::nullopt;
+        if (text_[position_] == '(') {
+            ++position_;
+            const auto value = parseExpression();
+            skipSpace();
+            if (!value || position_ >= text_.size() || text_[position_] != ')')
+                return std::nullopt;
+            ++position_;
+            return value;
+        }
+        if (text_[position_] == '+' || text_[position_] == '-') {
+            const auto operation = text_[position_++];
+            const auto value = parsePrimary();
+            if (!value)
+                return std::nullopt;
+            return operation == '-' ? -*value : *value;
+        }
+        if (std::isalpha(static_cast<unsigned char>(text_[position_])) || text_[position_] == '_') {
+            const auto start = position_;
+            while (position_ < text_.size()) {
+                const auto character = text_[position_];
+                if (!std::isalnum(static_cast<unsigned char>(character)) && character != '_' && character != '$')
+                    break;
+                ++position_;
+            }
+            const auto name = lowerCopy(text_.substr(start, position_ - start));
+            const auto parameter = parameters_.find(name);
+            if (parameter == parameters_.end() || depth_ > 16)
+                return std::nullopt;
+            return SpiceExpressionEvaluator(parameter->second, parameters_, depth_ + 1).evaluate();
+        }
+        const auto start = position_;
+        while (position_ < text_.size()) {
+            const auto character = text_[position_];
+            if (std::isalnum(static_cast<unsigned char>(character)) || character == '.' ||
+                ((character == '+' || character == '-') && position_ > start &&
+                 (text_[position_ - 1] == 'e' || text_[position_ - 1] == 'E')))
+                ++position_;
+            else
+                break;
+        }
+        if (position_ == start)
+            return std::nullopt;
+        return parseQuantity(text_.substr(start, position_ - start));
+    }
+
+    void skipSpace() {
+        while (position_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[position_])))
+            ++position_;
+    }
+
+    std::string text_;
+    const std::map<std::string, std::string> &parameters_;
+    std::size_t position_ = 0;
+    int depth_ = 0;
+};
+
+std::string resolveSpiceValue(const std::string &value, const std::map<std::string, std::string> &parameters) {
+    auto text = trim(value);
+    while (text.size() >= 2 && text.front() == '{' && text.back() == '}')
+        text = trim(text.substr(1, text.size() - 2));
+    if (text.empty())
+        return value;
+    const auto evaluated = SpiceExpressionEvaluator(text, parameters, 0).evaluate();
+    if (!evaluated)
+        return value;
+    std::ostringstream formatted;
+    formatted << std::setprecision(12) << std::defaultfloat << *evaluated;
+    return formatted.str();
+}
+
+std::map<std::string, std::string> resolvedParameters(const std::vector<SpiceParameter> &declarations,
+                                                      const std::map<std::string, std::string> &base = {}) {
+    auto parameters = base;
+    for (const auto &declaration : declarations) {
+        if (declaration.name.empty())
+            continue;
+        parameters[lowerCopy(declaration.name)] = resolveSpiceValue(declaration.value, parameters);
+    }
+    return parameters;
+}
+
 bool parameterValuesEqual(const std::string &left, const std::string &right) {
     const auto leftQuantity = parseQuantity(left);
     const auto rightQuantity = parseQuantity(right);
@@ -108,7 +335,13 @@ bool parameterValuesEqual(const std::string &left, const std::string &right) {
 
 bool hasUnitSuffix(const std::string &text) {
     const auto trimmed = trim(text);
-    return !trimmed.empty() && std::isalpha(static_cast<unsigned char>(trimmed.back())) != 0;
+    if (trimmed.empty())
+        return false;
+    if (std::isalpha(static_cast<unsigned char>(trimmed.back())) != 0)
+        return true;
+    // Resolved expressions are emitted in scientific notation, which is
+    // already in SI units even though it has no alphabetic suffix.
+    return trimmed.find('e') != std::string::npos || trimmed.find('E') != std::string::npos;
 }
 
 // Layout PCell lengths are conventionally written in micrometres ("2", "0.15")
@@ -202,6 +435,7 @@ struct LogicalDevice {
     std::string type;
     std::map<std::string, std::string> parameters;
     bool hasParameters = false;
+    bool multiTerminal = false;
     ObjectId sourceCell = 0;
     ObjectId childCell = 0;
     ObjectId schematicInstance = 0;
@@ -210,6 +444,10 @@ struct LogicalDevice {
 struct LogicalNet {
     std::string name;
     std::set<ObjectId> devices;
+    // Terminal names belonging to each device on this net. Two-terminal
+    // passives intentionally leave this empty because their orientation is not
+    // electrically meaningful.
+    std::map<ObjectId, std::set<std::string>> terminals;
     ObjectId object = 0;
 };
 
@@ -252,28 +490,34 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
         subcircuits.emplace(normalizedIdentifier(subcircuit.name), &subcircuit);
 
     std::map<std::string, std::set<ObjectId>> netDevices;
+    std::map<std::string, std::map<ObjectId, std::set<std::string>>> netTerminals;
     std::map<ObjectId, std::string> rawDeviceNames;
     ObjectId nextDevice = 1;
     ObjectId nextNet = 1;
 
-    const auto resolveNode = [](const std::string &node, const std::string &path,
-                                const std::map<std::string, std::string> &portMap) -> std::string {
+    std::set<std::string> globalNets;
+    for (const auto &global : document.globals)
+        globalNets.insert(lowerCopy(trim(global)));
+
+    const auto resolveNode = [&](const std::string &node, const std::string &path,
+                                 const std::map<std::string, std::string> &portMap) -> std::string {
         if (const auto mapped = portMap.find(node); mapped != portMap.end())
             return mapped->second;
-        if (node == "0" || path.empty())
+        if (node == "0" || path.empty() || globalNets.contains(lowerCopy(trim(node))))
             return node;
         return path + "." + node;
     };
 
     std::function<void(const SpiceSubcircuit &, const std::map<std::string, std::string> &, const std::string &,
-                       const std::set<std::string> &)>
+                       const std::set<std::string> &, const std::map<std::string, std::string> &)>
         flattenSubcircuit;
     std::function<void(const std::vector<SpiceElement> &, const std::map<std::string, std::string> &,
-                       const std::string &, const std::set<std::string> &)>
+                       const std::string &, const std::set<std::string> &, const std::map<std::string, std::string> &)>
         emitElements;
 
     emitElements = [&](const std::vector<SpiceElement> &elements, const std::map<std::string, std::string> &portMap,
-                       const std::string &path, const std::set<std::string> &scope) {
+                       const std::string &path, const std::set<std::string> &scope,
+                       const std::map<std::string, std::string> &parameters) {
         for (const auto &element : elements) {
             const auto deviceName = path.empty() ? element.name : path + "_" + element.name;
             const auto nodeFor = [&](const std::string &node) { return resolveNode(node, path, portMap); };
@@ -298,10 +542,15 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
                                 childPorts[bit] = path.empty() ? bit : path + "." + bit;
                         }
                     }
+                    auto childParameters = resolvedParameters(subcircuit->second->parameters, parameters);
+                    for (const auto &[name, value] : element.parameters) {
+                        if (!name.empty())
+                            childParameters[lowerCopy(name)] = resolveSpiceValue(value, parameters);
+                    }
                     auto childScope = scope;
                     childScope.insert(normalizedIdentifier(subcircuit->second->name));
                     const auto childPath = path.empty() ? deviceName : path + "." + element.name;
-                    flattenSubcircuit(*subcircuit->second, childPorts, childPath, childScope);
+                    flattenSubcircuit(*subcircuit->second, childPorts, childPath, childScope, childParameters);
                     continue;
                 }
             }
@@ -312,24 +561,36 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
                 element.kind != 'm' && element.kind != 'q' && element.kind != 'j' && element.kind != 'x')
                 continue;
 
+            auto resolved = element;
+            resolved.value = resolveSpiceValue(element.value, parameters);
+            for (auto &[name, value] : resolved.parameters)
+                value = resolveSpiceValue(value, parameters);
+
             LogicalDevice device;
             device.object = nextDevice++;
             device.name = deviceName;
-            device.type = spiceElementType(element);
-            device.parameters = spiceElementParameters(element);
+            device.type = spiceElementType(resolved);
+            device.parameters = spiceElementParameters(resolved);
             device.hasParameters = true;
+            const auto pinNames = elementPinNames(resolved);
+            device.multiTerminal = !pinNames.empty();
             rawDeviceNames[device.object] = element.name;
-            for (const auto &node : element.nodes)
-                netDevices[nodeFor(node)].insert(device.object);
+            for (std::size_t index = 0; index < resolved.nodes.size(); ++index) {
+                const auto node = nodeFor(resolved.nodes[index]);
+                netDevices[node].insert(device.object);
+                if (index < pinNames.size())
+                    netTerminals[node][device.object].insert(normalizedPinName(pinNames[index]));
+            }
             side.devices.emplace(device.object, std::move(device));
         }
     };
 
     flattenSubcircuit = [&](const SpiceSubcircuit &subcircuit, const std::map<std::string, std::string> &portMap,
-                            const std::string &path, const std::set<std::string> &parentScope) {
+                            const std::string &path, const std::set<std::string> &parentScope,
+                            const std::map<std::string, std::string> &parameters) {
         auto scope = parentScope;
         scope.insert(normalizedIdentifier(subcircuit.name));
-        emitElements(subcircuit.elements, portMap, path, scope);
+        emitElements(subcircuit.elements, portMap, path, scope, parameters);
     };
 
     if (selected) {
@@ -338,14 +599,15 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
             for (const auto &bit : expandSpiceBus(port))
                 ports[bit] = bit;
         }
-        flattenSubcircuit(*selected, ports, {}, {});
+        const auto parameters = resolvedParameters(selected->parameters, resolvedParameters(document.parameters));
+        flattenSubcircuit(*selected, ports, {}, {}, parameters);
         for (const auto &port : selected->ports) {
             for (const auto &bit : expandSpiceBus(port)) {
                 side.ports.push_back({nextNet++, bit, "inout", bit});
             }
         }
     } else {
-        emitElements(document.elements, {}, {}, {});
+        emitElements(document.elements, {}, {}, {}, resolvedParameters(document.parameters));
     }
 
     // Prefer the source reference name when it is unique across the flattened
@@ -362,7 +624,13 @@ LogicalSide collectSpiceSchematicSide(const SchematicCell &cell, std::vector<Lvs
     for (const auto &[name, devices] : netDevices) {
         if (devices.empty())
             continue;
-        side.nets.push_back({name, devices, nextNet++});
+        LogicalNet net;
+        net.name = name;
+        net.devices = devices;
+        if (const auto terminals = netTerminals.find(name); terminals != netTerminals.end())
+            net.terminals = terminals->second;
+        net.object = nextNet++;
+        side.nets.push_back(std::move(net));
     }
     return side;
 }
@@ -407,6 +675,7 @@ LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
 
     LogicalSide side;
     std::map<std::string, std::set<ObjectId>> netDevices;
+    std::map<std::string, std::map<ObjectId, std::set<std::string>>> netTerminals;
     ObjectId nextObject = 1;
     for (const auto &instance : netlist.instances) {
         LogicalDevice device;
@@ -415,8 +684,13 @@ LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
         device.type = instance.type;
         device.sourceCell = cell.id;
         device.hasParameters = false;
-        for (const auto &net : instance.nets)
-            netDevices[find(normalizedIdentifier(net))].insert(device.object);
+        device.multiTerminal = instance.portNames.size() > 2 || isMultiTerminalType(instance.type);
+        for (std::size_t index = 0; index < instance.nets.size(); ++index) {
+            const auto net = find(normalizedIdentifier(instance.nets[index]));
+            netDevices[net].insert(device.object);
+            if (index < instance.portNames.size())
+                netTerminals[net][device.object].insert(normalizedPinName(instance.portNames[index]));
+        }
         side.devices.emplace(device.object, std::move(device));
     }
 
@@ -449,7 +723,13 @@ LogicalSide collectHdlSchematicSide(const SchematicCell &cell) {
     for (auto &[net, devices] : netDevices) {
         if (devices.empty())
             continue;
-        side.nets.push_back({net, std::move(devices), nextObject++});
+        LogicalNet logicalNet;
+        logicalNet.name = net;
+        logicalNet.devices = std::move(devices);
+        if (const auto terminals = netTerminals.find(net); terminals != netTerminals.end())
+            logicalNet.terminals = terminals->second;
+        logicalNet.object = nextObject++;
+        side.nets.push_back(std::move(logicalNet));
     }
     return side;
 }
@@ -466,6 +746,7 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
 
     LogicalSide side;
     std::map<ObjectId, std::vector<ObjectId>> pinOwners;
+    std::map<ObjectId, std::string> pinNames;
     struct PortInstance {
         ObjectId id = 0;
         ObjectId symbol = 0;
@@ -505,8 +786,10 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
                     port.pins.push_back(pin.id);
                 portInstances.push_back(std::move(port));
             } else if (!sourceOrGround) {
-                for (const auto &pin : symbol->second.pins)
+                for (const auto &pin : symbol->second.pins) {
                     pinOwners[pin.id].push_back(id);
+                    pinNames[pin.id] = pin.name;
+                }
             }
         } else {
             device.type = "unknown";
@@ -524,6 +807,8 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
             device.type = model->second;
         else
             device.type = symbolName;
+        device.multiTerminal =
+            (symbol != cell.symbols.end() && symbol->second.pins.size() > 2) || isMultiTerminalType(device.type);
         side.devices.emplace(id, std::move(device));
     }
 
@@ -561,17 +846,23 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
     }
 
     for (const auto &[id, net] : cell.nets) {
-        std::set<ObjectId> devices;
+        LogicalNet logicalNet;
+        logicalNet.name = net.name.empty() ? "N" + std::to_string(id) : net.name;
+        logicalNet.object = id;
         for (const auto pinId : net.pins) {
             const auto owners = pinOwners.find(pinId);
             if (owners == pinOwners.end())
                 continue;
-            for (const auto owner : owners->second)
-                devices.insert(owner);
+            const auto pinName = pinNames.find(pinId);
+            for (const auto owner : owners->second) {
+                logicalNet.devices.insert(owner);
+                if (pinName != pinNames.end() && !pinName->second.empty())
+                    logicalNet.terminals[owner].insert(normalizedPinName(pinName->second));
+            }
         }
-        if (devices.empty())
+        if (logicalNet.devices.empty())
             continue;
-        side.nets.push_back({net.name.empty() ? "N" + std::to_string(id) : net.name, std::move(devices), id});
+        side.nets.push_back(std::move(logicalNet));
     }
     return side;
 }
@@ -584,6 +875,7 @@ LogicalDevice actualLayoutDevice(const LayoutInstance &instance, const LayoutCel
     device.childCell = child.id;
     device.parameters = parameterMap(child.parameters);
     device.hasParameters = !child.parameters.empty();
+    device.multiTerminal = child.ports.size() > 2 || isMultiTerminalType(device.type);
     device.schematicInstance = instance.schematicInstance;
     return device;
 }
@@ -707,6 +999,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
                 device.hasParameters = true;
             }
         }
+        device.multiTerminal = device.multiTerminal || planned.terminals.size() > 2 || isMultiTerminalType(device.type);
         const auto logicalId = actualId != 0 ? actualId : plannedId;
         device.object = logicalId;
         result.side.devices.emplace(logicalId, std::move(device));
@@ -746,9 +1039,11 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         std::string name;
         ObjectId object = 0;
         std::set<ObjectId> devices;
+        std::map<ObjectId, std::set<std::string>> terminals;
     };
     std::map<std::string, NetAccumulator> nets;
-    const auto addToNet = [&](const std::string &key, const std::string &name, ObjectId object, ObjectId device) {
+    const auto addToNet = [&](const std::string &key, const std::string &name, ObjectId object, ObjectId device,
+                              const std::string &pin = {}) {
         if (key.empty() || !result.side.devices.contains(device))
             return;
         auto &net = nets[key];
@@ -757,6 +1052,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         if (net.object == 0)
             net.object = object;
         net.devices.insert(device);
+        if (!pin.empty())
+            net.terminals[device].insert(normalizedPinName(pin));
     };
 
     const auto geometryGroups = extractLayoutNets(project, cellId);
@@ -837,9 +1134,9 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         if (group.net != 0) {
             const auto key = groupKey(index);
             for (const auto &[plannedId, planned] : cell.plannedDevices) {
-                for (const auto &[_, netId] : planned.terminals) {
+                for (const auto &[pin, netId] : planned.terminals) {
                     if (netId == group.net)
-                        addToNet(key, groupName(index), group.net, logicalId(plannedId));
+                        addToNet(key, groupName(index), group.net, logicalId(plannedId), pin);
                 }
             }
         }
@@ -888,7 +1185,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
                     }
                 }
                 if (matched)
-                    addToNet(groupKey(index), groupName(index), geometryGroups[index].net, logicalId(instanceId));
+                    addToNet(groupKey(index), groupName(index), geometryGroups[index].net, logicalId(instanceId),
+                             childPort.name);
             }
         }
     }
@@ -897,11 +1195,11 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     // this because their PCell geometry is flattened but the device identity
     // and pin nets are still known.
     for (const auto &[plannedId, planned] : cell.plannedDevices) {
-        for (const auto &[_, netId] : planned.terminals) {
+        for (const auto &[pin, netId] : planned.terminals) {
             if (netId == 0)
                 continue;
             result.hasConnectivity = true;
-            addToNet(netKeyFor(netId), netNameFor(netId), netId, logicalId(plannedId));
+            addToNet(netKeyFor(netId), netNameFor(netId), netId, logicalId(plannedId), pin);
         }
     }
 
@@ -930,6 +1228,21 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             parent[rightRoot] = leftRoot;
     };
 
+    const auto connectionPin = [&](ObjectId endpoint, ObjectId portId, const std::string &pin) {
+        if (!pin.empty())
+            return pin;
+        const auto instance = cell.instances.find(endpoint);
+        if (instance != cell.instances.end() && portId != 0) {
+            const auto child = project.layoutCells.find(instance->second.cell);
+            if (child != project.layoutCells.end()) {
+                const auto port = child->second.ports.find(portId);
+                if (port != child->second.ports.end())
+                    return port->second.name;
+            }
+        }
+        return std::string{};
+    };
+
     bool validConnection = false;
     std::set<ObjectId> unnamedMembers;
     std::map<ObjectId, ObjectId> unnamedObjects;
@@ -944,8 +1257,10 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         }
         validConnection = true;
         if (connection.net != 0) {
-            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.from));
-            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.to));
+            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.from),
+                     connectionPin(connection.from, connection.fromPort, connection.fromPin));
+            addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.to),
+                     connectionPin(connection.to, connection.toPort, connection.toPin));
         } else {
             unite(connection.from, connection.to);
             unnamedMembers.insert(connection.from);
@@ -982,6 +1297,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         logicalNet.name = net.name.empty() ? "net" : net.name;
         logicalNet.object = net.object;
         logicalNet.devices = std::move(net.devices);
+        logicalNet.terminals = std::move(net.terminals);
         result.side.nets.push_back(std::move(logicalNet));
     }
 
@@ -1081,8 +1397,13 @@ void expandMultiplicity(LogicalSide &side) {
     for (auto &net : side.nets) {
         std::set<ObjectId> additions;
         for (const auto id : net.devices) {
-            if (const auto found = expanded.find(id); found != expanded.end())
+            if (const auto found = expanded.find(id); found != expanded.end()) {
                 additions.insert(found->second.begin(), found->second.end());
+                if (const auto terminals = net.terminals.find(id); terminals != net.terminals.end()) {
+                    for (const auto clone : found->second)
+                        net.terminals[clone] = terminals->second;
+                }
+            }
         }
         net.devices.insert(additions.begin(), additions.end());
     }
@@ -1255,7 +1576,7 @@ struct NetRecord {
     ObjectId object = 0;
 };
 
-NetRecord netRecord(const LogicalNet &net, const std::map<ObjectId, std::string> &keys) {
+NetRecord netRecord(const LogicalNet &net, const LogicalSide &side, const std::map<ObjectId, std::string> &keys) {
     NetRecord record;
     record.name = net.name;
     record.object = net.object;
@@ -1263,7 +1584,22 @@ NetRecord netRecord(const LogicalNet &net, const std::map<ObjectId, std::string>
         const auto key = keys.find(device);
         if (key == keys.end())
             continue;
-        record.signature.push_back(key->second);
+        const auto logicalDevice = side.devices.find(device);
+        const auto terminals = net.terminals.find(device);
+        if (terminals != net.terminals.end() && !terminals->second.empty()) {
+            if (logicalDevice != side.devices.end() && logicalDevice->second.multiTerminal) {
+                for (const auto &pin : terminals->second)
+                    record.signature.push_back(key->second + ":" + pin);
+            } else {
+                record.signature.push_back(key->second);
+            }
+        } else if (logicalDevice != side.devices.end() && logicalDevice->second.multiTerminal) {
+            // Missing terminal labels on a multi-terminal device cannot be
+            // assumed to match any particular pin assignment.
+            record.signature.push_back(key->second + ":?");
+        } else {
+            record.signature.push_back(key->second);
+        }
     }
     std::sort(record.signature.begin(), record.signature.end());
     return record;
@@ -1284,10 +1620,17 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
         return 0;
     std::map<std::string, LogicalPort> schematicPorts;
     std::map<std::string, LogicalPort> layoutPorts;
+    const auto addPort = [&](std::map<std::string, LogicalPort> &ports, const LogicalPort &port) {
+        const auto key = portKey(port.name);
+        if (!ports.emplace(key, port).second)
+            mismatches.push_back({1, "duplicate-port",
+                                  "Port name '" + port.name + "' collides with another port after normalization",
+                                  std::optional<ObjectId>(port.object), std::nullopt, VerificationSeverity::error});
+    };
     for (const auto &port : schematic.ports)
-        schematicPorts[normalizedIdentifier(port.name)] = port;
+        addPort(schematicPorts, port);
     for (const auto &port : layout.ports)
-        layoutPorts[normalizedIdentifier(port.name)] = port;
+        addPort(layoutPorts, port);
     int matched = 0;
     for (const auto &[name, port] : schematicPorts) {
         const auto layoutPort = layoutPorts.find(name);
@@ -1306,15 +1649,19 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
                                   "Port '" + port.name + "' is '" + port.direction + "' in the schematic but '" +
                                       layoutPort->second.direction + "' in the layout",
                                   port.object, layoutPort->second.object, VerificationSeverity::warning});
-        const auto schematicNet = normalizedIdentifier(port.net);
-        const auto layoutNet = normalizedIdentifier(layoutPort->second.net);
-        if (!schematicNet.empty() && schematicNet != layoutNet)
-            mismatches.push_back({1, "port-net",
-                                  "Port '" + port.name + "' is connected to net '" + port.net +
-                                      "' in the schematic but '" +
-                                      (layoutPort->second.net.empty() ? "an unassigned pin" : layoutPort->second.net) +
-                                      "' in the layout",
-                                  port.object, layoutPort->second.object, VerificationSeverity::error});
+        const bool schematicGround = isGroundNetName(port.net);
+        const bool layoutGround = isGroundNetName(layoutPort->second.net);
+        if (!port.net.empty()) {
+            const bool mismatch = schematicGround != layoutGround ||
+                                  (!schematicGround && portKey(port.net) != portKey(layoutPort->second.net));
+            if (mismatch)
+                mismatches.push_back(
+                    {1, "port-net",
+                     "Port '" + port.name + "' is connected to net '" + port.net + "' in the schematic but '" +
+                         (layoutPort->second.net.empty() ? "an unassigned pin" : layoutPort->second.net) +
+                         "' in the layout",
+                     port.object, layoutPort->second.object, VerificationSeverity::error});
+        }
     }
     for (const auto &[name, port] : layoutPorts) {
         if (!schematicPorts.contains(name))
@@ -1328,8 +1675,13 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
                  const std::map<ObjectId, std::string> &schematicKeys,
                  const std::map<ObjectId, std::string> &layoutKeys, const std::map<std::string, std::string> &keyNames,
                  std::vector<LvsMismatch> &mismatches) {
-    if (schematic.nets.empty())
+    if (schematic.nets.empty()) {
+        if (!schematic.devices.empty())
+            mismatches.push_back({1, "schematic-netlist",
+                                  "Schematic has devices but no nets; LVS cannot verify connectivity", std::nullopt,
+                                  std::nullopt, VerificationSeverity::error});
         return;
+    }
     if (!layout.hasConnectivity) {
         mismatches.push_back({1, "layout-netlist",
                               "Layout has no planned-connection connectivity; LVS compared devices only", std::nullopt,
@@ -1337,17 +1689,25 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
         return;
     }
 
+    const auto isSignificantNet = [](const LogicalNet &net, const LogicalSide &side) {
+        if (net.devices.size() >= 2)
+            return true;
+        // A single-terminal net still matters for multi-terminal devices; it
+        // is where a swapped or dangling gate/drain/source would hide.
+        return std::any_of(net.devices.begin(), net.devices.end(), [&](ObjectId device) {
+            const auto found = side.devices.find(device);
+            return found != side.devices.end() && found->second.multiTerminal;
+        });
+    };
     std::vector<NetRecord> schematicNets;
     for (const auto &net : schematic.nets) {
-        auto record = netRecord(net, schematicKeys);
-        if (record.signature.size() >= 2)
-            schematicNets.push_back(std::move(record));
+        if (isSignificantNet(net, schematic))
+            schematicNets.push_back(netRecord(net, schematic, schematicKeys));
     }
     std::vector<NetRecord> layoutNets;
     for (const auto &net : layout.side.nets) {
-        auto record = netRecord(net, layoutKeys);
-        if (record.signature.size() >= 2)
-            layoutNets.push_back(std::move(record));
+        if (isSignificantNet(net, layout.side))
+            layoutNets.push_back(netRecord(net, layout.side, layoutKeys));
     }
 
     std::map<NetSignature, int> layoutCounts;

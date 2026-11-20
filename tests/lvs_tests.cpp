@@ -210,6 +210,68 @@ TEST_CASE("LVS compares device parameters from a text SPICE netlist") {
     CHECK(hasCategory(mismatch, "parameter"));
 }
 
+TEST_CASE("LVS resolves numeric SPICE parameter expressions") {
+    ice::Project project;
+    project.identity = "lvs-expression";
+    project.name = "lvs-expression";
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto inNet = ice::createLayoutNet(project, layout, "in");
+    const auto outNet = ice::createLayoutNet(project, layout, "out");
+    auto &layoutCell = project.layoutCells.at(layout);
+    ice::PlannedDevice resistor;
+    resistor.id = project.nextId();
+    resistor.name = "R1";
+    resistor.device = "resistor";
+    resistor.parameters.push_back({project.nextId(), "resistance", "2k"});
+    resistor.terminals = {{"A", inNet}, {"B", outNet}};
+    resistor.placeholder = false;
+    layoutCell.plannedDevices.emplace(resistor.id, resistor);
+
+    const auto schematic =
+        ice::createTextSchematicCell(project, "expression", ice::genericPdkId, ".param BASE=1k\nR1 IN OUT {BASE*2}\n");
+    const auto report = ice::runLvs(project, schematic, layout);
+    CHECK(report.matched());
+    CHECK(!hasCategory(report, "parameter"));
+}
+
+TEST_CASE("LVS distinguishes multi-terminal pin assignments") {
+    ice::Project project;
+    project.identity = "lvs-terminal";
+    project.name = "lvs-terminal";
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto drainNet = ice::createLayoutNet(project, layout, "d");
+    const auto gateNet = ice::createLayoutNet(project, layout, "g");
+    const auto sourceNet = ice::createLayoutNet(project, layout, "s");
+    const auto bulkNet = ice::createLayoutNet(project, layout, "b");
+    auto &layoutCell = project.layoutCells.at(layout);
+    ice::PlannedDevice transistor;
+    transistor.id = project.nextId();
+    transistor.name = "M1";
+    transistor.device = "nmos";
+    transistor.terminals = {{"D", drainNet}, {"G", gateNet}, {"S", sourceNet}, {"B", bulkNet}};
+    transistor.placeholder = false;
+    layoutCell.plannedDevices.emplace(transistor.id, transistor);
+
+    ice::PlannedDevice second;
+    second.id = project.nextId();
+    second.name = "M2";
+    second.device = "nmos";
+    second.terminals = {{"D", drainNet}, {"G", gateNet}, {"S", sourceNet}, {"B", bulkNet}};
+    second.placeholder = false;
+    layoutCell.plannedDevices.emplace(second.id, second);
+
+    const auto schematic =
+        ice::createTextSchematicCell(project, "terminal_top", ice::genericPdkId, "M1 D G S B nmos\nM2 D G S B nmos\n");
+    CHECK(ice::runLvs(project, schematic, layout).matched());
+
+    auto &planned = project.layoutCells.at(layout).plannedDevices.at(transistor.id);
+    std::swap(planned.terminals["D"], planned.terminals["G"]);
+    const auto swapped = ice::runLvs(project, schematic, layout);
+    CHECK(!swapped.matched());
+    CHECK(hasCategory(swapped, "missing-connection"));
+    CHECK(hasCategory(swapped, "extra-connection"));
+}
+
 TEST_CASE("LVS reports schematic parameters missing from the layout") {
     auto fixture = makeFixture();
     for (auto &[_, device] : fixture.project.layoutCells.at(fixture.layout).plannedDevices)
@@ -446,6 +508,56 @@ TEST_CASE("LVS flattens nested text SPICE subcircuit instances") {
     const auto report = ice::runLvs(project, text, layout);
     CHECK(report.matched());
     CHECK(report.mismatches.empty());
+}
+
+TEST_CASE("LVS merges SPICE global nets across subcircuit instances") {
+    ice::Project project;
+    project.identity = "lvs-global";
+    project.name = "lvs-global";
+    const auto layer = ice::addLayer(project, "Metal1", 12);
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto inNet = ice::createLayoutNet(project, layout, "IN");
+    const auto midNet = ice::createLayoutNet(project, layout, "MID");
+    const auto outNet = ice::createLayoutNet(project, layout, "OUT");
+    const auto vddNet = ice::createLayoutNet(project, layout, "VDD");
+    ice::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, ice::PortDirection::input, ice::PortSide::left, inNet,
+                 "IN");
+    ice::addPort(project, layout, "OUT", layer, {900, 0, 100, 100}, ice::PortDirection::output, ice::PortSide::right,
+                 outNet, "OUT");
+    ice::addPort(project, layout, "MID", layer, {450, 0, 100, 100}, ice::PortDirection::inout, ice::PortSide::left,
+                 midNet, "MID");
+    struct Planned {
+        const char *name;
+        const char *value;
+        ice::ObjectId a;
+        ice::ObjectId b;
+    };
+    const Planned planned[] = {{"X1_R1", "1k", inNet, vddNet},
+                               {"X1_R2", "2k", midNet, vddNet},
+                               {"X2_R1", "1k", midNet, vddNet},
+                               {"X2_R2", "2k", outNet, vddNet}};
+    for (const auto &entry : planned) {
+        ice::PlannedDevice device;
+        device.id = project.nextId();
+        device.name = entry.name;
+        device.device = "resistor";
+        device.parameters.push_back({project.nextId(), "resistance", entry.value});
+        device.terminals = {{"A", entry.a}, {"B", entry.b}};
+        device.placeholder = false;
+        project.layoutCells.at(layout).plannedDevices.emplace(device.id, device);
+    }
+    const auto schematic = ice::createTextSchematicCell(project, "top", ice::genericPdkId,
+                                                        ".global VDD\n"
+                                                        ".subckt leaf A B\n"
+                                                        "R1 A VDD 1k\n"
+                                                        "R2 B VDD 2k\n"
+                                                        ".ends leaf\n"
+                                                        ".subckt top IN MID OUT\n"
+                                                        "X1 IN MID leaf\n"
+                                                        "X2 MID OUT leaf\n"
+                                                        ".ends top\n");
+    const auto report = ice::runLvs(project, schematic, layout);
+    CHECK(report.matched());
 }
 
 TEST_CASE("LVS compares SystemVerilog module ports") {
