@@ -332,8 +332,9 @@ inductors. Source values are shown to the right, with sine sources displaying
 amplitude and period. Selecting a symbol highlights its artwork, reference
 label, and value text without drawing a selection rectangle. Hovering over a
 symbol highlights its artwork, and hovering over a net highlights its wires.
-Opening a project opens its first schematic; the create-schematic page is only
-shown for projects that have no schematics at all. The **Hierarchy** and
+Opening a project opens its first schematic and its first layout; the
+create-schematic and create-layout pages are only shown for projects that have
+none at all. The **Hierarchy** and
 **Devices** panel, like the side panel of every workspace tab, sits in a
 splitter that can be dragged shut to give the editor the full width.
 

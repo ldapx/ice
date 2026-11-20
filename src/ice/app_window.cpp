@@ -1368,6 +1368,21 @@ class DocumentWindow : public QMainWindow {
                 activeSchematicId_ = id;
                 break;
             }
+            // Same for layouts: open the first one the Hierarchy shows, which
+            // is a procedural layout when the project has any.
+            if (!project_->project().proceduralLayouts.empty()) {
+                const auto firstProcedural = project_->project().proceduralLayouts.begin()->first;
+                openLayoutTabs_.insert(firstProcedural);
+                activeProceduralLayoutId_ = firstProcedural;
+            } else {
+                for (const auto &[id, cell] : project_->project().layoutCells) {
+                    if (cell.library)
+                        continue;
+                    openLayoutTabs_.insert(id);
+                    activeLayoutId_ = id;
+                    break;
+                }
+            }
         }
         clearLayoutDeviceSelection();
         if (layoutSelectTool_)
@@ -12114,8 +12129,11 @@ class DocumentWindow : public QMainWindow {
     void applyTabOrder(const QStringList &order) {
         if (!documents_ || order.isEmpty())
             return;
-        // Restoring the remembered layout must not look like a user drag.
-        const QSignalBlocker blocker(documents_->tabBar());
+        // QTabWidget keeps its page stack in sync by listening to the tab
+        // bar's tabMoved signal, so the bar's signals must stay unblocked.
+        // Only this window's own persistence handler is skipped while the
+        // remembered layout is restored.
+        restoringTabOrder_ = true;
         int target = 0;
         for (const auto &name : order) {
             for (int index = target; index < documents_->count(); ++index) {
@@ -12127,6 +12145,7 @@ class DocumentWindow : public QMainWindow {
                 break;
             }
         }
+        restoringTabOrder_ = false;
     }
 
     // Applies the tab setting and layout remembered for the open project, or
@@ -12703,20 +12722,24 @@ class DocumentWindow : public QMainWindow {
             layoutEditorStack_->setCurrentWidget(hasOpenLayouts ? layoutEditorPage_ : layoutEmptyPanel_);
             if (!hasOpenLayouts) {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
+                bool layoutsExist = false;
                 if (project_) {
                     for (const auto &[id, layout] : project_->project().proceduralLayouts) {
+                        layoutsExist = true;
                         auto label = fileTabLabel(QString::fromStdString(layout.name), QStringLiteral("py"),
                                                   layoutFileDirty(id), conflictedProceduralFiles_.contains(id));
                         if (ice::proceduralLayoutNeedsRegeneration(layout))
                             label.prepend(QStringLiteral("↻ "));
                         candidates.emplace_back(id, label);
                     }
-                    for (const auto &[id, cell] : project_->project().layoutCells)
+                    for (const auto &[id, cell] : project_->project().layoutCells) {
+                        layoutsExist = true;
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
                                                                  QStringLiteral("icelay"), layoutFileDirty(id),
                                                                  conflictedLayoutFiles_.contains(id)));
+                    }
                 }
-                layoutEmptyPanel_->setOpenCandidates(candidates);
+                layoutEmptyPanel_->setOpenCandidates(candidates, layoutsExist);
                 layoutEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
                 if (!showingEmpty)
                     layoutEmptyPanel_->prepareForDisplay();
@@ -12731,8 +12754,9 @@ class DocumentWindow : public QMainWindow {
         documents->setTabsClosable(false);
         documents->setMovable(movableTabs_);
         connect(documents->tabBar(), &QTabBar::tabMoved, this, [this](int, int) {
-            if (movableTabs_)
-                saveTabOrder(projectPath_, currentTabOrder());
+            if (restoringTabOrder_ || !movableTabs_)
+                return;
+            saveTabOrder(projectPath_, currentTabOrder());
         });
         documents->setIconSize(QSize(16, 16));
         auto *schematicPage = new QWidget;
@@ -15270,6 +15294,7 @@ class DocumentWindow : public QMainWindow {
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
     bool movableTabs_ = false;
     QStringList defaultTabOrder_;
+    bool restoringTabOrder_ = false;
     QAction *movableTabsAction_ = nullptr;
     ice::ShortcutRegistry shortcuts_;
     QList<QAction *> commands_;

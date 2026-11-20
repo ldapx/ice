@@ -3474,12 +3474,30 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(24, 24, 24, 24);
     layout->setSpacing(12);
 
-    layout->addWidget(heading(QStringLiteral("Create a layout")));
+    heading_ = heading(QStringLiteral("Create a layout"));
+    layout->addWidget(heading_);
     description_ =
         new QLabel(QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);
+
+    openSection_ = new QWidget;
+    auto *openSectionLayout = new QHBoxLayout(openSection_);
+    openSectionLayout->setContentsMargins(0, 0, 0, 0);
+    open_ = new QComboBox;
+    open_->setAccessibleName(QStringLiteral("Open layout"));
+    openSectionLayout->addWidget(open_, 1);
+    auto *openButton = new QPushButton(QStringLiteral("Open"));
+    openSectionLayout->addWidget(openButton);
+    layout->addWidget(openSection_);
+
+    // Creating a layout is only offered for projects that have none; the whole
+    // section is hidden otherwise.
+    createSection_ = new QWidget;
+    auto *createLayout = new QVBoxLayout(createSection_);
+    createLayout->setContentsMargins(0, 0, 0, 0);
+    createLayout->setSpacing(12);
 
     auto *kindRow = new QHBoxLayout;
     kindRow->setSpacing(10);
@@ -3499,25 +3517,15 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Create a static layout cell and draw geometry on the canvas."));
     addKind(Kind::ProceduralLayout, QStringLiteral("Procedural Layout"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a layout from an editable procedural Python script."));
-    layout->addLayout(kindRow, 2);
+    createLayout->addLayout(kindRow, 2);
 
     kindDescription_ = new QLabel;
     kindDescription_->setWordWrap(true);
     kindDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    layout->addWidget(kindDescription_);
+    createLayout->addWidget(kindDescription_);
 
     auto *detailsCard = new QGroupBox(QStringLiteral("Details"));
     auto *detailsLayout = new QVBoxLayout(detailsCard);
-
-    openSection_ = new QWidget;
-    auto *openSectionLayout = new QHBoxLayout(openSection_);
-    openSectionLayout->setContentsMargins(0, 0, 0, 0);
-    open_ = new QComboBox;
-    open_->setAccessibleName(QStringLiteral("Open layout"));
-    openSectionLayout->addWidget(open_, 1);
-    auto *openButton = new QPushButton(QStringLiteral("Open"));
-    openSectionLayout->addWidget(openButton);
-    detailsLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("Layout01"));
@@ -3538,7 +3546,8 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     createButton_->setDefault(true);
     buttonRow->addWidget(createButton_);
     detailsLayout->addLayout(buttonRow);
-    layout->addWidget(detailsCard, 0);
+    createLayout->addWidget(detailsCard, 0);
+    layout->addWidget(createSection_, 1);
 
     refreshPdks(configuredPackageInstallDirectory());
     setOpenCandidates({});
@@ -3583,19 +3592,28 @@ void EmptyLayoutPanel::setOnCreate(CreateCallback callback) { onCreate_ = std::m
 
 void EmptyLayoutPanel::setOnOpen(OpenCallback callback) { onOpen_ = std::move(callback); }
 
-void EmptyLayoutPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates) {
+void EmptyLayoutPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates,
+                                         bool layoutsExist) {
     const QSignalBlocker blocker(open_);
     open_->clear();
     for (const auto &[id, name] : candidates)
         open_->addItem(name, QVariant::fromValue<qulonglong>(id));
     const bool hasCandidates = !candidates.empty();
     openSection_->setVisible(hasCandidates);
-    if (description_)
-        description_->setText(hasCandidates
-                                  ? QStringLiteral("All layout files are closed. Open an existing file or choose a "
-                                                   "layout type below to create a new one.")
-                                  : QStringLiteral("This project has no layout cells yet. Choose a layout type "
-                                                   "below to start."));
+    if (createSection_)
+        createSection_->setVisible(!layoutsExist);
+    if (heading_)
+        heading_->setText(layoutsExist ? QStringLiteral("Open a layout") : QStringLiteral("Create a layout"));
+    if (!description_)
+        return;
+    if (!layoutsExist)
+        description_->setText(
+            QStringLiteral("This project has no layout cells yet. Choose a layout type below to start."));
+    else if (hasCandidates)
+        description_->setText(QStringLiteral("All layout files are closed. Open an existing layout, or select one "
+                                             "in the Hierarchy."));
+    else
+        description_->setText(QStringLiteral("This project has layouts. Select one in the Hierarchy to open it."));
 }
 
 void EmptyLayoutPanel::refreshPdks(const std::filesystem::path &installDirectory) {
