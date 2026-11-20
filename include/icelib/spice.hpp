@@ -2,6 +2,7 @@
 
 #include "icelib/core.hpp"
 
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -43,8 +44,8 @@ struct SpiceSubcircuit {
 };
 
 // A parsed SPICE source file. Includes and libraries are retained in the AST
-// for diagnostics and future file resolution; the importer never executes or
-// follows them implicitly.
+// for diagnostics. parseSpiceDocument() leaves directives untouched;
+// parseSpiceDocumentResolved() follows them relative to a known source path.
 struct SpiceDocument {
     std::string title;
     std::vector<std::string> includes;
@@ -57,6 +58,20 @@ struct SpiceDocument {
 };
 
 SpiceDocument parseSpiceDocument(const std::string &source);
+
+// Parses a SPICE source and recursively inlines `.include`, `.inc`, and `.lib`
+// files relative to `sourcePath`. Missing files, include cycles, and missing
+// library sections are reported in `warnings` and the original directive is
+// preserved so diagnostics still point at the source line.
+SpiceDocument parseSpiceDocumentResolved(const std::string &source, const std::filesystem::path &sourcePath,
+                                         std::vector<std::string> *warnings = nullptr);
+
+// Rewrites relative include/library paths to absolute paths so an emitted
+// netlist is independent of the process working directory. It does not inline
+// file contents, which keeps model files shared by several blocks from being
+// duplicated. Missing files are left unchanged and reported in `warnings`.
+std::string rewriteSpiceIncludePaths(const std::string &source, const std::filesystem::path &sourcePath,
+                                     std::vector<std::string> *warnings = nullptr);
 
 // Finds a subcircuit by case-insensitive name. Returns nullptr when absent.
 const SpiceSubcircuit *findSpiceSubcircuit(const SpiceDocument &document, const std::string &name);
@@ -92,7 +107,8 @@ struct SpiceInterface {
 
 // Parses the interface of a text SPICE cell. `preferredName` should be the
 // schematic cell name.
-SpiceInterface spiceInterfaceForText(const std::string &source, const std::string &preferredName);
+SpiceInterface spiceInterfaceForText(const std::string &source, const std::string &preferredName,
+                                     const std::filesystem::path &sourcePath = {});
 SpiceInterface spiceInterfaceForCell(const SchematicCell &cell);
 
 // Box-symbol pins for a parsed SPICE subcircuit. Pin IDs are zero.
@@ -101,7 +117,10 @@ std::vector<Pin> spiceSubcircuitPins(const SpiceInterface &interface);
 // Returns the source lines that belong in a parent netlist when this text cell
 // is instantiated as a hierarchical block. Analysis-control directives and a
 // trailing .end are removed; subcircuits, models, includes, parameters, and
-// comments are preserved.
-std::vector<std::string> spiceSourceLinesForHierarchy(const std::string &source);
+// comments are preserved. Relative include/library paths are rewritten to
+// absolute paths when sourcePath is provided.
+std::vector<std::string> spiceSourceLinesForHierarchy(const std::string &source,
+                                                      const std::filesystem::path &sourcePath = {},
+                                                      std::vector<std::string> *warnings = nullptr);
 
 } // namespace ice

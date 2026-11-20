@@ -662,6 +662,29 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
             processOptions.arguments.push_back(argument);
     }
     result.process = runProcess(processOptions, cancellation, onOutput);
+    if (!result.process.started || result.process.cancelled || result.process.timedOut || result.process.signal != 0 ||
+        result.process.exitCode < 0) {
+        std::ostringstream message;
+        message << (result.engine == "klayout" ? "klayout" : "gdscheck") << " DRC ";
+        if (result.process.cancelled)
+            message << "was cancelled";
+        else if (result.process.timedOut)
+            message << "timed out";
+        else if (!result.process.started)
+            message << "did not start";
+        else if (result.process.signal != 0)
+            message << "terminated on signal " << result.process.signal;
+        else
+            message << "failed";
+        if (result.process.exitCode >= 0)
+            message << " (exit " << result.process.exitCode << ")";
+        if (!result.process.error.empty())
+            message << ": " << result.process.error;
+        if (!result.process.logTail.empty())
+            message << ": " << result.process.logTail;
+        result.error = message.str();
+        return result;
+    }
 
     if (!std::filesystem::is_regular_file(result.reportPath, status) || status) {
         std::ostringstream message;
@@ -683,6 +706,15 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
         result.error = error.what();
         return result;
     }
+    if (result.process.exitCode != 0 && result.report.drc.empty()) {
+        std::ostringstream message;
+        message << (result.engine == "klayout" ? "klayout" : "gdscheck") << " exited with status "
+                << result.process.exitCode << " but produced no DRC violations";
+        if (!result.process.logTail.empty())
+            message << ": " << result.process.logTail;
+        result.error = message.str();
+        return result;
+    }
     result.ok = true;
     return result;
 }
@@ -696,7 +728,9 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
     int categoriesDepth = 0;
     bool inItem = false;
     bool sawReport = false;
+    bool sawReportEnd = false;
     bool sawItems = false;
+    bool sawItemsEnd = false;
 
     std::string itemCategory;
     std::string itemCell;
@@ -787,6 +821,10 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
                 stack.push_back(event.name);
             if (event.selfClosing) {
                 // Treat self-closing elements as an immediate end event.
+                if (event.name == "report-database")
+                    sawReportEnd = true;
+                else if (event.name == "items")
+                    sawItemsEnd = true;
                 if (event.name == "category" && categoriesDepth > 0 && !categoryFrames.empty()) {
                     std::string path;
                     for (const auto &frame : categoryFrames) {
@@ -861,6 +899,10 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
                 --categoriesDepth;
             } else if (event.name == "item") {
                 finishItem();
+            } else if (event.name == "items") {
+                sawItemsEnd = true;
+            } else if (event.name == "report-database") {
+                sawReportEnd = true;
             }
             if (!stack.empty())
                 stack.pop_back();
@@ -868,6 +910,9 @@ VerificationReport parseGdsCheckLyrdbText(const std::string &text) {
     }
     if (!sawReport || !sawItems)
         throw ProjectError("drc.lyrdb", "The report is not a KLayout report database");
+    if (!sawReportEnd || !sawItemsEnd)
+        throw ProjectError("drc.lyrdb",
+                           "The report database is truncated; expected closing items/report-database tags");
     return report;
 }
 

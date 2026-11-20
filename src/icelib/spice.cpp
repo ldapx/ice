@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
+#include <set>
 #include <sstream>
 
 namespace ice {
@@ -313,6 +316,186 @@ std::size_t firstAssignment(const std::vector<std::string> &tokens, std::size_t 
     return tokens.size();
 }
 
+std::string unquoteSpiceToken(std::string token) {
+    token = trimCopy(std::move(token));
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+        token = token.substr(1, token.size() - 2);
+    return token;
+}
+
+std::string quoteSpiceToken(const std::string &token) {
+    if (token.find_first_of(" \t") == std::string::npos)
+        return token;
+    return "\"" + token + "\"";
+}
+
+std::filesystem::path resolveSpiceIncludePath(const std::string &raw, const std::filesystem::path &sourcePath) {
+    const auto value = unquoteSpiceToken(raw);
+    if (value.empty())
+        return {};
+    std::filesystem::path requested(value);
+    std::error_code status;
+    if (requested.is_absolute()) {
+        if (std::filesystem::is_regular_file(requested, status) && !status)
+            return std::filesystem::weakly_canonical(requested, status);
+        return {};
+    }
+
+    auto base = sourcePath;
+    if (!base.empty()) {
+        if (!std::filesystem::is_directory(base, status) || status)
+            base = base.parent_path();
+        status.clear();
+        const auto candidate = base / requested;
+        if (std::filesystem::is_regular_file(candidate, status) && !status)
+            return std::filesystem::weakly_canonical(candidate, status);
+    }
+    status.clear();
+    const auto candidate = std::filesystem::current_path(status) / requested;
+    if (!status && std::filesystem::is_regular_file(candidate, status) && !status)
+        return std::filesystem::weakly_canonical(candidate, status);
+    return {};
+}
+
+std::optional<std::string> readSpiceFile(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        return std::nullopt;
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+}
+
+std::string extractSpiceLibSection(const std::string &source, const std::string &section) {
+    const auto wanted = lowerCopy(unquoteSpiceToken(section));
+    std::ostringstream output;
+    std::istringstream stream(source);
+    std::string line;
+    bool inSection = false;
+    int depth = 0;
+    while (std::getline(stream, line)) {
+        const auto trimmed = trimCopy(stripInlineComment(line));
+        const auto tokens = splitTokens(trimmed);
+        if (!tokens.empty()) {
+            const auto directive = lowerCopy(tokens.front());
+            if (directive == ".lib" && tokens.size() >= 2) {
+                if (!inSection) {
+                    if (lowerCopy(unquoteSpiceToken(tokens[1])) == wanted) {
+                        inSection = true;
+                        depth = 1;
+                    }
+                } else {
+                    ++depth;
+                    output << line << "\n";
+                }
+                continue;
+            }
+            if (directive == ".endl" && inSection) {
+                --depth;
+                if (depth == 0)
+                    break;
+                output << line << "\n";
+                continue;
+            }
+        }
+        if (inSection)
+            output << line << "\n";
+    }
+    return inSection ? output.str() : std::string{};
+}
+
+std::string inlineSpiceSource(const std::string &source, const std::filesystem::path &sourcePath,
+                              std::set<std::filesystem::path> &stack, int depth, std::vector<std::string> *warnings) {
+    if (depth > 32) {
+        if (warnings)
+            warnings->push_back("SPICE include nesting exceeds 32 levels; remaining includes were left unresolved");
+        return source;
+    }
+    std::ostringstream output;
+    std::istringstream stream(source);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto trimmed = trimCopy(stripInlineComment(line));
+        const auto tokens = splitTokens(trimmed);
+        if (!tokens.empty()) {
+            const auto directive = lowerCopy(tokens.front());
+            if ((directive == ".include" || directive == ".inc" || directive == ".lib") && tokens.size() >= 2) {
+                const auto resolved = resolveSpiceIncludePath(tokens[1], sourcePath);
+                if (resolved.empty()) {
+                    if (warnings)
+                        warnings->push_back("SPICE include file not found: " + unquoteSpiceToken(tokens[1]));
+                    output << line << "\n";
+                    continue;
+                }
+                if (stack.contains(resolved)) {
+                    if (warnings)
+                        warnings->push_back("SPICE include cycle skipped: " + resolved.string());
+                    output << line << "\n";
+                    continue;
+                }
+                auto contents = readSpiceFile(resolved);
+                if (!contents) {
+                    if (warnings)
+                        warnings->push_back("Unable to read SPICE include file: " + resolved.string());
+                    output << line << "\n";
+                    continue;
+                }
+                auto body = std::move(*contents);
+                if (directive == ".lib" && tokens.size() >= 3) {
+                    const auto section = unquoteSpiceToken(tokens[2]);
+                    auto extracted = extractSpiceLibSection(body, section);
+                    if (extracted.empty()) {
+                        if (warnings)
+                            warnings->push_back("SPICE library section '" + section + "' not found in " +
+                                                resolved.string());
+                        output << line << "\n";
+                        continue;
+                    }
+                    body = std::move(extracted);
+                }
+                stack.insert(resolved);
+                output << "* ICE include begin: " << resolved.string() << "\n";
+                output << inlineSpiceSource(body, resolved, stack, depth + 1, warnings);
+                if (!body.empty() && body.back() != '\n')
+                    output << "\n";
+                output << "* ICE include end: " << resolved.string() << "\n";
+                stack.erase(resolved);
+                continue;
+            }
+        }
+        output << line << "\n";
+    }
+    return output.str();
+}
+
+std::string rewriteSpiceIncludes(const std::string &source, const std::filesystem::path &sourcePath,
+                                 std::vector<std::string> *warnings) {
+    std::ostringstream output;
+    std::istringstream stream(source);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto trimmed = trimCopy(stripInlineComment(line));
+        const auto tokens = splitTokens(trimmed);
+        if (!tokens.empty()) {
+            const auto directive = lowerCopy(tokens.front());
+            if ((directive == ".include" || directive == ".inc" || directive == ".lib") && tokens.size() >= 2) {
+                const auto resolved = resolveSpiceIncludePath(tokens[1], sourcePath);
+                if (!resolved.empty()) {
+                    output << tokens.front() << " " << quoteSpiceToken(resolved.string());
+                    for (std::size_t index = 2; index < tokens.size(); ++index)
+                        output << " " << tokens[index];
+                    output << "\n";
+                    continue;
+                }
+                if (warnings)
+                    warnings->push_back("SPICE include file not found: " + unquoteSpiceToken(tokens[1]));
+            }
+        }
+        output << line << "\n";
+    }
+    return output.str();
+}
+
 SpiceElement parseElement(const LogicalLine &logical, SpiceDocument &document) {
     SpiceElement element;
     element.line = logical.line;
@@ -587,6 +770,25 @@ SpiceDocument parseSpiceDocument(const std::string &source) {
     return document;
 }
 
+SpiceDocument parseSpiceDocumentResolved(const std::string &source, const std::filesystem::path &sourcePath,
+                                         std::vector<std::string> *warnings) {
+    std::set<std::filesystem::path> stack;
+    if (!sourcePath.empty()) {
+        std::error_code status;
+        if (std::filesystem::is_regular_file(sourcePath, status) && !status) {
+            const auto canonical = std::filesystem::weakly_canonical(sourcePath, status);
+            if (!status)
+                stack.insert(canonical);
+        }
+    }
+    return parseSpiceDocument(inlineSpiceSource(source, sourcePath, stack, 0, warnings));
+}
+
+std::string rewriteSpiceIncludePaths(const std::string &source, const std::filesystem::path &sourcePath,
+                                     std::vector<std::string> *warnings) {
+    return rewriteSpiceIncludes(source, sourcePath, warnings);
+}
+
 const SpiceSubcircuit *findSpiceSubcircuit(const SpiceDocument &document, const std::string &name) {
     const auto target = lowerCopy(name);
     for (const auto &subcircuit : document.subcircuits) {
@@ -705,10 +907,14 @@ std::map<std::string, std::string> spiceElementParameters(const SpiceElement &el
     return parameters;
 }
 
-SpiceInterface spiceInterfaceForText(const std::string &source, const std::string &preferredName) {
+SpiceInterface spiceInterfaceForText(const std::string &source, const std::string &preferredName,
+                                     const std::filesystem::path &sourcePath) {
     SpiceInterface interface;
-    auto document = parseSpiceDocument(source);
-    interface.warnings = document.warnings;
+    std::vector<std::string> includeWarnings;
+    auto document = sourcePath.empty() ? parseSpiceDocument(source)
+                                       : parseSpiceDocumentResolved(source, sourcePath, &includeWarnings);
+    interface.warnings = std::move(includeWarnings);
+    interface.warnings.insert(interface.warnings.end(), document.warnings.begin(), document.warnings.end());
     std::string error;
     const auto *subcircuit = preferredSpiceSubcircuit(document, preferredName, &error);
     if (!subcircuit) {
@@ -729,7 +935,7 @@ SpiceInterface spiceInterfaceForText(const std::string &source, const std::strin
 SpiceInterface spiceInterfaceForCell(const SchematicCell &cell) {
     if (!cell.textSchematic)
         return {false, "Schematic cell is not a text SPICE cell", {}, {}, {}, {}, {}};
-    return spiceInterfaceForText(cell.spiceText, cell.name);
+    return spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
 }
 
 std::vector<Pin> spiceSubcircuitPins(const SpiceInterface &interface) {
@@ -745,9 +951,12 @@ std::vector<Pin> spiceSubcircuitPins(const SpiceInterface &interface) {
     return pins;
 }
 
-std::vector<std::string> spiceSourceLinesForHierarchy(const std::string &source) {
+std::vector<std::string> spiceSourceLinesForHierarchy(const std::string &source,
+                                                      const std::filesystem::path &sourcePath,
+                                                      std::vector<std::string> *warnings) {
+    const auto rewritten = sourcePath.empty() ? source : rewriteSpiceIncludes(source, sourcePath, warnings);
     std::vector<std::string> lines;
-    for (const auto &logical : logicalLines(source)) {
+    for (const auto &logical : logicalLines(rewritten)) {
         if (logical.text.empty() || logical.text.front() != '.') {
             lines.push_back(logical.text);
             continue;

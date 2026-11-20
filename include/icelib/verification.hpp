@@ -35,9 +35,11 @@ struct LvsOptions {
 };
 
 // Result of comparing a schematic cell against a layout cell. Drawn, text SPICE,
-// and SystemVerilog source schematics are supported. Layout connectivity is
-// taken from planned-device connections; device identity is matched through
-// planned-device schematic links first and reference names second.
+// and structural SystemVerilog source schematics are supported. Layout
+// connectivity combines planned connections and terminal metadata with
+// geometry-derived nets (shapes, routed paths, vias, and placed-device port
+// overlaps). Device identity is matched through schematic links, names, and a
+// topology fallback after multiplicity expansion.
 struct LvsReport {
     int schemaVersion = 1;
     std::string schematic;

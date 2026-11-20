@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -19,6 +20,7 @@ struct ObjectRecord {
     ObjectId layer = 0;
     ObjectId net = 0;
     Rect rectangle;
+    Polygon polygon;
     bool viaLayer = false;
     // Electrical layer identity. A purpose variant of a drawing layer (for
     // example Metal1.pin) connects to the drawing layer it belongs to, while
@@ -239,6 +241,130 @@ std::vector<LayoutPoint> toLayoutPoints(const Polygon &polygon) {
     return points;
 }
 
+Polygon rectanglePolygon(const Rect &rectangle) {
+    if (!rectangle.valid())
+        return {};
+    return {{rectangle.x, rectangle.y},
+            {rectangle.x + rectangle.width, rectangle.y},
+            {rectangle.x + rectangle.width, rectangle.y + rectangle.height},
+            {rectangle.x, rectangle.y + rectangle.height}};
+}
+
+bool overlapsOrTouches(const Rect &left, const Rect &right);
+
+Rect polygonRectangle(const Polygon &polygon) {
+    if (polygon.empty())
+        return {};
+    auto minX = polygon.front().x;
+    auto minY = polygon.front().y;
+    auto maxX = minX;
+    auto maxY = minY;
+    for (const auto &point : polygon) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    if (maxX <= minX || maxY <= minY)
+        return {};
+    return {minX, minY, maxX - minX, maxY - minY};
+}
+
+__int128 orientation(const Point &a, const Point &b, const Point &c) {
+    return static_cast<__int128>(b.x - a.x) * static_cast<__int128>(c.y - a.y) -
+           static_cast<__int128>(b.y - a.y) * static_cast<__int128>(c.x - a.x);
+}
+
+bool pointOnSegment(const Point &a, const Point &b, const Point &point) {
+    if (orientation(a, b, point) != 0)
+        return false;
+    return point.x >= std::min(a.x, b.x) && point.x <= std::max(a.x, b.x) && point.y >= std::min(a.y, b.y) &&
+           point.y <= std::max(a.y, b.y);
+}
+
+bool segmentsIntersect(const Point &a, const Point &b, const Point &c, const Point &d) {
+    const auto first = orientation(a, b, c);
+    const auto second = orientation(a, b, d);
+    const auto third = orientation(c, d, a);
+    const auto fourth = orientation(c, d, b);
+    if (((first > 0 && second < 0) || (first < 0 && second > 0)) &&
+        ((third > 0 && fourth < 0) || (third < 0 && fourth > 0)))
+        return true;
+    if (first == 0 && pointOnSegment(a, b, c))
+        return true;
+    if (second == 0 && pointOnSegment(a, b, d))
+        return true;
+    if (third == 0 && pointOnSegment(c, d, a))
+        return true;
+    if (fourth == 0 && pointOnSegment(c, d, b))
+        return true;
+    return false;
+}
+
+bool pointInPolygon(const Point &point, const Polygon &polygon) {
+    if (polygon.size() < 3)
+        return false;
+    bool inside = false;
+    for (std::size_t index = 0, previous = polygon.size() - 1; index < polygon.size(); previous = index++) {
+        const auto &a = polygon[previous];
+        const auto &b = polygon[index];
+        if (pointOnSegment(a, b, point))
+            return true;
+        const bool crosses = (a.y > point.y) != (b.y > point.y);
+        if (!crosses)
+            continue;
+        const auto x = static_cast<long double>(b.x - a.x) * static_cast<long double>(point.y - a.y) /
+                           static_cast<long double>(b.y - a.y) +
+                       static_cast<long double>(a.x);
+        if (static_cast<long double>(point.x) < x)
+            inside = !inside;
+    }
+    return inside;
+}
+
+bool polygonsTouchOrOverlap(const Polygon &left, const Polygon &right) {
+    if (left.size() < 3 || right.size() < 3)
+        return false;
+    const auto leftBounds = polygonRectangle(left);
+    const auto rightBounds = polygonRectangle(right);
+    if (!overlapsOrTouches(leftBounds, rightBounds))
+        return false;
+    for (std::size_t leftIndex = 0; leftIndex < left.size(); ++leftIndex) {
+        const auto &leftStart = left[leftIndex];
+        const auto &leftEnd = left[(leftIndex + 1) % left.size()];
+        for (std::size_t rightIndex = 0; rightIndex < right.size(); ++rightIndex) {
+            const auto &rightStart = right[rightIndex];
+            const auto &rightEnd = right[(rightIndex + 1) % right.size()];
+            if (segmentsIntersect(leftStart, leftEnd, rightStart, rightEnd))
+                return true;
+        }
+    }
+    return pointInPolygon(left.front(), right) || pointInPolygon(right.front(), left);
+}
+
+Polygon pathSegmentPolygon(const LayoutPoint &start, const LayoutPoint &end, Coordinate width) {
+    const auto half = std::max<Coordinate>(1, width) / 2.0;
+    const auto dx = static_cast<double>(end.x - start.x);
+    const auto dy = static_cast<double>(end.y - start.y);
+    const auto length = std::hypot(dx, dy);
+    if (length <= 0.0) {
+        return {{static_cast<Coordinate>(std::llround(start.x - half)),
+                 static_cast<Coordinate>(std::llround(start.y - half))},
+                {static_cast<Coordinate>(std::llround(start.x + half)),
+                 static_cast<Coordinate>(std::llround(start.y - half))},
+                {static_cast<Coordinate>(std::llround(start.x + half)),
+                 static_cast<Coordinate>(std::llround(start.y + half))},
+                {static_cast<Coordinate>(std::llround(start.x - half)),
+                 static_cast<Coordinate>(std::llround(start.y + half))}};
+    }
+    const auto nx = -dy / length * half;
+    const auto ny = dx / length * half;
+    return {{static_cast<Coordinate>(std::llround(start.x + nx)), static_cast<Coordinate>(std::llround(start.y + ny))},
+            {static_cast<Coordinate>(std::llround(end.x + nx)), static_cast<Coordinate>(std::llround(end.y + ny))},
+            {static_cast<Coordinate>(std::llround(end.x - nx)), static_cast<Coordinate>(std::llround(end.y - ny))},
+            {static_cast<Coordinate>(std::llround(start.x - nx)), static_cast<Coordinate>(std::llround(start.y - ny))}};
+}
+
 // The active area under a gate is a channel, not a conductor. Split active
 // shapes around the gate so source and drain do not appear shorted in the
 // connectivity graph. This is a no-op after a PDK-aware device split.
@@ -388,34 +514,96 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
         return false;
     };
 
+    const auto makeObject = [&](ObjectRecord::Kind kind, ObjectId id, ObjectId layerId, ObjectId net,
+                                const Polygon &polygon, bool explicitVia) -> std::optional<ObjectRecord> {
+        if (polygon.size() < 3)
+            return std::nullopt;
+        const auto layer = project.layers.find(layerId);
+        if (layer != project.layers.end() && isNonConductingLayer(layer->second.name, connectivity))
+            return std::nullopt;
+        ObjectRecord object;
+        object.kind = kind;
+        object.id = id;
+        object.layer = layerId;
+        object.net = net;
+        object.polygon = polygon;
+        object.rectangle = polygonRectangle(polygon);
+        if (!object.rectangle.valid())
+            return std::nullopt;
+        object.viaLayer =
+            explicitVia || (layer != project.layers.end() && isConnectLayer(layer->second.name, connectivity));
+        const auto layerName = layer == project.layers.end() ? std::string{} : layer->second.name;
+        object.connectKey = layer == project.layers.end() ? "missing:" + std::to_string(layerId)
+                                                          : layoutLayerConnectivityKey(layer->second);
+        object.base = baseFromLayerName(layerName);
+        return object;
+    };
+
     std::vector<ObjectRecord> objects;
     objects.reserve(effectiveShapes.size() + cell->second.ports.size());
     for (const auto &[id, shape] : effectiveShapes) {
-        if (shape.isText() || !shape.rectangle.valid())
+        if (shape.isText())
+            continue;
+        bool added = false;
+        if (shape.isPath()) {
+            const auto segmentCount = shape.centerline.size() - 1;
+            for (std::size_t index = 0; index < segmentCount; ++index) {
+                const auto layerId = shape.layerForSegment(index);
+                auto width = shape.widthForSegment(index);
+                if (width <= 0)
+                    width = shape.width;
+                if (width <= 0) {
+                    const auto layer = project.layers.find(layerId);
+                    width = layer == project.layers.end() ? 1 : std::max<Coordinate>(1, layer->second.minimumWidth);
+                }
+                const auto polygon = pathSegmentPolygon(shape.centerline[index], shape.centerline[index + 1], width);
+                const auto rectangle = polygonRectangle(polygon);
+                const auto layer = project.layers.find(layerId);
+                if (layer != project.layers.end() && isResistorBody(layer->second, rectangle))
+                    continue;
+                if (auto object =
+                        makeObject(ObjectRecord::Kind::shape, id, layerId, shape.net.value_or(0), polygon, false)) {
+                    objects.push_back(std::move(*object));
+                    added = true;
+                }
+            }
+            for (std::size_t index = 0; index < shape.pointVias.size() && index < shape.centerline.size(); ++index) {
+                for (const auto viaLayer : shape.pointVias[index]) {
+                    auto width = shape.width;
+                    if (index < segmentCount)
+                        width = std::max(width, shape.widthForSegment(index));
+                    if (index > 0)
+                        width = std::max(width, shape.widthForSegment(index - 1));
+                    if (width <= 0) {
+                        const auto layer = project.layers.find(viaLayer);
+                        width = layer == project.layers.end() ? 1 : std::max<Coordinate>(1, layer->second.minimumWidth);
+                    }
+                    const auto polygon = pathSegmentPolygon(shape.centerline[index], shape.centerline[index], width);
+                    if (auto object =
+                            makeObject(ObjectRecord::Kind::shape, id, viaLayer, shape.net.value_or(0), polygon, true)) {
+                        objects.push_back(std::move(*object));
+                        added = true;
+                    }
+                }
+            }
+        }
+        if (added)
+            continue;
+        auto polygon = shapePolygon(shape);
+        if (polygon.size() < 3)
             continue;
         const auto layer = project.layers.find(shape.layer);
-        if (layer != project.layers.end() &&
-            (isNonConductingLayer(layer->second.name, connectivity) || isResistorBody(layer->second, shape.rectangle)))
+        if (layer != project.layers.end() && isResistorBody(layer->second, shape.rectangle))
             continue;
-        const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name, connectivity);
-        const auto layerName = layer == project.layers.end() ? std::string{} : layer->second.name;
-        const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(shape.layer)
-                                                              : layoutLayerConnectivityKey(layer->second);
-        objects.push_back({ObjectRecord::Kind::shape, id, shape.layer, shape.net.value_or(0), shape.rectangle, viaLayer,
-                           connectKey, baseFromLayerName(layerName)});
+        if (auto object = makeObject(ObjectRecord::Kind::shape, id, shape.layer, shape.net.value_or(0), polygon, false))
+            objects.push_back(std::move(*object));
     }
     for (const auto &[id, port] : cell->second.ports) {
         if (!port.visible)
             continue;
-        const auto layer = project.layers.find(port.layer);
-        if (layer != project.layers.end() && isNonConductingLayer(layer->second.name, connectivity))
-            continue;
-        const auto viaLayer = layer != project.layers.end() && isConnectLayer(layer->second.name, connectivity);
-        const auto layerName = layer == project.layers.end() ? std::string{} : layer->second.name;
-        const auto connectKey = layer == project.layers.end() ? "missing:" + std::to_string(port.layer)
-                                                              : layoutLayerConnectivityKey(layer->second);
-        objects.push_back({ObjectRecord::Kind::port, id, port.layer, port.net, port.rectangle, viaLayer, connectKey,
-                           baseFromLayerName(layerName)});
+        const auto polygon = rectanglePolygon(port.rectangle);
+        if (auto object = makeObject(ObjectRecord::Kind::port, id, port.layer, port.net, polygon, false))
+            objects.push_back(std::move(*object));
     }
 
     std::vector<std::size_t> parents(objects.size());
@@ -453,7 +641,7 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
                 continue;
             if (objects[left].net != 0 && objects[right].net != 0 && objects[left].net != objects[right].net)
                 continue;
-            if (overlapsOrTouches(objects[left].rectangle, objects[right].rectangle))
+            if (polygonsTouchOrOverlap(objects[left].polygon, objects[right].polygon))
                 unite(parents, left, right);
         }
     }
@@ -464,10 +652,12 @@ std::vector<LayoutNetGroup> extractLayoutNets(const Project &project, ObjectId c
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const auto root = findRoot(parents, index);
         auto &group = groups[root];
-        if (objects[index].kind == ObjectRecord::Kind::shape)
-            group.shapes.push_back(objects[index].id);
-        else
+        if (objects[index].kind == ObjectRecord::Kind::shape) {
+            if (std::find(group.shapes.begin(), group.shapes.end(), objects[index].id) == group.shapes.end())
+                group.shapes.push_back(objects[index].id);
+        } else {
             group.ports.push_back(objects[index].id);
+        }
         if (objects[index].net != 0) {
             if (groupNets[root] == 0)
                 groupNets[root] = objects[index].net;

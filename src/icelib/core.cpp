@@ -440,6 +440,8 @@ std::string Project::serialize() const {
             c["text_schematic"] = true;
         if (!cell.spiceText.empty())
             c["spice_text"] = cell.spiceText;
+        if (!cell.spiceSourcePath.empty())
+            c["spice_source_path"] = cell.spiceSourcePath;
         if (cell.systemVerilogSchematic)
             c["systemverilog"] = true;
         if (!cell.systemVerilogText.empty())
@@ -958,6 +960,7 @@ Project Project::deserialize(const std::string &text) {
                 cell.pdk = genericPdkId;
             cell.textSchematic = c.value("text_schematic", false);
             cell.spiceText = c.value("spice_text", std::string{});
+            cell.spiceSourcePath = c.value("spice_source_path", std::string{});
             cell.systemVerilogSchematic = c.value("systemverilog", false);
             cell.systemVerilogText = c.value("systemverilog_text", std::string{});
             if (c.contains("parameters")) {

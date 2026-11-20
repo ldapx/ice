@@ -10319,6 +10319,24 @@ class DocumentWindow : public QMainWindow {
         if (reportExists) {
             try {
                 const auto report = ice::parseGdsCheckLyrdb(drcReportPath_.toStdString());
+                const auto violations = report.drc.size();
+                if ((status != QProcess::NormalExit || exitCode != 0) && violations == 0) {
+                    auto details = drcLog_.trimmed();
+                    if (details.size() > 2000)
+                        details = details.right(2000);
+                    const auto message = QStringLiteral("DRC failed (exit code %1): %2")
+                                             .arg(exitCode)
+                                             .arg(details.isEmpty() ? QStringLiteral("the report was empty") : details);
+                    drcReportFromPhysicalPreview_ = false;
+                    if (activityPanel_)
+                        activityPanel_->setDrcError(message);
+                    if (activityDock_)
+                        activityDock_->show();
+                    if (activityPanel_)
+                        activityPanel_->showDrcTab();
+                    statusBar()->showMessage(QStringLiteral("DRC failed"));
+                    return;
+                }
                 drcReportFromPhysicalPreview_ = false;
                 if (activityPanel_)
                     activityPanel_->setDrcReport(report, drcReportPath_);
@@ -10326,10 +10344,13 @@ class DocumentWindow : public QMainWindow {
                     activityDock_->show();
                 if (activityPanel_)
                     activityPanel_->showDrcTab();
-                const auto violations = report.drc.size();
-                statusBar()->showMessage(violations == 0
-                                             ? QStringLiteral("DRC finished: no violations")
-                                             : QStringLiteral("DRC finished: %1 violation(s)").arg(violations));
+                if (status != QProcess::NormalExit || exitCode != 0)
+                    statusBar()->showMessage(
+                        QStringLiteral("DRC finished: %1 violation(s); tool exit %2").arg(violations).arg(exitCode));
+                else
+                    statusBar()->showMessage(violations == 0
+                                                 ? QStringLiteral("DRC finished: no violations")
+                                                 : QStringLiteral("DRC finished: %1 violation(s)").arg(violations));
                 return;
             } catch (const ice::ProjectError &error) {
                 const auto message =
