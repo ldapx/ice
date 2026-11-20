@@ -7320,8 +7320,20 @@ class DocumentWindow : public QMainWindow {
             std::string placedName;
             ice::ObjectId placedInstanceId = 0;
             project_->execute("place symbol", [&](ice::Project &project) {
-                const auto symbolId = ice::addSymbol(project, cellId, definition.name.toStdString(),
-                                                     definition.svg.toStdString(), definition.cell);
+                // A block placed again in the same schematic keeps the icon the
+                // user chose for it; the device picker only knows the generated
+                // default artwork.
+                auto artwork = definition.svg.toStdString();
+                if (definition.cell != 0) {
+                    for (const auto &[_, existing] : project.schematicCells.at(cellId).symbols) {
+                        if (existing.sourceCell == definition.cell && !existing.artwork.empty()) {
+                            artwork = existing.artwork;
+                            break;
+                        }
+                    }
+                }
+                const auto symbolId =
+                    ice::addSymbol(project, cellId, definition.name.toStdString(), artwork, definition.cell);
                 auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
                 symbol.label = definition.label;
                 for (auto pin : definition.pins) {
@@ -7680,6 +7692,78 @@ class DocumentWindow : public QMainWindow {
         refreshLayoutProperties();
         statusBar()->showMessage(QStringLiteral("Updated default %1 PCell parameters for new placements")
                                      .arg(QString::fromStdString(deviceName)));
+    }
+
+    void renameInstanceParameter(ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name) {
+        if (!project_ || instanceId == 0 || parameterId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename parameter", [&](ice::Project &project) {
+                for (auto &[_, cell] : project.schematicCells) {
+                    const auto instance = cell.instances.find(instanceId);
+                    if (instance == cell.instances.end())
+                        continue;
+                    auto &parameters = instance->second.parameters;
+                    const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
+                        return entry.id != parameterId && QString::fromStdString(entry.name).compare(
+                                                                 QString::fromStdString(name), Qt::CaseInsensitive) == 0;
+                    });
+                    if (duplicate)
+                        return;
+                    for (auto &parameter : parameters) {
+                        if (parameter.id == parameterId) {
+                            parameter.name = name;
+                            return;
+                        }
+                    }
+                    return;
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
+            updateSelectionStatus();
+            return;
+        }
+        updateSchematicNetlistState();
+        updateSimulationNetlistState();
+        QTimer::singleShot(0, this, [this] {
+            if (project_)
+                refreshSchematic();
+        });
+    }
+
+    void renameSchematicParameter(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name) {
+        if (!project_ || cellId == 0 || parameterId == 0 || name.empty())
+            return;
+        try {
+            project_->execute("rename schematic parameter", [&](ice::Project &project) {
+                const auto cell = project.schematicCells.find(cellId);
+                if (cell == project.schematicCells.end())
+                    return;
+                auto &parameters = cell->second.parameters;
+                const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
+                    return entry.id != parameterId &&
+                           QString::fromStdString(entry.name).compare(QString::fromStdString(name),
+                                                                      Qt::CaseInsensitive) == 0;
+                });
+                if (duplicate)
+                    return;
+                for (auto &parameter : parameters) {
+                    if (parameter.id == parameterId) {
+                        parameter.name = name;
+                        return;
+                    }
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Edit Parameter"), QString::fromStdString(error.what()));
+            updateSelectionStatus();
+            return;
+        }
+        QTimer::singleShot(0, this, [this] {
+            if (project_)
+                refreshSchematic();
+        });
     }
 
     void addSchematicParameter(ice::ObjectId cellId, const std::string &name) {
@@ -11278,6 +11362,8 @@ class DocumentWindow : public QMainWindow {
                 schematicSymbolsPanel_->clear();
             if (schematicNetlistPanel_)
                 schematicNetlistPanel_->clear();
+            if (schematicPropertiesPanel_)
+                schematicPropertiesPanel_->clearSelection();
             schematicSymbolsLoaded_ = false;
             schematicSymbolsPdk_.clear();
             return;
@@ -11294,6 +11380,8 @@ class DocumentWindow : public QMainWindow {
                 schematicSymbolsPanel_->clear();
             if (schematicNetlistPanel_)
                 schematicNetlistPanel_->clear();
+            if (schematicPropertiesPanel_)
+                schematicPropertiesPanel_->clearSelection();
             schematicSymbolsLoaded_ = false;
             schematicSymbolsPdk_.clear();
             return;
@@ -12575,6 +12663,14 @@ class DocumentWindow : public QMainWindow {
         schematicPropertiesPanel_->setOnCellParameterChanged(
             [this](ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name, const std::string &value) {
                 updateSchematicParameter(cellId, parameterId, name, value);
+            });
+        schematicPropertiesPanel_->setOnParameterRenamed(
+            [this](ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name) {
+                renameInstanceParameter(instanceId, parameterId, name);
+            });
+        schematicPropertiesPanel_->setOnCellParameterRenamed(
+            [this](ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name) {
+                renameSchematicParameter(cellId, parameterId, name);
             });
         schematicPropertiesPanel_->setOnCellParameterAdded(
             [this](ice::ObjectId cellId, const std::string &name) { addSchematicParameter(cellId, name); });

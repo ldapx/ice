@@ -40,6 +40,7 @@ constexpr int kItemKindRole = Qt::UserRole + 1;
 constexpr int kReportIdRole = Qt::UserRole + 2;
 constexpr int kInstanceIdRole = Qt::UserRole + 3;
 constexpr int kOwnerCellRole = Qt::UserRole + 4;
+constexpr int kSearchTextRole = Qt::UserRole + 5;
 constexpr int kLayerGroupIdsRole = Qt::UserRole + 10;
 
 enum class HierarchyItemKind : int {
@@ -54,7 +55,8 @@ enum class HierarchyItemKind : int {
     text = 10,
     pin = 11,
     textPolygon = 12,
-    routedPath = 13
+    routedPath = 13,
+    schematicDevice = 14
 };
 
 enum class ShapeEntryKind : int { rectangle = 0, polygon = 1, path = 2, routedPath = 3, text = 4, textPolygon = 5 };
@@ -189,10 +191,10 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
         auto *searchRow = new QHBoxLayout;
         search_ = new QLineEdit;
         search_->setPlaceholderText(showLayoutHierarchy_ ? QStringLiteral("Search layouts…")
-                                                         : QStringLiteral("Search schematics…"));
+                                                         : QStringLiteral("Search schematics, devices…"));
         search_->setClearButtonEnabled(true);
         search_->setAccessibleName(showLayoutHierarchy_ ? QStringLiteral("Search layouts")
-                                                        : QStringLiteral("Search schematics"));
+                                                        : QStringLiteral("Search schematics and devices"));
         addButton_ = new QPushButton;
         addButton_->setFixedWidth(28);
         setLucideIcon(addButton_, QStringLiteral("plus"), 16);
@@ -255,7 +257,17 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
         });
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
         updateRemoveButton();
-        if (rebuildingTree_ || !showLayoutHierarchy_ || !onInstanceSelected_ || !current)
+        if (rebuildingTree_ || !current)
+            return;
+        if (!showLayoutHierarchy_) {
+            // Selecting a schematic row opens (or switches to) its editor tab.
+            // Device rows carry no cell id and leave the tab alone.
+            const auto cellId = static_cast<ice::ObjectId>(current->data(0, Qt::UserRole).toULongLong());
+            if (cellId != 0 && onActivateSchematic_)
+                onActivateSchematic_(cellId);
+            return;
+        }
+        if (!onInstanceSelected_)
             return;
         const auto instanceId = current->data(0, kInstanceIdRole).toULongLong();
         if (instanceId == 0)
@@ -392,6 +404,9 @@ void ProjectPanel::setProject(const ice::Project &project) {
 
 void ProjectPanel::rebuildTree() {
     rebuildingTree_ = true;
+    // Remember the highlighted schematic so a rebuild triggered by opening it
+    // does not drop the selection.
+    const auto previousCellId = selectedCellId();
     tree_->clear();
     layerList_->clear();
     packageList_->clear();
@@ -409,48 +424,6 @@ void ProjectPanel::rebuildTree() {
     }
 
     if (!showLayoutHierarchy_) {
-        std::map<ice::ObjectId, std::vector<ice::ObjectId>> children;
-        for (const auto &[cellId, cell] : project.schematicCells) {
-            if (cell.isTextSource() || (hideSystemVerilog_ && cell.systemVerilogSchematic))
-                continue;
-            auto &childCells = children[cellId];
-            for (const auto &[_, instance] : cell.instances) {
-                const auto symbol = cell.symbols.find(instance.symbol);
-                if (symbol == cell.symbols.end())
-                    continue;
-                const auto childId = symbol->second.sourceCell;
-                if (childId == 0 || childId == cellId || !project.schematicCells.contains(childId))
-                    continue;
-                if (hideSystemVerilog_ && project.schematicCells.at(childId).systemVerilogSchematic)
-                    continue;
-                if (std::find(childCells.begin(), childCells.end(), childId) == childCells.end())
-                    childCells.push_back(childId);
-            }
-            std::sort(childCells.begin(), childCells.end(), [&](ice::ObjectId left, ice::ObjectId right) {
-                return project.schematicCells.at(left).name < project.schematicCells.at(right).name;
-            });
-        }
-        std::function<void(QTreeWidgetItem *, ice::ObjectId, std::vector<ice::ObjectId> &)> addChildren;
-        addChildren = [&](QTreeWidgetItem *parentItem, ice::ObjectId parentId, std::vector<ice::ObjectId> &ancestors) {
-            const auto childIt = children.find(parentId);
-            if (childIt == children.end())
-                return;
-            for (const auto childId : childIt->second) {
-                const auto cellIt = project.schematicCells.find(childId);
-                if (cellIt == project.schematicCells.end())
-                    continue;
-                const auto childLabel = schematicFileLabel(cellIt->second);
-                auto *childItem = new QTreeWidgetItem(parentItem, {childLabel});
-                childItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(childId));
-                childItem->setIcon(0, hierarchyIcon("puzzle"));
-                childItem->setToolTip(0, QStringLiteral("Cell: %1").arg(childLabel));
-                if (std::find(ancestors.begin(), ancestors.end(), childId) != ancestors.end())
-                    continue;
-                ancestors.push_back(childId);
-                addChildren(childItem, childId, ancestors);
-                ancestors.pop_back();
-            }
-        };
         for (const auto &[id, cell] : project.schematicCells) {
             if (hideSystemVerilog_ && cell.systemVerilogSchematic)
                 continue;
@@ -467,12 +440,54 @@ void ProjectPanel::rebuildTree() {
             }
             cellItem->setIcon(0, hierarchyIcon("microchip"));
             cellItem->setToolTip(0, QStringLiteral("Schematic: %1").arg(cellLabel));
-            std::vector<ice::ObjectId> ancestors{id};
-            addChildren(cellItem, id, ancestors);
+            // A subcircuit instance is represented by its device row below, so
+            // it is not listed a second time under its cell name.
+            std::vector<std::pair<QString, const ice::SchematicInstance *>> devices;
+            devices.reserve(cell.instances.size());
+            for (const auto &[_, instance] : cell.instances)
+                devices.emplace_back(QString::fromStdString(instance.name), &instance);
+            std::sort(devices.begin(), devices.end(), [](const auto &left, const auto &right) {
+                return left.first.compare(right.first, Qt::CaseInsensitive) < 0;
+            });
+            for (const auto &[deviceName, instance] : devices) {
+                const auto symbolIt = cell.symbols.find(instance->symbol);
+                const ice::ObjectId sourceCell =
+                    symbolIt == cell.symbols.end() ? 0 : symbolIt->second.sourceCell;
+                const bool subcircuitInstance = sourceCell != 0 && project.schematicCells.contains(sourceCell);
+                const auto symbolName =
+                    symbolIt == cell.symbols.end() ? QString() : QString::fromStdString(symbolIt->second.name);
+                const auto label = deviceName.isEmpty() ? QStringLiteral("Instance #%1").arg(instance->id) : deviceName;
+                auto *deviceItem = new QTreeWidgetItem(cellItem, {label});
+                deviceItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::schematicDevice));
+                deviceItem->setData(0, kOwnerCellRole, QVariant::fromValue<qulonglong>(id));
+                deviceItem->setData(0, kInstanceIdRole, QVariant::fromValue<qulonglong>(instance->id));
+                QIcon deviceIcon;
+                if (symbolIt != cell.symbols.end() && !symbolIt->second.artwork.empty())
+                    deviceIcon = ice::symbolArtworkIcon(QByteArray::fromStdString(symbolIt->second.artwork), 16);
+                if (deviceIcon.isNull())
+                    deviceIcon = hierarchyIcon(subcircuitInstance ? "puzzle" : "circuit-board");
+                deviceItem->setIcon(0, deviceIcon);
+                const auto typeName = subcircuitInstance ? schematicFileLabel(project.schematicCells.at(sourceCell))
+                                                         : symbolName;
+                deviceItem->setToolTip(0, typeName.isEmpty() ? QStringLiteral("Device: %1").arg(label)
+                                                             : QStringLiteral("Device: %1 · %2").arg(label, typeName));
+                deviceItem->setData(0, kSearchTextRole, QStringLiteral("%1 %2").arg(label, typeName));
+            }
         }
         tree_->expandAll();
         if (search_)
             applyFilter(search_->text());
+        if (previousCellId != 0) {
+            const QSignalBlocker blocker(tree_);
+            for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
+                auto *item = tree_->topLevelItem(index);
+                if (item->isHidden() ||
+                    static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong()) != previousCellId)
+                    continue;
+                tree_->setCurrentItem(item);
+                break;
+            }
+        }
         updateRemoveButton();
         rebuildingTree_ = false;
         return;
@@ -765,7 +780,9 @@ bool ProjectPanel::filterTreeItem(QTreeWidgetItem *item, const QString &needle) 
     bool childMatches = false;
     for (int index = 0; index < item->childCount(); ++index)
         childMatches |= filterTreeItem(item->child(index), needle);
-    const bool selfMatches = needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive);
+    const bool selfMatches =
+        needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive) ||
+        item->data(0, kSearchTextRole).toString().contains(needle, Qt::CaseInsensitive);
     const bool visible = selfMatches || childMatches;
     item->setHidden(!visible);
     return visible;
