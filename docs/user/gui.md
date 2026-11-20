@@ -1022,9 +1022,11 @@ active QPalette so they stay consistent with the surrounding widgets.
 
 The workspace tabs (Schematic, HDL Schematic, Synthesis, Physical Design,
 Layout, Simulation, and Digital Testbenches) are locked in their default order.
-**Settings → Movable Tabs** enables reordering them by dragging; the choice is
-persisted with `QSettings`. Reordering only changes their order, not which
-project file each tab shows.
+**Settings → Movable Tabs** enables reordering them by dragging. Both the
+setting and the resulting order are remembered per project in `QSettings`,
+keyed by the project file path, so reopening a project restores that project's
+layout. New projects start locked in the default order. Reordering only changes
+the tab order, not which project file each tab shows.
 
 ## Interaction conventions
 

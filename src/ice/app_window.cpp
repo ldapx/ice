@@ -52,6 +52,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
@@ -1130,24 +1131,50 @@ struct SchematicNetRoute {
     std::vector<SchematicBranchRoute> branches;
 };
 
-// Workspace tabs stay locked in place unless the user opts in to reordering
-// them with the "Movable Tabs" setting.
-constexpr auto kMovableTabsKey = "ui/movableTabs";
+// Workspace tabs stay locked in their default order unless the user opts in
+// to reordering them with the "Movable Tabs" setting.  Both the setting and
+// the resulting order are remembered per project, so new projects start
+// locked with the default layout.
+constexpr auto kTabStatePrefix = "ui/projects/";
 
-bool loadMovableTabs() {
-    QSettings settings;
-    return settings.value(QString::fromLatin1(kMovableTabsKey), false).toBool();
+QString projectTabStatePrefix(const QString &projectPath) {
+    const auto normalized = QDir::cleanPath(QFileInfo(projectPath).absoluteFilePath());
+    const auto digest = QCryptographicHash::hash(normalized.toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
+    return QString::fromLatin1(kTabStatePrefix) + QString::fromLatin1(digest) + QLatin1Char('/');
 }
 
-void saveMovableTabs(bool enabled) {
+bool loadMovableTabs(const QString &projectPath) {
+    if (projectPath.isEmpty())
+        return false;
     QSettings settings;
-    settings.setValue(QString::fromLatin1(kMovableTabsKey), enabled);
+    return settings.value(projectTabStatePrefix(projectPath) + QStringLiteral("movableTabs"), false).toBool();
+}
+
+void saveMovableTabs(const QString &projectPath, bool enabled) {
+    if (projectPath.isEmpty())
+        return;
+    QSettings settings;
+    settings.setValue(projectTabStatePrefix(projectPath) + QStringLiteral("movableTabs"), enabled);
+}
+
+QStringList loadTabOrder(const QString &projectPath) {
+    if (projectPath.isEmpty())
+        return {};
+    QSettings settings;
+    return settings.value(projectTabStatePrefix(projectPath) + QStringLiteral("tabOrder")).toStringList();
+}
+
+void saveTabOrder(const QString &projectPath, const QStringList &order) {
+    if (projectPath.isEmpty() || order.isEmpty())
+        return;
+    QSettings settings;
+    settings.setValue(projectTabStatePrefix(projectPath) + QStringLiteral("tabOrder"), order);
 }
 
 class DocumentWindow : public QMainWindow {
   public:
     explicit DocumentWindow(ice::AppearanceMode appearanceMode = ice::AppearanceMode::System)
-        : appearanceMode_(appearanceMode), movableTabs_(loadMovableTabs()) {
+        : appearanceMode_(appearanceMode) {
         ice::setPdkPackageRoots({configuredPackageInstallDirectory()});
         setWindowTitle(QStringLiteral("ICE"));
         if (const auto logo = ice::appLogo(); !logo.isNull())
@@ -1371,6 +1398,7 @@ class DocumentWindow : public QMainWindow {
     void setProjectPath(const QString &path) {
         if (path.isEmpty()) {
             projectPath_.clear();
+            restoreProjectTabState();
             clearProjectWatcher();
             if (implementationController_)
                 implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
@@ -1378,6 +1406,7 @@ class DocumentWindow : public QMainWindow {
         }
         const QFileInfo info(path);
         projectPath_ = info.isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
+        restoreProjectTabState();
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
         configureProjectWatcher();
@@ -1497,6 +1526,7 @@ class DocumentWindow : public QMainWindow {
         if (!setProject(std::move(project)))
             return;
         projectPath_ = QString::fromStdString(projectFile.string());
+        restoreProjectTabState();
         if (implementationController_)
             implementationController_->setProject(&project_->project(), projectPath_);
         if (activityPanel_)
@@ -1524,6 +1554,7 @@ class DocumentWindow : public QMainWindow {
             if (!setProject(std::move(project)))
                 return;
             projectPath_ = projectPath;
+            restoreProjectTabState();
             if (implementationController_)
                 implementationController_->setProject(&project_->project(), projectPath_);
             if (activityPanel_)
@@ -2424,6 +2455,7 @@ class DocumentWindow : public QMainWindow {
         knownLayoutCells_.clear();
         knownProceduralLayouts_.clear();
         projectPath_.clear();
+        restoreProjectTabState();
         if (activityPanel_)
             activityPanel_->setProjectPath({});
         refreshEmbeddedPanels();
@@ -12070,9 +12102,57 @@ class DocumentWindow : public QMainWindow {
         return action;
     }
 
+    QStringList currentTabOrder() const {
+        QStringList order;
+        if (!documents_)
+            return order;
+        for (int index = 0; index < documents_->count(); ++index)
+            order << documents_->tabText(index);
+        return order;
+    }
+
+    void applyTabOrder(const QStringList &order) {
+        if (!documents_ || order.isEmpty())
+            return;
+        // Restoring the remembered layout must not look like a user drag.
+        const QSignalBlocker blocker(documents_->tabBar());
+        int target = 0;
+        for (const auto &name : order) {
+            for (int index = target; index < documents_->count(); ++index) {
+                if (documents_->tabText(index) != name)
+                    continue;
+                if (index != target)
+                    documents_->tabBar()->moveTab(index, target);
+                ++target;
+                break;
+            }
+        }
+    }
+
+    // Applies the tab setting and layout remembered for the open project, or
+    // the defaults (locked, default order) when the project has none yet.
+    void restoreProjectTabState() {
+        if (defaultTabOrder_.isEmpty())
+            defaultTabOrder_ = currentTabOrder();
+        if (projectPath_.isEmpty()) {
+            applyTabOrder(defaultTabOrder_);
+            movableTabs_ = false;
+        } else {
+            const auto saved = loadTabOrder(projectPath_);
+            applyTabOrder(saved.isEmpty() ? defaultTabOrder_ : saved);
+            movableTabs_ = loadMovableTabs(projectPath_);
+        }
+        if (documents_)
+            documents_->setMovable(movableTabs_);
+        if (movableTabsAction_) {
+            const QSignalBlocker blocker(movableTabsAction_);
+            movableTabsAction_->setChecked(movableTabs_);
+        }
+    }
+
     void setMovableTabs(bool enabled) {
         movableTabs_ = enabled;
-        saveMovableTabs(enabled);
+        saveMovableTabs(projectPath_, enabled);
         if (documents_)
             documents_->setMovable(enabled);
         statusBar()->showMessage(enabled ? QStringLiteral("Workspace tabs can be reordered by dragging")
@@ -12290,11 +12370,11 @@ class DocumentWindow : public QMainWindow {
             break;
         }
         settingsMenu->addSeparator();
-        auto *movableTabsAction = addCommand(QStringLiteral("Movable Tabs"));
-        movableTabsAction->setCheckable(true);
-        movableTabsAction->setChecked(movableTabs_);
-        movableTabsAction->setStatusTip(QStringLiteral("Allow the workspace tabs to be reordered by dragging them"));
-        settingsMenu->addAction(movableTabsAction);
+        movableTabsAction_ = addCommand(QStringLiteral("Movable Tabs"));
+        movableTabsAction_->setCheckable(true);
+        movableTabsAction_->setChecked(movableTabs_);
+        movableTabsAction_->setStatusTip(QStringLiteral("Allow the workspace tabs to be reordered by dragging them"));
+        settingsMenu->addAction(movableTabsAction_);
 
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
         helpMenu->addAction(shortcutsAction);
@@ -12353,7 +12433,7 @@ class DocumentWindow : public QMainWindow {
                 [this] { setAppearanceMode(ice::AppearanceMode::Light); });
         connect(darkAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::Dark); });
-        connect(movableTabsAction, &QAction::toggled, this, [this](bool enabled) { setMovableTabs(enabled); });
+        connect(movableTabsAction_, &QAction::toggled, this, [this](bool enabled) { setMovableTabs(enabled); });
     }
 
     void showCommandPalette() {
@@ -12650,6 +12730,10 @@ class DocumentWindow : public QMainWindow {
         auto *documents = documents_;
         documents->setTabsClosable(false);
         documents->setMovable(movableTabs_);
+        connect(documents->tabBar(), &QTabBar::tabMoved, this, [this](int, int) {
+            if (movableTabs_)
+                saveTabOrder(projectPath_, currentTabOrder());
+        });
         documents->setIconSize(QSize(16, 16));
         auto *schematicPage = new QWidget;
         schematicPage_ = schematicPage;
@@ -15185,6 +15269,8 @@ class DocumentWindow : public QMainWindow {
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
     bool movableTabs_ = false;
+    QStringList defaultTabOrder_;
+    QAction *movableTabsAction_ = nullptr;
     ice::ShortcutRegistry shortcuts_;
     QList<QAction *> commands_;
 };
