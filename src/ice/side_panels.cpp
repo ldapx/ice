@@ -267,10 +267,21 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
                 onActivateSchematic_(cellId);
             return;
         }
-        if (!onInstanceSelected_)
-            return;
         const auto instanceId = current->data(0, kInstanceIdRole).toULongLong();
-        if (instanceId == 0)
+        if (instanceId == 0) {
+            // A single click on a layout row opens (or switches to) its editor
+            // tab, matching the schematic hierarchy.  Instance rows keep
+            // selecting the instance instead.
+            const auto kind = current->data(0, kItemKindRole).toInt();
+            if (kind == static_cast<int>(HierarchyItemKind::layout) ||
+                kind == static_cast<int>(HierarchyItemKind::proceduralLayout)) {
+                const auto cellId = static_cast<ice::ObjectId>(current->data(0, Qt::UserRole).toULongLong());
+                if (cellId != 0 && onActivateLayout_)
+                    onActivateLayout_(cellId);
+            }
+            return;
+        }
+        if (!onInstanceSelected_)
             return;
         const auto *parent = current->parent();
         const auto ownerCellId = parent ? parent->data(0, Qt::UserRole).toULongLong() : 0;

@@ -370,7 +370,10 @@ class EmptyLayoutPanel : public QWidget {
     explicit EmptyLayoutPanel(QWidget *parent = nullptr);
     void setOnCreate(CreateCallback callback);
     void setOnOpen(OpenCallback callback);
-    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates);
+    // `layoutsExist` hides the create controls, which are only offered when
+    // the project has no layout cells yet.
+    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates,
+                           bool layoutsExist = false);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
     // Fills the name field with the suggested default unless the user typed
@@ -383,6 +386,8 @@ class EmptyLayoutPanel : public QWidget {
     void updateKindUi();
     void refreshStacks();
 
+    QLabel *heading_ = nullptr;
+    QWidget *createSection_ = nullptr;
     QLabel *description_ = nullptr;
     QWidget *openSection_ = nullptr;
     QComboBox *open_ = nullptr;
