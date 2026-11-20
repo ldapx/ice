@@ -161,6 +161,9 @@ def main() -> int:
                 "layout_assign_port_net",
                 "layout_info",
                 "layout_connectivity",
+                "layout_list",
+                "layout_import_gds",
+                "layout_import_lef",
                 "layout_export_gds",
                 "layout_export_lef",
                 "layout_export_def",
@@ -307,6 +310,13 @@ def main() -> int:
                 net="VIN",
                 label="VIN",
             )
+            layouts = mcp.tool("layout_list", limit=1)
+            assert len(layouts["layouts"]) == 1, layouts
+            assert layouts["pagination"]["total"] >= 2, layouts
+            dry_delete = mcp.tool("layout_delete", layout="pin_test", dry_run=True)
+            assert dry_delete["deleted"] is False and dry_delete["dry_run"] is True, (
+                dry_delete
+            )
             ports = mcp.tool("layout_list_ports", cell="pin_test")["ports"]
             assert len(ports) == 1, ports
             assert ports[0]["direction"] == "input", ports
@@ -343,6 +353,18 @@ def main() -> int:
                 assert path.is_file() and path.stat().st_size > 0, path
                 if marker:
                     assert marker in path.read_text(), (tool_name, path.read_text())
+            imported_gds = mcp.tool(
+                "layout_import_gds",
+                path=str(exports / "pin_test.gds"),
+                name_prefix="gds",
+            )
+            assert imported_gds["cells"], imported_gds
+            imported_lef = mcp.tool(
+                "layout_import_lef",
+                path=str(exports / "pin_test.lef"),
+                name_prefix="lef",
+            )
+            assert imported_lef["cells"], imported_lef
             mcp.tool(
                 "layout_update_port",
                 cell="pin_test",
@@ -427,6 +449,8 @@ def main() -> int:
                 name="sv_sim",
                 schematic="sv_smoke",
             )
+            dry_sim = mcp.tool("simulation_delete", simulation="sv_sim", dry_run=True)
+            assert dry_sim["deleted"] is False and dry_sim["dry_run"] is True, dry_sim
             sv_run = mcp.tool("simulation_run", simulation="sv_sim")
             assert sv_run["state"] == "succeeded", sv_run
             assert sv_run["trace_count"] >= 2, sv_run
@@ -903,6 +927,9 @@ def main() -> int:
             assert parameter["value"] == "1k", parameter
             info = mcp.tool("schematic_info", cell="ports_test")
             assert any(entry["name"] == "R" for entry in info["parameters"]), info
+            paged_info = mcp.tool("schematic_info", cell="ports_test", limit=1)
+            assert len(paged_info["parameters"]) <= 1, paged_info
+            assert paged_info["pagination"]["parameters"]["total"] >= 1, paged_info
             removed = mcp.tool(
                 "schematic_remove_cell_parameter", cell="ports_test", name="R"
             )
@@ -961,6 +988,18 @@ def main() -> int:
                 assert opened["open"] is True, opened
             finally:
                 auto_mcp.close()
+
+            paged_summary = mcp.tool("project_summary", limit=1)
+            assert len(paged_summary["schematics"]) <= 1, paged_summary
+            assert paged_summary["pagination"]["schematics"]["total"] >= 1, (
+                paged_summary
+            )
+            chunk = mcp.call(
+                "resources/read", {"uri": "ice://project/json?offset=0&limit=64"}
+            )
+            chunk_data = json.loads(chunk["contents"][0]["text"])
+            assert chunk_data["total_bytes"] > 0, chunk_data
+            assert len(chunk_data["data"]) <= 64, chunk_data
 
             print("ice-mcp tool smoke tests passed")
             return 0

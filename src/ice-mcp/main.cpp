@@ -474,7 +474,274 @@ json fileSymbolJson(const ice::FileSymbol &symbol) {
             {"defaults", std::move(defaults)}};
 }
 
-json schematicJson(const ice::SchematicCell &cell) {
+struct PageRequest {
+    std::size_t offset = 0;
+    std::size_t limit = 0;
+};
+
+PageRequest pageRequest(const json &arguments) {
+    PageRequest page;
+    if (const auto value = arguments.find("offset"); value != arguments.end() && !value->is_null()) {
+        if (!value->is_number_integer() && !value->is_number_unsigned())
+            throw ToolError("offset must be an integer");
+        const auto requested = value->get<long long>();
+        if (requested < 0)
+            throw ToolError("offset must be non-negative");
+        page.offset = static_cast<std::size_t>(requested);
+    }
+    if (const auto value = arguments.find("limit"); value != arguments.end() && !value->is_null()) {
+        if (!value->is_number_integer() && !value->is_number_unsigned())
+            throw ToolError("limit must be an integer");
+        const auto requested = value->get<long long>();
+        if (requested < 0)
+            throw ToolError("limit must be non-negative");
+        page.limit = std::min<std::size_t>(static_cast<std::size_t>(requested), 10000);
+    }
+    return page;
+}
+
+json paginationJson(std::size_t total, const PageRequest &page) {
+    const auto begin = std::min(page.offset, total);
+    const auto returned = page.limit == 0 ? total - begin : std::min(page.limit, total - begin);
+    const auto end = begin + returned;
+    json result = {{"offset", page.offset},
+                   {"limit", page.limit},
+                   {"total", total},
+                   {"returned", returned},
+                   {"has_more", end < total}};
+    if (end < total)
+        result["next_offset"] = end;
+    return result;
+}
+
+template <typename T> void appendPage(json &array, const std::vector<T> &items, const PageRequest &page) {
+    const auto begin = std::min(page.offset, items.size());
+    const auto end = page.limit == 0 ? items.size() : std::min(items.size(), begin + page.limit);
+    for (auto index = begin; index < end; ++index)
+        array.push_back(items[index]);
+}
+
+std::optional<PageRequest> pageFromUri(const std::string &uri) {
+    const auto query = uri.find('?');
+    if (query == std::string::npos)
+        return std::nullopt;
+    PageRequest page;
+    bool requested = false;
+    std::istringstream stream(uri.substr(query + 1));
+    std::string pair;
+    while (std::getline(stream, pair, '&')) {
+        const auto equal = pair.find('=');
+        if (equal == std::string::npos)
+            continue;
+        const auto key = pair.substr(0, equal);
+        const auto value = pair.substr(equal + 1);
+        try {
+            if (key == "offset") {
+                const auto parsed = std::stoll(value);
+                if (parsed < 0)
+                    throw ToolError("offset must be non-negative");
+                page.offset = static_cast<std::size_t>(parsed);
+                requested = true;
+            } else if (key == "limit") {
+                const auto parsed = std::stoll(value);
+                if (parsed < 0)
+                    throw ToolError("limit must be non-negative");
+                page.limit = std::min<std::size_t>(static_cast<std::size_t>(parsed), 10000);
+                requested = true;
+            }
+        } catch (const std::invalid_argument &) {
+            throw ToolError("Invalid pagination value in resource URI: " + pair);
+        } catch (const std::out_of_range &) {
+            throw ToolError("Pagination value is out of range: " + pair);
+        }
+    }
+    return requested ? std::optional<PageRequest>(page) : std::nullopt;
+}
+
+// Merges a GDS/OASIS/LEF import project into the open project, assigning new
+// object ids and remapping every layer, net, shape, port, instance, planned
+// device, and connection reference.
+std::vector<ice::ObjectId> mergeImportedLayoutProject(ice::Project &target, const ice::Project &imported,
+                                                      const std::string &namePrefix) {
+    if (imported.layoutCells.empty())
+        return {};
+    auto nextId = target.nextId();
+    const auto allocate = [&] { return nextId++; };
+    std::set<std::string> names;
+    for (const auto &[_, cell] : target.layoutCells)
+        names.insert(lowerCopy(cell.name));
+    for (const auto &[_, layout] : target.proceduralLayouts)
+        names.insert(lowerCopy(layout.name));
+    const auto uniqueName = [&](std::string base) {
+        if (!namePrefix.empty())
+            base = namePrefix + " " + base;
+        auto candidate = base;
+        for (int suffix = 2; !names.insert(lowerCopy(candidate)).second; ++suffix)
+            candidate = base + " " + std::to_string(suffix);
+        return candidate;
+    };
+
+    std::map<ice::ObjectId, ice::ObjectId> cellMap;
+    std::map<ice::ObjectId, std::string> cellNames;
+    for (const auto &[id, cell] : imported.layoutCells) {
+        cellMap[id] = allocate();
+        cellNames[id] = uniqueName(cell.name.empty() ? "layout" : cell.name);
+    }
+
+    std::map<ice::ObjectId, ice::ObjectId> layerMap;
+    for (const auto &[id, layer] : imported.layers) {
+        auto layout = layer.layout;
+        if (layout != 0) {
+            const auto mapped = cellMap.find(layout);
+            layout = mapped == cellMap.end() ? 0 : mapped->second;
+        }
+        ice::ObjectId existing = 0;
+        for (const auto &[candidate, targetLayer] : target.layers) {
+            if (targetLayer.name == layer.name && targetLayer.number == layer.number &&
+                targetLayer.datatype == layer.datatype && targetLayer.pdk == layer.pdk &&
+                targetLayer.stack == layer.stack && targetLayer.layout == layout) {
+                existing = candidate;
+                break;
+            }
+        }
+        if (existing == 0) {
+            existing = allocate();
+            auto copy = layer;
+            copy.id = existing;
+            copy.layout = layout;
+            target.layers.emplace(existing, std::move(copy));
+        }
+        layerMap[id] = existing;
+    }
+
+    std::vector<ice::ObjectId> created;
+    for (const auto &[importedId, importedCell] : imported.layoutCells) {
+        auto cell = importedCell;
+        cell.id = cellMap.at(importedId);
+        cell.name = cellNames.at(importedId);
+        cell.generatedBy = 0;
+        for (auto &parameter : cell.parameters)
+            parameter.id = allocate();
+
+        std::map<ice::ObjectId, ice::ObjectId> netMap;
+        std::map<ice::ObjectId, ice::ObjectId> shapeMap;
+        std::map<ice::ObjectId, ice::ObjectId> portMap;
+        std::map<ice::ObjectId, ice::ObjectId> instanceMap;
+        std::map<ice::ObjectId, ice::ObjectId> deviceMap;
+        std::map<ice::ObjectId, ice::ObjectId> connectionMap;
+        for (const auto &[id, _] : cell.nets)
+            netMap[id] = allocate();
+        for (const auto &[id, _] : cell.shapes)
+            shapeMap[id] = allocate();
+        for (const auto &[id, _] : cell.ports)
+            portMap[id] = allocate();
+        for (const auto &[id, _] : cell.instances)
+            instanceMap[id] = allocate();
+        for (const auto &[id, _] : cell.plannedDevices)
+            deviceMap[id] = allocate();
+        for (const auto &[id, _] : cell.plannedConnections)
+            connectionMap[id] = allocate();
+        const auto remap = [](const std::map<ice::ObjectId, ice::ObjectId> &map, ice::ObjectId id) {
+            const auto found = map.find(id);
+            return found == map.end() ? id : found->second;
+        };
+        std::map<ice::ObjectId, ice::ObjectId> endpointMap = portMap;
+        endpointMap.insert(instanceMap.begin(), instanceMap.end());
+        endpointMap.insert(deviceMap.begin(), deviceMap.end());
+
+        std::map<ice::ObjectId, ice::LayoutNet> nets;
+        for (const auto &[id, net] : cell.nets) {
+            auto copy = net;
+            copy.id = netMap.at(id);
+            nets.emplace(copy.id, std::move(copy));
+        }
+        std::map<ice::ObjectId, ice::Shape> shapes;
+        for (const auto &[id, shape] : cell.shapes) {
+            auto copy = shape;
+            copy.id = shapeMap.at(id);
+            copy.layer = remap(layerMap, shape.layer);
+            if (copy.net && !netMap.contains(*copy.net))
+                copy.net.reset();
+            else if (copy.net)
+                copy.net = netMap.at(*copy.net);
+            copy.textGroup = remap(shapeMap, shape.textGroup);
+            copy.routedConnection = remap(connectionMap, shape.routedConnection);
+            shapes.emplace(copy.id, std::move(copy));
+        }
+        std::map<ice::ObjectId, ice::Port> ports;
+        for (const auto &[id, port] : cell.ports) {
+            auto copy = port;
+            copy.id = portMap.at(id);
+            copy.layer = remap(layerMap, port.layer);
+            copy.net = netMap.contains(port.net) ? netMap.at(port.net) : 0;
+            copy.sourceInstance = instanceMap.contains(port.sourceInstance) ? instanceMap.at(port.sourceInstance) : 0;
+            copy.sourcePort = portMap.contains(port.sourcePort) ? portMap.at(port.sourcePort) : 0;
+            ports.emplace(copy.id, std::move(copy));
+        }
+        std::map<ice::ObjectId, ice::LayoutInstance> instances;
+        for (const auto &[id, instance] : cell.instances) {
+            auto copy = instance;
+            copy.id = instanceMap.at(id);
+            copy.cell = remap(cellMap, instance.cell);
+            instances.emplace(copy.id, std::move(copy));
+        }
+        std::map<ice::ObjectId, ice::PlannedDevice> devices;
+        for (const auto &[id, device] : cell.plannedDevices) {
+            auto copy = device;
+            copy.id = deviceMap.at(id);
+            for (auto &parameter : copy.parameters)
+                parameter.id = allocate();
+            for (auto &[_, net] : copy.terminals)
+                net = remap(netMap, net);
+            devices.emplace(copy.id, std::move(copy));
+        }
+        std::map<ice::ObjectId, ice::PlannedConnection> connections;
+        for (const auto &[id, connection] : cell.plannedConnections) {
+            auto copy = connection;
+            copy.id = connectionMap.at(id);
+            copy.from = remap(endpointMap, connection.from);
+            copy.to = remap(endpointMap, connection.to);
+            copy.net = remap(netMap, connection.net);
+            copy.fromPort = remap(portMap, connection.fromPort);
+            copy.toPort = remap(portMap, connection.toPort);
+            connections.emplace(copy.id, std::move(copy));
+        }
+        cell.nets = std::move(nets);
+        cell.shapes = std::move(shapes);
+        cell.ports = std::move(ports);
+        cell.instances = std::move(instances);
+        cell.plannedDevices = std::move(devices);
+        cell.plannedConnections = std::move(connections);
+        created.push_back(cell.id);
+        target.layoutCells.emplace(cell.id, std::move(cell));
+    }
+    return created;
+}
+
+json schematicJson(const ice::SchematicCell &cell, const PageRequest &page = {}) {
+    std::vector<json> parameters;
+    std::vector<json> symbols;
+    std::vector<json> instances;
+    std::vector<json> nets;
+    for (const auto &parameter : cell.parameters)
+        parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+    for (const auto &[_, symbol] : cell.symbols)
+        symbols.push_back(symbolJson(symbol));
+    for (const auto &[id, instance] : cell.instances) {
+        json entryParameters = json::array();
+        for (const auto &parameter : instance.parameters)
+            entryParameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+        instances.push_back({{"id", id},
+                             {"name", instance.name},
+                             {"symbol", instance.symbol},
+                             {"x", instance.x},
+                             {"y", instance.y},
+                             {"orientation", ice::orientationName(instance.orientation)},
+                             {"parameters", std::move(entryParameters)}});
+    }
+    for (const auto &[id, net] : cell.nets)
+        nets.push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+
     json result = {{"id", cell.id},
                    {"name", cell.name},
                    {"pdk", cell.pdk},
@@ -484,25 +751,18 @@ json schematicJson(const ice::SchematicCell &cell) {
                    {"parameters", json::array()},
                    {"symbols", json::array()},
                    {"instances", json::array()},
-                   {"nets", json::array()}};
-    for (const auto &parameter : cell.parameters)
-        result["parameters"].push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
-    for (const auto &[_, symbol] : cell.symbols)
-        result["symbols"].push_back(symbolJson(symbol));
-    for (const auto &[id, instance] : cell.instances) {
-        json parameters = json::array();
-        for (const auto &parameter : instance.parameters)
-            parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
-        result["instances"].push_back({{"id", id},
-                                       {"name", instance.name},
-                                       {"symbol", instance.symbol},
-                                       {"x", instance.x},
-                                       {"y", instance.y},
-                                       {"orientation", ice::orientationName(instance.orientation)},
-                                       {"parameters", std::move(parameters)}});
-    }
-    for (const auto &[id, net] : cell.nets)
-        result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+                   {"nets", json::array()},
+                   {"pagination",
+                    {{"offset", page.offset},
+                     {"limit", page.limit},
+                     {"parameters", paginationJson(parameters.size(), page)},
+                     {"symbols", paginationJson(symbols.size(), page)},
+                     {"instances", paginationJson(instances.size(), page)},
+                     {"nets", paginationJson(nets.size(), page)}}}};
+    appendPage(result["parameters"], parameters, page);
+    appendPage(result["symbols"], symbols, page);
+    appendPage(result["instances"], instances, page);
+    appendPage(result["nets"], nets, page);
     if (cell.textSchematic) {
         const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
         result["spice_ready"] = interface.ok;
@@ -531,7 +791,7 @@ json helpJson(const std::string &requestedTopic) {
                         "implementation_export_gds"})}}},
         {"project",
          {{"tools", json::array({"project_create", "project_open", "project_summary", "project_validate",
-                                 "project_recover", "project_repair", "project_undo", "project_redo"})},
+                                 "project_repair", "project_reload", "project_undo", "project_redo"})},
           {"example", {{"tool", "project_open"}, {"arguments", json::object()}}}}},
         {"schematic",
          {{"tools", json::array({"schematic_create", "schematic_add_component", "schematic_list_symbols",
@@ -1689,7 +1949,7 @@ class IceMcpServer {
         return projectPath_;
     }
 
-    json summary() const {
+    json summary(const PageRequest &page = {}) const {
         if (!session_) {
             json candidates = json::array();
             json suggested = json::array();
@@ -1703,6 +1963,65 @@ class IceMcpServer {
                     {"suggested_calls", std::move(suggested)}};
         }
         const auto &project = session_->project();
+        std::vector<json> schematics;
+        std::vector<json> layers;
+        std::vector<json> layouts;
+        std::vector<json> proceduralLayouts;
+        std::vector<json> simulations;
+        std::vector<json> scripts;
+        for (const auto &[id, cell] : project.schematicCells) {
+            schematics.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"text", cell.textSchematic},
+                                  {"systemverilog", cell.systemVerilogSchematic},
+                                  {"symbols", cell.symbols.size()},
+                                  {"instances", cell.instances.size()},
+                                  {"nets", cell.nets.size()}});
+        }
+        for (const auto &[id, layer] : project.layers) {
+            layers.push_back({{"id", id},
+                              {"name", layer.name},
+                              {"number", layer.number},
+                              {"datatype", layer.datatype},
+                              {"color", layer.color},
+                              {"pattern", layer.pattern},
+                              {"visible", layer.visible}});
+        }
+        for (const auto &[id, cell] : project.layoutCells) {
+            layouts.push_back({{"id", id},
+                               {"name", cell.name},
+                               {"pdk", cell.pdk},
+                               {"stack", cell.stack},
+                               {"library", cell.library},
+                               {"device", cell.device},
+                               {"generated_by", cell.generatedBy},
+                               {"shapes", cell.shapes.size()},
+                               {"ports", cell.ports.size()},
+                               {"instances", cell.instances.size()},
+                               {"planned_devices", cell.plannedDevices.size()}});
+        }
+        for (const auto &[id, cell] : project.proceduralLayouts) {
+            proceduralLayouts.push_back({{"id", id},
+                                         {"name", cell.name},
+                                         {"pdk", cell.pdk},
+                                         {"stack", cell.stack},
+                                         {"generated_cell", cell.generatedCell},
+                                         {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(cell)},
+                                         {"generated_pdk_version", cell.generatedPdkVersion},
+                                         {"script_length", cell.script.size()}});
+        }
+        for (const auto &[id, simulation] : project.simulations) {
+            simulations.push_back({{"id", id},
+                                   {"name", simulation.name},
+                                   {"schematic", simulation.schematic},
+                                   {"analysis", simulation.analysis},
+                                   {"simulator", simulation.simulator},
+                                   {"graphs", simulation.graphs.size()}});
+        }
+        for (const auto &[id, report] : project.reports)
+            scripts.push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+
         json result = {
             {"open", true},
             {"name", project.name},
@@ -1717,59 +2036,22 @@ class IceMcpServer {
             {"procedural_layouts", json::array()},
             {"simulations", json::array()},
             {"simulation_scripts", json::array()},
+            {"pagination",
+             {{"offset", page.offset},
+              {"limit", page.limit},
+              {"schematics", paginationJson(schematics.size(), page)},
+              {"layers", paginationJson(layers.size(), page)},
+              {"layouts", paginationJson(layouts.size(), page)},
+              {"procedural_layouts", paginationJson(proceduralLayouts.size(), page)},
+              {"simulations", paginationJson(simulations.size(), page)},
+              {"simulation_scripts", paginationJson(scripts.size(), page)}}},
         };
-        for (const auto &[id, cell] : project.schematicCells) {
-            result["schematics"].push_back({{"id", id},
-                                            {"name", cell.name},
-                                            {"pdk", cell.pdk},
-                                            {"text", cell.textSchematic},
-                                            {"systemverilog", cell.systemVerilogSchematic},
-                                            {"symbols", cell.symbols.size()},
-                                            {"instances", cell.instances.size()},
-                                            {"nets", cell.nets.size()}});
-        }
-        for (const auto &[id, layer] : project.layers)
-            result["layers"].push_back({{"id", id},
-                                        {"name", layer.name},
-                                        {"number", layer.number},
-                                        {"datatype", layer.datatype},
-                                        {"color", layer.color},
-                                        {"pattern", layer.pattern},
-                                        {"visible", layer.visible}});
-        for (const auto &[id, cell] : project.layoutCells) {
-            result["layouts"].push_back({{"id", id},
-                                         {"name", cell.name},
-                                         {"pdk", cell.pdk},
-                                         {"stack", cell.stack},
-                                         {"library", cell.library},
-                                         {"device", cell.device},
-                                         {"generated_by", cell.generatedBy},
-                                         {"shapes", cell.shapes.size()},
-                                         {"ports", cell.ports.size()},
-                                         {"instances", cell.instances.size()},
-                                         {"planned_devices", cell.plannedDevices.size()}});
-        }
-        for (const auto &[id, cell] : project.proceduralLayouts) {
-            result["procedural_layouts"].push_back(
-                {{"id", id},
-                 {"name", cell.name},
-                 {"pdk", cell.pdk},
-                 {"stack", cell.stack},
-                 {"generated_cell", cell.generatedCell},
-                 {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(cell)},
-                 {"generated_pdk_version", cell.generatedPdkVersion},
-                 {"script_length", cell.script.size()}});
-        }
-        for (const auto &[id, simulation] : project.simulations) {
-            result["simulations"].push_back({{"id", id},
-                                             {"name", simulation.name},
-                                             {"schematic", simulation.schematic},
-                                             {"analysis", simulation.analysis},
-                                             {"simulator", simulation.simulator},
-                                             {"graphs", simulation.graphs.size()}});
-        }
-        for (const auto &[id, report] : project.reports)
-            result["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+        appendPage(result["schematics"], schematics, page);
+        appendPage(result["layers"], layers, page);
+        appendPage(result["layouts"], layouts, page);
+        appendPage(result["procedural_layouts"], proceduralLayouts, page);
+        appendPage(result["simulations"], simulations, page);
+        appendPage(result["simulation_scripts"], scripts, page);
         return result;
     }
 
@@ -2091,7 +2373,7 @@ class IceMcpServer {
             return result;
         }
         if (name == "project_summary")
-            return summary();
+            return summary(pageRequest(arguments));
         if (name == "ice_doctor")
             return doctorWithChecks(arguments);
 
@@ -2755,6 +3037,9 @@ class IceMcpServer {
         if (name == "simulation_delete") {
             const auto id = resolveSimulation(session.project(), requiredValue(arguments, "simulation"));
             const auto simulationName = session.project().simulations.at(id).name;
+            const bool dryRun = optionalBoolean(arguments, "dry_run", false);
+            if (dryRun)
+                return {{"id", id}, {"name", simulationName}, {"deleted", false}, {"dry_run", true}};
             session.execute("mcp simulation-delete",
                             [&](ice::Project &project) { ice::removeSimulationItem(project, id); });
             return {{"id", id}, {"name", simulationName}, {"deleted", true}};
@@ -2825,6 +3110,10 @@ class IceMcpServer {
                 lookupByIdOrName(session.project().reports, requiredValue(arguments, "script"), "simulation script");
             const auto script = session.project().reports.at(id);
             const bool purge = optionalBoolean(arguments, "purge", false);
+            const bool dryRun = optionalBoolean(arguments, "dry_run", false);
+            if (dryRun)
+                return {{"id", id},         {"name", script.name}, {"path", script.path},
+                        {"deleted", false}, {"dry_run", true},     {"purge", purge}};
             session.execute("mcp simulation-script-delete", [&](ice::Project &project) { project.reports.erase(id); });
             if (purge) {
                 std::error_code status;
@@ -3001,7 +3290,7 @@ class IceMcpServer {
         if (name == "schematic_info") {
             const auto id = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
             const auto &cell = session.project().schematicCells.at(id);
-            auto result = schematicJson(cell);
+            auto result = schematicJson(cell, pageRequest(arguments));
             try {
                 const auto setup = ice::pdkSimulationSetupFor(cell.pdk);
                 result["pdk_setup"] = {
@@ -3598,12 +3887,51 @@ class IceMcpServer {
         }
         if (name == "layout_delete") {
             const auto id = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
+            const bool dryRun = optionalBoolean(arguments, "dry_run", false);
             std::string layoutName;
+            json references = json::array();
+            std::string reason;
             if (const auto procedural = session.project().proceduralLayouts.find(id);
-                procedural != session.project().proceduralLayouts.end())
+                procedural != session.project().proceduralLayouts.end()) {
                 layoutName = procedural->second.name;
-            else
-                layoutName = session.project().layoutCells.at(id).name;
+                const auto generatedId = procedural->second.generatedCell;
+                for (const auto &[otherId, otherCell] : session.project().layoutCells) {
+                    if (otherId == generatedId)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == generatedId)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty())
+                    reason = "The generated layout is used as an instance";
+            } else {
+                const auto &cell = session.project().layoutCells.at(id);
+                layoutName = cell.name;
+                if (cell.library || (cell.readOnly && !cell.reference))
+                    reason = "Read-only layout cells cannot be removed";
+                else if (cell.generatedBy != 0 && session.project().proceduralLayouts.contains(cell.generatedBy))
+                    reason = "The layout is generated by a procedural layout; remove the procedural layout instead";
+                for (const auto &[otherId, otherCell] : session.project().layoutCells) {
+                    if (otherId == id)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == id)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty() && reason.empty())
+                    reason = "The layout is used as an instance";
+            }
+            const bool blocked = !reason.empty() || !references.empty();
+            if (dryRun || blocked)
+                return {{"id", id},
+                        {"name", layoutName},
+                        {"deleted", false},
+                        {"dry_run", dryRun},
+                        {"blocked", blocked},
+                        {"reason", reason},
+                        {"references", std::move(references)}};
             session.execute("mcp layout-delete", [&](ice::Project &project) { ice::removeLayoutItem(project, id); });
             return {{"id", id}, {"name", layoutName}, {"deleted", true}};
         }
@@ -3734,6 +4062,89 @@ class IceMcpServer {
                 id = ice::createLayoutFromSchematic(project, schematic, layoutName, stack);
             });
             return {{"id", id}, {"schematic", schematic}, {"stack", stack}};
+        }
+        if (name == "layout_list") {
+            std::vector<json> entries;
+            for (const auto &[id, cell] : session.project().layoutCells) {
+                entries.push_back({{"id", id},
+                                   {"name", cell.name},
+                                   {"pdk", cell.pdk},
+                                   {"stack", cell.stack},
+                                   {"procedural", false},
+                                   {"library", cell.library},
+                                   {"read_only", cell.readOnly},
+                                   {"device", cell.device},
+                                   {"generated_by", cell.generatedBy},
+                                   {"shapes", cell.shapes.size()},
+                                   {"ports", cell.ports.size()},
+                                   {"instances", cell.instances.size()},
+                                   {"reference", cell.reference ? json(cell.reference->path) : json(nullptr)}});
+            }
+            for (const auto &[id, procedural] : session.project().proceduralLayouts) {
+                entries.push_back({{"id", id},
+                                   {"name", procedural.name},
+                                   {"pdk", procedural.pdk},
+                                   {"stack", procedural.stack},
+                                   {"procedural", true},
+                                   {"generated_cell", procedural.generatedCell},
+                                   {"needs_regeneration", ice::proceduralLayoutNeedsRegeneration(procedural)},
+                                   {"generated_pdk_version", procedural.generatedPdkVersion},
+                                   {"script_length", procedural.script.size()}});
+            }
+            const auto page = pageRequest(arguments);
+            json layouts = json::array();
+            appendPage(layouts, entries, page);
+            return {{"layouts", std::move(layouts)}, {"pagination", paginationJson(entries.size(), page)}};
+        }
+        if (name == "layout_import_gds") {
+            const auto path = requiredString(arguments, "path");
+            ice::LayoutImportOptions options;
+            options.topCell = optionalString(arguments, "top_cell");
+            if (const auto layer = optionalInteger(arguments, "pin_label_layer"))
+                options.pinLabelLayer = static_cast<int>(*layer);
+            std::vector<std::string> warnings;
+            options.warnings = &warnings;
+            const auto imported = ice::LayoutInterchange::importStream(path, options);
+            const auto prefix = optionalString(arguments, "name_prefix");
+            std::vector<ice::ObjectId> ids;
+            session.execute("mcp layout-import-gds", [&](ice::Project &project) {
+                ids = mergeImportedLayoutProject(project, imported, prefix);
+            });
+            json cells = json::array();
+            for (const auto id : ids) {
+                const auto &cell = session.project().layoutCells.at(id);
+                cells.push_back({{"id", id},
+                                 {"name", cell.name},
+                                 {"pdk", cell.pdk},
+                                 {"stack", cell.stack},
+                                 {"shapes", cell.shapes.size()},
+                                 {"ports", cell.ports.size()},
+                                 {"nets", cell.nets.size()},
+                                 {"instances", cell.instances.size()}});
+            }
+            return {{"cells", std::move(cells)}, {"warnings", warnings}};
+        }
+        if (name == "layout_import_lef") {
+            const auto path = requiredString(arguments, "path");
+            const auto prefix = optionalString(arguments, "name_prefix");
+            const auto imported = ice::LayoutInterchange::importLef(path);
+            std::vector<ice::ObjectId> ids;
+            session.execute("mcp layout-import-lef", [&](ice::Project &project) {
+                ids = mergeImportedLayoutProject(project, imported, prefix);
+            });
+            json cells = json::array();
+            for (const auto id : ids) {
+                const auto &cell = session.project().layoutCells.at(id);
+                cells.push_back({{"id", id},
+                                 {"name", cell.name},
+                                 {"pdk", cell.pdk},
+                                 {"stack", cell.stack},
+                                 {"shapes", cell.shapes.size()},
+                                 {"ports", cell.ports.size()},
+                                 {"nets", cell.nets.size()},
+                                 {"instances", cell.instances.size()}});
+            }
+            return {{"cells", std::move(cells)}};
         }
         if (name == "layout_add_layer") {
             ice::ObjectId id = 0;
@@ -4465,6 +4876,10 @@ class IceMcpServer {
             const auto runName = run.name;
             const auto directory = run.directory;
             const bool purge = optionalBoolean(arguments, "purge", false);
+            const bool dryRun = optionalBoolean(arguments, "dry_run", false);
+            if (dryRun)
+                return {{"id", runId},    {"name", runName},  {"directory", directory},
+                        {"purge", purge}, {"deleted", false}, {"dry_run", true}};
             session.execute("mcp implementation-delete",
                             [&](ice::Project &project) { ice::removeImplementationRun(project, runId); });
             bool purged = false;
@@ -4572,7 +4987,10 @@ class IceMcpServer {
                             .build());
         tools.push_back(
             tool_builder("project_summary")
-                .with_description("Summarize the open project and its cells; when closed, return candidate paths.")
+                .with_description("Summarize the open project and its cells; when closed, return candidate paths. "
+                                  "limit/offset page each returned collection.")
+                .with_integer_param("offset", "Optional collection offset", false)
+                .with_integer_param("limit", "Optional maximum entries per collection (0 = all)", false)
                 .build());
         tools.push_back(tool_builder("project_validate")
                             .with_description("Validate the open project and return diagnostics.")
@@ -4783,10 +5201,12 @@ class IceMcpServer {
                             .with_string_param("simulation", "Simulation name or id")
                             .with_string_param("graph", "Graph name or id")
                             .build());
-        tools.push_back(tool_builder("simulation_delete")
-                            .with_description("Delete a simulation and all its graph definitions.")
-                            .with_string_param("simulation", "Simulation name or id")
-                            .build());
+        tools.push_back(
+            tool_builder("simulation_delete")
+                .with_description("Delete a simulation and all its graph definitions.")
+                .with_string_param("simulation", "Simulation name or id")
+                .with_boolean_param("dry_run", "Report what would be deleted without changing the project", false)
+                .build());
         tools.push_back(tool_builder("simulation_script_create")
                             .with_description("Create a project-level Python simulation script under scripts/.")
                             .with_string_param("name", "Simulation script name")
@@ -4808,17 +5228,22 @@ class IceMcpServer {
                             .with_string_param("script", "Simulation script name or id")
                             .with_integer_param("timeout_ms", "Optional timeout in milliseconds", false)
                             .build());
-        tools.push_back(tool_builder("simulation_script_delete")
-                            .with_description("Delete simulation script metadata; optionally purge its Python file.")
-                            .with_string_param("script", "Simulation script name or id")
-                            .with_boolean_param("purge", "Also remove the Python source file", false)
-                            .build());
+        tools.push_back(
+            tool_builder("simulation_script_delete")
+                .with_description("Delete simulation script metadata; optionally purge its Python file.")
+                .with_string_param("script", "Simulation script name or id")
+                .with_boolean_param("purge", "Also remove the Python source file", false)
+                .with_boolean_param("dry_run", "Report what would be deleted without changing the project", false)
+                .build());
         tools.push_back(tool_builder("schematic_list")
                             .with_description("List schematic cells with symbol, instance, and net counts.")
                             .build());
         tools.push_back(tool_builder("schematic_info")
-                            .with_description("Return symbols, pins, instances, and nets for a schematic.")
+                            .with_description("Return symbols, pins, instances, and nets for a schematic. "
+                                              "limit/offset page each returned collection.")
                             .with_string_param("schematic", "Schematic name or id")
+                            .with_integer_param("offset", "Optional collection offset", false)
+                            .with_integer_param("limit", "Optional maximum entries per collection (0 = all)", false)
                             .build());
         tools.push_back(tool_builder("schematic_hdl_ports")
                             .with_description("Parse a SystemVerilog cell and return its module name and ports.")
@@ -5013,9 +5438,28 @@ class IceMcpServer {
                             .with_string_param("name", "Optional layout name", false)
                             .with_string_param("stack", "Optional PDK stack identifier", false)
                             .build());
+        tools.push_back(tool_builder("layout_list")
+                            .with_description("List static and procedural layouts with paging.")
+                            .with_integer_param("offset", "Optional entry offset", false)
+                            .with_integer_param("limit", "Optional maximum entries (0 = all)", false)
+                            .build());
+        tools.push_back(tool_builder("layout_import_gds")
+                            .with_description("Import a GDSII/OASIS stream into the open project and merge its "
+                                              "cells, layers, and hierarchy.")
+                            .with_string_param("path", "Input GDSII/OASIS path")
+                            .with_integer_param("pin_label_layer", "Optional GDS layer whose TEXT becomes pins", false)
+                            .with_string_param("top_cell", "Optional top structure name", false)
+                            .with_string_param("name_prefix", "Optional imported cell-name prefix", false)
+                            .build());
+        tools.push_back(tool_builder("layout_import_lef")
+                            .with_description("Import a LEF macro into the open project as a layout cell.")
+                            .with_string_param("path", "Input LEF path")
+                            .with_string_param("name_prefix", "Optional imported cell-name prefix", false)
+                            .build());
         tools.push_back(tool_builder("layout_delete")
                             .with_description("Delete a static or procedural layout; blocked when instances use it.")
                             .with_string_param("layout", "Layout or procedural layout name or id")
+                            .with_boolean_param("dry_run", "Report references and blocking without deleting", false)
                             .build());
         tools.push_back(tool_builder("layout_add_layer")
                             .with_description("Add a layout layer.")
@@ -5288,6 +5732,7 @@ class IceMcpServer {
                             .with_description("Delete an implementation run; optionally purge its build directory.")
                             .with_string_param("run", "Implementation run name or id")
                             .with_boolean_param("purge", "Remove build/impl/<run> as well", false)
+                            .with_boolean_param("dry_run", "Report the run and purge target without deleting", false)
                             .build());
         tools.push_back(
             tool_builder("drc_run")
@@ -5320,8 +5765,11 @@ class IceMcpServer {
     std::vector<agentsdk::mcp::resource> listResources() const {
         std::vector<agentsdk::mcp::resource> resources;
         resources.push_back({"ice://project/summary", "Project summary", std::nullopt,
-                             "JSON summary of the open project", "application/json", std::nullopt, std::nullopt});
-        resources.push_back({"ice://project/json", "Project JSON", std::nullopt, "Canonical serialized project file",
+                             "JSON summary of the open project; optional ?offset=&limit= page each collection",
+                             "application/json", std::nullopt, std::nullopt});
+        resources.push_back({"ice://project/json", "Project JSON", std::nullopt,
+                             "Canonical serialized project file; optional ?offset=&limit= returns a byte-range "
+                             "chunk with total_bytes and next_offset",
                              "application/json", std::nullopt, std::nullopt});
         resources.push_back({"ice://project/validation", "Project validation", std::nullopt,
                              "Validation diagnostics for the open project", "application/json", std::nullopt,
@@ -5337,14 +5785,37 @@ class IceMcpServer {
         using namespace agentsdk::mcp;
         if (!session_)
             return mcp_error{RESOURCE_NOT_FOUND, "No project is open", std::nullopt};
+        const auto baseUri = uri.substr(0, uri.find('?'));
+        std::optional<PageRequest> page;
+        try {
+            page = pageFromUri(uri);
+        } catch (const ToolError &error) {
+            return mcp_error{INVALID_PARAMS, error.what(), std::nullopt};
+        }
         std::string text;
-        if (uri == "ice://project/summary")
-            text = summary().dump(2);
-        else if (uri == "ice://project/json")
-            text = session_->project().serialize();
-        else if (uri == "ice://project/validation")
+        if (baseUri == "ice://project/summary")
+            text = (page ? summary(*page) : summary()).dump(2);
+        else if (baseUri == "ice://project/json") {
+            const auto serialized = session_->project().serialize();
+            if (page) {
+                const auto offset = std::min(page->offset, serialized.size());
+                const auto limit = page->limit == 0 ? std::min<std::size_t>(65536, serialized.size() - offset)
+                                                    : std::min(page->limit, serialized.size() - offset);
+                const auto end = offset + limit;
+                json chunk = {{"offset", offset},
+                              {"limit", limit},
+                              {"total_bytes", serialized.size()},
+                              {"has_more", end < serialized.size()},
+                              {"data", serialized.substr(offset, limit)}};
+                if (end < serialized.size())
+                    chunk["next_offset"] = end;
+                text = chunk.dump(2);
+            } else {
+                text = serialized;
+            }
+        } else if (baseUri == "ice://project/validation")
             text = diagnostics().dump(2);
-        else if (uri == "ice://project/simulation-scripts" || uri == "ice://project/reports") {
+        else if (baseUri == "ice://project/simulation-scripts" || baseUri == "ice://project/reports") {
             json reports = json::array();
             for (const auto &[id, report] : session_->project().reports) {
                 json entry = {{"id", id}, {"name", report.name}, {"path", report.path}};

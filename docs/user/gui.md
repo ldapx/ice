@@ -166,7 +166,9 @@ and Layout:
   module, net, layer, and sources. Preview DRC markers, timing metrics, and
   generated OpenROAD STA path reports appear in the bottom `Reports` tab; its
   selector switches between the DRC, LVS, and Timing reports. Activating a DRC
-  row selects and zooms to the marker in the physical canvas.
+  row selects and zooms to the marker in the physical canvas. Activating an LVS
+  row opens the compared schematic or layout and focuses the reported object;
+  blocked or ambiguous objects are reported in the status bar.
 
 The HDL Schematic page shows the project's `.sv` files in the left `Explorer`,
 with a search field and icon buttons to create (`+`) or delete the selected file.
@@ -247,6 +249,9 @@ The Placement, CTS, Routing, and Final stage panes use the same pattern:
 The `Properties` and `Metrics` tabs continue to show the active run, selected
 stage, and selected preview object. Physical preview DRC markers, LVS results,
 timing metrics, and STA reports appear together in the bottom `Reports` tab.
+LVS rows can be activated to cross-probe the reported schematic or layout
+object. Opening a GDS/OASIS stream asks to save, discard, or cancel when the
+current project has unsaved changes.
 
 Graph generation requires Graphviz (`dot`) on `PATH`; without it, synthesis
 still runs and the canvases show an explanatory message. The final stage also

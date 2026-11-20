@@ -38,6 +38,7 @@ class QTabWidget;
 
 namespace ice {
 struct DrcViolation;
+struct LvsMismatch;
 struct LvsReport;
 struct VerificationReport;
 } // namespace ice
@@ -63,6 +64,7 @@ class ActivityPanel : public QWidget {
     void setDrcError(const QString &message);
     void showDrcTab();
     void setLvsReport(const ice::LvsReport &report);
+    void setOnLvsMismatchActivated(std::function<void(const ice::LvsMismatch &)> callback);
     void setLvsError(const QString &message);
     void showLvsTab();
     void setOnGenerateTimingReport(std::function<void()> callback) { onGenerateTimingReport_ = std::move(callback); }
@@ -163,11 +165,13 @@ class ActivityPanel : public QWidget {
     QLabel *messagesCount_ = nullptr;
     QPushButton *copyMessagesButton_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
-    QPlainTextEdit *lvsReport_ = nullptr;
+    QTableWidget *lvsTable_ = nullptr;
     QTableWidget *timingTable_ = nullptr;
     QPlainTextEdit *timingReport_ = nullptr;
     std::vector<ice::DrcViolation> drcViolations_;
+    std::vector<ice::LvsMismatch> lvsMismatches_;
     std::function<void(const ice::DrcViolation &)> onDrcViolationActivated_;
+    std::function<void(const ice::LvsMismatch &)> onLvsMismatchActivated_;
     std::function<void()> onGenerateTimingReport_;
     QComboBox *reportSelector_ = nullptr;
     QStackedWidget *reportStack_ = nullptr;

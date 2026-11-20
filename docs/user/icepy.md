@@ -261,6 +261,46 @@ The generic package generator contract is:
 `icepy.pcells.package_main_cli(...)` implements this contract for ICE-native
 package PCells.
 
+## Schematic, simulation, DRC, and packages
+
+`Project.create_schematic_cell`, `create_text_schematic_cell`, and
+`create_systemverilog_cell` return a `SchematicBuilder` with `symbol`, `pin`,
+`instance`, `net`, `component`, `set_parameter`, `set_cell_parameter`, and
+`netlist`. `Project.schematic_cells`, `schematic_cell`, and
+`schematic_cell_by_id` expose parsed cell data.
+
+```python
+builder = project.create_schematic_cell("top")
+resistor = builder.symbol("resistor")
+a = builder.pin(resistor, "A", "left", -50, 0)
+b = builder.pin(resistor, "B", "right", 50, 0)
+r1 = builder.instance(resistor, "R1")
+builder.set_parameter(r1, "resistance", "10k")
+```
+
+Simulation definitions use `SimulationItem`. Set the schematic id, analysis,
+simulator, stop/step, corners, sweeps, Monte Carlo options, measurements, and
+graphs, then call `Project.create_simulation`, `update_simulation`, or
+`run_simulation`.
+
+```python
+simulation = icepy.SimulationItem()
+simulation.name = "tran"
+simulation.schematic = builder.id
+simulation.stop = 1e-6
+simulation.step = 1e-9
+simulation.capture_signals = "v(out)"
+project.create_simulation(simulation)
+result = project.run_simulation("tran", project_root=".")
+```
+
+Verification exposes `LocalVerificationAdapter`, `run_layout_drc`,
+`parse_lyrdb`, `parse_lyrdb_text`, and `verification_report_json`. Package
+management exposes `PackageManager.read_manifest`, `content_hash`,
+`install_git`, `install_git_package`, `uninstall`, `scan_index`, `resolve`,
+`read_lockfile`, `write_lockfile`, `verify_lockfile`, `capabilities`, and
+`provenance`, plus `package_matches_pdk` and `resolve_pdk_stack`.
+
 ## Package implementation guidance
 
 Package Python code should use generic `icepy` APIs rather than mutating
