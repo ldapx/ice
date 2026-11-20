@@ -72,8 +72,9 @@ and ask the user to rebuild/restart ICE.
 | `ice_help` | Return workflow topics, common tools, and example payloads. |
 | `pdk_info` | Inspect ICE PDK packages, ngspice models, OSDI setup, sections, and optional transistor probe. |
 | `pdk_build` | Build an ICE PDK package's Verilog-A sources into the OSDI cache. |
-| `project_create` | Create and open a project file. |
-| `project_open` | Open a project; without `path`, search cwd/parents for exactly one `project.icepro`. Optional `recover` quarantines malformed sidecar files. |
+| `project_create` | Create and open a project file. Refuses to replace an existing project unless `overwrite=true`. |
+| `project_open` | Open a project; without `path`, search cwd/parents for exactly one `project.icepro`. Optional `recover` quarantines malformed sidecar files; `discard=true` closes unsaved changes. |
+| `project_reload` | Reload the current project from disk; requires `discard=true` when local changes are pending. |
 | `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
 | `project_validate` | Return validation diagnostics. |
 | `project_repair` | Recover a project and save it after quarantining invalid files. |
@@ -85,6 +86,7 @@ and ask the user to rebuild/restart ICE.
 | `schematic_set_cell_parameter` | Set or create a drawn-schematic parameter used by `{name}` component values and subcircuit `params:` defaults. |
 | `schematic_remove_cell_parameter` | Remove a schematic cell parameter by name. |
 | `schematic_create_text` | Create a text SPICE schematic. |
+| `schematic_set_text` | Replace a text SPICE or SystemVerilog cell source and reconcile placed hierarchical symbols. |
 | `schematic_create_systemverilog` | Create a SystemVerilog source cell for digital HDL simulation. |
 | `schematic_hdl_ports` | Parse a SystemVerilog cell and return its module name, port directions, widths, and real flags. |
 | `schematic_add_component` | Create a resistor, capacitor, source, ground, or device with a generated symbol and pins. |
@@ -110,7 +112,10 @@ and ask the user to rebuild/restart ICE.
 | `layout_set_script` | Replace a procedural layout script without regenerating. |
 | `layout_set_parameter` | Set a procedural layout parameter value without regenerating. |
 | `layout_create_from_schematic` | Generate a layout from a schematic; accepts an optional `stack`. |
-| `layout_delete` | Delete a static or procedural layout, blocked when referenced. |
+| `layout_list` | List static and procedural layouts; supports `limit`/`offset`. |
+| `layout_import_gds` | Import and merge a GDSII/OASIS stream into the open project. |
+| `layout_import_lef` | Import and merge a LEF macro into the open project. |
+| `layout_delete` | Delete a static or procedural layout, blocked when referenced; `dry_run` reports references. |
 
 `layout_regenerate` returns structured `layout_quality`, `layout_plan`, and
 `layout_review` objects in addition to `generation_log`. Procedural scripts use
@@ -174,6 +179,18 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `simulation_script_write` | Replace simulation script source. |
 | `simulation_script_run` | Run a script and return output plus generated graphs. |
 | `simulation_script_delete` | Delete script metadata; the file remains. |
+
+`project_summary`, `schematic_info`, and `layout_list` accept optional `limit`
+and `offset` arguments. Each returned collection reports its total and whether
+another page exists. The `ice://project/summary` resource accepts the same query
+parameters, and `ice://project/json` accepts `?offset=&limit=` for byte-range
+chunks with `total_bytes` and `next_offset`.
+
+Destructive tools accept `dry_run` where applicable: `schematic_delete`,
+`layout_delete`, `simulation_delete`, `simulation_script_delete`, and
+`implementation_delete` report what would be removed without changing the
+project. A blocked layout or schematic delete returns `deleted: false`,
+`blocked: true`, and the referencing instances.
 
 Cells, layers, simulations, graphs, and simulation scripts may be referenced by
 name or numeric id. Coordinates are integer database units. Layout tools expose
@@ -287,7 +304,10 @@ cell. Do not create a drawn cell and then write its sidecar by hand.
 SystemVerilog cell; pass `kind` only when its language must be explicit. It can
 also convert an empty drawn cell when called with `convert: true`; non-empty
 drawn cells are rejected. A source cell cannot switch between SPICE and
-SystemVerilog in place.
+SystemVerilog in place. Parent symbols generated from that cell are reconciled
+by pin name; removing a pin that is still connected fails instead of changing
+connectivity silently. Pass `source_path` to retain relative SPICE include
+resolution.
 
 SystemVerilog cells are simulated with Icarus Verilog and the `digital`
 analysis. `simulation_create` selects those defaults for such a cell, and

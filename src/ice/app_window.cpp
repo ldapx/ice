@@ -1278,6 +1278,21 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    bool confirmDiscardCurrentProject(const QString &action) {
+        if (!project_ || (!project_->dirty() && !reportDirty_))
+            return true;
+        const auto choice =
+            QMessageBox::warning(this, action, QStringLiteral("The current project has unsaved changes."),
+                                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+        if (choice == QMessageBox::Cancel)
+            return false;
+        if (choice == QMessageBox::Save) {
+            saveProject();
+            return project_ && !project_->dirty() && !reportDirty_;
+        }
+        return true;
+    }
+
     bool setProject(ice::Project project) {
         if (reportDirty_ && !saveReportSource()) {
             QMessageBox::warning(this, QStringLiteral("Simulation Script"),
@@ -2363,6 +2378,8 @@ class DocumentWindow : public QMainWindow {
                                                         "GDSII Stream (*.gds *.gdsii);;OASIS Stream "
                                                         "(*.oas *.oasis);;All files (*)"));
         if (path.isEmpty())
+            return;
+        if (!confirmDiscardCurrentProject(QStringLiteral("Open GDS/OASIS Layout")))
             return;
         try {
             bool accepted = false;
@@ -10585,6 +10602,52 @@ class DocumentWindow : public QMainWindow {
                                                    : QStringLiteral("DRC %1: %2").arg(rule, message));
     }
 
+    void focusLvsMismatch(const ice::LvsMismatch &mismatch) {
+        if (!project_)
+            return;
+        const auto &project = project_->project();
+        if (mismatch.layoutObject && project.layoutCells.contains(lvsLayoutId_)) {
+            const auto id = *mismatch.layoutObject;
+            openLayoutFile(lvsLayoutId_);
+            const auto &cell = project.layoutCells.at(lvsLayoutId_);
+            if (layoutCanvas_)
+                layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+            if (cell.instances.contains(id)) {
+                if (layoutCanvas_) {
+                    layoutCanvas_->selectLayoutInstance(id);
+                    layoutCanvas_->setFocus();
+                }
+            } else {
+                selectLayoutShapeItem(id);
+            }
+            if (activityDock_)
+                activityDock_->show();
+            statusBar()->showMessage(
+                QStringLiteral("LVS [%1]: %2")
+                    .arg(QString::fromStdString(mismatch.category), QString::fromStdString(mismatch.message)));
+            return;
+        }
+        if (mismatch.schematicObject && project.schematicCells.contains(lvsSchematicId_)) {
+            const auto id = *mismatch.schematicObject;
+            openSchematicFile(lvsSchematicId_);
+            const auto &cell = project.schematicCells.at(lvsSchematicId_);
+            if (schematicCanvas_) {
+                if (cell.instances.contains(id))
+                    schematicCanvas_->selectInstance(id);
+                else
+                    schematicCanvas_->clearSelection();
+                schematicCanvas_->setFocus();
+            }
+            if (activityDock_)
+                activityDock_->show();
+            statusBar()->showMessage(
+                QStringLiteral("LVS [%1]: %2")
+                    .arg(QString::fromStdString(mismatch.category), QString::fromStdString(mismatch.message)));
+            return;
+        }
+        statusBar()->showMessage(QStringLiteral("LVS object is not available in the compared cells"));
+    }
+
     void runLvs() {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Run LVS"),
@@ -10637,6 +10700,8 @@ class DocumentWindow : public QMainWindow {
 
         try {
             const auto report = ice::runLvs(project, schematicId, layoutId);
+            lvsSchematicId_ = schematicId;
+            lvsLayoutId_ = layoutId;
             if (activityPanel_)
                 activityPanel_->setLvsReport(report);
             if (activityDock_)
@@ -12497,6 +12562,8 @@ class DocumentWindow : public QMainWindow {
         activityPanel_->setProjectChangedCallback([this] { scheduleProjectReloadFromDisk(); });
         activityPanel_->setOnDrcViolationActivated(
             [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
+        activityPanel_->setOnLvsMismatchActivated(
+            [this](const ice::LvsMismatch &mismatch) { focusLvsMismatch(mismatch); });
         activityPanel_->setOnGenerateTimingReport([this] {
             if (!implementationController_ || !physicalDesignPage_)
                 return;
@@ -15161,6 +15228,8 @@ class DocumentWindow : public QMainWindow {
     QString drcReportPath_;
     QString drcLog_;
     ice::ObjectId drcLayoutId_ = 0;
+    ice::ObjectId lvsSchematicId_ = 0;
+    ice::ObjectId lvsLayoutId_ = 0;
     bool drcReportFromPhysicalPreview_ = false;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;

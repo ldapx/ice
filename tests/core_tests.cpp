@@ -1321,6 +1321,17 @@ TEST_CASE("project saves one cell file at a time") {
     CHECK(read(savedProcedural).find("procedural_layout") != std::string::npos);
     CHECK(read(otherPath) == otherBefore);
 
+    const auto singleCellLoaded = ice::Project::load(root);
+    CHECK(singleCellLoaded.schematicCells.contains(schematic));
+    CHECK(singleCellLoaded.layoutCells.contains(layout));
+    CHECK(singleCellLoaded.proceduralLayouts.contains(procedural));
+
+    const auto lateSchematic = ice::createSchematicCell(project, "late", "example.pdk");
+    const auto latePath = project.saveCellFile(lateSchematic);
+    CHECK(std::filesystem::is_regular_file(latePath));
+    const auto lateLoaded = ice::Project::load(root);
+    CHECK(lateLoaded.schematicCells.contains(lateSchematic));
+
     // A single-file save must update the revision used by the next full save.
     project.save(root);
     CHECK(std::filesystem::is_regular_file(root / "sch" / "amp2.icesch"));
@@ -3335,6 +3346,68 @@ TEST_CASE("layout shape boolean operations reject mixed layers and empty results
     CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {second, third}, ice::BooleanOperation::intersection),
                     ice::ProjectError);
     CHECK(project.layoutCells.at(cellId).shapes.size() == 3);
+}
+
+TEST_CASE("project inventory detects missing sidecars") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-project-inventory-test";
+    std::filesystem::remove_all(root);
+    ice::Project project;
+    project.identity = "inventory-demo";
+    project.name = "inventory-demo";
+    ice::createSchematicCell(project, "alpha");
+    ice::createSchematicCell(project, "beta");
+    project.save(root);
+
+    const auto alpha = root / "sch" / "alpha.icesch";
+    const auto beta = root / "sch" / "beta.icesch";
+    REQUIRE(std::filesystem::is_regular_file(alpha));
+    REQUIRE(std::filesystem::is_regular_file(beta));
+    std::filesystem::remove(beta);
+
+    CHECK_THROWS_AS(ice::Project::load(root), ice::ProjectError);
+    ice::ProjectLoadReport report;
+    const auto recovered = ice::Project::load(root, ice::ProjectLoadOptions{true}, &report);
+    CHECK(recovered.schematicCells.size() == 1);
+    CHECK(!report.warnings.empty());
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("project loading rejects duplicate sidecar ids") {
+    const auto root = std::filesystem::temp_directory_path() / "ice-project-duplicate-id-test";
+    std::filesystem::remove_all(root);
+    ice::Project project;
+    project.identity = "duplicate-demo";
+    project.name = "duplicate-demo";
+    ice::createSchematicCell(project, "alpha");
+    project.save(root);
+
+    const auto alpha = root / "sch" / "alpha.icesch";
+    REQUIRE(std::filesystem::is_regular_file(alpha));
+    std::filesystem::copy_file(alpha, root / "sch" / "copy.icesch");
+    {
+        std::ifstream input(root / "project.icepro");
+        nlohmann::json metadata;
+        input >> metadata;
+        input.close();
+        metadata.erase("inventory");
+        std::ofstream output(root / "project.icepro");
+        output << metadata.dump(2) << "\n";
+    }
+    CHECK_THROWS_AS(ice::Project::load(root), ice::ProjectError);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("project validation rejects duplicate schematic instance names") {
+    ice::Project project;
+    project.identity = "duplicate-instance";
+    project.name = "duplicate-instance";
+    const auto cell = ice::createSchematicCell(project, "top");
+    const auto symbol = ice::addSymbol(project, cell, "resistor");
+    project.schematicCells.at(cell).symbols.at(symbol).pins.push_back({project.nextId(), "A", 0, 0});
+    project.schematicCells.at(cell).symbols.at(symbol).pins.push_back({project.nextId(), "B", 0, 0});
+    ice::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
+    ice::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
+    CHECK(!project.validate().empty());
 }
 
 TEST_CASE("project loading can quarantine invalid sidecar files") {

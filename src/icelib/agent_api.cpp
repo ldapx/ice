@@ -580,6 +580,28 @@ SchematicDeletePlan planSchematicDeletion(const Project &project, ObjectId cellI
             plan.symbols.push_back(std::move(dependency));
         }
     }
+    std::set<ObjectId> instanceIds;
+    for (const auto &[instanceId, _] : cell->second.instances)
+        instanceIds.insert(instanceId);
+    for (const auto &[layoutId, layout] : project.layoutCells) {
+        SchematicLayoutDependency dependency;
+        dependency.layout = layoutId;
+        dependency.layoutName = layout.name;
+        for (const auto &[_, device] : layout.plannedDevices) {
+            if (device.schematicInstance != 0 && instanceIds.contains(device.schematicInstance))
+                ++dependency.devices;
+        }
+        for (const auto &[_, instance] : layout.instances) {
+            if (instance.schematicInstance != 0 && instanceIds.contains(instance.schematicInstance))
+                ++dependency.instances;
+        }
+        for (const auto &[_, port] : layout.ports) {
+            if (port.schematicInstance != 0 && instanceIds.contains(port.schematicInstance))
+                ++dependency.ports;
+        }
+        if (dependency.devices || dependency.instances || dependency.ports)
+            plan.layouts.push_back(std::move(dependency));
+    }
     return plan;
 }
 
@@ -615,6 +637,26 @@ void removeSchematicCascade(Project &project, ObjectId cellId) {
                 it = cell.nets.erase(it);
             else
                 ++it;
+        }
+    }
+    const auto cell = project.schematicCells.find(cellId);
+    if (cell != project.schematicCells.end()) {
+        std::set<ObjectId> instanceIds;
+        for (const auto &[instanceId, _] : cell->second.instances)
+            instanceIds.insert(instanceId);
+        for (auto &[_, layout] : project.layoutCells) {
+            for (auto &[__, device] : layout.plannedDevices) {
+                if (instanceIds.contains(device.schematicInstance))
+                    device.schematicInstance = 0;
+            }
+            for (auto &[__, instance] : layout.instances) {
+                if (instanceIds.contains(instance.schematicInstance))
+                    instance.schematicInstance = 0;
+            }
+            for (auto &[__, port] : layout.ports) {
+                if (instanceIds.contains(port.schematicInstance))
+                    port.schematicInstance = 0;
+            }
         }
     }
     project.schematicCells.erase(cellId);

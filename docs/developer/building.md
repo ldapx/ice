@@ -36,6 +36,10 @@ Python scientific stack.
   `git submodule update --init --recursive` after cloning. The build produces
   `libagentsdk.so` and installs it alongside ICE.
 
+System dependency locations can be overridden when the defaults do not match
+your distribution: `ICE_PYTHON_VERSION`, `ICE_PYTHON_INCLUDE`, `NANOBIND_ROOT`,
+`ICE_QT_INCLUDE`, `ICE_NGSPICE_INCLUDE`, and `ICE_TOML_INCLUDE`.
+
 ## Build
 
 ```sh

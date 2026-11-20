@@ -3,6 +3,7 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/process.hpp"
 #include "icelib/vcd.hpp"
 
 #include <algorithm>
@@ -26,7 +27,6 @@
 
 #ifndef _WIN32
 #include <locale.h>
-#include <sys/wait.h>
 #endif
 
 namespace ice {
@@ -242,17 +242,6 @@ std::string fingerprintRequest(const SimulationRequest &request) {
     return "fnv1a64:" + text.str();
 }
 
-std::string shellQuote(const std::string &value) {
-    std::string result = "'";
-    for (const char character : value) {
-        if (character == '\'')
-            result += "'\\''";
-        else
-            result += character;
-    }
-    return result + "'";
-}
-
 std::string readTextFile(const std::filesystem::path &path, std::size_t limit = std::size_t{2} * 1024 * 1024) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
@@ -434,14 +423,6 @@ std::vector<SimulationTrace> filterVcdTraces(const VcdData &data, const std::vec
     for (const auto &name : missing)
         warnings.push_back("VCD signal not found: " + name);
     return traces;
-}
-
-int processExitCode(int status) {
-#ifndef _WIN32
-    if (status != -1 && WIFEXITED(status))
-        return WEXITSTATUS(status);
-#endif
-    return status;
 }
 
 std::string verilogStringLiteral(const std::filesystem::path &path) {
@@ -1167,7 +1148,7 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
     std::filesystem::path vcdPath;
     if (sourceHasDump)
         vcdPath = parseVerilogDumpFile(source, temp);
-    std::string sources = " " + shellQuote(sourcePath.string());
+    std::vector<std::string> sourcePaths{sourcePath.string()};
     std::string compileTop = sourceTop;
     if (!sourceHasDump) {
         vcdPath = temp / "ice_trace.vcd";
@@ -1186,7 +1167,7 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
             result.error = "Unable to write the SystemVerilog VCD wrapper";
             return result;
         }
-        sources += " " + shellQuote(wrapperPath.string());
+        sourcePaths.push_back(wrapperPath.string());
         compileTop = "ice_vcd_top";
     }
 
@@ -1198,26 +1179,26 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
     }
     if (progress)
         progress({0.1, "compiling SystemVerilog testbench"});
-    std::string compileCommand;
-#ifdef _WIN32
-    compileCommand = "cd /d " + shellQuote(compileDirectory.string()) + " && ";
-#else
-    compileCommand = "cd " + shellQuote(compileDirectory.string()) + " && ";
-#endif
-    compileCommand += "iverilog -g2012 -s " + shellQuote(compileTop) + " -o " + shellQuote(executablePath.string()) +
-                      sources + " >" + shellQuote(compileLogPath.string()) + " 2>&1";
-    const auto compileStatus = processExitCode(std::system(compileCommand.c_str()));
+    ProcessOptions compileOptions;
+    compileOptions.arguments = {"iverilog", "-g2012", "-s", compileTop, "-o", executablePath.string()};
+    for (const auto &sourcePath : sourcePaths)
+        compileOptions.arguments.push_back(sourcePath);
+    compileOptions.workingDirectory = compileDirectory;
+    compileOptions.logPath = compileLogPath;
+    compileOptions.timeoutSeconds = std::max(30, request.wallTimeoutSeconds > 0 ? request.wallTimeoutSeconds : 60);
+    const auto compileResult = runProcess(compileOptions);
     if (token.cancelled()) {
         cleanup();
         result.state = JobState::cancelled;
         result.error = "simulation cancelled";
         return result;
     }
-    if (compileStatus != 0) {
-        auto details = tailText(readTextFile(compileLogPath));
+    if (!compileResult.succeeded()) {
+        auto details = tailText(compileResult.logTail.empty() ? readTextFile(compileLogPath) : compileResult.logTail);
         cleanup();
-        result.state = JobState::failed;
-        result.error = "iverilog could not compile the SystemVerilog source";
+        result.state = compileResult.timedOut ? JobState::timed_out : JobState::failed;
+        result.error = compileResult.timedOut ? "iverilog compilation timed out"
+                                              : "iverilog could not compile the SystemVerilog source";
         if (!details.empty())
             result.error += ": " + details;
         return result;
@@ -1225,25 +1206,21 @@ SimulationResult IcarusVerilogSimulator::run(const SimulationRequest &request, c
 
     if (progress)
         progress({0.45, "running SystemVerilog testbench"});
-    std::string runCommand;
-#ifdef _WIN32
-    runCommand = "cd /d " + shellQuote(temp.string()) + " && vvp " + shellQuote(executablePath.string());
-#else
-    const auto wallSeconds = request.wallTimeoutSeconds > 0 ? request.wallTimeoutSeconds : 10;
-    runCommand = "cd " + shellQuote(temp.string()) + " && timeout " + std::to_string(wallSeconds) + "s vvp " +
-                 shellQuote(executablePath.string());
-#endif
-    runCommand += " >" + shellQuote(runLogPath.string()) + " 2>&1";
-    const auto runStatus = processExitCode(std::system(runCommand.c_str()));
+    ProcessOptions runOptions;
+    runOptions.arguments = {"vvp", executablePath.string()};
+    runOptions.workingDirectory = temp;
+    runOptions.logPath = runLogPath;
+    runOptions.timeoutSeconds = request.wallTimeoutSeconds > 0 ? request.wallTimeoutSeconds : 10;
+    const auto runResult = runProcess(runOptions);
     if (token.cancelled()) {
         cleanup();
         result.state = JobState::cancelled;
         result.error = "simulation cancelled";
         return result;
     }
-    const bool timedOut = runStatus == 124;
-    if (runStatus != 0 && !timedOut) {
-        auto details = tailText(readTextFile(runLogPath));
+    const bool timedOut = runResult.timedOut;
+    if (!runResult.succeeded() && !timedOut) {
+        auto details = tailText(runResult.logTail.empty() ? readTextFile(runLogPath) : runResult.logTail);
         cleanup();
         result.state = JobState::failed;
         result.error = "vvp failed while running the SystemVerilog testbench";
@@ -1303,17 +1280,12 @@ SimulationResult AutoSimulator::run(const SimulationRequest &request, const Canc
     return NgspiceSimulator().run(request, token, progress);
 }
 
-SimulationRunner::SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter) : adapter_(std::move(adapter)) {}
+namespace {
 
-SimulationResult SimulationRunner::run(const SimulationRequest &request, std::chrono::milliseconds timeout,
+SimulationResult runAdapterWithTimeout(const std::shared_ptr<SimulatorAdapter> &adapter,
+                                       const SimulationRequest &request, std::chrono::milliseconds timeout,
+                                       const std::shared_ptr<CancellationToken> &token,
                                        const ProgressCallback &progress) {
-    auto token = std::make_shared<CancellationToken>();
-    {
-        std::lock_guard lock(tokenMutex_);
-        activeToken_ = token;
-    }
-    // Copy the adapter so the worker does not depend on `this` outliving the call.
-    auto adapter = adapter_;
     auto effective = request;
     if (timeout.count() > 0) {
         const auto seconds = static_cast<int>(std::clamp<long long>((timeout.count() + 999) / 1000, 5, 3600));
@@ -1325,8 +1297,8 @@ SimulationResult SimulationRunner::run(const SimulationRequest &request, std::ch
     if (future.wait_for(timeout) == std::future_status::timeout) {
         token->cancel();
         // NOTE: std::future from std::async blocks on destruction, so this still
-        // waits for the worker. ngspice has no async abort here; the timeout
-        // marks the result while cancellation propagates cooperatively.
+        // waits for the worker. Adapters with process-based execution react to
+        // the token; in-process ngspice can only stop at its next boundary.
         auto result = future.get();
         if (result.state == JobState::succeeded || result.state == JobState::running) {
             result.state = JobState::timed_out;
@@ -1335,31 +1307,45 @@ SimulationResult SimulationRunner::run(const SimulationRequest &request, std::ch
             result.scalars.clear();
             result.measurements.clear();
         }
-        {
-            std::lock_guard lock(tokenMutex_);
-            if (activeToken_ == token)
-                activeToken_.reset();
-        }
         return result;
     }
     auto result = future.get();
-    {
-        std::lock_guard lock(tokenMutex_);
-        if (activeToken_ == token)
-            activeToken_.reset();
-    }
     if (result.state == JobState::succeeded && !request.measurements.empty())
         result.measurements = evaluateMeasurements(request.measurements, result);
     return result;
 }
 
+} // namespace
+
+SimulationRunner::SimulationRunner(std::shared_ptr<SimulatorAdapter> adapter) : adapter_(std::move(adapter)) {}
+
+SimulationResult SimulationRunner::run(const SimulationRequest &request, std::chrono::milliseconds timeout,
+                                       const ProgressCallback &progress) {
+    auto token = std::make_shared<CancellationToken>();
+    {
+        std::lock_guard lock(tokenMutex_);
+        activeToken_ = token;
+    }
+    auto result = runAdapterWithTimeout(adapter_, request, timeout, token, progress);
+    {
+        std::lock_guard lock(tokenMutex_);
+        if (activeToken_ == token)
+            activeToken_.reset();
+    }
+    return result;
+}
+
 std::future<SimulationResult> SimulationRunner::runAsync(SimulationRequest request, std::chrono::milliseconds timeout,
                                                          ProgressCallback progress) {
+    auto token = std::make_shared<CancellationToken>();
+    {
+        std::lock_guard lock(tokenMutex_);
+        activeToken_ = token;
+    }
     auto adapter = adapter_;
     return std::async(std::launch::async,
-                      [adapter, request = std::move(request), timeout, progress = std::move(progress)] {
-                          SimulationRunner runner(adapter);
-                          return runner.run(request, timeout, progress);
+                      [adapter, request = std::move(request), timeout, progress = std::move(progress), token] {
+                          return runAdapterWithTimeout(adapter, request, timeout, token, progress);
                       });
 }
 
