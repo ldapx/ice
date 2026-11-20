@@ -12453,6 +12453,14 @@ class DocumentWindow : public QMainWindow {
             systemAppearanceAction->setChecked(true);
             break;
         }
+        // Leave the theme submenu as soon as the cursor moves to another
+        // Settings entry; some styles otherwise keep it open on top of the
+        // entries below it.  A null action means no entry is highlighted
+        // (moving into the submenu itself), so the submenu stays usable.
+        connect(settingsMenu, &QMenu::hovered, settingsMenu, [appearanceMenu](QAction *action) {
+            if (action && action != appearanceMenu->menuAction() && appearanceMenu->isVisible())
+                appearanceMenu->hide();
+        });
         settingsMenu->addSeparator();
         movableTabsAction_ = addCommand(QStringLiteral("Movable Tabs"));
         movableTabsAction_->setCheckable(true);
