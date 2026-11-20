@@ -1179,12 +1179,19 @@ class DocumentWindow : public QMainWindow {
         return false;
     }
 
+    // The single lookup for a PDK package's schematic symbols. Packages install
+    // under their own root, which need not match the PDK id, so the directory
+    // is resolved from the installed package instead of guessing.
+    static std::filesystem::path pdkSymbolDirectory(const std::string &pdk) {
+        const auto packageRoot = installedPdkPackageRoot(pdk);
+        return packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols"
+                                   : packageRoot / "symbols";
+    }
+
     std::vector<SymbolDefinition> symbolLibraryForPdk(const std::string &pdk) const {
         auto symbols = genericSymbolLibrary();
         if (pdk != ice::genericPdkId) {
-            const auto packageRoot = installedPdkPackageRoot(pdk);
-            const auto symbolDirectory =
-                packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols" : packageRoot / "symbols";
+            const auto symbolDirectory = pdkSymbolDirectory(pdk);
             if (directoryHasSymbols(symbolDirectory)) {
                 const auto pdkSymbols = packageSymbolLibrary(symbolDirectory);
                 symbols.insert(symbols.end(), pdkSymbols.begin(), pdkSymbols.end());
@@ -1206,9 +1213,7 @@ class DocumentWindow : public QMainWindow {
                 continue;
             auto library = packageLibraries.find(pdk);
             if (library == packageLibraries.end()) {
-                const auto packageRoot = installedPdkPackageRoot(pdk);
-                const auto symbolDirectory = packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols"
-                                                                 : packageRoot / "symbols";
+                const auto symbolDirectory = pdkSymbolDirectory(pdk);
                 auto definitions = directoryHasSymbols(symbolDirectory) ? packageSymbolLibrary(symbolDirectory)
                                                                         : std::vector<SymbolDefinition>{};
                 library = packageLibraries.emplace(pdk, std::move(definitions)).first;
@@ -7258,7 +7263,7 @@ class DocumentWindow : public QMainWindow {
             const auto pdk = cell.pdk.empty() ? std::string(ice::genericPdkId) : cell.pdk;
             std::vector<SymbolDefinition> pdkSymbols;
             if (pdk != ice::genericPdkId) {
-                const auto symbolDirectory = configuredPackageInstallDirectory() / pdk / "symbols";
+                const auto symbolDirectory = pdkSymbolDirectory(pdk);
                 if (!directoryHasSymbols(symbolDirectory)) {
                     QMessageBox::warning(
                         this, QStringLiteral("Package PDK symbols"),
