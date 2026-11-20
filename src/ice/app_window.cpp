@@ -1130,10 +1130,24 @@ struct SchematicNetRoute {
     std::vector<SchematicBranchRoute> branches;
 };
 
+// Workspace tabs stay locked in place unless the user opts in to reordering
+// them with the "Movable Tabs" setting.
+constexpr auto kMovableTabsKey = "ui/movableTabs";
+
+bool loadMovableTabs() {
+    QSettings settings;
+    return settings.value(QString::fromLatin1(kMovableTabsKey), false).toBool();
+}
+
+void saveMovableTabs(bool enabled) {
+    QSettings settings;
+    settings.setValue(QString::fromLatin1(kMovableTabsKey), enabled);
+}
+
 class DocumentWindow : public QMainWindow {
   public:
     explicit DocumentWindow(ice::AppearanceMode appearanceMode = ice::AppearanceMode::System)
-        : appearanceMode_(appearanceMode) {
+        : appearanceMode_(appearanceMode), movableTabs_(loadMovableTabs()) {
         ice::setPdkPackageRoots({configuredPackageInstallDirectory()});
         setWindowTitle(QStringLiteral("ICE"));
         if (const auto logo = ice::appLogo(); !logo.isNull())
@@ -1318,6 +1332,15 @@ class DocumentWindow : public QMainWindow {
                 knownLayoutCells_.insert(id);
             for (const auto &[id, _] : project_->project().proceduralLayouts)
                 knownProceduralLayouts_.insert(id);
+            // Show the first existing schematic instead of the create-schematic
+            // placeholder; the placeholder is only for projects without one.
+            for (const auto &[id, cell] : project_->project().schematicCells) {
+                if (cell.systemVerilogSchematic)
+                    continue;
+                openSchematicTabs_.insert(id);
+                activeSchematicId_ = id;
+                break;
+            }
         }
         clearLayoutDeviceSelection();
         if (layoutSelectTool_)
@@ -12047,6 +12070,16 @@ class DocumentWindow : public QMainWindow {
         return action;
     }
 
+    void setMovableTabs(bool enabled) {
+        movableTabs_ = enabled;
+        saveMovableTabs(enabled);
+        if (documents_)
+            documents_->setMovable(enabled);
+        statusBar()->showMessage(enabled ? QStringLiteral("Workspace tabs can be reordered by dragging")
+                                         : QStringLiteral("Workspace tabs are locked in place"),
+                                 5000);
+    }
+
     void setAppearanceMode(ice::AppearanceMode mode) {
         appearanceMode_ = mode;
         ice::saveAppearanceMode(mode);
@@ -12256,6 +12289,12 @@ class DocumentWindow : public QMainWindow {
             systemAppearanceAction->setChecked(true);
             break;
         }
+        settingsMenu->addSeparator();
+        auto *movableTabsAction = addCommand(QStringLiteral("Movable Tabs"));
+        movableTabsAction->setCheckable(true);
+        movableTabsAction->setChecked(movableTabs_);
+        movableTabsAction->setStatusTip(QStringLiteral("Allow the workspace tabs to be reordered by dragging them"));
+        settingsMenu->addAction(movableTabsAction);
 
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
         helpMenu->addAction(shortcutsAction);
@@ -12314,6 +12353,7 @@ class DocumentWindow : public QMainWindow {
                 [this] { setAppearanceMode(ice::AppearanceMode::Light); });
         connect(darkAppearanceAction, &QAction::triggered, this,
                 [this] { setAppearanceMode(ice::AppearanceMode::Dark); });
+        connect(movableTabsAction, &QAction::toggled, this, [this](bool enabled) { setMovableTabs(enabled); });
     }
 
     void showCommandPalette() {
@@ -12559,8 +12599,10 @@ class DocumentWindow : public QMainWindow {
                 schematicEditorStack_->setCurrentWidget(schematicEditorPage_);
             } else {
                 std::vector<std::pair<ice::ObjectId, QString>> candidates;
+                bool schematicsExist = false;
                 if (project_) {
                     for (const auto &[id, cell] : project_->project().schematicCells) {
+                        schematicsExist = true;
                         if (cell.systemVerilogSchematic)
                             continue;
                         candidates.emplace_back(id, fileTabLabel(QString::fromStdString(cell.name),
@@ -12568,7 +12610,7 @@ class DocumentWindow : public QMainWindow {
                                                                  conflictedSchematicFiles_.contains(id)));
                     }
                 }
-                schematicEmptyPanel_->setOpenCandidates(candidates);
+                schematicEmptyPanel_->setOpenCandidates(candidates, schematicsExist);
                 schematicEmptyPanel_->refreshPdks(configuredPackageInstallDirectory());
                 schematicEditorStack_->setCurrentWidget(schematicEmptyPanel_);
                 if (!showingEmpty)
@@ -12607,6 +12649,7 @@ class DocumentWindow : public QMainWindow {
         documents_ = new QTabWidget;
         auto *documents = documents_;
         documents->setTabsClosable(false);
+        documents->setMovable(movableTabs_);
         documents->setIconSize(QSize(16, 16));
         auto *schematicPage = new QWidget;
         schematicPage_ = schematicPage;
@@ -12637,7 +12680,22 @@ class DocumentWindow : public QMainWindow {
         schematicLeftTabs_ = new QTabWidget;
         schematicLeftTabs_->addTab(schematicHierarchy_, QStringLiteral("Hierarchy"));
         schematicLeftTabs_->addTab(schematicSymbolsPanel_, QStringLiteral("Devices"));
-        schematicContentLayout->addWidget(schematicLeftTabs_, 0);
+        // Keep the editor visible when the splitter is dragged right, like the
+        // Simulation tab's side panel.
+        schematicLeftTabs_->setMinimumWidth(180);
+        schematicLeftTabs_->setMaximumWidth(280);
+        // The side panel sits in a splitter so it can be retracted, matching
+        // the Simulation tab.
+        auto *schematicSplit = new QSplitter(Qt::Horizontal);
+        schematicSplit->addWidget(schematicLeftTabs_);
+        auto *schematicWorkspace = new QWidget;
+        auto *schematicWorkspaceLayout = new QHBoxLayout(schematicWorkspace);
+        schematicWorkspaceLayout->setContentsMargins(0, 0, 0, 0);
+        schematicSplit->addWidget(schematicWorkspace);
+        schematicSplit->setStretchFactor(0, 0);
+        schematicSplit->setStretchFactor(1, 1);
+        schematicSplit->setSizes({240, 1000});
+        schematicContentLayout->addWidget(schematicSplit, 1);
         auto *schematicToolbar = createEditorToolbar(false);
         schematicToolbar->setOrientation(Qt::Vertical);
         schematicToolbarColumn_ = new QWidget;
@@ -12646,7 +12704,7 @@ class DocumentWindow : public QMainWindow {
         schematicToolbarLayout->addStretch(1);
         schematicToolbarLayout->addWidget(schematicToolbar, 0, Qt::AlignHCenter);
         schematicToolbarLayout->addStretch(1);
-        schematicContentLayout->addWidget(schematicToolbarColumn_, 0);
+        schematicWorkspaceLayout->addWidget(schematicToolbarColumn_, 0);
         schematicEditorPage_ = new QWidget;
         auto *schematicEditorLayout = new QVBoxLayout(schematicEditorPage_);
         schematicEditorLayout->setContentsMargins(0, 0, 0, 0);
@@ -12679,7 +12737,7 @@ class DocumentWindow : public QMainWindow {
         schematicEditorStack_ = new QStackedWidget;
         schematicEditorStack_->addWidget(schematicEmptyPanel_);
         schematicEditorStack_->addWidget(schematicEditorPage_);
-        schematicContentLayout->addWidget(schematicEditorStack_, 1);
+        schematicWorkspaceLayout->addWidget(schematicEditorStack_, 1);
         auto *schematicProperties = new QTabWidget;
         schematicPropertiesPanel_ = new PropertiesPanel(false);
         schematicPropertiesPanel_->setEditButtonVisible(true);
@@ -12713,7 +12771,7 @@ class DocumentWindow : public QMainWindow {
         schematicHistoryPanel_->setOnHistorySelected(
             [this](std::size_t position) { jumpToSchematicHistory(position); });
         schematicProperties->addTab(schematicHistoryPanel_, QStringLiteral("History"));
-        schematicContentLayout->addWidget(schematicProperties, 0);
+        schematicWorkspaceLayout->addWidget(schematicProperties, 0);
         schematicLayout->addWidget(schematicContent, 1);
         const auto schematicTab = documents->addTab(schematicPage, QStringLiteral("A/MS Schematic"));
         documents->setTabIcon(schematicTab, ice::tabIcon(QStringLiteral("ams-schematic"), 16));
@@ -12768,7 +12826,22 @@ class DocumentWindow : public QMainWindow {
         layoutLeftTabs_->addTab(layoutHierarchy_, QStringLiteral("Hierarchy"));
         layoutDevicesPanel_ = new LayoutDevicesPanel;
         layoutLeftTabs_->addTab(layoutDevicesPanel_, QStringLiteral("Devices"));
-        layoutContentLayout->addWidget(layoutLeftTabs_, 0);
+        // Keep the editor visible when the splitter is dragged right, like the
+        // Simulation tab's side panel.
+        layoutLeftTabs_->setMinimumWidth(180);
+        layoutLeftTabs_->setMaximumWidth(280);
+        // The side panel sits in a splitter so it can be retracted, matching
+        // the Simulation tab.
+        auto *layoutSplit = new QSplitter(Qt::Horizontal);
+        layoutSplit->addWidget(layoutLeftTabs_);
+        auto *layoutWorkspace = new QWidget;
+        auto *layoutWorkspaceLayout = new QHBoxLayout(layoutWorkspace);
+        layoutWorkspaceLayout->setContentsMargins(0, 0, 0, 0);
+        layoutSplit->addWidget(layoutWorkspace);
+        layoutSplit->setStretchFactor(0, 0);
+        layoutSplit->setStretchFactor(1, 1);
+        layoutSplit->setSizes({240, 1000});
+        layoutContentLayout->addWidget(layoutSplit, 1);
         auto *layoutToolbar = createEditorToolbar(true);
         layoutToolbar->setOrientation(Qt::Vertical);
         layoutToolbarColumn_ = new QWidget;
@@ -12777,7 +12850,7 @@ class DocumentWindow : public QMainWindow {
         layoutToolbarLayout->addStretch(1);
         layoutToolbarLayout->addWidget(layoutToolbar, 0, Qt::AlignHCenter);
         layoutToolbarLayout->addStretch(1);
-        layoutContentLayout->addWidget(layoutToolbarColumn_, 0);
+        layoutWorkspaceLayout->addWidget(layoutToolbarColumn_, 0);
         layoutEditorPage_ = new QWidget;
         auto *layoutEditorLayout = new QVBoxLayout(layoutEditorPage_);
         layoutEditorLayout->setContentsMargins(0, 0, 0, 0);
@@ -12813,7 +12886,7 @@ class DocumentWindow : public QMainWindow {
         layoutEditorStack_ = new QStackedWidget;
         layoutEditorStack_->addWidget(layoutEmptyPanel_);
         layoutEditorStack_->addWidget(layoutEditorPage_);
-        layoutContentLayout->addWidget(layoutEditorStack_, 1);
+        layoutWorkspaceLayout->addWidget(layoutEditorStack_, 1);
         auto *layoutOptionsToolbar = createLayoutOptionsToolbar();
         layoutOptionsToolbar->setOrientation(Qt::Vertical);
         layoutOptionsColumn_ = new QWidget;
@@ -12822,7 +12895,7 @@ class DocumentWindow : public QMainWindow {
         layoutOptionsLayout->addStretch(1);
         layoutOptionsLayout->addWidget(layoutOptionsToolbar, 0, Qt::AlignHCenter);
         layoutOptionsLayout->addStretch(1);
-        layoutContentLayout->addWidget(layoutOptionsColumn_, 0);
+        layoutWorkspaceLayout->addWidget(layoutOptionsColumn_, 0);
         layoutRightTabs_ = new QTabWidget;
         auto *layoutRightTabs = layoutRightTabs_;
         layoutPropertiesPanel_ = new PropertiesPanel(false);
@@ -12932,7 +13005,7 @@ class DocumentWindow : public QMainWindow {
         layoutHistoryPanel_ = new HistoryPanel;
         layoutHistoryPanel_->setOnHistorySelected([this](std::size_t position) { jumpToLayoutHistory(position); });
         layoutRightTabs->addTab(layoutHistoryPanel_, QStringLiteral("History"));
-        layoutContentLayout->addWidget(layoutRightTabs, 0);
+        layoutWorkspaceLayout->addWidget(layoutRightTabs, 0);
         layoutLayout->addWidget(layoutContent, 1);
         const auto layoutTab = documents->addTab(layoutPage, QStringLiteral("Layout"));
         documents->setTabIcon(layoutTab, ice::tabIcon(QStringLiteral("layout"), 16));
@@ -15111,6 +15184,7 @@ class DocumentWindow : public QMainWindow {
     int layoutTextHeight_ = 1000;
     QShortcut *toolEscapeShortcut_ = nullptr;
     ice::AppearanceMode appearanceMode_ = ice::AppearanceMode::System;
+    bool movableTabs_ = false;
     ice::ShortcutRegistry shortcuts_;
     QList<QAction *> commands_;
 };

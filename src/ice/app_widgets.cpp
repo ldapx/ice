@@ -3285,12 +3285,30 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(24, 24, 24, 24);
     layout->setSpacing(12);
 
-    layout->addWidget(heading(QStringLiteral("Create a schematic")));
+    heading_ = heading(QStringLiteral("Create a schematic"));
+    layout->addWidget(heading_);
     description_ =
         new QLabel(QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
     description_->setWordWrap(true);
     description_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
     layout->addWidget(description_);
+
+    openSection_ = new QWidget;
+    auto *openSectionLayout = new QHBoxLayout(openSection_);
+    openSectionLayout->setContentsMargins(0, 0, 0, 0);
+    open_ = new QComboBox;
+    open_->setAccessibleName(QStringLiteral("Open schematic"));
+    openSectionLayout->addWidget(open_, 1);
+    auto *openButton = new QPushButton(QStringLiteral("Open"));
+    openSectionLayout->addWidget(openButton);
+    layout->addWidget(openSection_);
+
+    // Creating a schematic is only offered for projects that have none; the
+    // whole section is hidden otherwise.
+    createSection_ = new QWidget;
+    auto *createLayout = new QVBoxLayout(createSection_);
+    createLayout->setContentsMargins(0, 0, 0, 0);
+    createLayout->setSpacing(12);
 
     auto *kindRow = new QHBoxLayout;
     kindRow->setSpacing(10);
@@ -3311,25 +3329,15 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Draw a schematic with symbols and wires on the canvas."));
     addKind(Kind::TextSpice, QStringLiteral("Text Schematic"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a SPICE netlist cell and edit its source directly."));
-    layout->addLayout(kindRow, 0);
+    createLayout->addLayout(kindRow, 0);
 
     kindDescription_ = new QLabel;
     kindDescription_->setWordWrap(true);
     kindDescription_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
-    layout->addWidget(kindDescription_);
+    createLayout->addWidget(kindDescription_);
 
     auto *detailsCard = new QGroupBox(QStringLiteral("Details"));
     auto *detailsLayout = new QVBoxLayout(detailsCard);
-
-    openSection_ = new QWidget;
-    auto *openSectionLayout = new QHBoxLayout(openSection_);
-    openSectionLayout->setContentsMargins(0, 0, 0, 0);
-    open_ = new QComboBox;
-    open_->setAccessibleName(QStringLiteral("Open schematic"));
-    openSectionLayout->addWidget(open_, 1);
-    auto *openButton = new QPushButton(QStringLiteral("Open"));
-    openSectionLayout->addWidget(openButton);
-    detailsLayout->addWidget(openSection_);
 
     auto *form = new QFormLayout;
     name_ = new QLineEdit(QStringLiteral("Schematic01"));
@@ -3346,7 +3354,8 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     createButton_->setDefault(true);
     buttonRow->addWidget(createButton_);
     detailsLayout->addLayout(buttonRow);
-    layout->addWidget(detailsCard, 0);
+    createLayout->addWidget(detailsCard, 0);
+    layout->addWidget(createSection_, 0);
     layout->addStretch(1);
 
     refreshPdks(configuredPackageInstallDirectory());
@@ -3395,19 +3404,28 @@ void EmptySchematicPanel::setOnCreate(CreateCallback callback) { onCreate_ = std
 
 void EmptySchematicPanel::setOnOpen(OpenCallback callback) { onOpen_ = std::move(callback); }
 
-void EmptySchematicPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates) {
+void EmptySchematicPanel::setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates,
+                                            bool schematicsExist) {
     const QSignalBlocker blocker(open_);
     open_->clear();
     for (const auto &[id, name] : candidates)
         open_->addItem(name, QVariant::fromValue<qulonglong>(id));
     const bool hasCandidates = !candidates.empty();
     openSection_->setVisible(hasCandidates);
-    if (description_)
-        description_->setText(hasCandidates
-                                  ? QStringLiteral("All schematics are closed. Open an existing file or choose a "
-                                                   "schematic type below to create a new one.")
-                                  : QStringLiteral("This project has no schematics yet. Choose a schematic type "
-                                                   "below to start."));
+    if (createSection_)
+        createSection_->setVisible(!schematicsExist);
+    if (heading_)
+        heading_->setText(schematicsExist ? QStringLiteral("Open a schematic") : QStringLiteral("Create a schematic"));
+    if (!description_)
+        return;
+    if (!schematicsExist)
+        description_->setText(
+            QStringLiteral("This project has no schematics yet. Choose a schematic type below to start."));
+    else if (hasCandidates)
+        description_->setText(QStringLiteral("All schematics are closed. Open an existing schematic, or select one "
+                                             "in the Hierarchy."));
+    else
+        description_->setText(QStringLiteral("This project has schematics. Select one in the Hierarchy to open it."));
 }
 
 void EmptySchematicPanel::refreshPdks(const std::filesystem::path &installDirectory) {
