@@ -24,6 +24,12 @@
 
 #include <algorithm>
 
+namespace {
+// Original parameter name stored on the name cell so a rejected rename can be
+// restored without rebuilding the table.
+constexpr int kOriginalParameterNameRole = Qt::UserRole + 1;
+} // namespace
+
 PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
     auto *headerRow = new QHBoxLayout;
@@ -115,6 +121,15 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({75, 500});
+    contentSplitter_ = splitter;
+    emptyHint_ = new QLabel(QStringLiteral("Select a device, net, or the schematic background to inspect its "
+                                          "properties."));
+    emptyHint_->setAlignment(Qt::AlignCenter);
+    emptyHint_->setWordWrap(true);
+    emptyHint_->setContentsMargins(16, 16, 16, 16);
+    emptyHint_->setStyleSheet(QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+    emptyHint_->setVisible(false);
+    layout->addWidget(emptyHint_, 1);
     layout->addWidget(splitter, 1);
     connect(parameters_, &QTableWidget::itemChanged, this,
             [this](QTableWidgetItem *item) { handleParameterEdit(item); });
@@ -131,18 +146,37 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     });
     updateParameterButtons();
     refreshAppearance();
+    setEmptyState(true);
 }
 
 void PropertiesPanel::setEditButtonVisible(bool visible) {
     editButtonVisible_ = visible;
     if (editButton_)
-        editButton_->setVisible(visible);
+        editButton_->setVisible(visible && !emptyState_);
+}
+
+void PropertiesPanel::setEmptyState(bool empty) {
+    emptyState_ = empty;
+    if (emptyHint_)
+        emptyHint_->setVisible(empty);
+    if (contentSplitter_)
+        contentSplitter_->setVisible(!empty);
+    if (title_)
+        title_->setVisible(!empty);
+    if (editButton_)
+        editButton_->setVisible(!empty && editButtonVisible_);
 }
 
 void PropertiesPanel::setOnParameterChanged(ParameterChanged callback) { onParameterChanged_ = std::move(callback); }
 
 void PropertiesPanel::setOnCellParameterChanged(CellParameterChanged callback) {
     onCellParameterChanged_ = std::move(callback);
+}
+
+void PropertiesPanel::setOnParameterRenamed(ParameterRenamed callback) { onParameterRenamed_ = std::move(callback); }
+
+void PropertiesPanel::setOnCellParameterRenamed(CellParameterRenamed callback) {
+    onCellParameterRenamed_ = std::move(callback);
 }
 
 void PropertiesPanel::setOnCellParameterAdded(CellParameterAdded callback) {
@@ -196,6 +230,7 @@ void PropertiesPanel::clearSelection() {
         gridOptions_->setVisible(false);
     setParametersVisible(false);
     setTitle(QStringLiteral("Properties"));
+    setEmptyState(true);
     previewFrame_->setVisible(true);
     QSignalBlocker blocker(parameters_);
     parameters_->setRowCount(0);
@@ -204,6 +239,8 @@ void PropertiesPanel::clearSelection() {
 
 void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const std::string &symbolName,
                                   const std::string &symbolSvg, bool iconEditable) {
+    setEmptyState(false);
+    parameterNamesEditable_ = true;
     (void)symbolName;
     instanceId_ = instance.id;
     symbolIconEditable_ = iconEditable;
@@ -226,6 +263,8 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
 }
 
 void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString &symbolSvg) {
+    setEmptyState(false);
+    parameterNamesEditable_ = true;
     instanceId_ = 0;
     cellId_ = cell.id;
     layoutCellId_ = 0;
@@ -253,6 +292,8 @@ void PropertiesPanel::setLayoutPreviewStyles(const ice::LayoutRenderer::LayerSty
 }
 
 void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model) {
+    setEmptyState(false);
+    parameterNamesEditable_ = false;
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = cell.id;
@@ -287,11 +328,13 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     setParametersVisible(cell != nullptr);
     if (!cell) {
         setTitle(QStringLiteral("Properties"));
+        setEmptyState(true);
         previewFrame_->setVisible(true);
         populateParameters({});
         updateParameterButtons();
         return;
     }
+    setEmptyState(false);
     layoutDeviceName_ = cell->name;
     setTitle(QString::fromStdString(cell->name));
     layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
@@ -303,6 +346,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
 }
 
 void PropertiesPanel::setPathTool(const std::string &layerName) {
+    setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -333,6 +377,7 @@ void PropertiesPanel::setPathTool(const std::string &layerName) {
 void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string &layerName,
                                      const std::string &displayName, const std::string &typeName,
                                      const ice::LayoutPreviewModel &model) {
+    setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -387,6 +432,7 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
 }
 
 void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName) {
+    setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -438,6 +484,7 @@ void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &la
 
 void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model,
                                         int spacing) {
+    setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
@@ -476,9 +523,13 @@ void PropertiesPanel::populateParameters(const std::vector<ice::Parameter> &para
     for (const auto &parameter : parameters) {
         const int row = parameters_->rowCount();
         parameters_->insertRow(row);
-        auto *name = new QTableWidgetItem(QString::fromStdString(parameter.name));
+        const auto nameText = QString::fromStdString(parameter.name);
+        auto *name = new QTableWidgetItem(nameText);
         name->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(parameter.id));
-        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+        // Kept so an invalid rename can be rolled back without a model refresh.
+        name->setData(kOriginalParameterNameRole, nameText);
+        if (!parameterNamesEditable_)
+            name->setFlags(name->flags() & ~Qt::ItemIsEditable);
         parameters_->setItem(row, 0, name);
         parameters_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(parameter.value)));
     }
@@ -511,7 +562,41 @@ void PropertiesPanel::populateLayoutDeviceParameters(const std::vector<ice::Layo
 }
 
 void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
-    if (!item || item->column() != 1)
+    if (!item)
+        return;
+    if (item->column() == 0) {
+        const auto original = item->data(kOriginalParameterNameRole).toString();
+        const auto newName = item->text().trimmed();
+        const auto revert = [&] {
+            QSignalBlocker blocker(parameters_);
+            item->setText(original);
+        };
+        if (!parameterNamesEditable_ || newName == original)
+            return;
+        if (newName.isEmpty()) {
+            revert();
+            return;
+        }
+        for (int row = 0; row < parameters_->rowCount(); ++row) {
+            const auto *other = parameters_->item(row, 0);
+            if (other && other != item && other->text().compare(newName, Qt::CaseInsensitive) == 0) {
+                revert();
+                return;
+            }
+        }
+        const auto parameterId = static_cast<ice::ObjectId>(item->data(Qt::UserRole).toULongLong());
+        if (instanceId_ != 0 && onParameterRenamed_)
+            onParameterRenamed_(instanceId_, parameterId, newName.toStdString());
+        else if (cellId_ != 0 && onCellParameterRenamed_)
+            onCellParameterRenamed_(cellId_, parameterId, newName.toStdString());
+        else {
+            revert();
+            return;
+        }
+        item->setData(kOriginalParameterNameRole, newName);
+        return;
+    }
+    if (item->column() != 1)
         return;
     const auto *name = parameters_->item(item->row(), 0);
     if (!name)

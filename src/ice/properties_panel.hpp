@@ -27,6 +27,12 @@ class PropertiesPanel : public QWidget {
                                                 const std::string &name, const std::string &value)>;
     using CellParameterChanged = std::function<void(ice::ObjectId cellId, ice::ObjectId parameterId,
                                                     const std::string &name, const std::string &value)>;
+    // Renaming a parameter keeps its id and value; the callback receives the
+    // new name. Names are unique per instance or cell.
+    using ParameterRenamed =
+        std::function<void(ice::ObjectId instanceId, ice::ObjectId parameterId, const std::string &name)>;
+    using CellParameterRenamed =
+        std::function<void(ice::ObjectId cellId, ice::ObjectId parameterId, const std::string &name)>;
     using CellParameterAdded = std::function<void(ice::ObjectId cellId, const std::string &name)>;
     using CellParametersRemoved =
         std::function<void(ice::ObjectId cellId, const std::vector<ice::ObjectId> &parameterIds)>;
@@ -43,6 +49,8 @@ class PropertiesPanel : public QWidget {
 
     void setOnParameterChanged(ParameterChanged callback);
     void setOnCellParameterChanged(CellParameterChanged callback);
+    void setOnParameterRenamed(ParameterRenamed callback);
+    void setOnCellParameterRenamed(CellParameterRenamed callback);
     void setOnCellParameterAdded(CellParameterAdded callback);
     void setOnCellParametersRemoved(CellParametersRemoved callback);
     void setOnLayoutCellParameterChanged(LayoutCellParameterChanged callback);
@@ -76,6 +84,10 @@ class PropertiesPanel : public QWidget {
 
   private:
     void setTitle(const QString &title);
+    // Swaps the details view for a short hint when nothing is selected; the
+    // panel heading is hidden because the enclosing tab already says
+    // "Properties".
+    void setEmptyState(bool empty);
     void populateParameters(const std::vector<ice::Parameter> &parameters);
     void setParametersVisible(bool visible);
     void populateLayoutDeviceParameters(const std::vector<ice::LayoutDeviceParameter> &parameters);
@@ -85,6 +97,8 @@ class PropertiesPanel : public QWidget {
     void removeParameters();
 
     QLabel *title_ = nullptr;
+    QLabel *emptyHint_ = nullptr;
+    QWidget *contentSplitter_ = nullptr;
     QPushButton *editButton_ = nullptr;
     QStackedWidget *previewStack_ = nullptr;
     SymbolPreview *symbolPreview_ = nullptr;
@@ -115,6 +129,8 @@ class PropertiesPanel : public QWidget {
     QWidget *parametersHeader_ = nullptr;
     ParameterChanged onParameterChanged_;
     CellParameterChanged onCellParameterChanged_;
+    ParameterRenamed onParameterRenamed_;
+    CellParameterRenamed onCellParameterRenamed_;
     CellParameterAdded onCellParameterAdded_;
     CellParametersRemoved onCellParametersRemoved_;
     LayoutCellParameterChanged onLayoutCellParameterChanged_;
@@ -125,4 +141,8 @@ class PropertiesPanel : public QWidget {
     SymbolIconEditRequested onSymbolIconEditRequested_;
     bool editButtonVisible_ = false;
     bool symbolIconEditable_ = false;
+    bool emptyState_ = true;
+    // Parameter names may be edited only where a rename callback exists: on
+    // schematic instances and schematic cells.
+    bool parameterNamesEditable_ = false;
 };

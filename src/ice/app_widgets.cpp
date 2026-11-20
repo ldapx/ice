@@ -3210,9 +3210,10 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     const auto addKind = [&](Kind kind, const QString &label, const QString &icon, const QString &tooltip) {
         auto *button = new QPushButton(label);
         button->setCheckable(true);
-        button->setMinimumHeight(72);
-        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        setLucideIcon(button, icon, 20);
+        // Compact enough to read as a choice card rather than filling the page.
+        button->setFixedHeight(64);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setLucideIcon(button, icon, 18);
         button->setToolTip(tooltip);
         kindGroup_->addButton(button, static_cast<int>(kind));
         kindRow->addWidget(button, 1);
@@ -3221,7 +3222,7 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Draw a schematic with symbols and wires on the canvas."));
     addKind(Kind::TextSpice, QStringLiteral("Text Schematic"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a SPICE netlist cell and edit its source directly."));
-    layout->addLayout(kindRow, 2);
+    layout->addLayout(kindRow, 0);
 
     kindDescription_ = new QLabel;
     kindDescription_->setWordWrap(true);
@@ -3257,6 +3258,7 @@ EmptySchematicPanel::EmptySchematicPanel(QWidget *parent) : QWidget(parent) {
     buttonRow->addWidget(createButton_);
     detailsLayout->addLayout(buttonRow);
     layout->addWidget(detailsCard, 0);
+    layout->addStretch(1);
 
     refreshPdks(configuredPackageInstallDirectory());
     setOpenCandidates({});
