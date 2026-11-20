@@ -896,7 +896,7 @@ json schematicInfo(const ice::SchematicCell &cell) {
         result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
     }
     if (cell.textSchematic) {
-        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name);
+        const auto interface = ice::spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
         result["spice_ready"] = interface.ok;
         result["spice_subcircuit"] = interface.subcircuitName;
         result["spice_ports"] = interface.ports;
@@ -1666,7 +1666,7 @@ int main(int argc, char **argv) {
                                           : readTextFile(spiceFile);
             ice::ObjectId id = 0;
             session.execute("schematic-add-text", [&](ice::Project &project) {
-                id = ice::createTextSchematicCell(project, args[2], pdk, text);
+                id = ice::createTextSchematicCell(project, args[2], pdk, text, spiceFile);
             });
             session.save(args[1]);
             json result = {{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"text", text}};
@@ -1907,7 +1907,8 @@ int main(int argc, char **argv) {
             ice::ProjectSession session(ice::Project::load(args[1]));
             ice::SpiceImportResult imported;
             session.execute("schematic-import-spice", [&](ice::Project &project) {
-                imported = ice::createSchematicFromSpice(project, args[2], pdk, source, drawn);
+                imported = ice::createSchematicFromSpice(project, args[2], pdk, source, drawn,
+                                                         file == "-" ? std::string{} : file);
             });
             session.save(args[1]);
             printJson({{"id", imported.cell},

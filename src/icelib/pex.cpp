@@ -10,15 +10,19 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace ice {
@@ -472,6 +476,22 @@ extractPlacedDevice(const LayoutCell &parent, const LayoutInstance &instance, co
     device.name = instance.name;
     device.type = placedDeviceKindName(kind);
     device.model = model;
+    for (const auto &[_, childPort] : child.ports) {
+        const auto rectangle =
+            transformRectangle(childPort.rectangle, Transform{instance.x, instance.y, instance.orientation});
+        if (!rectangle.valid())
+            continue;
+        if (!device.bounds.valid()) {
+            device.bounds = rectangle;
+        } else {
+            const auto maxX = std::max(device.bounds.x + device.bounds.width, rectangle.x + rectangle.width);
+            const auto maxY = std::max(device.bounds.y + device.bounds.height, rectangle.y + rectangle.height);
+            device.bounds.x = std::min(device.bounds.x, rectangle.x);
+            device.bounds.y = std::min(device.bounds.y, rectangle.y);
+            device.bounds.width = maxX - device.bounds.x;
+            device.bounds.height = maxY - device.bounds.y;
+        }
+    }
 
     const auto effectivePdk = parent.pdk.empty() || parent.pdk == genericPdkId ? child.pdk : parent.pdk;
     const bool pdkSubckt = !effectivePdk.empty() && effectivePdk != genericPdkId && !model.empty();
@@ -635,6 +655,7 @@ std::vector<PexDevice> extractPlannedDevices(const LayoutCell &layout,
         device.instance = planned.id;
         device.name = planned.name;
         device.model = planned.model;
+        device.bounds = Rect{planned.x, planned.y, planned.width, planned.height};
 
         if (kind == PlacedDeviceKind::mos) {
             const auto drain = requireNode("D");
@@ -1272,6 +1293,7 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
                         device.model = rule.model;
                         device.pins = {"D", "G", "S", "B"};
                         device.nodes = {drainNode, gateNode, sourceNode, bodyNode};
+                        device.bounds = channelBounds;
                         device.spiceLine = std::move(line);
                         devices.push_back(std::move(device));
                     }
@@ -1349,6 +1371,7 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
                     device.model = rule.model;
                     device.pins = {"1", "2"};
                     device.nodes = {firstNode, secondNode};
+                    device.bounds = bounds;
                     device.spiceLine = designator + " " + firstNode + " " + secondNode + " " + value;
                     devices.push_back(std::move(device));
                 }
@@ -1424,6 +1447,7 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
                 device.model = rule.model;
                 device.pins = {"1", "2"};
                 device.nodes = {firstNode, secondNode};
+                device.bounds = body.bounds;
                 device.spiceLine = designator + " " + firstNode + " " + secondNode + " " + resistance;
                 devices.push_back(std::move(device));
             }
@@ -1447,6 +1471,13 @@ double sheetResistanceFor(const ParsedLayer &layer, const PexOptions &options) {
         break;
     }
     return 0.0;
+}
+
+bool pointInsideOrOnRectangle(double x, double y, const Rect &rectangle) {
+    if (!rectangle.valid())
+        return false;
+    return x >= static_cast<double>(rectangle.x) && x <= static_cast<double>(rectangle.x + rectangle.width) &&
+           y >= static_cast<double>(rectangle.y) && y <= static_cast<double>(rectangle.y + rectangle.height);
 }
 
 std::string joinNames(const std::vector<std::string> &names) {
@@ -1517,6 +1548,441 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
 
     std::set<std::string> skippedLayers;
     std::vector<std::string> notes;
+
+    // Builds a small resistive graph for one net. Shapes are resistors between
+    // their long-axis endpoints, touching shapes merge at shared endpoints,
+    // and vias at the same location combine in parallel. This replaces the old
+    // lumped sum, which made parallel wires and via arrays look more resistive.
+    const auto computeGroupResistance = [&](const LayoutNetGroup &group, int &viaCount) -> double {
+        struct Conductor {
+            std::string layerKey;
+            Rect bounds;
+            double resistance = 0.0;
+            double ax = 0.0;
+            double ay = 0.0;
+            double bx = 0.0;
+            double by = 0.0;
+            int firstNode = -1;
+            int secondNode = -1;
+        };
+        struct Via {
+            double x = 0.0;
+            double y = 0.0;
+            double resistance = 0.0;
+            ObjectId layer = 0;
+        };
+        std::vector<Conductor> conductors;
+        std::vector<Via> vias;
+        viaCount = 0;
+        for (const auto shapeId : group.shapes) {
+            const auto shape = connectivityLayout.shapes.find(shapeId);
+            if (shape == connectivityLayout.shapes.end() || shape->second.isText())
+                continue;
+            const auto layer = project.layers.find(shape->second.layer);
+            if (layer == project.layers.end())
+                continue;
+            const auto parsed = parseLayer(layer->second.name, declaredLayers);
+            if (!isDrawingPurpose(parsed) || parsed.kind == LayerKind::ignored)
+                continue;
+            if (shape->second.isPath()) {
+                for (std::size_t pointIndex = 0;
+                     pointIndex < shape->second.pointVias.size() && pointIndex < shape->second.centerline.size();
+                     ++pointIndex) {
+                    for (const auto viaLayerId : shape->second.pointVias[pointIndex]) {
+                        const auto viaLayer = project.layers.find(viaLayerId);
+                        if (viaLayer == project.layers.end())
+                            continue;
+                        const auto viaParsed = parseLayer(viaLayer->second.name, declaredLayers);
+                        if (viaParsed.kind != LayerKind::via)
+                            continue;
+                        vias.push_back({static_cast<double>(shape->second.centerline[pointIndex].x),
+                                        static_cast<double>(shape->second.centerline[pointIndex].y),
+                                        options.viaResistance, viaLayerId});
+                        ++viaCount;
+                    }
+                }
+            }
+            if (parsed.kind == LayerKind::via) {
+                vias.push_back({shape->second.rectangle.x + shape->second.rectangle.width / 2.0,
+                                shape->second.rectangle.y + shape->second.rectangle.height / 2.0, options.viaResistance,
+                                shape->second.layer});
+                ++viaCount;
+                continue;
+            }
+            const auto metrics = shapeMetrics(shape->second, project.units);
+            if (!(metrics.squares > 0.0))
+                continue;
+            Conductor conductor;
+            conductor.layerKey = layoutLayerConnectivityKey(layer->second);
+            conductor.bounds = shape->second.rectangle;
+            if (!conductor.bounds.valid() && shape->second.isPath() && !shape->second.centerline.empty()) {
+                const auto expansion = std::max<Coordinate>(1, shape->second.width) / 2;
+                auto minX = shape->second.centerline.front().x - expansion;
+                auto minY = shape->second.centerline.front().y - expansion;
+                auto maxX = shape->second.centerline.front().x + expansion;
+                auto maxY = shape->second.centerline.front().y + expansion;
+                for (const auto &point : shape->second.centerline) {
+                    minX = std::min(minX, point.x - expansion);
+                    minY = std::min(minY, point.y - expansion);
+                    maxX = std::max(maxX, point.x + expansion);
+                    maxY = std::max(maxY, point.y + expansion);
+                }
+                conductor.bounds = Rect{minX, minY, maxX - minX, maxY - minY};
+            }
+            conductor.resistance = std::max(1.0e-12, sheetResistanceFor(parsed, options) * metrics.squares);
+            if (shape->second.isPath() && shape->second.centerline.size() >= 2) {
+                conductor.ax = static_cast<double>(shape->second.centerline.front().x);
+                conductor.ay = static_cast<double>(shape->second.centerline.front().y);
+                conductor.bx = static_cast<double>(shape->second.centerline.back().x);
+                conductor.by = static_cast<double>(shape->second.centerline.back().y);
+            } else if (conductor.bounds.width >= conductor.bounds.height) {
+                conductor.ax = conductor.bounds.x;
+                conductor.ay = conductor.bounds.y + conductor.bounds.height / 2.0;
+                conductor.bx = conductor.bounds.x + conductor.bounds.width;
+                conductor.by = conductor.ay;
+            } else {
+                conductor.ax = conductor.bounds.x + conductor.bounds.width / 2.0;
+                conductor.ay = conductor.bounds.y;
+                conductor.bx = conductor.ax;
+                conductor.by = conductor.bounds.y + conductor.bounds.height;
+            }
+            conductors.push_back(std::move(conductor));
+        }
+
+        struct Node {
+            double x = 0.0;
+            double y = 0.0;
+            std::string key;
+            bool terminal = false;
+        };
+        struct Edge {
+            int left = 0;
+            int right = 0;
+            double resistance = 0.0;
+        };
+        std::vector<Node> nodes;
+        std::map<std::string, int> nodeIndex;
+        const auto nodeFor = [&](const std::string &key, double x, double y, bool terminal = false) {
+            const auto found = nodeIndex.find(key);
+            if (found != nodeIndex.end()) {
+                if (terminal)
+                    nodes[static_cast<std::size_t>(found->second)].terminal = true;
+                return found->second;
+            }
+            const auto index = static_cast<int>(nodes.size());
+            nodes.push_back({x, y, key, terminal});
+            nodeIndex.emplace(key, index);
+            return index;
+        };
+        const auto endpointKey = [&](const Conductor &conductor, double x, double y) {
+            return conductor.layerKey + "|" + std::to_string(static_cast<long long>(std::llround(x))) + "," +
+                   std::to_string(static_cast<long long>(std::llround(y)));
+        };
+        for (auto &conductor : conductors) {
+            conductor.firstNode =
+                nodeFor(endpointKey(conductor, conductor.ax, conductor.ay), conductor.ax, conductor.ay);
+            conductor.secondNode =
+                nodeFor(endpointKey(conductor, conductor.bx, conductor.by), conductor.bx, conductor.by);
+        }
+
+        std::vector<Edge> edges;
+        for (const auto &conductor : conductors) {
+            if (conductor.firstNode == conductor.secondNode)
+                continue;
+            edges.push_back({conductor.firstNode, conductor.secondNode, conductor.resistance});
+        }
+        for (std::size_t left = 0; left < conductors.size(); ++left) {
+            for (std::size_t right = left + 1; right < conductors.size(); ++right) {
+                if (conductors[left].layerKey != conductors[right].layerKey ||
+                    !rectanglesOverlapOrTouch(conductors[left].bounds, conductors[right].bounds))
+                    continue;
+                int bestLeft = conductors[left].firstNode;
+                int bestRight = conductors[right].firstNode;
+                double bestDistance = std::numeric_limits<double>::max();
+                const std::array<std::pair<int, std::pair<double, double>>, 2> leftNodes = {
+                    std::make_pair(conductors[left].firstNode,
+                                   std::make_pair(conductors[left].ax, conductors[left].ay)),
+                    std::make_pair(conductors[left].secondNode,
+                                   std::make_pair(conductors[left].bx, conductors[left].by))};
+                const std::array<std::pair<int, std::pair<double, double>>, 2> rightNodes = {
+                    std::make_pair(conductors[right].firstNode,
+                                   std::make_pair(conductors[right].ax, conductors[right].ay)),
+                    std::make_pair(conductors[right].secondNode,
+                                   std::make_pair(conductors[right].bx, conductors[right].by))};
+                for (const auto &leftNode : leftNodes) {
+                    for (const auto &rightNode : rightNodes) {
+                        const auto dx = leftNode.second.first - rightNode.second.first;
+                        const auto dy = leftNode.second.second - rightNode.second.second;
+                        const auto distance = dx * dx + dy * dy;
+                        if (distance < bestDistance) {
+                            bestDistance = distance;
+                            bestLeft = leftNode.first;
+                            bestRight = rightNode.first;
+                        }
+                    }
+                }
+                if (bestLeft != bestRight)
+                    edges.push_back({bestLeft, bestRight, 1.0e-12});
+            }
+        }
+
+        using ViaLocation = std::tuple<ObjectId, long long, long long>;
+        std::map<ViaLocation, int> viaCounts;
+        for (const auto &via : vias)
+            ++viaCounts[{via.layer, static_cast<long long>(std::llround(via.x)),
+                         static_cast<long long>(std::llround(via.y))}];
+        double seriesViaResistance = 0.0;
+        for (const auto &[location, count] : viaCounts) {
+            const auto x = static_cast<double>(std::get<1>(location));
+            const auto y = static_cast<double>(std::get<2>(location));
+            std::vector<std::size_t> touching;
+            for (std::size_t index = 0; index < conductors.size(); ++index) {
+                if (pointInsideOrOnRectangle(x, y, conductors[index].bounds))
+                    touching.push_back(index);
+            }
+            if (touching.size() < 2) {
+                seriesViaResistance += options.viaResistance / static_cast<double>(count);
+                continue;
+            }
+            const auto nearestNode = [&](const Conductor &conductor) {
+                const auto firstDistance = std::hypot(conductor.ax - x, conductor.ay - y);
+                const auto secondDistance = std::hypot(conductor.bx - x, conductor.by - y);
+                return firstDistance <= secondDistance ? conductor.firstNode : conductor.secondNode;
+            };
+            const auto anchor = nearestNode(conductors[touching.front()]);
+            for (std::size_t index = 1; index < touching.size(); ++index) {
+                const auto other = nearestNode(conductors[touching[index]]);
+                if (anchor != other)
+                    edges.push_back(
+                        {anchor, other, std::max(1.0e-12, options.viaResistance / static_cast<double>(count))});
+            }
+        }
+
+        for (const auto portId : group.ports) {
+            const auto port = connectivityLayout.ports.find(portId);
+            if (port == connectivityLayout.ports.end() || !port->second.visible)
+                continue;
+            const auto x = port->second.rectangle.x + port->second.rectangle.width / 2.0;
+            const auto y = port->second.rectangle.y + port->second.rectangle.height / 2.0;
+            const auto terminal = nodeFor("port:" + std::to_string(portId), x, y, true);
+            bool connected = false;
+            for (const auto &conductor : conductors) {
+                if (pointInsideOrOnRectangle(conductor.ax, conductor.ay, port->second.rectangle)) {
+                    edges.push_back({terminal, conductor.firstNode, 1.0e-12});
+                    connected = true;
+                }
+                if (pointInsideOrOnRectangle(conductor.bx, conductor.by, port->second.rectangle)) {
+                    edges.push_back({terminal, conductor.secondNode, 1.0e-12});
+                    connected = true;
+                }
+            }
+            if (!connected && !conductors.empty()) {
+                auto nearest = conductors.front().firstNode;
+                auto distance = std::numeric_limits<double>::max();
+                for (const auto &conductor : conductors) {
+                    for (const auto node : {conductor.firstNode, conductor.secondNode}) {
+                        const auto dx = nodes[static_cast<std::size_t>(node)].x - x;
+                        const auto dy = nodes[static_cast<std::size_t>(node)].y - y;
+                        const auto candidate = dx * dx + dy * dy;
+                        if (candidate < distance) {
+                            distance = candidate;
+                            nearest = node;
+                        }
+                    }
+                }
+                edges.push_back({terminal, nearest, 1.0e-12});
+            }
+        }
+
+        if (nodes.empty())
+            return seriesViaResistance;
+
+        std::vector<std::vector<std::pair<int, double>>> adjacency(nodes.size());
+        for (const auto &edge : edges) {
+            if (edge.left == edge.right || !(edge.resistance > 0.0))
+                continue;
+            adjacency[static_cast<std::size_t>(edge.left)].push_back({edge.right, edge.resistance});
+            adjacency[static_cast<std::size_t>(edge.right)].push_back({edge.left, edge.resistance});
+        }
+        const auto shortestPath = [&](int start) {
+            std::vector<double> distance(nodes.size(), std::numeric_limits<double>::infinity());
+            using Entry = std::pair<double, int>;
+            std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
+            distance[static_cast<std::size_t>(start)] = 0.0;
+            queue.push({0.0, start});
+            while (!queue.empty()) {
+                const auto [currentDistance, current] = queue.top();
+                queue.pop();
+                if (currentDistance > distance[static_cast<std::size_t>(current)])
+                    continue;
+                for (const auto &[next, resistance] : adjacency[static_cast<std::size_t>(current)]) {
+                    const auto candidate = currentDistance + resistance;
+                    if (candidate < distance[static_cast<std::size_t>(next)]) {
+                        distance[static_cast<std::size_t>(next)] = candidate;
+                        queue.push({candidate, next});
+                    }
+                }
+            }
+            return distance;
+        };
+        const auto effectiveBetween = [&](const std::vector<int> &component, int left, int right) -> double {
+            if (left == right)
+                return 0.0;
+            std::map<int, int> local;
+            for (std::size_t index = 0; index < component.size(); ++index)
+                local.emplace(component[index], static_cast<int>(index));
+            const auto count = component.size();
+            if (count > 256) {
+                std::vector<double> distance(count, std::numeric_limits<double>::infinity());
+                using Entry = std::pair<double, int>;
+                std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
+                const auto start = local.at(left);
+                distance[static_cast<std::size_t>(start)] = 0.0;
+                queue.push({0.0, start});
+                while (!queue.empty()) {
+                    const auto [currentDistance, current] = queue.top();
+                    queue.pop();
+                    if (currentDistance > distance[static_cast<std::size_t>(current)])
+                        continue;
+                    const auto original = component[static_cast<std::size_t>(current)];
+                    for (const auto &[nextOriginal, resistance] : adjacency[static_cast<std::size_t>(original)]) {
+                        const auto found = local.find(nextOriginal);
+                        if (found == local.end())
+                            continue;
+                        const auto candidate = currentDistance + resistance;
+                        if (candidate < distance[static_cast<std::size_t>(found->second)]) {
+                            distance[static_cast<std::size_t>(found->second)] = candidate;
+                            queue.push({candidate, found->second});
+                        }
+                    }
+                }
+                return distance[static_cast<std::size_t>(local.at(right))];
+            }
+            std::vector<std::vector<double>> matrix(count, std::vector<double>(count, 0.0));
+            for (const auto &edge : edges) {
+                const auto leftLocal = local.find(edge.left);
+                const auto rightLocal = local.find(edge.right);
+                if (leftLocal == local.end() || rightLocal == local.end() || edge.left == edge.right)
+                    continue;
+                const auto conductance = 1.0 / std::max(1.0e-12, edge.resistance);
+                matrix[static_cast<std::size_t>(leftLocal->second)][static_cast<std::size_t>(leftLocal->second)] +=
+                    conductance;
+                matrix[static_cast<std::size_t>(rightLocal->second)][static_cast<std::size_t>(rightLocal->second)] +=
+                    conductance;
+                matrix[static_cast<std::size_t>(leftLocal->second)][static_cast<std::size_t>(rightLocal->second)] -=
+                    conductance;
+                matrix[static_cast<std::size_t>(rightLocal->second)][static_cast<std::size_t>(leftLocal->second)] -=
+                    conductance;
+            }
+            const auto ground = local.at(right);
+            std::vector<int> active;
+            for (std::size_t index = 0; index < count; ++index) {
+                if (static_cast<int>(index) != ground)
+                    active.push_back(static_cast<int>(index));
+            }
+            const auto reduced = active.size();
+            std::vector<std::vector<double>> system(reduced, std::vector<double>(reduced, 0.0));
+            std::vector<double> rhs(reduced, 0.0);
+            std::map<int, std::size_t> reducedIndex;
+            for (std::size_t row = 0; row < reduced; ++row) {
+                reducedIndex.emplace(active[row], row);
+                for (std::size_t column = 0; column < reduced; ++column)
+                    system[row][column] =
+                        matrix[static_cast<std::size_t>(active[row])][static_cast<std::size_t>(active[column])];
+                if (active[row] == local.at(left))
+                    rhs[row] = 1.0;
+            }
+            for (std::size_t column = 0; column < reduced; ++column) {
+                auto pivot = column;
+                for (std::size_t row = column + 1; row < reduced; ++row) {
+                    if (std::abs(system[row][column]) > std::abs(system[pivot][column]))
+                        pivot = row;
+                }
+                if (std::abs(system[pivot][column]) < 1.0e-18)
+                    return std::numeric_limits<double>::infinity();
+                std::swap(system[pivot], system[column]);
+                std::swap(rhs[pivot], rhs[column]);
+                const auto diagonal = system[column][column];
+                for (std::size_t row = column + 1; row < reduced; ++row) {
+                    const auto factor = system[row][column] / diagonal;
+                    if (factor == 0.0)
+                        continue;
+                    for (std::size_t entry = column; entry < reduced; ++entry)
+                        system[row][entry] -= factor * system[column][entry];
+                    rhs[row] -= factor * rhs[column];
+                }
+            }
+            for (std::size_t row = reduced; row-- > 0;) {
+                auto value = rhs[row];
+                for (std::size_t column = row + 1; column < reduced; ++column)
+                    value -= system[row][column] * rhs[column];
+                rhs[row] = value / system[row][row];
+            }
+            return rhs[reducedIndex.at(local.at(left))];
+        };
+
+        std::vector<int> component(nodes.size(), -1);
+        std::vector<std::vector<int>> components;
+        for (std::size_t start = 0; start < nodes.size(); ++start) {
+            if (component[start] >= 0)
+                continue;
+            const auto index = static_cast<int>(components.size());
+            components.emplace_back();
+            std::vector<int> pending{static_cast<int>(start)};
+            component[start] = index;
+            while (!pending.empty()) {
+                const auto current = pending.back();
+                pending.pop_back();
+                components[static_cast<std::size_t>(index)].push_back(current);
+                for (const auto &[next, _] : adjacency[static_cast<std::size_t>(current)]) {
+                    if (component[static_cast<std::size_t>(next)] >= 0)
+                        continue;
+                    component[static_cast<std::size_t>(next)] = index;
+                    pending.push_back(next);
+                }
+            }
+        }
+
+        double parallelConductance = 0.0;
+        for (const auto &members : components) {
+            std::vector<int> terminals;
+            for (const auto member : members) {
+                if (nodes[static_cast<std::size_t>(member)].terminal)
+                    terminals.push_back(member);
+            }
+            double resistance = 0.0;
+            if (terminals.size() >= 2) {
+                for (std::size_t left = 0; left < terminals.size(); ++left) {
+                    for (std::size_t right = left + 1; right < terminals.size(); ++right) {
+                        const auto candidate = effectiveBetween(members, terminals[left], terminals[right]);
+                        if (std::isfinite(candidate))
+                            resistance = std::max(resistance, candidate);
+                    }
+                }
+            } else if (members.size() >= 2) {
+                const auto first = shortestPath(members.front());
+                auto farthest = members.front();
+                for (const auto member : members) {
+                    if (first[static_cast<std::size_t>(member)] > first[static_cast<std::size_t>(farthest)])
+                        farthest = member;
+                }
+                const auto second = shortestPath(farthest);
+                auto other = farthest;
+                for (const auto member : members) {
+                    if (second[static_cast<std::size_t>(member)] > second[static_cast<std::size_t>(other)])
+                        other = member;
+                }
+                const auto candidate = effectiveBetween(members, farthest, other);
+                if (std::isfinite(candidate))
+                    resistance = candidate;
+            }
+            if (resistance > 0.0 && std::isfinite(resistance))
+                parallelConductance += 1.0 / resistance;
+        }
+        const auto conductorResistance = parallelConductance > 0.0 ? 1.0 / parallelConductance : 0.0;
+        return conductorResistance + seriesViaResistance;
+    };
+
     for (const auto &group : groups) {
         PexNet net;
         net.net = group.net;
@@ -1546,13 +2012,8 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
             net.perimeter += metrics.perimeter;
             net.capacitance +=
                 options.areaCapacitance * metrics.area + options.perimeterCapacitance * metrics.perimeter;
-            if (layer.kind == LayerKind::via) {
-                ++net.viaCount;
-                net.resistance += options.viaResistance;
-            } else {
-                net.resistance += sheetResistanceFor(layer, options) * metrics.squares;
-            }
         }
+        net.resistance = computeGroupResistance(group, net.viaCount);
 
         std::set<std::string> portNames;
         for (const auto portId : group.ports) {
@@ -1687,17 +2148,64 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     }
 
     std::set<std::string> designators;
-    std::vector<PexDevice> plannedDevices;
-    if (options.extractPlannedDevices)
-        plannedDevices = extractPlannedDevices(layout, netNodeById, names, designators, notes);
-    if (!plannedDevices.empty()) {
-        report.devices = std::move(plannedDevices);
-        notes.push_back("Extracted " + std::to_string(report.devices.size()) +
-                        " planned layout device(s); placed/polygon device extraction was skipped to avoid duplicates.");
+    std::vector<PexDevice> devices;
+    const auto normalizedDeviceName = [](const std::string &text) {
+        std::string result;
+        for (const auto character : text) {
+            const auto byte = static_cast<unsigned char>(character);
+            if (std::isalnum(byte))
+                result.push_back(static_cast<char>(std::tolower(byte)));
+            else if (!result.empty() && result.back() != '_')
+                result.push_back('_');
+        }
+        while (!result.empty() && result.back() == '_')
+            result.pop_back();
+        return result;
+    };
+    const auto boundsOverlap = [](const Rect &left, const Rect &right) {
+        if (!left.valid() || !right.valid())
+            return false;
+        const auto x0 = std::max(left.x, right.x);
+        const auto x1 = std::min(left.x + left.width, right.x + right.width);
+        const auto y0 = std::max(left.y, right.y);
+        const auto y1 = std::min(left.y + left.height, right.y + right.height);
+        return x1 > x0 && y1 > y0;
+    };
+    std::size_t plannedAdded = 0;
+    std::size_t placedAdded = 0;
+    std::size_t polygonAdded = 0;
+    const auto addDevice = [&](PexDevice device, const char *source) {
+        for (const auto &existing : devices) {
+            if (device.instance != 0 && device.instance == existing.instance) {
+                notes.push_back(std::string("Skipped duplicate ") + source + " device '" + device.name +
+                                "': already represented as '" + existing.name + "'.");
+                return;
+            }
+            if (!device.name.empty() && normalizedDeviceName(device.name) == normalizedDeviceName(existing.name)) {
+                notes.push_back(std::string("Skipped duplicate ") + source + " device '" + device.name +
+                                "': the same name was already extracted.");
+                return;
+            }
+            if (device.type == existing.type && device.model == existing.model &&
+                boundsOverlap(device.bounds, existing.bounds)) {
+                notes.push_back(std::string("Skipped duplicate ") + source + " device '" + device.name +
+                                "': its geometry overlaps '" + existing.name + "'.");
+                return;
+            }
+        }
+        devices.push_back(std::move(device));
+    };
+
+    if (options.extractPlannedDevices) {
+        auto plannedDevices = extractPlannedDevices(layout, netNodeById, names, designators, notes);
+        for (auto &device : plannedDevices) {
+            const auto before = devices.size();
+            addDevice(std::move(device), "planned");
+            if (devices.size() != before)
+                ++plannedAdded;
+        }
     }
-    const bool usedPlannedDevices = !report.devices.empty();
-    const auto placedDeviceStart = report.devices.size();
-    if (!usedPlannedDevices && options.extractPlacedDevices) {
+    if (options.extractPlacedDevices) {
         std::map<ObjectId, std::string> layerKeys;
         for (const auto &[id, layer] : project.layers)
             layerKeys.emplace(id, layoutLayerConnectivityKey(layer));
@@ -1710,29 +2218,39 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
             }
             auto device = extractPlacedDevice(layout, instance, child->second, netGeometry, report.nets, layerKeys,
                                               names, designators, notes);
-            if (device)
-                report.devices.push_back(std::move(*device));
+            if (!device)
+                continue;
+            const auto before = devices.size();
+            addDevice(std::move(*device), "placed");
+            if (devices.size() != before)
+                ++placedAdded;
         }
-    } else if (!usedPlannedDevices && !layout.instances.empty()) {
+    } else if (!layout.instances.empty()) {
         notes.push_back("Placed layout device extraction is disabled.");
     }
-    const auto placedDeviceCount = report.devices.size() - placedDeviceStart;
 
-    std::size_t polygonDeviceCount = 0;
-    if (!usedPlannedDevices && options.extractPolygonDevices && extractionRules && !extractionRules->rules.empty()) {
+    if (options.extractPolygonDevices && extractionRules && !extractionRules->rules.empty()) {
         auto polygonDevices = extractPolygonDevices(project, layout, groups, report.nets, netNodeById, *extractionRules,
                                                     designators, notes);
-        polygonDeviceCount = polygonDevices.size();
-        for (auto &device : polygonDevices)
-            report.devices.push_back(std::move(device));
+        for (auto &device : polygonDevices) {
+            const auto before = devices.size();
+            addDevice(std::move(device), "polygon");
+            if (devices.size() != before)
+                ++polygonAdded;
+        }
     }
+
+    report.devices = std::move(devices);
     report.devicesFromLayout = !report.devices.empty();
     if (report.devicesFromLayout) {
-        if (!usedPlannedDevices) {
-            notes.push_back("Extracted " + std::to_string(placedDeviceCount) + " placed layout device(s) and " +
-                            std::to_string(polygonDeviceCount) +
-                            " polygon device(s); linked schematic devices were not copied.");
-        }
+        if (plannedAdded > 0)
+            notes.push_back("Extracted " + std::to_string(plannedAdded) + " planned layout device(s).");
+        if (placedAdded > 0)
+            notes.push_back("Extracted " + std::to_string(placedAdded) + " placed layout device(s).");
+        if (polygonAdded > 0)
+            notes.push_back("Extracted " + std::to_string(polygonAdded) + " polygon device(s).");
+        if (plannedAdded + placedAdded + polygonAdded > 0 && placedAdded + polygonAdded > 0)
+            notes.push_back("Merged planned, placed, and polygon device extraction without duplicating overlap.");
     } else {
         notes.push_back("No placed or planned layout devices were recognized; the linked schematic netlist is used "
                         "if available.");

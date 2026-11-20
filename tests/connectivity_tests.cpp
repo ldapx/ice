@@ -149,6 +149,44 @@ TEST_CASE("resistor bodies do not alias the nets at their terminals") {
     CHECK(groupFor(groups, left2) != groupFor(groups, right2));
 }
 
+TEST_CASE("polygon connectivity does not merge overlapping bounding boxes") {
+    auto fixture = makeFixture();
+    const auto left = ice::addPolygon(fixture.project, fixture.cell, fixture.metal,
+                                      {{0, 0}, {1000, 0}, {1000, 200}, {200, 200}, {200, 1000}, {0, 1000}});
+    const auto right = ice::addPolygon(fixture.project, fixture.cell, fixture.metal,
+                                       {{300, 300}, {1000, 300}, {1000, 1000}, {800, 1000}, {800, 800}, {300, 800}});
+    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    CHECK(groupFor(groups, left) != nullptr);
+    CHECK(groupFor(groups, right) != nullptr);
+    CHECK(groupFor(groups, left) != groupFor(groups, right));
+}
+
+TEST_CASE("routed paths honor segment layers and point vias") {
+    auto fixture = makeFixture();
+    const auto metal2 = ice::addLayer(fixture.project, "Metal2", 12);
+    const auto start = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 300, 300});
+    const auto end = ice::addRectangle(fixture.project, fixture.cell, metal2, {1700, 1700, 300, 300});
+
+    ice::Shape path;
+    path.id = fixture.project.nextId();
+    path.layer = fixture.metal;
+    path.centerline = {{200, 200}, {1850, 200}, {1850, 1850}};
+    path.width = 200;
+    path.segmentLayers = {fixture.metal, metal2};
+    path.segmentWidths = {200, 200};
+    path.pointVias = {{}, {fixture.via}, {}};
+    fixture.project.layoutCells.at(fixture.cell).shapes.emplace(path.id, path);
+
+    auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    CHECK(groupFor(groups, start) != nullptr);
+    CHECK(groupFor(groups, end) != nullptr);
+    CHECK(groupFor(groups, start) == groupFor(groups, end));
+
+    fixture.project.layoutCells.at(fixture.cell).shapes.at(path.id).pointVias[1].clear();
+    groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    CHECK(groupFor(groups, start) != groupFor(groups, end));
+}
+
 TEST_CASE("explicit layout nets merge distant shapes and pins") {
     auto fixture = makeFixture();
     const auto net = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");

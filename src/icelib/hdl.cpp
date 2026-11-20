@@ -402,8 +402,8 @@ std::vector<HdlPort> parsePortsFromHeader(const std::string &header, bool &hasDi
             inheritedWidth = segmentWidth;
         // A type qualifier applies to every name in the comma-separated list,
         // e.g. "output real samp, samp_b, clkc" makes all three ports real.
-        const bool segmentReal = containsWord(lowered, "real") || containsWord(lowered, "realtime") ||
-                                 containsWord(lowered, "shortreal");
+        const bool segmentReal =
+            containsWord(lowered, "real") || containsWord(lowered, "realtime") || containsWord(lowered, "shortreal");
         if (segmentHasDirection)
             inheritedReal = segmentReal;
         const auto name = portNameForSegment(segment);
@@ -466,6 +466,51 @@ void applyBodyDeclarations(const std::string &body, std::vector<HdlPort> &ports)
             }
         }
     }
+}
+
+bool isSimpleNetName(const std::string &text) {
+    if (text.empty())
+        return false;
+    if (text == "0" || text == "1" || text == "1'b0" || text == "1'b1" || text == "1'bx" || text == "1'bz")
+        return true;
+    for (const char character : text) {
+        if (!isIdentifierChar(character))
+            return false;
+    }
+    return true;
+}
+
+std::vector<std::string> wordsOf(const std::string &text) {
+    std::vector<std::string> words;
+    std::istringstream stream(text);
+    std::string word;
+    while (stream >> word)
+        words.push_back(std::move(word));
+    return words;
+}
+
+bool isGatePrimitive(const std::string &name) {
+    static const std::set<std::string> gates = {"and", "or", "not", "buf", "nand", "nor", "xor", "xnor"};
+    return gates.contains(name);
+}
+
+bool isDeclarationKeyword(const std::string &name) {
+    static const std::set<std::string> declarations = {
+        "wire",      "logic",      "reg",     "input",   "output", "inout",    "tri",    "supply0",  "supply1",
+        "parameter", "localparam", "typedef", "integer", "real",   "time",     "signed", "unsigned", "automatic",
+        "static",    "const",      "var",     "bit",     "byte",   "shortint", "int",    "longint",  "genvar"};
+    return declarations.contains(name);
+}
+
+bool containsBehavioralConstruct(const std::string &statement) {
+    static const std::set<std::string> keywords = {
+        "always", "always_comb", "always_ff", "always_latch", "initial", "final", "generate", "function", "task",
+        "for",    "while",       "if",        "case",         "casez",   "casex", "assert",   "assume",   "cover"};
+    for (const auto &keyword : keywords) {
+        if (containsWord(statement, keyword))
+            return true;
+    }
+    return statement.find('$') != std::string::npos;
 }
 
 HdlParseResult parseRawModule(const RawModule &raw, const std::string &source) {
@@ -574,6 +619,211 @@ HdlParseResult parseSystemVerilogModule(const SchematicCell &cell) {
     if (!cell.systemVerilogSchematic)
         return {false, {}, {}, "Schematic cell is not a SystemVerilog source cell"};
     return parseSystemVerilogModule(cell.systemVerilogText, cell.name);
+}
+
+HdlNetlist parseStructuralSystemVerilog(const std::string &source, const std::string &moduleName) {
+    HdlNetlist result;
+    const auto cleaned = stripComments(source);
+    const auto modules = rawModules(cleaned);
+    if (modules.empty()) {
+        result.error = "SystemVerilog source contains no module declaration";
+        return result;
+    }
+    const RawModule *selected = nullptr;
+    if (!moduleName.empty()) {
+        for (const auto &module : modules) {
+            if (lowerCopy(module.name) == lowerCopy(moduleName)) {
+                selected = &module;
+                break;
+            }
+        }
+    }
+    if (selected == nullptr && modules.size() == 1)
+        selected = &modules.front();
+    if (selected == nullptr) {
+        result.error = "Unable to select module '" + moduleName + "' for structural LVS";
+        return result;
+    }
+    result.ok = true;
+    result.structural = true;
+
+    const auto statements = splitTopLevel(selected->body, ';');
+    int unnamedIndex = 0;
+    for (const auto &rawStatement : statements) {
+        const auto statement = trimCopy(rawStatement);
+        if (statement.empty())
+            continue;
+        const auto lowered = lowerCopy(statement);
+        if (lowered.starts_with("endmodule"))
+            continue;
+        if (containsBehavioralConstruct(statement)) {
+            result.structural = false;
+            result.error = "SystemVerilog module '" + selected->name +
+                           "' contains behavioral constructs; synthesize it to a gate-level netlist before LVS";
+            return result;
+        }
+        const auto words = wordsOf(statement);
+        if (words.empty())
+            continue;
+        const auto first = lowerCopy(words.front());
+        if (isDeclarationKeyword(first)) {
+            const auto equal = statement.find('=');
+            if (equal != std::string::npos) {
+                const auto right = trimCopy(statement.substr(equal + 1));
+                if (!isSimpleNetName(right)) {
+                    result.structural = false;
+                    result.error = "Declaration initializers are behavioral; synthesize module '" + selected->name +
+                                   "' to a gate-level netlist before LVS";
+                    return result;
+                }
+            }
+            continue;
+        }
+        if (first == "assign") {
+            const auto equal = statement.find('=');
+            if (equal == std::string::npos) {
+                result.structural = false;
+                result.error = "Malformed continuous assignment in module '" + selected->name + "'";
+                return result;
+            }
+            const auto left = trimCopy(statement.substr(6, equal - 6));
+            const auto right = trimCopy(statement.substr(equal + 1));
+            if (!isSimpleNetName(left) || !isSimpleNetName(right)) {
+                result.structural = false;
+                result.error = "Continuous assignment expressions are behavioral; synthesize module '" +
+                               selected->name + "' to a gate-level netlist before LVS";
+                return result;
+            }
+            if (right != "0" && right != "1" && right != "1'b0" && right != "1'b1" && right != "1'bx" &&
+                right != "1'bz")
+                result.netAliases[lowerCopy(left)] = lowerCopy(right);
+            continue;
+        }
+
+        const auto open = statement.find('(');
+        const auto close = open == std::string::npos ? std::string::npos : findMatching(statement, open, '(', ')');
+        if (open == std::string::npos || close == std::string::npos) {
+            result.structural = false;
+            result.error = "Unsupported SystemVerilog statement for LVS: " + statement;
+            return result;
+        }
+
+        if (isGatePrimitive(first)) {
+            const auto prefix = trimCopy(statement.substr(0, open));
+            const auto prefixWords = wordsOf(prefix);
+            HdlNetlistInstance instance;
+            instance.type = prefixWords.empty() ? first : lowerCopy(prefixWords.front());
+            instance.name = prefixWords.size() > 1 ? prefixWords[1] : first + "_" + std::to_string(++unnamedIndex);
+            const auto connections = splitTopLevel(statement.substr(open + 1, close - open - 1), ',');
+            for (const auto &connection : connections) {
+                const auto net = trimCopy(connection);
+                if (!isSimpleNetName(net)) {
+                    result.structural = false;
+                    result.error = "Unsupported gate connection in module '" + selected->name + "': " + net;
+                    return result;
+                }
+                instance.nets.push_back(net);
+            }
+            if (instance.nets.empty()) {
+                result.structural = false;
+                result.error = "Gate instance '" + instance.name + "' has no connections";
+                return result;
+            }
+            instance.portNames.push_back("Y");
+            instance.portNames.push_back("A");
+            for (std::size_t index = 2; index < instance.nets.size(); ++index)
+                instance.portNames.push_back(index == 2 ? "B" : "C" + std::to_string(index - 2));
+            result.instances.push_back(std::move(instance));
+            continue;
+        }
+
+        // Module instantiation: type [#(...)] name (connections).
+        std::size_t cursor = 0;
+        const auto skipSpace = [&] {
+            while (cursor < statement.size() && std::isspace(static_cast<unsigned char>(statement[cursor])))
+                ++cursor;
+        };
+        skipSpace();
+        const auto typeStart = cursor;
+        while (cursor < statement.size() && isIdentifierChar(statement[cursor]))
+            ++cursor;
+        const auto type = statement.substr(typeStart, cursor - typeStart);
+        if (type.empty()) {
+            result.structural = false;
+            result.error = "Unsupported SystemVerilog statement for LVS: " + statement;
+            return result;
+        }
+        skipSpace();
+        if (cursor < statement.size() && statement[cursor] == '#') {
+            ++cursor;
+            skipSpace();
+            if (cursor >= statement.size() || statement[cursor] != '(') {
+                result.structural = false;
+                result.error = "Malformed parameter override in module '" + selected->name + "'";
+                return result;
+            }
+            const auto parameterClose = findMatching(statement, cursor, '(', ')');
+            if (parameterClose == std::string::npos) {
+                result.structural = false;
+                result.error = "Malformed parameter override in module '" + selected->name + "'";
+                return result;
+            }
+            cursor = parameterClose + 1;
+            skipSpace();
+        }
+        const auto nameStart = cursor;
+        while (cursor < statement.size() && isIdentifierChar(statement[cursor]))
+            ++cursor;
+        const auto instanceName = statement.substr(nameStart, cursor - nameStart);
+        skipSpace();
+        if (cursor >= statement.size() || statement[cursor] != '(') {
+            result.structural = false;
+            result.error = "Unsupported SystemVerilog statement for LVS: " + statement;
+            return result;
+        }
+        const auto connectionClose = findMatching(statement, cursor, '(', ')');
+        if (connectionClose == std::string::npos) {
+            result.structural = false;
+            result.error = "Malformed module instance in '" + selected->name + "'";
+            return result;
+        }
+        HdlNetlistInstance instance;
+        instance.type = type;
+        instance.name = instanceName.empty() ? type + "_" + std::to_string(++unnamedIndex) : instanceName;
+        const auto connections = splitTopLevel(statement.substr(cursor + 1, connectionClose - cursor - 1), ',');
+        int positional = 0;
+        for (const auto &rawConnection : connections) {
+            auto connection = trimCopy(rawConnection);
+            if (connection.empty())
+                continue;
+            std::string port;
+            std::string net;
+            if (connection.front() == '.') {
+                const auto portOpen = connection.find('(');
+                const auto portClose =
+                    portOpen == std::string::npos ? std::string::npos : findMatching(connection, portOpen, '(', ')');
+                if (portOpen == std::string::npos || portClose == std::string::npos) {
+                    result.structural = false;
+                    result.error = "Malformed named connection in instance '" + instance.name + "'";
+                    return result;
+                }
+                port = trimCopy(connection.substr(1, portOpen - 1));
+                net = trimCopy(connection.substr(portOpen + 1, portClose - portOpen - 1));
+            } else {
+                port = std::to_string(positional++);
+                net = connection;
+            }
+            if (!isSimpleNetName(net)) {
+                result.structural = false;
+                result.error = "Unsupported connection expression in instance '" + instance.name + "': " + net;
+                return result;
+            }
+            instance.portNames.push_back(std::move(port));
+            instance.nets.push_back(std::move(net));
+        }
+        result.instances.push_back(std::move(instance));
+    }
+    return result;
 }
 
 std::string buildSystemVerilogSimulationSource(const Project &project, ObjectId cellId) {

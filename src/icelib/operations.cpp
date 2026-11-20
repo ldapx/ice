@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <initializer_list>
 #include <iomanip>
@@ -360,12 +361,20 @@ ObjectId createSchematicCell(Project &project, std::string name, std::string pdk
     project.schematicCells.emplace(id, SchematicCell{id, std::move(name), std::move(pdk)});
     return id;
 }
-ObjectId createTextSchematicCell(Project &project, std::string name, std::string pdk, std::string spiceText) {
+ObjectId createTextSchematicCell(Project &project, std::string name, std::string pdk, std::string spiceText,
+                                 std::string spiceSourcePath) {
     const auto id = createSchematicCell(project, std::move(name), std::move(pdk));
     auto &cell = project.schematicCells.at(id);
     cell.textSchematic = true;
     cell.spiceText = std::move(spiceText);
-    const auto interface = spiceInterfaceForText(cell.spiceText, cell.name);
+    cell.spiceSourcePath = std::move(spiceSourcePath);
+    if (!cell.spiceSourcePath.empty()) {
+        std::error_code status;
+        const auto absolute = std::filesystem::absolute(cell.spiceSourcePath, status);
+        if (!status)
+            cell.spiceSourcePath = absolute.lexically_normal().string();
+    }
+    const auto interface = spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
     for (const auto &parameter : interface.parameters) {
         if (parameter.name.empty())
             continue;
@@ -805,9 +814,25 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
 
         const auto deviceId = project.nextId();
         const auto &placement = placements[static_cast<std::size_t>(index)];
-        layout.plannedDevices.emplace(deviceId,
-                                      PlannedDevice{deviceId, std::move(deviceName), instance->id,
-                                                    placement.x + offsetX, placement.y + offsetY, boxWidth, boxHeight});
+        PlannedDevice planned;
+        planned.id = deviceId;
+        planned.name = std::move(deviceName);
+        planned.schematicInstance = instance->id;
+        planned.x = placement.x + offsetX;
+        planned.y = placement.y + offsetY;
+        planned.width = boxWidth;
+        planned.height = boxHeight;
+        if (symbol != schematic.symbols.end()) {
+            planned.device = symbolTypeName(symbol->second.name);
+            planned.model = parameterNamed(*instance, {"model", "spice_model", "subckt"});
+            for (const auto &parameter : instance->parameters) {
+                const auto name = lower(parameter.name);
+                if (name == "model" || name == "spice_model" || name == "subckt")
+                    continue;
+                planned.parameters.push_back(parameter);
+            }
+        }
+        layout.plannedDevices.emplace(deviceId, std::move(planned));
         if (symbol == schematic.symbols.end())
             continue;
         for (const auto &pin : symbol->second.pins) {
@@ -845,6 +870,12 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         layoutNetNames.insert(lower(netName));
         const auto layoutNetId = project.nextId();
         layout.nets.emplace(layoutNetId, LayoutNet{layoutNetId, netName});
+        for (const auto &endpoint : endpoints) {
+            if (endpoint.pin.empty())
+                continue;
+            if (auto planned = layout.plannedDevices.find(endpoint.device); planned != layout.plannedDevices.end())
+                planned->second.terminals[endpoint.pin] = layoutNetId;
+        }
         const auto &from = endpoints.front();
         for (std::size_t index = 1; index < endpoints.size(); ++index) {
             const auto &to = endpoints[index];
@@ -1495,8 +1526,12 @@ std::vector<std::string> buildSchematicNetlistImpl(const Project &project, Objec
                                                ") has no usable subcircuit: " + interface->second.error);
                     }
                     if (emittedTextSources.insert(child->first).second) {
-                        for (const auto &line : spiceSourceLinesForHierarchy(child->second.spiceText))
+                        std::vector<std::string> includeWarnings;
+                        for (const auto &line : spiceSourceLinesForHierarchy(
+                                 child->second.spiceText, child->second.spiceSourcePath, &includeWarnings))
                             subcircuits << line << "\n";
+                        for (const auto &warning : includeWarnings)
+                            note(warning);
                     }
                     if (symbolUseCount[instance.symbol] > 1) {
                         throw ProjectError("schematic.netlist.ambiguous_symbol",
@@ -2030,8 +2065,14 @@ std::vector<std::string> buildSimulationNetlist(const Project &project, ObjectId
         return buildSchematicNetlist(project, cellId, notes, SchematicNetlistMode::analog,
                                      pdkNetlistGeometryScale(cell.pdk));
 
+    std::vector<std::string> includeWarnings;
+    const auto rewritten = cell.spiceSourcePath.empty()
+                               ? cell.spiceText
+                               : rewriteSpiceIncludePaths(cell.spiceText, cell.spiceSourcePath, &includeWarnings);
+    if (notes)
+        notes->insert(notes->end(), includeWarnings.begin(), includeWarnings.end());
     std::vector<std::string> lines;
-    std::istringstream stream(cell.spiceText);
+    std::istringstream stream(rewritten);
     std::string line;
     while (std::getline(stream, line)) {
         const auto trimmed = trimLine(line);

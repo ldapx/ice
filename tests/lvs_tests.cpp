@@ -5,6 +5,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,12 @@ LvsFixture makeFixture() {
     fixture.schematic = ice::createSchematicCell(fixture.project, "top");
     fixture.resistor = addTwoPinDevice(fixture.project, fixture.schematic, "resistor", "R1", fixture.resistorPins);
     fixture.capacitor = addTwoPinDevice(fixture.project, fixture.schematic, "capacitor", "C1", fixture.capacitorPins);
+    fixture.project.schematicCells.at(fixture.schematic)
+        .instances.at(fixture.resistor)
+        .parameters.push_back({fixture.project.nextId(), "resistance", "1k"});
+    fixture.project.schematicCells.at(fixture.schematic)
+        .instances.at(fixture.capacitor)
+        .parameters.push_back({fixture.project.nextId(), "capacitance", "1n"});
     ice::addNet(fixture.project, fixture.schematic, "in", {fixture.resistorPins[0], fixture.capacitorPins[0]});
     ice::addNet(fixture.project, fixture.schematic, "out", {fixture.resistorPins[1], fixture.capacitorPins[1]});
     fixture.layout = ice::createLayoutFromSchematic(fixture.project, fixture.schematic);
@@ -121,6 +129,8 @@ TEST_CASE("LVS compares layout net topology") {
     auto fixture = makeFixture();
     auto &layout = fixture.project.layoutCells.at(fixture.layout);
     CHECK(!layout.plannedConnections.empty());
+    for (auto &[_, device] : layout.plannedDevices)
+        device.terminals.clear();
     layout.plannedConnections.erase(layout.plannedConnections.begin());
 
     const auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
@@ -200,6 +210,136 @@ TEST_CASE("LVS compares device parameters from a text SPICE netlist") {
     CHECK(hasCategory(mismatch, "parameter"));
 }
 
+TEST_CASE("LVS reports schematic parameters missing from the layout") {
+    auto fixture = makeFixture();
+    for (auto &[_, device] : fixture.project.layoutCells.at(fixture.layout).plannedDevices)
+        device.parameters.clear();
+    const auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "parameter-unavailable"));
+}
+
+TEST_CASE("LVS expands multiplicity and matches renamed devices by topology") {
+    ice::Project project;
+    project.identity = "lvs-multiplicity";
+    project.name = "lvs-multiplicity";
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto inNet = ice::createLayoutNet(project, layout, "in");
+    const auto outNet = ice::createLayoutNet(project, layout, "out");
+    auto &cell = project.layoutCells.at(layout);
+    for (int index = 1; index <= 4; ++index) {
+        ice::PlannedDevice resistor;
+        resistor.id = project.nextId();
+        resistor.name = "R" + std::to_string(index);
+        resistor.device = "resistor";
+        resistor.parameters.push_back({project.nextId(), "resistance", "1k"});
+        resistor.terminals = {{"A", inNet}, {"B", outNet}};
+        resistor.placeholder = false;
+        cell.plannedDevices.emplace(resistor.id, resistor);
+    }
+    const auto spice = ice::createTextSchematicCell(project, "top_spice", ice::genericPdkId, "R1 in out 1k m=4\n");
+    const auto report = ice::runLvs(project, spice, layout);
+    CHECK(report.matched());
+    CHECK(std::none_of(report.mismatches.begin(), report.mismatches.end(), [](const ice::LvsMismatch &mismatch) {
+        return mismatch.category == "missing-device" || mismatch.category == "extra-device";
+    }));
+
+    cell.plannedDevices.clear();
+    ice::PlannedDevice renamed;
+    renamed.id = project.nextId();
+    renamed.name = "RA";
+    renamed.device = "resistor";
+    renamed.parameters.push_back({project.nextId(), "resistance", "1k"});
+    renamed.terminals = {{"A", inNet}, {"B", outNet}};
+    renamed.placeholder = false;
+    cell.plannedDevices.emplace(renamed.id, renamed);
+    const auto simpleSpice =
+        ice::createTextSchematicCell(project, "renamed_spice", ice::genericPdkId, "R1 in out 1k\n");
+    const auto renamedReport = ice::runLvs(project, simpleSpice, layout);
+    CHECK(renamedReport.matched());
+    CHECK(hasCategory(renamedReport, "device-name"));
+    CHECK(!hasCategory(renamedReport, "missing-device"));
+    CHECK(!hasCategory(renamedReport, "extra-device"));
+}
+
+TEST_CASE("LVS derives layout connectivity from geometry, not planned links") {
+    ice::Project project;
+    project.identity = "lvs-geometry";
+    project.name = "lvs-geometry";
+    const auto layer = ice::addLayer(project, "Metal1", 8);
+    const auto child = ice::createLayoutCell(project, "res_dev");
+    auto &childCell = project.layoutCells.at(child);
+    childCell.library = true;
+    childCell.device = "resistor";
+    ice::addPort(project, child, "A", layer, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
+    ice::addPort(project, child, "B", layer, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
+
+    const auto layout = ice::createLayoutCell(project, "top");
+    ice::addLayoutInstance(project, layout, child, "R1", 0, 0);
+    ice::addLayoutInstance(project, layout, child, "R2", 3000, 0);
+    ice::addRectangle(project, layout, layer, {1100, 0, 1900, 200});
+    CHECK(project.layoutCells.at(layout).plannedConnections.empty());
+    CHECK(project.layoutCells.at(layout).plannedDevices.empty());
+
+    const auto schematic = ice::createSchematicCell(project, "top");
+    std::vector<ice::ObjectId> r1Pins;
+    std::vector<ice::ObjectId> r2Pins;
+    addTwoPinDevice(project, schematic, "resistor", "R1", r1Pins);
+    addTwoPinDevice(project, schematic, "resistor", "R2", r2Pins);
+    auto &drawn = project.schematicCells.at(schematic);
+    const auto inputNet = project.nextId();
+    drawn.nets.emplace(inputNet, ice::Net{inputNet, "IN", {r1Pins[0]}});
+    const auto middleNet = project.nextId();
+    drawn.nets.emplace(middleNet, ice::Net{middleNet, "MID", {r1Pins[1], r2Pins[0]}});
+    const auto outputNet = project.nextId();
+    drawn.nets.emplace(outputNet, ice::Net{outputNet, "OUT", {r2Pins[1]}});
+
+    const auto report = ice::runLvs(project, schematic, layout);
+    CHECK(report.matched());
+}
+
+TEST_CASE("LVS parses gate-level SystemVerilog and rejects behavioral modules") {
+    ice::Project project;
+    project.identity = "lvs-gate-hdl";
+    project.name = "lvs-gate-hdl";
+    const auto source = ice::createSystemVerilogCell(
+        project, "gate", ice::genericPdkId,
+        "module gate(input logic a, input logic b, output logic y);\nand g1(y, a, b);\nendmodule\n");
+    const auto layout = ice::createLayoutCell(project, "gate_layout");
+    const auto layer = ice::addLayer(project, "Metal1", 10);
+    const auto aNet = ice::createLayoutNet(project, layout, "a");
+    const auto bNet = ice::createLayoutNet(project, layout, "b");
+    const auto yNet = ice::createLayoutNet(project, layout, "y");
+    ice::addPort(project, layout, "a", layer, {0, 0, 100, 100}, ice::PortDirection::input, ice::PortSide::left, aNet,
+                 "a");
+    ice::addPort(project, layout, "b", layer, {0, 200, 100, 100}, ice::PortDirection::input, ice::PortSide::left, bNet,
+                 "b");
+    ice::addPort(project, layout, "y", layer, {800, 100, 100, 100}, ice::PortDirection::output, ice::PortSide::right,
+                 yNet, "y");
+    auto &layoutCell = project.layoutCells.at(layout);
+    ice::PlannedDevice gate;
+    gate.id = project.nextId();
+    gate.name = "g1";
+    gate.device = "and";
+    gate.terminals = {{"Y", yNet}, {"A", aNet}, {"B", bNet}};
+    gate.placeholder = false;
+    layoutCell.plannedDevices.emplace(gate.id, gate);
+
+    auto report = ice::runLvs(project, source, layout);
+    CHECK(report.matched());
+    CHECK(report.portsMatched == 3);
+
+    layoutCell.plannedDevices.at(gate.id).device = "or";
+    report = ice::runLvs(project, source, layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "device-type"));
+
+    const auto behavioral = ice::createSystemVerilogCell(
+        project, "behavioral_gate", ice::genericPdkId,
+        "module behavioral_gate(input logic a, input logic b, output logic y);\nalways_comb y = a & b;\nendmodule\n");
+    CHECK_THROWS_AS(ice::runLvs(project, behavioral, layout), ice::ProjectError);
+}
+
 TEST_CASE("LVS flattens text SPICE subcircuits and compares top-level ports") {
     ice::Project project;
     project.identity = "lvs-spice";
@@ -207,8 +347,10 @@ TEST_CASE("LVS flattens text SPICE subcircuits and compares top-level ports") {
     const auto drawn = ice::createSchematicCell(project, "filter_drawn");
     std::vector<ice::ObjectId> rPins;
     std::vector<ice::ObjectId> cPins;
-    addTwoPinDevice(project, drawn, "resistor", "R1", rPins);
-    addTwoPinDevice(project, drawn, "capacitor", "C1", cPins);
+    const auto r1 = addTwoPinDevice(project, drawn, "resistor", "R1", rPins);
+    const auto c1 = addTwoPinDevice(project, drawn, "capacitor", "C1", cPins);
+    project.schematicCells.at(drawn).instances.at(r1).parameters.push_back({project.nextId(), "resistance", "1k"});
+    project.schematicCells.at(drawn).instances.at(c1).parameters.push_back({project.nextId(), "capacitance", "1n"});
     auto &drawnCell = project.schematicCells.at(drawn);
     const auto inNetId = project.nextId();
     drawnCell.nets.emplace(inNetId, ice::Net{inNetId, "IN", {rPins[0]}});
@@ -233,6 +375,50 @@ TEST_CASE("LVS flattens text SPICE subcircuits and compares top-level ports") {
     CHECK(report.mismatches.empty());
 }
 
+TEST_CASE("LVS resolves SPICE includes against the source file") {
+    ice::Project project;
+    project.identity = "lvs-spice-include";
+    project.name = "lvs-spice-include";
+    const auto drawn = ice::createSchematicCell(project, "filter_drawn");
+    std::vector<ice::ObjectId> rPins;
+    std::vector<ice::ObjectId> cPins;
+    const auto r1 = addTwoPinDevice(project, drawn, "resistor", "R1", rPins);
+    const auto c1 = addTwoPinDevice(project, drawn, "capacitor", "C1", cPins);
+    project.schematicCells.at(drawn).instances.at(r1).parameters.push_back({project.nextId(), "resistance", "1k"});
+    project.schematicCells.at(drawn).instances.at(c1).parameters.push_back({project.nextId(), "capacitance", "1n"});
+    auto &drawnCell = project.schematicCells.at(drawn);
+    const auto inNetId = project.nextId();
+    drawnCell.nets.emplace(inNetId, ice::Net{inNetId, "IN", {rPins[0]}});
+    const auto midNetId = project.nextId();
+    drawnCell.nets.emplace(midNetId, ice::Net{midNetId, "MID", {rPins[1], cPins[0]}});
+    const auto outNetId = project.nextId();
+    drawnCell.nets.emplace(outNetId, ice::Net{outNetId, "OUT", {cPins[1]}});
+    const auto layout = ice::createLayoutFromSchematic(project, drawn, "filter_layout");
+    const auto layer = ice::addLayer(project, "Metal1", 10);
+    const auto inNet = ice::createLayoutNet(project, layout, "IN");
+    const auto outNet = ice::createLayoutNet(project, layout, "OUT");
+    ice::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, ice::PortDirection::input, ice::PortSide::left, inNet,
+                 "IN");
+    ice::addPort(project, layout, "OUT", layer, {0, 0, 100, 100}, ice::PortDirection::output, ice::PortSide::right,
+                 outNet, "OUT");
+
+    const auto root = std::filesystem::temp_directory_path() / "ice-lvs-include-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "filter.inc") << ".subckt filter IN OUT\nR1 IN MID 1k\nC1 MID OUT 1n\n.ends filter\n";
+    const auto text = ice::createTextSchematicCell(project, "filter", ice::genericPdkId, ".include \"filter.inc\"\n",
+                                                   (root / "top.sp").string());
+    auto report = ice::runLvs(project, text, layout);
+    CHECK(report.matched());
+    CHECK(report.portsMatched == 2);
+
+    std::filesystem::remove(root / "filter.inc");
+    report = ice::runLvs(project, text, layout);
+    CHECK(!report.matched());
+    CHECK(hasCategory(report, "spice-include"));
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("LVS flattens nested text SPICE subcircuit instances") {
     ice::Project project;
     project.identity = "lvs-spice-nested";
@@ -240,8 +426,10 @@ TEST_CASE("LVS flattens nested text SPICE subcircuit instances") {
     const auto drawn = ice::createSchematicCell(project, "nested_drawn");
     std::vector<ice::ObjectId> r1Pins;
     std::vector<ice::ObjectId> r2Pins;
-    addTwoPinDevice(project, drawn, "resistor", "R1", r1Pins);
-    addTwoPinDevice(project, drawn, "resistor", "R2", r2Pins);
+    const auto r1 = addTwoPinDevice(project, drawn, "resistor", "R1", r1Pins);
+    const auto r2 = addTwoPinDevice(project, drawn, "resistor", "R2", r2Pins);
+    project.schematicCells.at(drawn).instances.at(r1).parameters.push_back({project.nextId(), "resistance", "1k"});
+    project.schematicCells.at(drawn).instances.at(r2).parameters.push_back({project.nextId(), "resistance", "1k"});
     auto &drawnCell = project.schematicCells.at(drawn);
     const auto inNet = project.nextId();
     drawnCell.nets.emplace(inNet, ice::Net{inNet, "IN", {r1Pins[0]}});
