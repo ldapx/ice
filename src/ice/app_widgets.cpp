@@ -17,6 +17,7 @@
 #include <QClipboard>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -944,8 +945,14 @@ void ActivityPanel::switchAgentSession(int index) {
         prompt_->clear();
     showSessionTranscript();
     populateModelSelector();
-    if (const auto *session = activeAgentSession())
-        updateAgentUsage(session->used, session->size);
+    if (const auto *session = activeAgentSession()) {
+        // Keep showing the live estimate for a turn that is still running.
+        if (session->promptRunning && session->size > 0)
+            updateAgentUsage(std::min(session->turnBaseUsed + session->streamedChars / 4, session->size), session->size,
+                             true);
+        else
+            updateAgentUsage(session->used, session->size);
+    }
     updateAgentControls();
 }
 
@@ -1014,12 +1021,57 @@ void ActivityPanel::setSessionPromptRunning(const std::string &acpSessionId, boo
     }
 }
 
-void ActivityPanel::updateAgentUsage(qint64 used, qint64 size) {
+void ActivityPanel::updateAgentUsage(qint64 used, qint64 size, bool estimated) {
     if (!tokens_ || !contextUsage_)
         return;
-    tokens_->setText(QStringLiteral("%1 / %2 tokens").arg(used).arg(size));
+    tokens_->setText(estimated ? QStringLiteral("≈ %1 / %2 tokens").arg(used).arg(size)
+                               : QStringLiteral("%1 / %2 tokens").arg(used).arg(size));
     const int percentage = size > 0 ? static_cast<int>(used * 100 / size) : 0;
     contextUsage_->setValue(std::clamp(percentage, 0, 100));
+}
+
+// Agents that follow the ACP session-usage RFD report `usage_update` once per
+// turn, usually together with the prompt response.  Until that arrives, grow
+// the indicator from the text the agent streams so the user can watch the
+// turn consume context instead of seeing the bar jump only at the end.
+void ActivityPanel::addStreamedUsage(AgentSession &session, qint64 chars) {
+    if (chars <= 0)
+        return;
+    session.streamedChars += chars;
+    if (!session.promptRunning || session.size <= 0)
+        return;
+    const qint64 estimated = session.turnBaseUsed + session.streamedChars / 4;
+    if (&session == activeAgentSession())
+        updateAgentUsage(std::min(estimated, session.size), session.size, true);
+}
+
+QString ActivityPanel::agentUsageKey(const std::string &acpSessionId) const {
+    const auto project = projectPath_.isEmpty() ? QDir::currentPath() : projectPath_;
+    const auto digest = QCryptographicHash::hash(project.toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
+    return QStringLiteral("agent/usage/%1/%2").arg(QString::fromLatin1(digest), QString::fromStdString(acpSessionId));
+}
+
+void ActivityPanel::restoreAgentUsage(AgentSession &session) {
+    if (session.acpSessionId.empty())
+        return;
+    QSettings settings;
+    const auto key = agentUsageKey(session.acpSessionId);
+    const auto used = settings.value(key + QStringLiteral("/used"), qint64{0}).toLongLong();
+    const auto size = settings.value(key + QStringLiteral("/size"), qint64{0}).toLongLong();
+    if (size <= 0)
+        return;
+    session.used = std::max<qint64>(0, used);
+    session.size = size;
+    session.turnBaseUsed = session.used;
+}
+
+void ActivityPanel::persistAgentUsage(const AgentSession &session) const {
+    if (session.acpSessionId.empty() || session.size <= 0)
+        return;
+    QSettings settings;
+    const auto key = agentUsageKey(session.acpSessionId);
+    settings.setValue(key + QStringLiteral("/used"), session.used);
+    settings.setValue(key + QStringLiteral("/size"), session.size);
 }
 
 QString ActivityPanel::agentModeLabel(const AgentSession &session) const {
@@ -1407,6 +1459,12 @@ void ActivityPanel::loadAgentSession(const std::string &acpSessionId) {
         agentTranscriptStack_->addWidget(session.transcript);
     session.configOptionsJson = QStringLiteral("[]");
     session.loading = true;
+    // Restore the last known context usage for this session so a reopened
+    // project does not drop the indicator back to zero before the agent
+    // sends its next `usage_update`.
+    restoreAgentUsage(session);
+    const auto restoredUsed = session.used;
+    const auto restoredSize = session.size;
     agentSessions_.push_back(std::move(session));
     activeAgentSession_ = static_cast<int>(agentSessions_.size()) - 1;
     sessionLoading_ = true;
@@ -1415,7 +1473,7 @@ void ActivityPanel::loadAgentSession(const std::string &acpSessionId) {
     refreshSessionSelector();
     showSessionTranscript();
     populateModelSelector();
-    updateAgentUsage(0, 0);
+    updateAgentUsage(restoredUsed, restoredSize);
     setAgentStatus(QStringLiteral("Loading session..."));
     updateAgentControls();
 
@@ -1717,8 +1775,13 @@ void ActivityPanel::sendPrompt() {
     if (session->transcript)
         session->transcript->appendUserChunk(QStringLiteral("local-%1").arg(QDateTime::currentMSecsSinceEpoch()), text);
     session->pendingUserText = text;
+    session->turnBaseUsed = session->used;
+    session->streamedChars = 0;
+    session->turnUsageReported = false;
+    session->countedToolChars.clear();
     session->turnTimer.start();
     setSessionPromptRunning(acpSessionId, true);
+    addStreamedUsage(*session, text.size());
     const auto generation = agentBackend_->generation.load();
     auto *client = agentBackend_->client.get();
     agentBackend_->pool.start(QRunnable::create([this, client, acpSessionId, text, generation] {
@@ -1775,10 +1838,20 @@ void ActivityPanel::sendPrompt() {
                                                               : (ok ? QString{} : QStringLiteral("Turn failed")));
                 }
                 if (totalTokens > 0) {
-                    session->used = totalTokens;
-                    if (session == activeAgentSession())
-                        updateAgentUsage(session->used, session->size);
+                    // `usage_update` (when the agent sends one) carries the
+                    // context occupancy, which is what the panel displays.
+                    // The prompt response only reports the last LLM request of
+                    // the turn, so use it as a fallback and never let it
+                    // overwrite values reported by the agent.
+                    if (!session->turnUsageReported && session->size <= 0)
+                        session->used = totalTokens;
                 }
+                session->turnBaseUsed = session->used;
+                session->streamedChars = 0;
+                session->countedToolChars.clear();
+                if (session == activeAgentSession())
+                    updateAgentUsage(session->used, session->size);
+                persistAgentUsage(*session);
                 if (projectChangedCallback_)
                     projectChangedCallback_();
                 if (session == activeAgentSession())
@@ -1880,6 +1953,16 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
             if (!session)
                 return;
             if (toolUpdate) {
+                // Tool output also enters the context; count each tool call's
+                // growth once so repeated updates do not double count.
+                if (!toolUpdate->output.isEmpty()) {
+                    auto &counted = session->countedToolChars[toolUpdate->id];
+                    const auto size = static_cast<qint64>(toolUpdate->output.size());
+                    if (size > counted) {
+                        addStreamedUsage(*session, size - counted);
+                        counted = size;
+                    }
+                }
                 handleToolCallUpdate(*session, *toolUpdate);
                 // A tool call may create a new project item before the agent
                 // finishes its turn. Ask the owning window to rescan now as
@@ -1905,9 +1988,11 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
                     break;
                 case AgentTextKind::Thought:
                     session->transcript->appendThoughtChunk(messageId, text);
+                    addStreamedUsage(*session, text.size());
                     break;
                 case AgentTextKind::Assistant:
                     session->transcript->appendAssistantChunk(messageId, text);
+                    addStreamedUsage(*session, text.size());
                     break;
                 case AgentTextKind::Plan:
                     session->transcript->appendMarkdownBlock(text);
@@ -1922,8 +2007,12 @@ void ActivityPanel::handleAgentUpdate(const std::string &acpSessionId, const std
             if (used && size) {
                 session->used = *used;
                 session->size = *size;
+                session->turnBaseUsed = session->used;
+                session->streamedChars = 0;
+                session->turnUsageReported = true;
                 if (session == activeAgentSession())
                     updateAgentUsage(*used, *size);
+                persistAgentUsage(*session);
             }
         },
         Qt::QueuedConnection);
