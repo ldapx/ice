@@ -98,10 +98,18 @@ class ActivityPanel : public QWidget {
         QString modelConfigId;
         QString pendingUserText;
         std::map<std::string, AgentToolCall> toolCalls;
+        std::map<QString, qint64> countedToolChars;
         QElapsedTimer turnTimer;
         int pendingReads = 0;
         qint64 used = 0;
         qint64 size = 0;
+        // Live progress for the running turn.  ACP agents commonly report
+        // `usage_update` only at the end of a turn, so the panel estimates
+        // the context growth from the streamed text and reconciles it with
+        // the authoritative value when the agent reports one.
+        qint64 turnBaseUsed = 0;
+        qint64 streamedChars = 0;
+        bool turnUsageReported = false;
         bool modelAvailable = false;
         bool promptRunning = false;
         bool loading = false;
@@ -122,7 +130,11 @@ class ActivityPanel : public QWidget {
     void handleAgentUpdate(const std::string &acpSessionId, const std::string &params);
     std::string handleAgentPermission(const std::string &params);
     std::string handleAgentElicitation(const std::string &params);
-    void updateAgentUsage(qint64 used, qint64 size);
+    void updateAgentUsage(qint64 used, qint64 size, bool estimated = false);
+    void addStreamedUsage(AgentSession &session, qint64 chars);
+    QString agentUsageKey(const std::string &acpSessionId) const;
+    void restoreAgentUsage(AgentSession &session);
+    void persistAgentUsage(const AgentSession &session) const;
     void setAgentStatus(const QString &text);
     void populateModelSelector();
     void applyModelSelection();

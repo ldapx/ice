@@ -991,7 +991,14 @@ stdio.
   the requested fields (single choice, multi-select, boolean, numeric, and text),
   and returns the answers to the agent. Declining the dialog returns a declined
   elicitation response.
-- Token usage updates the session page when the agent reports `usage_update`.
+- Token usage comes from the ACP `usage_update` notification. Because agents
+  such as OpenCode report it only once per turn (together with the prompt
+  response), the context bar also grows while a turn runs using a local
+  estimate from the streamed assistant text, thoughts, and tool output; the
+  bar shows `≈` for estimated values and snaps to the reported value when the
+  turn ends. The last value reported for a session is stored per project, so
+  reloading a past session (`session/load`) restores the context indicator
+  instead of starting again from zero.
 
 ACP support is built from the bundled `third_party/agentsdk-cpp` submodule into
 a shared `libagentsdk` library. Initialize the submodule with
