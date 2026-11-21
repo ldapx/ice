@@ -47,6 +47,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -58,20 +59,27 @@ jobs:
             arch: x86_64
             artifact: ice-macos-x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - name: Install dependencies
         run: |
-          brew update
-          brew install qt libngspice tomlplusplus spdlog nlohmann-json openssl@3 curl zlib simdjson pkgconf dylibbundler
-          pkg_config_path="$(brew --prefix)/lib/pkgconfig"
+          brew install libngspice tomlplusplus spdlog nlohmann-json openssl@3 curl zlib simdjson pkgconf dylibbundler
+          python3 -m venv "$RUNNER_TEMP/aqt"
+          "$RUNNER_TEMP/aqt/bin/pip" install --quiet aqtinstall
+          "$RUNNER_TEMP/aqt/bin/aqt" install-qt mac desktop 6.8.3 clang_64 -O "$HOME/Qt"
+          qt_prefix="$HOME/Qt/6.8.3/clang_64"
+          pkg_config_path="$qt_prefix/lib/pkgconfig"
+          pkg_config_path="$pkg_config_path:$(brew --prefix)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix openssl@3)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix curl)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix zlib)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=$pkg_config_path" >>"$GITHUB_ENV"
-          echo "ICE_QT_BIN=$(brew --prefix qt)/bin" >>"$GITHUB_ENV"
+          echo "ICE_QT_BIN=$qt_prefix/bin" >>"$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: '3.1.2'
@@ -94,6 +102,7 @@ jobs:
 
   windows:
     name: Windows x86_64
+    timeout-minutes: 90
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,7 +138,8 @@ jobs:
           ICE_BUILD_PYTHON: "0"
           ICE_PKG_CONFIG_DIR: C:\msys64\ucrt64\lib\pkgconfig
         run: |
-          xmake f -y -m release || xmake f -p mingw -a x86_64 -y -m release
+          mingw_prefix="${MINGW_PREFIX:-/ucrt64}"
+          xmake f -p mingw -a x86_64 --mingw="$(cygpath -w "$mingw_prefix")" -y -m release
           xmake build -y ice ice-cli ice-pkg ice-mcp
           xmake pack -f nsis,zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4

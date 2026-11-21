@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 -- XPack provides `xmake pack` for NSIS installers and archive releases.
 includes("@builtin/xpack")
 
-local is_windows = is_plat("windows", "mingw")
+local is_windows = is_plat("windows", "mingw", "msys", "cygwin")
 local is_msvc = is_plat("windows")
 local is_macos = is_plat("macosx")
 local is_linux = is_plat("linux")

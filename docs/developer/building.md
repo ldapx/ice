@@ -55,9 +55,9 @@ sudo apt-get install -y build-essential cmake ninja-build pkg-config \
 ### macOS
 
 ```sh
-brew install qt libngspice tomlplusplus spdlog nlohmann-json openssl@3 \
-    curl zlib simdjson pkgconf
-export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
+brew install qtbase qtsvg libngspice tomlplusplus spdlog nlohmann-json \
+    openssl@3 curl zlib simdjson pkgconf
+export PKG_CONFIG_PATH="$(brew --prefix qtbase)/lib/pkgconfig:$(brew --prefix qtsvg)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
 ```
 
 ### Windows (MSYS2 UCRT64)
@@ -76,8 +76,12 @@ pacman -S --needed git pkgconf \
     mingw-w64-ucrt-x86_64-nsis mingw-w64-ucrt-x86_64-ntldd
 ```
 
-Build from the UCRT64 shell. If xmake does not auto-detect MinGW, add
-`-p mingw -a x86_64` to the configure command.
+Build from the UCRT64 shell with the MinGW target. MSYS targets are treated
+as ELF hosts by xmake's packaging code, so configure explicitly:
+
+```sh
+xmake f -p mingw -a x86_64 --mingw="$(cygpath -w "$MINGW_PREFIX")" -m release
+```
 
 ### OpenROAD
 
