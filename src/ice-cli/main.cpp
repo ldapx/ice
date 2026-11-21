@@ -87,11 +87,11 @@ ice::Coordinate parseInteger(const std::string &text, const char *what) {
 
 double parseDouble(const std::string &text, const char *what) {
     try {
-        double value = 0.0;
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr == text.data())
+        std::size_t used = 0;
+        const auto parsed = ice::parseDoublePrefix(text, used);
+        if (!parsed || used == 0)
             throw std::invalid_argument("invalid number");
-        const auto used = static_cast<std::size_t>(parsed.ptr - text.data());
+        double value = *parsed;
         auto suffix = text.substr(used);
         std::transform(suffix.begin(), suffix.end(), suffix.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

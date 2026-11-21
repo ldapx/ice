@@ -278,12 +278,13 @@ class ExpressionParser {
                 Token token;
                 token.kind = Token::Kind::number;
                 token.text = expression_.substr(start, index - start);
-                const auto parsed =
-                    std::from_chars(token.text.data(), token.text.data() + token.text.size(), token.number);
-                if (parsed.ec != std::errc{}) {
+                std::size_t consumed = 0;
+                const auto parsed = parseDoublePrefix(token.text, consumed);
+                if (!parsed || consumed != token.text.size()) {
                     error_ = "invalid number in expression: '" + token.text + "'";
                     return;
                 }
+                token.number = *parsed;
                 tokens_.push_back(std::move(token));
                 continue;
             }

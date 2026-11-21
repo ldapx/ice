@@ -11390,11 +11390,11 @@ class DocumentWindow : public QMainWindow {
             return std::nullopt;
         const auto last = text.find_last_not_of(" \t\r\n");
         const auto trimmed = text.substr(first, last - first + 1);
-        double value = 0.0;
-        const auto parsed = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr == trimmed.data())
+        std::size_t consumed = 0;
+        const auto parsed = ice::parseDoublePrefix(trimmed, consumed);
+        if (!parsed || consumed == 0)
             return std::nullopt;
-        std::size_t consumed = static_cast<std::size_t>(parsed.ptr - trimmed.data());
+        double value = *parsed;
         while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
             ++consumed;
         double scale = 1.0;

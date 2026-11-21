@@ -829,11 +829,11 @@ double parseInterchangeNumber(const std::string &token) {
     // Use from_chars so exchange files remain locale-independent. Qt switches
     // the numeric locale at startup (for example es_CL uses a comma decimal
     // separator), which makes std::stod reject "0.230".
-    double value = 0.0;
-    const auto result = std::from_chars(token.data(), token.data() + token.size(), value);
-    if (result.ec != std::errc{} || result.ptr != token.data() + token.size())
+    std::size_t consumed = 0;
+    const auto parsed = parseDoublePrefix(token, consumed);
+    if (!parsed || consumed != token.size())
         throw ProjectError("interchange.parse", "Invalid interchange coordinate: " + token);
-    return value;
+    return *parsed;
 }
 
 std::string uppercase(std::string text) {

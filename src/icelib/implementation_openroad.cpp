@@ -51,12 +51,10 @@ std::optional<double> parseLeadingNumber(const std::string &text, std::size_t &c
     consumed = 0;
     if (text.empty())
         return std::nullopt;
-    double value = 0.0;
-    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-    consumed = static_cast<std::size_t>(result.ptr - text.data());
-    if (result.ec != std::errc{} || consumed == 0)
+    const auto parsed = parseDoublePrefix(text, consumed);
+    if (!parsed || consumed == 0)
         return std::nullopt;
-    return value;
+    return parsed;
 }
 
 std::string trim(std::string value) {

@@ -234,6 +234,12 @@ enum class PortSide { left, right, top, bottom };
 
 const char *portDirectionName(PortDirection direction);
 const char *portSideName(PortSide side);
+// Locale-independent floating-point parser. Parses a decimal number from the
+// beginning of `text` and returns the number of consumed bytes. This is a
+// portable replacement for std::from_chars(double), which libc++ does not
+// implement.
+std::optional<double> parseDoublePrefix(const std::string &text, std::size_t &consumed);
+
 std::optional<PortDirection> parsePortDirection(const std::string &value);
 std::optional<PortSide> parsePortSide(const std::string &value);
 

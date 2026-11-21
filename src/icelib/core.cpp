@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <locale>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <spdlog/spdlog.h>
@@ -959,6 +960,48 @@ const char *portSideName(PortSide side) {
         return "bottom";
     }
     throw ProjectError("project.port_side", "Unknown port side value");
+}
+
+std::optional<double> parseDoublePrefix(const std::string &text, std::size_t &consumed) {
+    consumed = 0;
+    std::size_t index = 0;
+    if (index < text.size() && (text[index] == '+' || text[index] == '-'))
+        ++index;
+
+    bool hasDigits = false;
+    while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+        ++index;
+        hasDigits = true;
+    }
+    if (index < text.size() && text[index] == '.') {
+        ++index;
+        while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+            ++index;
+            hasDigits = true;
+        }
+    }
+    if (!hasDigits)
+        return std::nullopt;
+
+    const auto mantissaEnd = index;
+    if (index < text.size() && (text[index] == 'e' || text[index] == 'E')) {
+        auto exponent = index + 1;
+        if (exponent < text.size() && (text[exponent] == '+' || text[exponent] == '-'))
+            ++exponent;
+        const auto exponentDigits = exponent;
+        while (exponent < text.size() && std::isdigit(static_cast<unsigned char>(text[exponent])))
+            ++exponent;
+        index = exponent > exponentDigits ? exponent : mantissaEnd;
+    }
+
+    std::istringstream stream(text.substr(0, index));
+    stream.imbue(std::locale::classic());
+    double value = 0.0;
+    stream >> value;
+    if (!stream || !stream.eof())
+        return std::nullopt;
+    consumed = index;
+    return value;
 }
 
 std::optional<PortDirection> parsePortDirection(const std::string &value) {

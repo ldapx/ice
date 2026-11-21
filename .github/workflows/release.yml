@@ -135,9 +135,21 @@ jobs:
         run: |
           $msys = Join-Path $env:RUNNER_TEMP "msys64"
           $ucrt = Join-Path $msys "ucrt64"
+          if (-not (Test-Path "$ucrt\bin\gcc.exe")) {
+            $gcc = Get-ChildItem -Path $env:RUNNER_TEMP -Filter gcc.exe -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'ucrt64' } | Select-Object -First 1
+            if ($gcc) { $ucrt = Split-Path (Split-Path $gcc.FullName -Parent) -Parent }
+          }
+          $ucrtXmake = $ucrt.Replace('\', '/')
+          Write-Host "MinGW SDK: $ucrtXmake"
+          & "$ucrt\bin\gcc.exe" --version | Select-Object -First 1
           $env:PATH = "$ucrt\bin;$msys\usr\bin;$env:PATH"
           $env:MINGW_PREFIX = $ucrt
-          $env:ICE_PKG_CONFIG_DIR = Join-Path $ucrt "lib\pkgconfig"
+          $env:CC = "$ucrt\bin\gcc.exe"
+          $env:CXX = "$ucrt\bin\g++.exe"
+          $env:AR = "$ucrt\bin\ar.exe"
+          $env:WINDRES = "$ucrt\bin\windres.exe"
+          $env:ICE_PKG_CONFIG_DIR = "$ucrtXmake/lib/pkgconfig"
           $env:ICE_ENABLE_OPENROAD = "0"
           $env:ICE_BUILD_PYTHON = "0"
 
@@ -147,7 +159,7 @@ jobs:
           Expand-Archive -Path "$xmakeRoot\xmake.zip" -DestinationPath $xmakeRoot -Force
           $xmake = Join-Path $xmakeRoot "xmake\xmake.exe"
 
-          & $xmake f -p mingw -a x86_64 "--mingw=$ucrt" -y -m release
+          & $xmake f -p mingw -a x86_64 --toolchain=mingw "--mingw=$ucrtXmake" -y -m release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $xmake build -y ice ice-cli ice-pkg ice-mcp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
