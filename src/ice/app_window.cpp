@@ -1190,12 +1190,14 @@ class DocumentWindow : public QMainWindow {
         toolEscapeShortcut_->setEnabled(false);
         connect(toolEscapeShortcut_, &QShortcut::activated, this, [this] { selectSchematicTool(); });
         showStartup();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this](Qt::ColorScheme) {
             if (appearanceMode_ != ice::AppearanceMode::System)
                 return;
             ice::applyAppearance(appearanceMode_);
             refreshAppearance();
         });
+#endif
     }
 
     ~DocumentWindow() override {

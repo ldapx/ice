@@ -51,7 +51,12 @@ QPalette darkPalette() {
 }
 
 QPalette systemPalette() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark ? darkPalette() : lightPalette();
+#else
+    const auto current = QGuiApplication::palette();
+    return current.color(QPalette::Window).lightness() < 128 ? darkPalette() : lightPalette();
+#endif
 }
 
 } // namespace
