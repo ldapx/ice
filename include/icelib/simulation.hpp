@@ -247,4 +247,8 @@ std::vector<ExperimentPoint> runSimulationExperiment(const Project &project, con
 std::string jobStateName(JobState state);
 std::string serializeSimulationResult(const SimulationResult &result);
 
+// True when the in-process libngspice shared library is available next to the
+// executable or in the platform's standard library locations.
+bool ngspiceLibraryAvailable();
+
 } // namespace ice

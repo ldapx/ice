@@ -9,6 +9,7 @@
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
 #include "icelib/procedural_layout.hpp"
+#include "icelib/process.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -1083,17 +1084,16 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
                 bool probe = false) {
     const auto runner = ice::reportRunnerScriptPath(executablePath);
     const auto python = ice::reportPythonExecutable();
-    const bool pythonAvailable = !python.empty() && std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
-    bool ngspiceLibrary = false;
-    for (const auto *candidate :
-         {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0", "/usr/lib/x86_64-linux-gnu/libngspice.so.0"}) {
-        std::error_code status;
-        if (std::filesystem::exists(candidate, status) && !status) {
-            ngspiceLibrary = true;
-            break;
-        }
-    }
-    const bool ngspiceExecutable = std::system("ngspice --version >/dev/null 2>&1") == 0;
+    const auto commandAvailable = [](const std::string &program) {
+        ice::ProcessOptions options;
+        options.arguments = {program, "--version"};
+        options.timeoutSeconds = 10;
+        const auto result = ice::runProcess(options);
+        return result.started && result.exitCode == 0;
+    };
+    const bool pythonAvailable = !python.empty() && commandAvailable(python);
+    const bool ngspiceLibrary = ice::ngspiceLibraryAvailable();
+    const bool ngspiceExecutable = commandAvailable("ngspice");
 
     const auto roots = ice::defaultPdkRoots();
     const auto pdks = ice::discoverPdks(roots);

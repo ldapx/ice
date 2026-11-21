@@ -1,5 +1,7 @@
 #include "icelib/implementation.hpp"
 
+#include "icelib/platform.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -309,18 +311,7 @@ std::optional<std::filesystem::path> findExecutable(const std::string &name) {
         if (const auto found = check(overridePath))
             return found;
     }
-    if (const auto *path = std::getenv("PATH"); path && *path) {
-        std::stringstream entries(path);
-        std::string entry;
-        while (std::getline(entries, entry, ':')) {
-            if (entry.empty())
-                entry = ".";
-            const auto candidate = std::filesystem::path(entry) / name;
-            if (const auto found = check(candidate))
-                return found;
-        }
-    }
-    return std::nullopt;
+    return findExecutableOnPath(name);
 }
 
 std::string lowercase(std::string value) {
@@ -644,9 +635,7 @@ std::string implementationRunStem(const ImplementationRun &run) {
     return safeStem(run.name) + "-" + std::to_string(run.id);
 }
 
-bool ImplementationToolchain::ready() const {
-    return !iceOpenRoad.path.empty() && !yosys.path.empty();
-}
+bool ImplementationToolchain::ready() const { return !iceOpenRoad.path.empty() && !yosys.path.empty(); }
 
 std::vector<std::string> ImplementationToolchain::missing() const {
     std::vector<std::string> result;
@@ -687,12 +676,9 @@ json implementationToolchainJson(const ImplementationToolchain &toolchain) {
                     {"path", value.path.empty() ? json(nullptr) : json(value.path.generic_string())},
                     {"source", value.source}};
     };
-    return {{"ready", toolchain.ready()},
-            {"missing", toolchain.missing()},
-            {"openroad", tool(toolchain.openroad)},
-            {"ice-openroad", tool(toolchain.iceOpenRoad)},
-            {"yosys", tool(toolchain.yosys)},
-            {"klayout", tool(toolchain.klayout)}};
+    return {{"ready", toolchain.ready()},           {"missing", toolchain.missing()},
+            {"openroad", tool(toolchain.openroad)}, {"ice-openroad", tool(toolchain.iceOpenRoad)},
+            {"yosys", tool(toolchain.yosys)},       {"klayout", tool(toolchain.klayout)}};
 }
 
 std::string implementationConfigHash(const ImplementationConfig &config) { return hashText(configJson(config).dump()); }

@@ -20,6 +20,14 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace ice {
@@ -1528,19 +1536,24 @@ std::string projectRevision(const std::filesystem::path &root) {
 
 class ProjectLock {
   public:
-    ProjectLock(const std::filesystem::path &root, int operation) {
-#ifndef _WIN32
+    ProjectLock(const std::filesystem::path &root, bool exclusive) {
         std::error_code status;
         std::filesystem::create_directories(root / "build", status);
         const auto path = root / "build" / ".ice-save.lock";
+#ifndef _WIN32
         descriptor_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
         if (descriptor_ >= 0) {
+            const auto operation = exclusive ? LOCK_EX : LOCK_SH;
             while (::flock(descriptor_, operation) != 0 && errno == EINTR) {
             }
         }
 #else
-        (void)root;
-        (void)operation;
+        handle_ = CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            LockFileEx(handle_, exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0, 0, MAXDWORD, MAXDWORD, &overlapped);
+        }
 #endif
     }
     ~ProjectLock() {
@@ -1548,6 +1561,12 @@ class ProjectLock {
         if (descriptor_ >= 0) {
             ::flock(descriptor_, LOCK_UN);
             ::close(descriptor_);
+        }
+#else
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
+            CloseHandle(handle_);
         }
 #endif
     }
@@ -1557,17 +1576,19 @@ class ProjectLock {
   private:
 #ifndef _WIN32
     int descriptor_ = -1;
+#else
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
 #endif
 };
 
 class ProjectSaveLock : public ProjectLock {
   public:
-    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_EX) {}
+    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, true) {}
 };
 
 class ProjectReadLock : public ProjectLock {
   public:
-    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_SH) {}
+    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, false) {}
 };
 
 std::string recoveryHint() {

@@ -1,5 +1,8 @@
 #include "icelib/pdk.hpp"
 
+#include "icelib/platform.hpp"
+#include "icelib/process.hpp"
+
 #include "icelib/core.hpp"
 #include "icelib/implementation.hpp"
 #include "icelib/simulation.hpp"
@@ -22,6 +25,14 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace ice {
@@ -93,9 +104,8 @@ std::optional<double> geometryScaleFromLines(const std::vector<std::string> &lin
         const auto trimmed = lowerCopy(trimCopy(line));
         if (!trimmed.starts_with(".option"))
             continue;
-        auto body = trimmed.substr(trimmed.find_first_of(" \t") == std::string::npos
-                                       ? trimmed.size()
-                                       : trimmed.find_first_of(" \t"));
+        auto body = trimmed.substr(trimmed.find_first_of(" \t") == std::string::npos ? trimmed.size()
+                                                                                     : trimmed.find_first_of(" \t"));
         std::size_t position = 0;
         while ((position = body.find("scale", position)) != std::string::npos) {
             const auto equals = body.find('=', position);
@@ -129,27 +139,7 @@ std::string readPrefix(const std::filesystem::path &path, std::size_t limit = st
     return text;
 }
 
-bool executableInPath(const std::string &name) {
-    const auto *path = std::getenv("PATH");
-    if (!path || !*path)
-        return false;
-    std::stringstream stream(path);
-    std::string directory;
-    while (std::getline(stream, directory, ':')) {
-        if (directory.empty())
-            continue;
-        std::error_code status;
-        const auto candidate = std::filesystem::path(directory) / name;
-        if (std::filesystem::is_regular_file(candidate, status) && !status)
-            return true;
-    }
-    return false;
-}
-
-std::filesystem::path homeDirectory() {
-    const auto *home = std::getenv("HOME");
-    return home && *home ? std::filesystem::path(home) : std::filesystem::path{};
-}
+bool executableInPath(const std::string &name) { return findExecutableOnPath(name).has_value(); }
 
 std::filesystem::path cacheRoot() {
     if (const auto *value = std::getenv("ICE_PDK_CACHE"); value && *value)
@@ -235,30 +225,25 @@ bool logLooksLikeFailure(const std::string &log) {
     return false;
 }
 
-std::string shellQuote(const std::string &value) {
-    std::string result = "'";
-    for (const char character : value) {
-        if (character == '\'')
-            result += "'\\''";
-        else
-            result += character;
-    }
-    return result + "'";
-}
-
 class PdkBuildLock {
   public:
     explicit PdkBuildLock(const std::filesystem::path &directory) {
-#ifndef _WIN32
         std::error_code status;
         std::filesystem::create_directories(directory, status);
-        descriptor_ = ::open((directory / "build.lock").c_str(), O_CREAT | O_RDWR, 0666);
+        const auto path = directory / "build.lock";
+#ifndef _WIN32
+        descriptor_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
         if (descriptor_ >= 0) {
             while (::flock(descriptor_, LOCK_EX) != 0 && errno == EINTR) {
             }
         }
 #else
-        (void)directory;
+        handle_ = CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            LockFileEx(handle_, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &overlapped);
+        }
 #endif
     }
     ~PdkBuildLock() {
@@ -267,12 +252,20 @@ class PdkBuildLock {
             ::flock(descriptor_, LOCK_UN);
             ::close(descriptor_);
         }
+#else
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
+            CloseHandle(handle_);
+        }
 #endif
     }
 
   private:
 #ifndef _WIN32
     int descriptor_ = -1;
+#else
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
 #endif
 };
 
@@ -573,11 +566,7 @@ std::vector<std::filesystem::path> defaultPdkRoots() {
     }
     std::vector<std::filesystem::path> roots;
     const auto append = [&](const std::string &value) {
-        if (value.empty())
-            return;
-        std::stringstream stream(value);
-        std::string part;
-        while (std::getline(stream, part, ':')) {
+        for (const auto &part : splitPathList(value)) {
             if (!part.empty())
                 roots.emplace_back(part);
         }
@@ -761,14 +750,18 @@ PdkBuildResult buildPdkOsdi(const PdkInfo &info, std::chrono::milliseconds timeo
                 std::filesystem::remove(it->path(), status);
             status.clear();
         }
-        std::string command = "cd " + shellQuote(input.parent_path().string()) + " && timeout " +
-                              std::to_string(std::max<std::int64_t>(1, (timeout.count() + 999) / 1000)) + "s " +
-                              shellQuote(compiler);
+        ProcessOptions options;
+        options.arguments.push_back(compiler);
         for (const auto &flag : info.packageSimulation->compilerFlags)
-            command += " " + shellQuote(flag);
-        command += " " + shellQuote(input.filename().string()) + " --output " + shellQuote(output.string()) + " >> " +
-                   shellQuote((info.osdiDir / "build.log").string()) + " 2>&1";
-        const auto exitCode = std::system(command.c_str());
+            options.arguments.push_back(flag);
+        options.arguments.push_back(input.filename().string());
+        options.arguments.push_back("--output");
+        options.arguments.push_back(output.string());
+        options.workingDirectory = input.parent_path();
+        options.logPath = info.osdiDir / "build.log";
+        options.timeoutSeconds = static_cast<int>(std::max<std::int64_t>(1, (timeout.count() + 999) / 1000));
+        const auto process = runProcess(options);
+        const auto exitCode = process.started ? process.exitCode : -1;
         if (exitCode != 0 || !std::filesystem::is_regular_file(output)) {
             result.ok = false;
             log << "failed: " << input << " (exit " << exitCode << ")\n";
@@ -833,14 +826,17 @@ PdkProbeResult probePdk(const PdkInfo &info, std::chrono::milliseconds timeout) 
         return result;
     }
 
-    const auto seconds = std::max<std::int64_t>(1, (timeout.count() + 999) / 1000);
-    const auto command = "cd " + shellQuote(directory.string()) + " && HOME=" + shellQuote(directory.string()) +
-                         " timeout " + std::to_string(seconds) + "s ngspice -b -o " + shellQuote(logPath.string()) +
-                         " " + shellQuote(netlist.string()) + " >/dev/null 2>&1";
-    const auto exitCode = std::system(command.c_str());
+    ProcessOptions options;
+    options.arguments = {"ngspice", "-b", "-o", logPath.string(), netlist.string()};
+    options.workingDirectory = directory;
+    options.environment["HOME"] = directory.string();
+    options.environment["USERPROFILE"] = directory.string();
+    options.timeoutSeconds = static_cast<int>(std::max<std::int64_t>(1, (timeout.count() + 999) / 1000));
+    options.logTailBytes = 64 * 1024;
+    const auto process = runProcess(options);
     const auto log = readPrefix(logPath, std::size_t{64} * 1024);
     result.log = log.size() > 4000 ? "..." + log.substr(log.size() - 4000) : log;
-    result.ok = exitCode == 0 && !logLooksLikeFailure(log);
+    result.ok = process.succeeded() && !logLooksLikeFailure(log);
     result.summary =
         result.ok ? "ngspice loaded the PDK model and biased a minimum-size NMOS." : firstUsefulLogLine(log);
     if (result.summary.empty())

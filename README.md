@@ -59,17 +59,38 @@ simulations are stored as individual files.
 
 ## Prerequisites
 
+ICE builds on Linux, macOS, and Windows. Dependencies are resolved through
+`pkg-config`.
+
 - C++20 compiler
-- [xmake](https://xmake.io/) 2.9.8+ (build system, see `xmake.lua`)
+- [xmake](https://xmake.io/) 3.1+ (build system, see `xmake.lua`)
 - Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
-- `spdlog`, `nlohmann_json` (via xmake packages)
-- `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
-- `bazelisk` or `bazel` for the required `ice-openroad` helper (see below)
-- Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
+- `libngspice`, `toml++`, `spdlog`, `nlohmann_json`, OpenSSL, zlib
 - Bundled `agentsdk-cpp` submodule for the Agent Client Protocol tab and MCP
   server. Clone with `--recursive`, or run
   `git submodule update --init --recursive` after cloning
-- `clang-format` (formatting via `xmake format`), `doctest` sources (bundled under `include/doctest`)
+- `clang-format` (formatting via `xmake format`), `doctest` sources (bundled
+  under `include/doctest`)
+
+Linux (Debian/Ubuntu):
+
+```sh
+sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+    qt6-base-dev qt6-svg-dev libngspice0-dev libtomlplusplus-dev \
+    libssl-dev zlib1g-dev libcurl4-openssl-dev
+```
+
+macOS:
+
+```sh
+brew install qt libngspice tomlplusplus spdlog nlohmann-json openssl@3 \
+    curl zlib simdjson pkgconf
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
+```
+
+Windows: use the MSYS2 UCRT64 shell and install the MinGW toolchain, Qt 6,
+ngspice, pkgconf, and the libraries listed above. The commands are listed in
+[`docs/developer/building.md`](docs/developer/building.md).
 
 ## Build
 
@@ -83,11 +104,16 @@ Build the desktop app (requires Qt 6):
 xmake build ice
 ```
 
-The C++ OpenROAD helper (`ice-openroad`) is required by the physical design
-flow. Building `ice`, `ice-cli`, or `ice-mcp` builds it automatically; the
-pinned OpenROAD/OpenSTA source pair is fetched into
-`$HOME/.cache/ice/openroad-sdk` on the first build. Build or rebuild it on its
-own with:
+On Linux, the C++ OpenROAD helper (`ice-openroad`) is built automatically for
+the physical design flow; the pinned OpenROAD/OpenSTA source pair is fetched
+into `$HOME/.cache/ice/openroad-sdk` on the first build. On Windows and macOS,
+disable it with `ICE_ENABLE_OPENROAD=0`:
+
+```sh
+ICE_ENABLE_OPENROAD=0 xmake build ice ice-cli ice-pkg ice-mcp
+```
+
+Build or rebuild the helper on Linux with:
 
 ```sh
 xmake build ice-openroad
@@ -96,6 +122,18 @@ xmake build ice-openroad
 This requires `bazelisk` or `bazel` on `PATH`. Set
 `ICE_OPENROAD_SRC=/path/to/OpenROAD` to build against an existing source
 checkout instead.
+
+## Package
+
+```sh
+xmake pack -f targz,zip   # Linux
+xmake pack -f zip         # macOS
+xmake pack -f nsis,zip    # Windows (MSYS2 UCRT64 + NSIS)
+```
+
+The Windows installer is generated with XPack's NSIS backend and bundles the
+Qt/MinGW runtime. macOS packages include an `ICE.app` bundle. See
+`.github/workflows/release.yml` for the three-platform release pipeline.
 
 ## Test
 
