@@ -204,9 +204,27 @@ local fallback_includedirs = {}
 local fallback_linkdirs = {}
 local fallback_links = {}
 
-append_package(core_packages, find_pkg({"spdlog"}))
-append_package(core_packages, find_pkg({"nlohmann_json"}))
-append_package(core_packages, find_pkg({"tomlplusplus"}))
+-- Header-only packages fall back to xmake's package manager when the host
+-- does not provide pkg-config metadata. This keeps fresh CI images and local
+-- setups buildable without manual header installation.
+local spdlog_package = find_pkg({"spdlog"})
+if spdlog_package then
+    append_package(core_packages, spdlog_package)
+else
+    table.insert(core_packages, "spdlog")
+end
+local nlohmann_package = find_pkg({"nlohmann_json"})
+if nlohmann_package then
+    append_package(core_packages, nlohmann_package)
+else
+    table.insert(core_packages, "nlohmann_json")
+end
+local toml_package = find_pkg({"tomlplusplus"})
+if toml_package then
+    append_package(core_packages, toml_package)
+else
+    table.insert(core_packages, "toml++")
+end
 
 local openssl_package = find_pkg({"openssl"})
 append_package(core_packages, openssl_package)
@@ -272,11 +290,10 @@ end
 
 local agent_packages = {}
 if has_agentsdk then
-    append_package(agent_packages, find_pkg({"libcurl"}))
-    append_package(agent_packages, find_pkg({"simdjson"}))
-    if #core_packages == 0 or not find_pkg({"spdlog"}) then
-        print("warning: agentsdk-cpp requires spdlog, libcurl, and simdjson")
-    end
+    local curl_package = find_pkg({"libcurl"})
+    append_package(agent_packages, curl_package or "libcurl")
+    local simdjson_package = find_pkg({"simdjson"})
+    append_package(agent_packages, simdjson_package or "simdjson")
 end
 
 local qt_packages = {}
