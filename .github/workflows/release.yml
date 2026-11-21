@@ -17,9 +17,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: xmake-io/github-action@v1
+      - uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: 3.1.2
+          xmake-version: '3.1.2'
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -71,9 +71,9 @@ jobs:
           pkg_config_path="$pkg_config_path:$(brew --prefix zlib)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=$pkg_config_path" >>"$GITHUB_ENV"
           echo "ICE_QT_BIN=$(brew --prefix qt)/bin" >>"$GITHUB_ENV"
-      - uses: xmake-io/github-action@v1
+      - uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: 3.1.2
+          xmake-version: '3.1.2'
       - name: Build
         env:
           ICE_ENABLE_OPENROAD: "0"
