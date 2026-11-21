@@ -60,6 +60,11 @@ brew install qtbase qtsvg libngspice tomlplusplus spdlog nlohmann-json \
 export PKG_CONFIG_PATH="$(brew --prefix qtbase)/lib/pkgconfig:$(brew --prefix qtsvg)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
 ```
 
+The official Qt macOS SDK is a framework build without `.pc` files. Set
+`ICE_QT_PREFIX` to that SDK (for example
+`$HOME/Qt/6.8.3/macos` from `aqtinstall`) and ICE will link the Qt frameworks
+directly.
+
 ### Windows (MSYS2 UCRT64)
 
 Install the UCRT64 toolchain and dependencies from an MSYS2 UCRT64 shell:

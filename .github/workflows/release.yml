@@ -71,14 +71,14 @@ jobs:
           brew install libngspice tomlplusplus spdlog nlohmann-json openssl@3 curl zlib simdjson pkgconf dylibbundler
           python3 -m venv "$RUNNER_TEMP/aqt"
           "$RUNNER_TEMP/aqt/bin/pip" install --quiet aqtinstall
-          "$RUNNER_TEMP/aqt/bin/aqt" install-qt mac desktop 6.8.3 clang_64 -O "$HOME/Qt"
-          qt_prefix="$HOME/Qt/6.8.3/clang_64"
-          pkg_config_path="$qt_prefix/lib/pkgconfig"
-          pkg_config_path="$pkg_config_path:$(brew --prefix)/lib/pkgconfig"
+          "$RUNNER_TEMP/aqt/bin/aqt" install-qt mac desktop 6.8.3 clang_64 -O "$HOME/Qt" --archives qtbase qtsvg
+          qt_prefix="$HOME/Qt/6.8.3/macos"
+          pkg_config_path="$(brew --prefix)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix openssl@3)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix curl)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix zlib)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=$pkg_config_path" >>"$GITHUB_ENV"
+          echo "ICE_QT_PREFIX=$qt_prefix" >>"$GITHUB_ENV"
           echo "ICE_QT_BIN=$qt_prefix/bin" >>"$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
@@ -115,10 +115,11 @@ jobs:
           install: >-
             git
             pkgconf
+            unzip
+            curl
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-xmake
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-qt6-svg
             mingw-w64-ucrt-x86_64-ngspice
@@ -129,19 +130,25 @@ jobs:
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-curl
             mingw-w64-ucrt-x86_64-simdjson
-            mingw-w64-ucrt-x86_64-nsis
             mingw-w64-ucrt-x86_64-ntldd
+      - name: Install Windows-hosted xmake
+        shell: msys2 {0}
+        run: |
+          xmake_dir="$(mktemp -d)"
+          curl -fsSL -o "$xmake_dir/xmake.zip" https://github.com/xmake-io/xmake/releases/download/v3.1.2/xmake-v3.1.2.win64.zip
+          unzip -q "$xmake_dir/xmake.zip" -d "$xmake_dir"
+          echo "XMAKE_EXE=$xmake_dir/xmake/xmake.exe" >>"$GITHUB_ENV"
       - name: Build and package
         shell: msys2 {0}
         env:
           ICE_ENABLE_OPENROAD: "0"
           ICE_BUILD_PYTHON: "0"
-          ICE_PKG_CONFIG_DIR: C:\msys64\ucrt64\lib\pkgconfig
         run: |
           mingw_prefix="${MINGW_PREFIX:-/ucrt64}"
-          xmake f -p mingw -a x86_64 --mingw="$(cygpath -w "$mingw_prefix")" -y -m release
-          xmake build -y ice ice-cli ice-pkg ice-mcp
-          xmake pack -f nsis,zip --autobuild=n -o dist
+          export ICE_PKG_CONFIG_DIR="$(cygpath -w "$mingw_prefix/lib/pkgconfig")"
+          "$XMAKE_EXE" f -p mingw -a x86_64 --mingw="$(cygpath -w "$mingw_prefix")" -y -m release
+          "$XMAKE_EXE" build -y ice ice-cli ice-pkg ice-mcp
+          "$XMAKE_EXE" pack -f nsis,zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
           name: ice-windows-x86_64

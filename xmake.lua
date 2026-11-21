@@ -297,12 +297,40 @@ if has_agentsdk then
 end
 
 local qt_packages = {}
+local qt_framework_dir
+local qt_framework_includes = {}
+local qt_framework_names = {}
 local has_qt = pkg_available("Qt6Widgets") and pkg_available("Qt6Svg") and pkg_available("Qt6SvgWidgets")
 if build_gui and has_qt then
     append_package(qt_packages, find_pkg({"Qt6Widgets"}))
     append_package(qt_packages, find_pkg({"Qt6Svg"}))
     append_package(qt_packages, find_pkg({"Qt6SvgWidgets"}))
 elseif build_gui then
+    -- The official Qt macOS packages are framework builds without .pc
+    -- files. Accept an explicit SDK prefix and link the frameworks directly.
+    local prefix = os.getenv("ICE_QT_PREFIX")
+    if prefix and os.isdir(prefix) then
+        local framework_dir = path.join(prefix, "lib")
+        local modules = {"QtCore", "QtGui", "QtWidgets", "QtSvg", "QtSvgWidgets"}
+        local complete = true
+        local includes = {}
+        for _, module in ipairs(modules) do
+            local headers = path.join(framework_dir, module .. ".framework", "Headers")
+            if os.isdir(headers) then
+                table.insert(includes, headers)
+            else
+                complete = false
+            end
+        end
+        if complete then
+            has_qt = true
+            qt_framework_dir = framework_dir
+            qt_framework_includes = includes
+            qt_framework_names = modules
+        end
+    end
+end
+if build_gui and not has_qt then
     print("warning: Qt 6 (Widgets, Svg, SvgWidgets) was not found; skipping the ice GUI target")
     build_gui = false
 end
@@ -418,6 +446,15 @@ if build_gui then
         end
         for _, package in ipairs(qt_packages) do
             add_packages(package)
+        end
+        if qt_framework_dir then
+            add_frameworkdirs(qt_framework_dir)
+            for _, framework in ipairs(qt_framework_names) do
+                add_frameworks(framework)
+            end
+            for _, include in ipairs(qt_framework_includes) do
+                add_includedirs(include)
+            end
         end
         add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
         if is_linux then
