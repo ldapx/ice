@@ -948,17 +948,20 @@ simulation run through the context (`simulations`, `runs`, `latest`,
 `latest_many`, and `load`) and can compare multiple simulations in one script.
 
 Scripts can generate GUI graphs with `ctx.graph(...)`. The generated graphs are
-shown in the **Graphs** tab; selecting a script opens **File** first, and a run
-that produces graphs switches to **Graphs**. Graphs can reference stored runs
-and signals, or use explicit `x` and `y` arrays computed by the script. Running
-the script replaces the previously generated graph tabs. The latest graph payload is
-cached under `build/simulation-scripts/` and reloaded when the script is selected,
-including runs started from `ice-cli`.
+shown as child entries under the script in the simulation hierarchy and in the
+**Graphs** tab; selecting a graph child opens the corresponding plot. Selecting a
+script opens **File** first, and a run that produces graphs switches to
+**Graphs**. Graphs can reference stored runs and signals, or use explicit `x`
+and `y` arrays computed by the script. Running the script replaces the
+previously generated graph tabs and refreshes its hierarchy children. The latest
+graph payload is cached under `build/simulation-scripts/` and reloaded when the
+script is selected, including runs started from `ice-cli`.
 
-The **Save** button saves the Python source immediately; edits also autosave
-after a short pause. **Run** saves any pending edits and executes the script.
-**Open File** opens the Python source externally. Deleting a script removes only
-its project metadata; the file remains on disk.
+Python source edits autosave after a short pause. The script **Graphs** page has
+the same vertical tool column as normal simulation graphs, with **Run**,
+**Open File**, and the graph grid toggle. **Run** saves any pending edits and
+executes the script; **Open File** opens the Python source externally. Deleting
+a script removes only its project metadata; the file remains on disk.
 
 Simulation plots downsample traces to at most two display points per horizontal
 pixel column. The minimum and maximum sample in each column are kept so narrow
