@@ -111,12 +111,11 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
+          location: ${{ runner.temp }}\msys64
           update: true
           install: >-
             git
             pkgconf
-            unzip
-            curl
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
@@ -131,24 +130,29 @@ jobs:
             mingw-w64-ucrt-x86_64-curl
             mingw-w64-ucrt-x86_64-simdjson
             mingw-w64-ucrt-x86_64-ntldd
-      - name: Install Windows-hosted xmake
-        shell: msys2 {0}
-        run: |
-          xmake_dir="$(mktemp -d)"
-          curl -fsSL -o "$xmake_dir/xmake.zip" https://github.com/xmake-io/xmake/releases/download/v3.1.2/xmake-v3.1.2.win64.zip
-          unzip -q "$xmake_dir/xmake.zip" -d "$xmake_dir"
-          echo "XMAKE_EXE=$xmake_dir/xmake/xmake.exe" >>"$GITHUB_ENV"
       - name: Build and package
-        shell: msys2 {0}
-        env:
-          ICE_ENABLE_OPENROAD: "0"
-          ICE_BUILD_PYTHON: "0"
+        shell: pwsh
         run: |
-          mingw_prefix="${MINGW_PREFIX:-/ucrt64}"
-          export ICE_PKG_CONFIG_DIR="$(cygpath -w "$mingw_prefix/lib/pkgconfig")"
-          "$XMAKE_EXE" f -p mingw -a x86_64 --mingw="$(cygpath -w "$mingw_prefix")" -y -m release
-          "$XMAKE_EXE" build -y ice ice-cli ice-pkg ice-mcp
-          "$XMAKE_EXE" pack -f nsis,zip --autobuild=n -o dist
+          $msys = Join-Path $env:RUNNER_TEMP "msys64"
+          $ucrt = Join-Path $msys "ucrt64"
+          $env:PATH = "$ucrt\bin;$msys\usr\bin;$env:PATH"
+          $env:MINGW_PREFIX = $ucrt
+          $env:ICE_PKG_CONFIG_DIR = Join-Path $ucrt "lib\pkgconfig"
+          $env:ICE_ENABLE_OPENROAD = "0"
+          $env:ICE_BUILD_PYTHON = "0"
+
+          $xmakeRoot = Join-Path $env:RUNNER_TEMP "xmake-win"
+          New-Item -ItemType Directory -Force -Path $xmakeRoot | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.1.2/xmake-v3.1.2.win64.zip" -OutFile "$xmakeRoot\xmake.zip"
+          Expand-Archive -Path "$xmakeRoot\xmake.zip" -DestinationPath $xmakeRoot -Force
+          $xmake = Join-Path $xmakeRoot "xmake\xmake.exe"
+
+          & $xmake f -p mingw -a x86_64 "--mingw=$ucrt" -y -m release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $xmake build -y ice ice-cli ice-pkg ice-mcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $xmake pack -f nsis,zip --autobuild=n -o dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: ice-windows-x86_64

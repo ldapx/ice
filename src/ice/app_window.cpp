@@ -129,6 +129,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -6061,9 +6062,10 @@ class DocumentWindow : public QMainWindow {
                                 ? std::filesystem::path(cell.reference->path)
                                 : root / cell.reference->path;
         std::error_code status;
-        const auto stamp = std::filesystem::is_regular_file(source, status) && !status
-                               ? std::filesystem::last_write_time(source, status).time_since_epoch().count()
-                               : 0;
+        const auto stamp =
+            std::filesystem::is_regular_file(source, status) && !status
+                ? static_cast<std::int64_t>(std::filesystem::last_write_time(source, status).time_since_epoch().count())
+                : std::int64_t{0};
         std::ostringstream key;
         key << cell.reference->path << "|" << cell.reference->format << "|" << cell.reference->topCell << "|" << stamp;
         const auto keyText = QString::fromStdString(key.str());

@@ -1527,7 +1527,8 @@ std::string projectRevision(const std::filesystem::path &root) {
         const auto size = std::filesystem::file_size(file, status);
         mix(status ? std::string("missing") : std::to_string(size));
         const auto modified = std::filesystem::last_write_time(file, status);
-        mix(status ? std::string("missing") : std::to_string(modified.time_since_epoch().count()));
+        mix(status ? std::string("missing")
+                   : std::to_string(static_cast<std::int64_t>(modified.time_since_epoch().count())));
     }
     std::ostringstream text;
     text << std::hex << hash;
