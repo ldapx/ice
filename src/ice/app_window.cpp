@@ -1225,8 +1225,7 @@ class DocumentWindow : public QMainWindow {
     // is resolved from the installed package instead of guessing.
     static std::filesystem::path pdkSymbolDirectory(const std::string &pdk) {
         const auto packageRoot = installedPdkPackageRoot(pdk);
-        return packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols"
-                                   : packageRoot / "symbols";
+        return packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols" : packageRoot / "symbols";
     }
 
     std::vector<SymbolDefinition> symbolLibraryForPdk(const std::string &pdk) const {
@@ -1430,6 +1429,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_.clear();
             restoreProjectTabState();
             clearProjectWatcher();
+            refreshSimulationPanelTree();
             if (implementationController_)
                 implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
             return;
@@ -1439,6 +1439,7 @@ class DocumentWindow : public QMainWindow {
         restoreProjectTabState();
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        refreshSimulationPanelTree();
         configureProjectWatcher();
         if (implementationController_)
             implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
@@ -1561,6 +1562,7 @@ class DocumentWindow : public QMainWindow {
             implementationController_->setProject(&project_->project(), projectPath_);
         if (activityPanel_)
             activityPanel_->setProjectPath(QString::fromStdString(root.string()));
+        refreshSimulationPanelTree();
         configureProjectWatcher();
         addRecentProject(projectPath_);
         if (startupView_)
@@ -1589,6 +1591,7 @@ class DocumentWindow : public QMainWindow {
                 implementationController_->setProject(&project_->project(), projectPath_);
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
+            refreshSimulationPanelTree();
             configureProjectWatcher();
             addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project opened"));
@@ -1781,6 +1784,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_ = QFileInfo(path).isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            refreshSimulationPanelTree();
             projectDiskChangePending_ = false;
             configureProjectWatcher();
             if (projectWatcherResumeTimer_)
@@ -2310,6 +2314,7 @@ class DocumentWindow : public QMainWindow {
         projectPath_ = path;
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        refreshSimulationPanelTree();
         openSchematicTabs_ = openSchematics;
         openLayoutTabs_ = openLayouts;
         knownSchematicCells_ = knownSchematics;
@@ -2364,6 +2369,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_ = path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            refreshSimulationPanelTree();
             configureProjectWatcher();
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(
@@ -2404,6 +2410,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_.clear();
             if (activityPanel_)
                 activityPanel_->setProjectPath({});
+            refreshSimulationPanelTree();
             if (!warnings.empty()) {
                 QStringList lines;
                 for (const auto &warning : warnings)
@@ -7797,8 +7804,9 @@ class DocumentWindow : public QMainWindow {
                         continue;
                     auto &parameters = instance->second.parameters;
                     const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
-                        return entry.id != parameterId && QString::fromStdString(entry.name).compare(
-                                                                 QString::fromStdString(name), Qt::CaseInsensitive) == 0;
+                        return entry.id != parameterId &&
+                               QString::fromStdString(entry.name)
+                                       .compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0;
                     });
                     if (duplicate)
                         return;
@@ -7835,8 +7843,8 @@ class DocumentWindow : public QMainWindow {
                 auto &parameters = cell->second.parameters;
                 const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
                     return entry.id != parameterId &&
-                           QString::fromStdString(entry.name).compare(QString::fromStdString(name),
-                                                                      Qt::CaseInsensitive) == 0;
+                           QString::fromStdString(entry.name)
+                                   .compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0;
                 });
                 if (duplicate)
                     return;
@@ -8106,7 +8114,7 @@ class DocumentWindow : public QMainWindow {
         });
         const auto &storedSimulation = project_->project().simulations.at(simId);
         rebuildGraphTabs(storedSimulation.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         for (int index = 0; index < graphTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
                 graphTabs_->setCurrentIndex(index);
@@ -8166,7 +8174,7 @@ class DocumentWindow : public QMainWindow {
     void refreshGraphAfterLabelEdit(ice::ObjectId simId, ice::ObjectId graphId, const QString &message) {
         const auto &simulation = project_->project().simulations.at(simId);
         rebuildGraphTabs(simulation.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         // Rebuild keeps the previous tab index; select the edited graph's tab.
         for (int index = 0; index < graphTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
@@ -8575,7 +8583,7 @@ class DocumentWindow : public QMainWindow {
             sim.graphs.push_back(std::move(graph));
             project.simulations.emplace(newId, std::move(sim));
         });
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         simulationPanel_->selectSimulation(newId);
         statusBar()->showMessage(QStringLiteral("Simulation added"));
     }
@@ -8627,7 +8635,7 @@ class DocumentWindow : public QMainWindow {
             project_->setLastHistoryLabel("Created SystemVerilog testbench " + name.trimmed().toStdString());
             refreshProject();
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             selectDigitalTestbenchSimulation(simulationId);
             if (documents_ && simulationTestbenchPage_)
                 documents_->setCurrentWidget(simulationTestbenchPage_);
@@ -8662,12 +8670,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     void setReportStatus(const QString &text, bool error = false) {
-        if (!reportStatusLabel_)
-            return;
-        reportStatusLabel_->setText(text);
-        reportStatusLabel_->setStyleSheet(
-            error ? QStringLiteral("color: #d9534f; font-weight: bold;")
-                  : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+        if (error && !text.isEmpty())
+            statusBar()->showMessage(text, 10000);
     }
 
     void beginImplementationJob(const QString &title, ice::ImplementationStage stage) {
@@ -8733,8 +8737,6 @@ class DocumentWindow : public QMainWindow {
         const auto *report = selectedReport();
         if (!report) {
             clearScriptGraphs();
-            if (reportTitleLabel_)
-                reportTitleLabel_->setText(QStringLiteral("No simulation script selected"));
             if (reportCodeEditor_) {
                 const QSignalBlocker blocker(reportCodeEditor_);
                 reportCodeEditor_->clear();
@@ -8744,27 +8746,30 @@ class DocumentWindow : public QMainWindow {
             reportDirty_ = false;
             if (reportSaveTimer_)
                 reportSaveTimer_->stop();
-            if (reportSaveButton_)
-                reportSaveButton_->setEnabled(false);
             if (reportRunButton_)
                 reportRunButton_->setEnabled(false);
             if (reportOpenButton_)
                 reportOpenButton_->setEnabled(false);
+            if (scriptGridButton_)
+                scriptGridButton_->setEnabled(false);
             if (simulationRightStack_ && simulationEditorPage_ &&
                 simulationRightStack_->currentWidget() == reportsView_)
                 simulationRightStack_->setCurrentWidget(simulationEditorPage_);
             return;
         }
-        if (reportTitleLabel_)
-            reportTitleLabel_->setText(QString::fromStdString(report->name));
         if (reportCodeEditor_)
             reportCodeEditor_->setReadOnly(false);
-        if (reportSaveButton_)
-            reportSaveButton_->setEnabled(true);
         if (reportRunButton_)
             reportRunButton_->setEnabled(true);
         if (reportOpenButton_)
             reportOpenButton_->setEnabled(true);
+        if (scriptGridButton_) {
+            scriptGridButton_->setEnabled(true);
+            if (scriptGridButton_->isChecked() != graphGridVisible_) {
+                const QSignalBlocker blocker(scriptGridButton_);
+                scriptGridButton_->setChecked(graphGridVisible_);
+            }
+        }
     }
 
     void loadReportSource() {
@@ -8829,7 +8834,7 @@ class DocumentWindow : public QMainWindow {
         return true;
     }
 
-    void selectReport(ice::ObjectId id) {
+    void selectReport(ice::ObjectId id, int graphIndex = -1) {
         if (selectingReport_)
             return;
         if (activeReportId_ != 0 && reportDirty_ && !saveReportSource()) {
@@ -8845,16 +8850,17 @@ class DocumentWindow : public QMainWindow {
         activeReportId_ = id;
         clearScriptGraphs();
         if (simulationPanel_)
-            simulationPanel_->selectReport(id);
+            simulationPanel_->selectReport(id, graphIndex);
         if (simulationRightStack_ && reportsView_)
             simulationRightStack_->setCurrentWidget(reportsView_);
         if (scriptTabs_)
-            scriptTabs_->setCurrentIndex(0);
+            scriptTabs_->setCurrentIndex(graphIndex >= 0 && scriptGraphsPage_ ? scriptTabs_->indexOf(scriptGraphsPage_)
+                                                                              : 0);
         if (documents_ && simulationPage_)
             documents_->setCurrentWidget(simulationPage_);
         selectingReport_ = false;
         loadReportSource();
-        loadCachedScriptGraphs();
+        loadCachedScriptGraphs(graphIndex);
     }
 
     std::filesystem::path reportRunnerPath() const {
@@ -8888,10 +8894,13 @@ class DocumentWindow : public QMainWindow {
             scriptGraphViewStack_->setCurrentIndex(0);
     }
 
-    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false) {
+    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false,
+                             int selectedGraph = -1) {
         if (!scriptGraphTabs_)
             return;
         clearScriptGraphs();
+        int graphIndex = 0;
+        int selectedTab = -1;
         for (const auto &graph : graphs) {
             if (graph.x.empty() || graph.series.empty())
                 continue;
@@ -8915,10 +8924,13 @@ class DocumentWindow : public QMainWindow {
             plot->setGridVisible(graphGridVisible_);
             plot->setGraph(definition);
             plot->setResult(result);
+            if (graphIndex == selectedGraph)
+                selectedTab = scriptGraphTabs_->count();
             scriptGraphTabs_->addTab(plot, QString::fromStdString(graph.name));
+            ++graphIndex;
         }
         if (scriptGraphTabs_->count() > 0) {
-            scriptGraphTabs_->setCurrentIndex(0);
+            scriptGraphTabs_->setCurrentIndex(selectedTab >= 0 ? selectedTab : 0);
             if (scriptGraphViewStack_)
                 scriptGraphViewStack_->setCurrentIndex(1);
             if (reveal && scriptTabs_ && scriptGraphsPage_)
@@ -8928,7 +8940,7 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    void loadCachedScriptGraphs() {
+    void loadCachedScriptGraphs(int selectedGraph = -1) {
         const auto *report = selectedReport();
         if (!report || projectPath_.isEmpty()) {
             clearScriptGraphs();
@@ -8943,7 +8955,8 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         try {
-            displayScriptGraphs(ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString()));
+            displayScriptGraphs(ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString()),
+                                selectedGraph >= 0, selectedGraph);
         } catch (const ice::ProjectError &) {
             clearScriptGraphs();
         }
@@ -9030,8 +9043,10 @@ class DocumentWindow : public QMainWindow {
             try {
                 const auto graphs =
                     ice::parseSimulationScriptGraphs(QString::fromUtf8(graphFile.readAll()).toStdString());
-                if (!graphs.empty())
+                if (!graphs.empty()) {
                     displayScriptGraphs(graphs, true);
+                    refreshSimulationPanelTree();
+                }
             } catch (const ice::ProjectError &error) {
                 appendReportMessage(QStringLiteral("[Simulation script] %1: unable to read graphs: %2")
                                         .arg(reportName, QString::fromStdString(error.what())));
@@ -9173,7 +9188,7 @@ class DocumentWindow : public QMainWindow {
             return;
         project_->execute("delete simulation", [id](ice::Project &project) { project.simulations.erase(id); });
         activeSimulationId_ = 0;
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         rebuildGraphTabs({});
         updateSimulationNetlistState();
         statusBar()->showMessage(QStringLiteral("Simulation deleted"));
@@ -9208,7 +9223,7 @@ class DocumentWindow : public QMainWindow {
         if (newGraphId == 0)
             return;
         // Refresh the panel tree, select the simulation and the new graph tab.
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         activeSimulationId_ = 0; // force rebuild on next load
         simulationPanel_->selectSimulation(simId, newGraphId);
         statusBar()->showMessage(QStringLiteral("Graph added"));
@@ -9244,7 +9259,7 @@ class DocumentWindow : public QMainWindow {
         // Rebuild tabs from the surviving graphs and refresh the panel tree.
         const auto &updatedSim = project_->project().simulations.at(simId);
         rebuildGraphTabs(updatedSim.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         statusBar()->showMessage(QStringLiteral("Graph deleted"));
     }
 
@@ -9452,7 +9467,7 @@ class DocumentWindow : public QMainWindow {
         // Rebuild tabs to reflect new name and refresh the panel tree.
         const auto &updatedSim = project_->project().simulations.at(simId);
         rebuildGraphTabs(updatedSim.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         // Restore to the same graph (by id).
         for (int i = 0; i < graphTabs_->count(); ++i) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong()) == graphId) {
@@ -10213,7 +10228,7 @@ class DocumentWindow : public QMainWindow {
             QSignalBlocker blocker(signalsCapture_);
             signalsCapture_->setText(QString::fromStdString(updated->second.captureSignals));
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             rebuildGraphTabs(updated->second.graphs);
         }
         auto result = std::make_shared<ice::SimulationResult>();
@@ -10368,7 +10383,7 @@ class DocumentWindow : public QMainWindow {
             QSignalBlocker blocker(signalsCapture_);
             signalsCapture_->setText(QString::fromStdString(sim.captureSignals));
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             if (!digitalSimulation)
                 rebuildGraphTabs(sim.graphs);
         }
@@ -11144,6 +11159,16 @@ class DocumentWindow : public QMainWindow {
             documents_->setCurrentWidget(layoutPage_);
     }
 
+    void refreshSimulationPanelTree() {
+        if (!simulationPanel_)
+            return;
+        simulationPanel_->setProjectRoot(projectPath_.isEmpty() ? QString() : QFileInfo(projectPath_).absolutePath());
+        if (project_)
+            simulationPanel_->setProject(project_->project());
+        else
+            simulationPanel_->clear();
+    }
+
     void refreshEmbeddedPanels() {
         const ice::Project empty;
         const auto &project = project_ ? project_->project() : empty;
@@ -11267,8 +11292,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         // Refresh simulation panel and project-level simulation scripts.
-        if (simulationPanel_)
-            simulationPanel_->setProject(project);
+        refreshSimulationPanelTree();
         refreshReportPanel();
         updateEmptyWorkspaceState();
     }
@@ -13636,7 +13660,8 @@ class DocumentWindow : public QMainWindow {
             if (simId != 0 && documents_ && simulationPage_)
                 documents_->setCurrentWidget(simulationPage_);
         });
-        simulationPanel_->setOnReportSelection([this](ice::ObjectId reportId) { selectReport(reportId); });
+        simulationPanel_->setOnReportSelection(
+            [this](ice::ObjectId reportId, int graphIndex) { selectReport(reportId, graphIndex); });
         simulationPanel_->setOnAddGraph([this](ice::ObjectId simId) { addGraph(simId); });
         simulationPanel_->setOnDeleteGraph(
             [this](ice::ObjectId simId, ice::ObjectId graphId) { deleteGraph(simId, graphId); });
@@ -13685,6 +13710,10 @@ class DocumentWindow : public QMainWindow {
         connect(simulationEditGraphButton_, &QPushButton::clicked, this, [this] { editGraph(); });
         connect(simulationGridButton_, &QPushButton::toggled, this, [this](bool visible) {
             graphGridVisible_ = visible;
+            if (scriptGridButton_ && scriptGridButton_->isChecked() != visible) {
+                const QSignalBlocker blocker(scriptGridButton_);
+                scriptGridButton_->setChecked(visible);
+            }
             if (!graphTabs_)
                 return;
             for (int index = 0; index < graphTabs_->count(); ++index)
@@ -13903,25 +13932,6 @@ class DocumentWindow : public QMainWindow {
         reportsView_ = reportsView;
         auto *reportsLayout = new QVBoxLayout(reportsView_);
         reportsLayout->setContentsMargins(0, 0, 0, 0);
-        auto *reportsToolbar = new QHBoxLayout;
-        reportsToolbar->setContentsMargins(4, 4, 4, 4);
-        reportTitleLabel_ = new QLabel(QStringLiteral("No simulation script selected"));
-        reportTitleLabel_->setStyleSheet(QStringLiteral("font-weight: 600;"));
-        reportsToolbar->addWidget(reportTitleLabel_, 1);
-        reportStatusLabel_ = new QLabel;
-        reportsToolbar->addWidget(reportStatusLabel_);
-        reportSaveButton_ = new QPushButton(QStringLiteral("Save"));
-        reportSaveButton_->setToolTip(QStringLiteral("Save the simulation script source"));
-        reportsToolbar->addWidget(reportSaveButton_);
-        reportRunButton_ = new QPushButton(QStringLiteral("Run"));
-        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected simulation script"));
-        setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
-        reportsToolbar->addWidget(reportRunButton_);
-        reportOpenButton_ = new QPushButton(QStringLiteral("Open File"));
-        reportOpenButton_->setToolTip(QStringLiteral("Open the simulation script source in an external editor"));
-        setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
-        reportsToolbar->addWidget(reportOpenButton_);
-        reportsLayout->addLayout(reportsToolbar);
 
         reportCodeEditor_ = new QPlainTextEdit;
         reportCodeEditor_->setReadOnly(true);
@@ -13943,10 +13953,41 @@ class DocumentWindow : public QMainWindow {
         scriptTabs_->addTab(filePage, QStringLiteral("File"));
 
         scriptGraphsPage_ = new QWidget;
-        auto *scriptGraphsLayout = new QVBoxLayout(scriptGraphsPage_);
+        auto *scriptGraphsLayout = new QHBoxLayout(scriptGraphsPage_);
         scriptGraphsLayout->setContentsMargins(0, 0, 0, 0);
-        scriptGraphViewStack_ = new QStackedWidget;
+        scriptGraphsLayout->setSpacing(4);
+        auto *scriptGraphControls = new QWidget;
+        scriptGraphControls->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        auto *scriptGraphControlsLayout = new QVBoxLayout(scriptGraphControls);
+        scriptGraphControlsLayout->setContentsMargins(0, 0, 0, 0);
+        scriptGraphControlsLayout->setSpacing(2);
+        reportRunButton_ = new QPushButton;
+        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected simulation script"));
+        reportRunButton_->setAccessibleName(QStringLiteral("Run simulation script"));
+        reportRunButton_->setFixedWidth(32);
+        reportRunButton_->setEnabled(false);
+        setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
+        reportOpenButton_ = new QPushButton;
+        reportOpenButton_->setToolTip(QStringLiteral("Open the simulation script source in an external editor"));
+        reportOpenButton_->setAccessibleName(QStringLiteral("Open simulation script file"));
+        reportOpenButton_->setFixedWidth(32);
+        reportOpenButton_->setEnabled(false);
+        setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
+        scriptGridButton_ = new QPushButton;
+        scriptGridButton_->setCheckable(true);
+        scriptGridButton_->setChecked(true);
+        scriptGridButton_->setToolTip(QStringLiteral("Show or hide the graph grid"));
+        scriptGridButton_->setAccessibleName(QStringLiteral("Toggle script graph grid"));
+        scriptGridButton_->setFixedWidth(32);
+        scriptGridButton_->setEnabled(false);
+        setLucideIcon(scriptGridButton_, QStringLiteral("grid-3x3"), 16);
+        scriptGraphControlsLayout->addStretch(1);
+        scriptGraphControlsLayout->addWidget(reportRunButton_);
+        scriptGraphControlsLayout->addWidget(reportOpenButton_);
+        scriptGraphControlsLayout->addWidget(scriptGridButton_);
+        scriptGraphControlsLayout->addStretch(1);
 
+        scriptGraphViewStack_ = new QStackedWidget;
         auto *graphPlaceholder = new QWidget;
         auto *graphPlaceholderLayout = new QVBoxLayout(graphPlaceholder);
         graphPlaceholderLayout->setContentsMargins(12, 12, 12, 12);
@@ -13961,6 +14002,7 @@ class DocumentWindow : public QMainWindow {
         scriptGraphViewStack_->addWidget(graphPlaceholder);
         scriptGraphViewStack_->addWidget(scriptGraphTabs_);
         scriptGraphViewStack_->setCurrentWidget(graphPlaceholder);
+        scriptGraphsLayout->addWidget(scriptGraphControls, 0);
         scriptGraphsLayout->addWidget(scriptGraphViewStack_, 1);
         scriptTabs_->addTab(scriptGraphsPage_, QStringLiteral("Graphs"));
         reportsLayout->addWidget(scriptTabs_, 1);
@@ -13978,16 +14020,27 @@ class DocumentWindow : public QMainWindow {
             if (reportSaveTimer_)
                 reportSaveTimer_->start();
         });
-        connect(reportSaveButton_, &QPushButton::clicked, this, [this] { saveReportSource(); });
         connect(reportRunButton_, &QPushButton::clicked, this, [this] { runSelectedReport(); });
         connect(reportOpenButton_, &QPushButton::clicked, this, [this] { openSelectedReportFile(); });
+        connect(scriptGridButton_, &QPushButton::toggled, this, [this](bool visible) {
+            graphGridVisible_ = visible;
+            if (simulationGridButton_ && simulationGridButton_->isChecked() != visible) {
+                const QSignalBlocker blocker(simulationGridButton_);
+                simulationGridButton_->setChecked(visible);
+            }
+            if (!scriptGraphTabs_)
+                return;
+            for (int index = 0; index < scriptGraphTabs_->count(); ++index)
+                if (auto *plot = dynamic_cast<SimulationPlot *>(scriptGraphTabs_->widget(index)))
+                    plot->setGridVisible(visible);
+        });
         connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
             if (reportDirty_)
                 saveReportSource();
         });
-        reportSaveButton_->setEnabled(false);
         reportRunButton_->setEnabled(false);
         reportOpenButton_->setEnabled(false);
+        scriptGridButton_->setEnabled(false);
 
         workspaceStack_ = new WorkspaceStack;
         startupView_ = new StartupView;
@@ -15269,13 +15322,11 @@ class DocumentWindow : public QMainWindow {
     QWidget *scriptGraphsPage_ = nullptr;
     QStackedWidget *scriptGraphViewStack_ = nullptr;
     QTabWidget *scriptGraphTabs_ = nullptr;
-    QLabel *reportTitleLabel_ = nullptr;
     QPlainTextEdit *reportCodeEditor_ = nullptr;
     PythonSyntaxHighlighter *reportHighlighter_ = nullptr;
-    QLabel *reportStatusLabel_ = nullptr;
-    QPushButton *reportSaveButton_ = nullptr;
     QPushButton *reportRunButton_ = nullptr;
     QPushButton *reportOpenButton_ = nullptr;
+    QPushButton *scriptGridButton_ = nullptr;
     QTimer *reportSaveTimer_ = nullptr;
     QString loadedCachedRunPath_;
     ice::ObjectId activeReportId_ = 0;
