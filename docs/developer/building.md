@@ -24,21 +24,78 @@ Python scientific stack.
 
 ## Prerequisites
 
-- C++20 compiler
-- [xmake](https://xmake.io/) 2.9.8+ (build system, see `xmake.lua`)
-- Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
-- `spdlog`, `nlohmann_json`, `clipper2` (via xmake packages)
-- `libngspice`, `toml++`, `libcrypto` headers (system layout, see `xmake.lua`)
-- `bazelisk` or `bazel` for the required `ice-openroad` helper
-- Python 3.14 + `nanobind` headers (only for the optional `icepy` target)
-- `clang-format` (formatting via `xmake format`)
-- The bundled `agentsdk-cpp` submodule. Clone with `--recursive`, or run
-  `git submodule update --init --recursive` after cloning. The build produces
-  `libagentsdk.so` and installs it alongside ICE.
+ICE builds on Linux, macOS, and Windows. All C/C++ dependencies are resolved
+through `pkg-config`, so the same `xmake.lua` works on every platform. Linux
+and macOS use their native package managers; Windows uses the MSYS2 UCRT64
+environment.
 
-System dependency locations can be overridden when the defaults do not match
-your distribution: `ICE_PYTHON_VERSION`, `ICE_PYTHON_INCLUDE`, `NANOBIND_ROOT`,
-`ICE_QT_INCLUDE`, `ICE_NGSPICE_INCLUDE`, and `ICE_TOML_INCLUDE`.
+Common prerequisites:
+
+- C++20 compiler
+- [xmake](https://xmake.io/) 3.1+ (build system, see `xmake.lua`)
+- `pkg-config` (or `pkgconf`)
+- Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
+- `libngspice`, `toml++`, `spdlog`, `nlohmann_json`, OpenSSL, zlib
+- `clang-format` for `xmake format`
+- The bundled `agentsdk-cpp` submodule. Clone with `--recursive`, or run
+  `git submodule update --init --recursive` after cloning. The SDK is linked
+  statically into the ICE executables.
+
+`clipper2` is installed by xmake from source, so a broken distribution-provided
+Clipper2 archive cannot break the link.
+
+### Linux
+
+```sh
+sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+    qt6-base-dev qt6-svg-dev libngspice0-dev libtomlplusplus-dev \
+    libssl-dev zlib1g-dev libcurl4-openssl-dev
+```
+
+### macOS
+
+```sh
+brew install qt libngspice tomlplusplus spdlog nlohmann-json openssl@3 \
+    curl zlib simdjson pkgconf
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix zlib)/lib/pkgconfig"
+```
+
+### Windows (MSYS2 UCRT64)
+
+Install the UCRT64 toolchain and dependencies from an MSYS2 UCRT64 shell:
+
+```sh
+pacman -S --needed git pkgconf \
+    mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
+    mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-xmake \
+    mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg \
+    mingw-w64-ucrt-x86_64-ngspice mingw-w64-ucrt-x86_64-tomlplusplus \
+    mingw-w64-ucrt-x86_64-spdlog mingw-w64-ucrt-x86_64-nlohmann-json \
+    mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-zlib \
+    mingw-w64-ucrt-x86_64-curl mingw-w64-ucrt-x86_64-simdjson \
+    mingw-w64-ucrt-x86_64-nsis mingw-w64-ucrt-x86_64-ntldd
+```
+
+Build from the UCRT64 shell. If xmake does not auto-detect MinGW, add
+`-p mingw -a x86_64` to the configure command.
+
+### OpenROAD
+
+OpenROAD's C++ helper is built with Bazel and Bash, so `ice-openroad` is
+Linux-only by default. Disable it on other platforms (the rest of ICE builds
+normally):
+
+```sh
+ICE_ENABLE_OPENROAD=0 xmake build ice ice-cli ice-pkg ice-mcp
+```
+
+Force it on an unsupported host with `ICE_ENABLE_OPENROAD=1` only when you
+have provided a compatible `ice-openroad` helper yourself.
+
+Optional targets can be disabled with `ICE_BUILD_GUI=0` and
+`ICE_BUILD_PYTHON=0`. Python bindings additionally accept
+`ICE_PYTHON_VERSION`, `ICE_PYTHON_INCLUDE`, `ICE_PYTHON_LIBDIR`,
+`ICE_PYTHON_LIB`, and `NANOBIND_ROOT`.
 
 ## Build
 
@@ -60,14 +117,39 @@ server keeps the code it loaded at process start. `ice-cli --version` and the
 MCP `ice_version` tool print the commit, build time, executable path, and
 feature flags.
 
-Building `ice`, `ice-cli`, or `ice-mcp` also builds the required `ice-openroad`
-helper when it is missing. To build it on its own:
+On Linux, building `ice`, `ice-cli`, or `ice-mcp` also builds the required
+`ice-openroad` helper when it is missing. To build it on its own:
 
 ```sh
 xmake build ice-openroad
 ```
 
 Force a helper rebuild with `xmake build -r ice-openroad`.
+
+## Package
+
+XPack is included in `xmake.lua`. The generated package contains the GUI, CLI,
+package manager, MCP server, symbols, and runtime assets:
+
+```sh
+# Linux
+xmake pack -f targz,zip
+
+# macOS
+xmake pack -f zip
+
+# Windows (from MSYS2 UCRT64; NSIS must be installed)
+xmake pack -f nsis,zip
+```
+
+The Windows packaging step runs `windeployqt`, copies the MinGW/MSYS2 runtime
+DLLs and ngspice code models, and writes an NSIS installer. The macOS step
+creates `ICE.app` and deploys Qt frameworks; install `dylibbundler` to bundle
+non-Qt libraries as well.
+
+The `.github/workflows/release.yml` workflow builds Linux x86_64, macOS
+(arm64 and x86_64), and Windows x86_64 packages. Pushing a `v*` tag publishes the resulting archives
+and Windows installer to the GitHub release.
 
 Build the desktop app (requires Qt 6):
 

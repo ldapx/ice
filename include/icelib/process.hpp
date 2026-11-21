@@ -59,10 +59,9 @@ using ProcessStartedCallback = std::function<void(int pid)>;
 // Runs one external process with merged stdout/stderr, bounded tail capture,
 // optional full log file, timeout, and cooperative cancellation.
 //
-// On POSIX the child runs in its own process group, so cancellation terminates
-// the whole tool process tree. On platforms without a POSIX process API this
-// falls back to std::system; streaming, timeout, and cancellation are then
-// unavailable and the log is read back from disk when possible.
+// The child runs in its own process group on POSIX and in a kill-on-close Job
+// Object on Windows, so cancellation terminates the whole tool process tree.
+// Set ProcessOptions::environment to override inherited variables.
 ProcessResult runProcess(const ProcessOptions &options, const ProcessCancellation *cancellation = nullptr,
                          const ProcessOutputCallback &onOutput = {}, const ProcessStartedCallback &onStarted = {});
 

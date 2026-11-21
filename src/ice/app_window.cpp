@@ -8868,6 +8868,8 @@ class DocumentWindow : public QMainWindow {
         const auto appDir = QCoreApplication::applicationDirPath().toStdString();
         const std::vector<std::filesystem::path> candidates = {
             std::filesystem::path(appDir) / "assets" / "simulation" / "report_runner.py",
+            std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "simulation" / "report_runner.py",
+            std::filesystem::path(appDir) / ".." / "Resources" / "assets" / "simulation" / "report_runner.py",
             std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "simulation" / "report_runner.py",
 #ifdef ICE_SOURCE_DIR
             std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "simulation" / "report_runner.py",

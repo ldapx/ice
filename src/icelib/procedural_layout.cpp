@@ -1,5 +1,7 @@
 #include "icelib/procedural_layout.hpp"
 
+#include "icelib/platform.hpp"
+
 #include "icelib/geometry.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
@@ -129,15 +131,7 @@ std::filesystem::path normalizedExecutable(const std::filesystem::path &path) {
     return status ? absolute : canonical;
 }
 
-std::string proceduralPythonExecutable() {
-    if (const char *python = std::getenv("ICE_PYTHON"); python && *python)
-        return python;
-#ifdef _WIN32
-    return "python";
-#else
-    return "python3";
-#endif
-}
+std::string proceduralPythonExecutable() { return defaultPythonExecutable(); }
 
 std::string hashText(const std::string &text) {
     constexpr std::uint64_t offset = 1469598103934665603ULL;
@@ -1165,27 +1159,19 @@ std::filesystem::path proceduralRunnerScriptPath(const std::filesystem::path &ex
     }
     const auto executable = normalizedExecutable(executablePath);
     std::vector<std::filesystem::path> candidates;
-#ifdef ICE_SOURCE_DIR
-    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "procedural_runner.py");
-#endif
-    auto directory = executable.parent_path();
-    for (int level = 0; level < 6 && !directory.empty(); ++level) {
-        candidates.push_back(directory / "assets" / "layout" / "procedural_runner.py");
-        directory = directory.parent_path();
+    if (!executable.empty()) {
+        auto directory = executable.parent_path();
+        for (int level = 0; level < 6 && !directory.empty(); ++level) {
+            candidates.push_back(directory / "assets" / "layout" / "procedural_runner.py");
+            candidates.push_back(directory / "share" / "ice" / "assets" / "layout" / "procedural_runner.py");
+            directory = directory.parent_path();
+        }
     }
-    if (!executable.empty())
-        candidates.push_back(executable.parent_path() / ".." / "share" / "ice" / "assets" / "layout" /
-                             "procedural_runner.py");
-    auto current = std::filesystem::current_path();
-    for (int level = 0; level < 5 && !current.empty(); ++level) {
-        candidates.push_back(current / "assets" / "layout" / "procedural_runner.py");
-        current = current.parent_path();
-    }
-    candidates.push_back("/usr/share/ice/assets/layout/procedural_runner.py");
-    candidates.push_back("/usr/local/share/ice/assets/layout/procedural_runner.py");
-    if (const char *home = std::getenv("HOME"); home && *home)
-        candidates.push_back(std::filesystem::path(home) / ".local" / "share" / "ice" / "assets" / "layout" /
-                             "procedural_runner.py");
+    for (const auto &root : applicationResourceDirectories())
+        candidates.push_back(root / "assets" / "layout" / "procedural_runner.py");
+    const auto home = homeDirectory();
+    if (!home.empty())
+        candidates.push_back(home / ".local" / "share" / "ice" / "assets" / "layout" / "procedural_runner.py");
     for (const auto &candidate : candidates) {
         if (isRegularFile(candidate))
             return candidate;

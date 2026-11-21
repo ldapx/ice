@@ -225,6 +225,8 @@ QString icepyPythonPath() {
     // <prefix>/share/ice/python/icepy_pcells.py.
     paths << appDir + QStringLiteral("/../lib");
     paths << appDir + QStringLiteral("/../share/ice/python");
+    paths << appDir + QStringLiteral("/../Resources/lib");
+    paths << appDir + QStringLiteral("/../Resources/python");
 #ifdef ICE_SOURCE_DIR
     paths << QString::fromStdString((std::filesystem::path(ICE_SOURCE_DIR) / "python").string());
     paths << QString::fromStdString((std::filesystem::path(ICE_SOURCE_DIR) / "build").string());

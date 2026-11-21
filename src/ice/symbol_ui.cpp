@@ -48,6 +48,9 @@ std::filesystem::path symbolLibraryDirectory() {
     std::vector<std::filesystem::path> candidates = {
         std::filesystem::path(appDir) / "symbols",
         std::filesystem::path(appDir) / ".." / "symbols",
+        std::filesystem::path(appDir) / ".." / "share" / "ice" / "symbols",
+        std::filesystem::path(appDir) / ".." / "Resources" / "symbols",
+        std::filesystem::path(appDir) / ".." / ".." / "share" / "ice" / "symbols",
 #ifdef ICE_SOURCE_DIR
         std::filesystem::path(ICE_SOURCE_DIR) / "symbols",
 #endif

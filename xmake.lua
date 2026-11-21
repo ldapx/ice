@@ -3,17 +3,128 @@ set_version("0.1.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")
 
-add_requires("spdlog", "nlohmann_json", "clipper2")
+-- XPack provides `xmake pack` for NSIS installers and archive releases.
+includes("@builtin/xpack")
 
--- System dependency locations. These defaults match Debian/Ubuntu; override
--- them in environments with versioned or non-standard prefixes.
-local python_version = os.getenv("ICE_PYTHON_VERSION") or "3.14"
-local python_include = os.getenv("ICE_PYTHON_INCLUDE") or ("/usr/include/python" .. python_version)
-local nanobind_root = os.getenv("NANOBIND_ROOT") or
-                          ("/usr/lib/python" .. python_version .. "/site-packages/nanobind")
-local qt_include = os.getenv("ICE_QT_INCLUDE") or "/usr/include/qt6"
-local ngspice_include = os.getenv("ICE_NGSPICE_INCLUDE") or "/usr/include/ngspice"
-local toml_include = os.getenv("ICE_TOML_INCLUDE") or "/usr/include/toml++"
+local is_windows = is_plat("windows", "mingw")
+local is_msvc = is_plat("windows")
+local is_macos = is_plat("macosx")
+local is_linux = is_plat("linux")
+
+local function env_bool(name, default)
+    local value = os.getenv(name)
+    if value == nil or value == "" then
+        return default
+    end
+    value = value:lower()
+    return value ~= "0" and value ~= "false" and value ~= "off" and value ~= "no"
+end
+
+-- Project scripts run in a restricted Lua sandbox, so package discovery is
+-- done by looking for pkg-config metadata in the standard locations. Set
+-- PKG_CONFIG_PATH/MINGW_PREFIX when dependencies live elsewhere.
+local function split_path_list(value, separator)
+    local result = {}
+    if not value or value == "" then
+        return result
+    end
+    for entry in value:gmatch("[^" .. separator .. "]+") do
+        if entry ~= "" then
+            table.insert(result, entry)
+        end
+    end
+    return result
+end
+
+local function append_path_list(dirs, value, defaultSeparator)
+    if not value or value == "" then
+        return
+    end
+    local separator = defaultSeparator
+    if value:find(";", 1, true) then
+        separator = ";"
+    elseif is_host("windows") and value:match("^%a:[/\\]") then
+        -- A single Windows path such as C:\msys64\ucrt64\lib\pkgconfig.
+        table.insert(dirs, value)
+        return
+    end
+    for _, entry in ipairs(split_path_list(value, separator)) do
+        table.insert(dirs, entry)
+    end
+end
+
+local function pkg_search_dirs()
+    local dirs = {}
+    local separator = is_host("windows") and ";" or ":"
+    append_path_list(dirs, os.getenv("ICE_PKG_CONFIG_DIR"), separator)
+    append_path_list(dirs, os.getenv("PKG_CONFIG_PATH"), separator)
+    append_path_list(dirs, os.getenv("PKG_CONFIG_LIBDIR"), separator)
+    if is_host("windows") then
+        local prefix = os.getenv("MINGW_PREFIX") or os.getenv("MSYSTEM_PREFIX")
+        if prefix and prefix ~= "" then
+            table.insert(dirs, path.join(prefix, "lib", "pkgconfig"))
+            table.insert(dirs, path.join(prefix, "share", "pkgconfig"))
+        end
+        for _, prefix in ipairs({"C:/msys64/ucrt64", "C:/msys64/mingw64", "C:/msys64/clang64"}) do
+            table.insert(dirs, path.join(prefix, "lib", "pkgconfig"))
+            table.insert(dirs, path.join(prefix, "share", "pkgconfig"))
+        end
+    elseif is_host("macosx") then
+        for _, prefix in ipairs({"/opt/homebrew", "/usr/local"}) do
+            table.insert(dirs, path.join(prefix, "lib", "pkgconfig"))
+            table.insert(dirs, path.join(prefix, "share", "pkgconfig"))
+            table.insert(dirs, path.join(prefix, "opt", "openssl@3", "lib", "pkgconfig"))
+        end
+    else
+        for _, dir in ipairs({
+            "/usr/lib/pkgconfig",
+            "/usr/lib64/pkgconfig",
+            "/usr/lib/x86_64-linux-gnu/pkgconfig",
+            "/usr/share/pkgconfig",
+            "/usr/local/lib/pkgconfig",
+            "/usr/local/share/pkgconfig",
+        }) do
+            table.insert(dirs, dir)
+        end
+        for _, dir in ipairs(os.dirs("/usr/lib/*/pkgconfig")) do
+            table.insert(dirs, dir)
+        end
+    end
+    return dirs
+end
+
+local pkg_dirs = pkg_search_dirs()
+
+local function pkg_available(name)
+    for _, dir in ipairs(pkg_dirs) do
+        if os.isfile(path.join(dir, name .. ".pc")) then
+            return true
+        end
+    end
+    return false
+end
+
+local function find_pkg(names)
+    for _, name in ipairs(names) do
+        if pkg_available(name) then
+            return "pkgconfig::" .. name
+        end
+    end
+    return nil
+end
+
+local function append_package(list, package)
+    if package then
+        table.insert(list, package)
+    end
+end
+
+-- Opt-in toggles. OpenROAD remains Linux-only by default because its helper is
+-- built with Bazel and the Bash build script; other platforms still build all
+-- other ICE components. GUI and Python targets are skipped when their SDKs are
+-- not available.
+local enable_openroad = env_bool("ICE_ENABLE_OPENROAD", is_linux)
+local build_gui = env_bool("ICE_BUILD_GUI", true)
 
 -- Bake a small build fingerprint into icelib so MCP clients can detect a
 -- long-lived server that was started before the last install.
@@ -51,6 +162,18 @@ if not build_time then
 end
 local build_type = is_mode("release") and "release" or "debug"
 
+local function define_string(name, value)
+    value = tostring(value):gsub("\\", "\\\\"):gsub('"', '\\"')
+    return name .. '="' .. value .. '"'
+end
+
+local source_define = {define_string("ICE_SOURCE_DIR", os.projectdir())}
+local build_defines = {
+    define_string("ICE_BUILD_COMMIT", build_commit),
+    define_string("ICE_BUILD_TIME", build_time),
+    define_string("ICE_BUILD_TYPE", build_type),
+}
+
 -- Agent Client Protocol support. The normal build uses the bundled
 -- third_party/agentsdk-cpp submodule. AGENTSDK_CPP_DIR and a sibling checkout
 -- remain supported for downstream packaging.
@@ -70,106 +193,245 @@ end
 local has_agentsdk = agentsdk_dir and os.isdir(path.join(agentsdk_dir, "src", "agentsdk"))
 if has_agentsdk then
     agentsdk_dir = path.absolute(agentsdk_dir)
-    add_requires("simdjson", "libcurl")
-else
-    print("warning: agentsdk-cpp is missing; run `git submodule update --init --recursive` to enable the Agent tab")
+end
+
+-- Dependencies are resolved through pkg-config on every platform. This keeps
+-- Linux, macOS (Homebrew), and Windows (MSYS2 UCRT64) on the same code path.
+-- Set PKG_CONFIG_PATH to the prefix that provides the .pc files when the
+-- dependency is installed outside the compiler's default search path.
+local core_packages = {}
+local fallback_includedirs = {}
+local fallback_linkdirs = {}
+local fallback_links = {}
+
+append_package(core_packages, find_pkg({"spdlog"}))
+append_package(core_packages, find_pkg({"nlohmann_json"}))
+append_package(core_packages, find_pkg({"tomlplusplus"}))
+
+local openssl_package = find_pkg({"openssl"})
+append_package(core_packages, openssl_package)
+if not openssl_package then
+    local prefix = os.getenv("ICE_OPENSSL_PREFIX")
+    if prefix and os.isdir(prefix) then
+        table.insert(fallback_includedirs, path.join(prefix, "include"))
+        table.insert(fallback_linkdirs, path.join(prefix, "lib"))
+    end
+    table.insert(fallback_links, "ssl")
+    table.insert(fallback_links, "crypto")
+end
+
+local zlib_package = find_pkg({"zlib"})
+append_package(core_packages, zlib_package)
+if not zlib_package then
+    table.insert(fallback_links, "z")
+end
+
+local ngspice_package = find_pkg({"ngspice", "libngspice"})
+append_package(core_packages, ngspice_package)
+if not ngspice_package then
+    local candidates = {}
+    local configured = os.getenv("ICE_NGSPICE_PREFIX")
+    if configured and configured ~= "" then
+        table.insert(candidates, configured)
+    end
+    if is_host("windows") then
+        local prefix = os.getenv("MINGW_PREFIX") or os.getenv("MSYSTEM_PREFIX")
+        if prefix and prefix ~= "" then
+            table.insert(candidates, prefix)
+        end
+    end
+    for _, prefix in ipairs({"/opt/homebrew/opt/libngspice", "/usr/local/opt/libngspice", "/opt/homebrew",
+                             "/usr/local"}) do
+        table.insert(candidates, prefix)
+    end
+    for _, prefix in ipairs(candidates) do
+        if os.isfile(path.join(prefix, "include", "ngspice", "sharedspice.h")) then
+            table.insert(fallback_includedirs, path.join(prefix, "include"))
+            table.insert(fallback_linkdirs, path.join(prefix, "lib"))
+            table.insert(fallback_links, "ngspice")
+            break
+        end
+    end
+end
+
+-- The source-built xmake package is used instead of distro pkg-config
+-- metadata, which can point at unusable LTO stubs on some Linux systems.
+table.insert(core_packages, "clipper2")
+
+local function apply_fallbacks()
+    for _, directory in ipairs(fallback_includedirs) do
+        add_includedirs(directory)
+    end
+    for _, directory in ipairs(fallback_linkdirs) do
+        add_linkdirs(directory)
+    end
+    for _, link in ipairs(fallback_links) do
+        add_links(link)
+    end
+end
+
+local agent_packages = {}
+if has_agentsdk then
+    append_package(agent_packages, find_pkg({"libcurl"}))
+    append_package(agent_packages, find_pkg({"simdjson"}))
+    if #core_packages == 0 or not find_pkg({"spdlog"}) then
+        print("warning: agentsdk-cpp requires spdlog, libcurl, and simdjson")
+    end
+end
+
+local qt_packages = {}
+local has_qt = pkg_available("Qt6Widgets") and pkg_available("Qt6Svg") and pkg_available("Qt6SvgWidgets")
+if build_gui and has_qt then
+    append_package(qt_packages, find_pkg({"Qt6Widgets"}))
+    append_package(qt_packages, find_pkg({"Qt6Svg"}))
+    append_package(qt_packages, find_pkg({"Qt6SvgWidgets"}))
+elseif build_gui then
+    print("warning: Qt 6 (Widgets, Svg, SvgWidgets) was not found; skipping the ice GUI target")
+    build_gui = false
+end
+
+for _, package in ipairs(core_packages) do
+    add_requires(package)
+end
+for _, package in ipairs(agent_packages) do
+    add_requires(package)
+end
+for _, package in ipairs(qt_packages) do
+    add_requires(package)
 end
 
 -- First-party warnings. Third-party headers are included via system paths, so
 -- -Werror is intentionally not enabled.
-local first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
+local first_party_warnings
+if is_msvc then
+    first_party_warnings = {"/W3", "/utf-8", "/permissive-"}
+else
+    first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
+end
 
 -- The C++ OpenROAD helper is required by the physical implementation flow
--- and the ODB-backed previews. It is no longer an optional extra: the targets
--- that run physical stages depend on it, so a normal build always produces it.
--- Building it needs bazelisk (or bazel) and the pinned OpenROAD source; see
--- scripts/build-ice-openroad.sh.
-target("ice-openroad")
-    set_kind("phony")
-    on_build(function (target)
-        -- A phony target is never up to date, so this would otherwise re-run the
-        -- full OpenROAD Bazel build on every `xmake build/run ice`. Skip it once
-        -- the helper is installed; `xmake build -r ice-openroad` still forces a
-        -- rebuild.
-        if os.isfile(path.join(target:targetdir(), "ice-openroad")) then
-            return
-        end
-        os.execv("bash", {
-            path.join(os.projectdir(), "scripts", "build-ice-openroad.sh"),
-            "--output-dir", target:targetdir()
-        })
-    end)
+-- and the ODB-backed previews. It is Linux-only in the default build because
+-- its pinned upstream toolchain is built with Bazel and Bash.
+if enable_openroad then
+    target("ice-openroad")
+        set_kind("phony")
+        on_build(function (target)
+            -- A phony target is never up to date, so this would otherwise re-run the
+            -- full OpenROAD Bazel build on every `xmake build/run ice`. Skip it once
+            -- the helper is installed; `xmake build -r ice-openroad` still forces a
+            -- rebuild.
+            if os.isfile(path.join(target:targetdir(), "ice-openroad")) then
+                return
+            end
+            os.execv("bash", {
+                path.join(os.projectdir(), "scripts", "build-ice-openroad.sh"),
+                "--output-dir", target:targetdir()
+            })
+        end)
+end
 
 target("icelib")
     set_kind("static")
     add_files("src/icelib/*.cpp")
     add_includedirs("include", {public = true})
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"',
-                'ICE_BUILD_COMMIT="' .. build_commit .. '"',
-                'ICE_BUILD_TIME="' .. build_time .. '"',
-                'ICE_BUILD_TYPE="' .. build_type .. '"',
-                {public = true})
-    add_cxxflags("-fPIC", {public = true})
+    add_defines(source_define, {public = true})
+    add_defines(build_defines, {public = true})
+    if not is_msvc then
+        add_cxxflags("-fPIC", {public = true})
+    end
     add_cxxflags(first_party_warnings)
-    add_packages("spdlog", "nlohmann_json", "clipper2")
-    -- System-provided dependencies without xmake packages (Debian/Ubuntu layout).
-    -- The include directories are overridable through the environment.
-    add_includedirs(toml_include, "/usr/include")
-    add_links("crypto", "z")
-    add_includedirs(ngspice_include)
-    add_links("ngspice")
+    apply_fallbacks()
+    for _, package in ipairs(core_packages) do
+        add_packages(package, {public = true})
+    end
+    if is_windows then
+        add_syslinks("ws2_32", "wsock32", "crypt32", "advapi32", "user32")
+    elseif is_linux then
+        add_syslinks("dl", "pthread")
+    end
 
 if has_agentsdk then
     target("agentsdk")
-        set_kind("shared")
+        set_kind("static")
         set_languages("c++20")
         add_files(path.join(agentsdk_dir, "src", "agentsdk", "**.cpp"))
+        -- The A2A HTTP server is POSIX-socket-only and is not used by ICE.
+        -- ACP and MCP remain available on every platform.
+        remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "server.cpp"))
+        remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "http", "http_listener.cpp"))
+        remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "http", "http_server.cpp"))
+        remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "http", "json_rpc_server.cpp"))
         add_includedirs(path.join(agentsdk_dir, "src"), {public = true})
-        add_packages("spdlog", "libcurl", "simdjson", {public = true})
-        add_cxxflags("-fPIC")
-        if is_plat("linux") then
-            -- The package metadata provides headers here, but does not add
-            -- the libraries to the link line when the system installations
-            -- are selected.  Keep the SDK shared object self-contained.
-            add_syslinks("curl", "simdjson", "pthread")
-        elseif is_plat("windows") then
-            add_syslinks("ws2_32", "wsock32")
+        for _, package in ipairs(agent_packages) do
+            add_packages(package, {public = true})
+        end
+        -- spdlog is public already through icelib for ICE targets, but the
+        -- standalone SDK also needs it when built on its own.
+        for _, package in ipairs(core_packages) do
+            if package:find("spdlog") then
+                add_packages(package, {public = true})
+            end
+        end
+        if not is_msvc then
+            add_cxxflags("-fPIC")
+        end
+        if is_windows then
+            add_syslinks("ws2_32", "wsock32", "crypt32", "advapi32", "user32")
+        elseif is_linux then
+            add_syslinks("pthread", "dl")
         end
 end
 
-target("ice")
-    set_kind("binary")
-    add_files("src/ice/*.cpp")
-    add_deps("icelib", "ice-openroad")
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_includedirs("include", qt_include, qt_include .. "/QtCore", qt_include .. "/QtGui",
-                    qt_include .. "/QtWidgets", qt_include .. "/QtSvg", qt_include .. "/QtSvgWidgets")
-    add_syslinks("Qt6Widgets", "Qt6Gui", "Qt6Core", "Qt6Svg", "Qt6SvgWidgets")
-    add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
-    add_cxxflags("-fPIC", {force = true})
-    add_cxxflags(first_party_warnings)
-    add_ldflags("-no-pie", {force = true})
-    if has_agentsdk then
-        add_deps("agentsdk")
-        add_defines("ICE_HAVE_AGENTSDK=1")
-        if is_plat("linux") then
-            -- app_widgets.cpp uses simdjson directly, and the SDK's curl
-            -- symbols must also be resolvable when linking the executable.
-            add_syslinks("curl", "simdjson", "pthread")
-            add_rpathdirs("$ORIGIN/../lib")
-        elseif is_plat("windows") then
-            add_syslinks("ws2_32", "wsock32")
+if build_gui then
+    target("ice")
+        set_kind("binary")
+        add_files("src/ice/*.cpp")
+        if is_windows then
+            add_files("assets/ice.rc")
         end
-    end
+        add_deps("icelib")
+        if enable_openroad then
+            add_deps("ice-openroad")
+        end
+        add_defines(source_define)
+        add_cxxflags(first_party_warnings)
+        apply_fallbacks()
+        for _, package in ipairs(core_packages) do
+            add_packages(package)
+        end
+        for _, package in ipairs(qt_packages) do
+            add_packages(package)
+        end
+        add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
+        if is_linux then
+            add_ldflags("-no-pie", {force = true})
+            add_rpathdirs("$ORIGIN/../lib")
+        elseif is_macos then
+            add_rpathdirs("@loader_path/../lib")
+        end
+        if has_agentsdk then
+            add_deps("agentsdk")
+            add_defines("ICE_HAVE_AGENTSDK=1")
+            for _, package in ipairs(agent_packages) do
+                add_packages(package)
+            end
+        end
+end
 
 target("ice-cli")
     set_kind("binary")
     add_files("src/ice-cli/main.cpp")
-    add_deps("icelib", "ice-openroad")
+    add_deps("icelib")
+    if enable_openroad then
+        add_deps("ice-openroad")
+    end
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_packages("spdlog", "nlohmann_json")
+    add_defines(source_define)
+    apply_fallbacks()
+    for _, package in ipairs(core_packages) do
+        add_packages(package)
+    end
 
 target("ice-pkg")
     set_kind("binary")
@@ -177,52 +439,99 @@ target("ice-pkg")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    apply_fallbacks()
+    for _, package in ipairs(core_packages) do
+        add_packages(package)
+    end
 
 target("ice-mcp")
     set_kind("binary")
     add_files("src/ice-mcp/main.cpp")
-    add_deps("icelib", "ice-openroad")
+    add_deps("icelib")
+    if enable_openroad then
+        add_deps("ice-openroad")
+    end
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_packages("nlohmann_json")
+    add_defines(source_define)
+    apply_fallbacks()
+    for _, package in ipairs(core_packages) do
+        add_packages(package)
+    end
     if has_agentsdk then
         add_deps("agentsdk")
         add_defines("ICE_HAVE_AGENTSDK=1")
-        if is_plat("linux") then
-            -- Keep the executable link complete when the AgentSDK package
-            -- exposes curl and simdjson only through its public headers.
-            add_syslinks("curl", "simdjson", "pthread")
-            add_rpathdirs("$ORIGIN/../lib")
-        elseif is_plat("windows") then
-            add_syslinks("ws2_32", "wsock32")
+        for _, package in ipairs(agent_packages) do
+            add_packages(package)
         end
     end
 
-target("doctest")
-    set_kind("binary")
-    add_files("tests/*.cpp")
-    add_deps("icelib")
-    add_cxxflags(first_party_warnings)
-    add_includedirs("include")
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
+-- The doctest suite uses POSIX process and environment APIs. Keep it on
+-- Linux/macOS; Windows release builds still compile all application targets.
+if not is_windows then
+    target("doctest")
+        set_kind("binary")
+        add_files("tests/*.cpp")
+        add_deps("icelib")
+        add_cxxflags(first_party_warnings)
+        add_includedirs("include")
+        add_defines(source_define)
+        apply_fallbacks()
+        for _, package in ipairs(core_packages) do
+            add_packages(package)
+        end
+end
 
-target("icepy")
-    set_kind("shared")
-    set_prefixname("")
-    add_files("src/icepy/module.cpp", nanobind_root .. "/src/nb_combined.cpp")
-    add_deps("icelib")
-    add_defines('ICE_SOURCE_DIR="' .. os.projectdir() .. '"')
-    add_includedirs("include", python_include, nanobind_root .. "/include", nanobind_root .. "/src")
-    add_links("python" .. python_version, "dl")
-    add_installfiles("python/icepy_pcells.py", {prefixdir = "share/ice/python"})
-    add_installfiles("python/icepy_sim.py", {prefixdir = "share/ice/python"})
-    add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/ice/assets/simulation"})
-    add_installfiles("assets/layout/procedural_runner.py", {prefixdir = "share/ice/assets/layout"})
-    add_installfiles("assets/layout/generators/*.py", {prefixdir = "share/ice/assets/layout/generators"})
+-- Optional Python bindings. Set ICE_PYTHON_INCLUDE, ICE_PYTHON_LIBDIR,
+-- ICE_PYTHON_LIB, and NANOBIND_ROOT (or install nanobind into the selected
+-- Python) to enable this target on macOS/Windows as well.
+local python_version = os.getenv("ICE_PYTHON_VERSION") or "3.14"
+local python_include = os.getenv("ICE_PYTHON_INCLUDE") or ("/usr/include/python" .. python_version)
+local python_libdir = os.getenv("ICE_PYTHON_LIBDIR")
+local python_lib = os.getenv("ICE_PYTHON_LIB") or
+                       (is_windows and ("python" .. python_version:gsub("%.", "")) or ("python" .. python_version))
+local nanobind_root = os.getenv("NANOBIND_ROOT") or
+                          ("/usr/lib/python" .. python_version .. "/site-packages/nanobind")
+local has_python = os.isdir(python_include) and os.isdir(path.join(nanobind_root, "include")) and
+                       os.isdir(path.join(nanobind_root, "src"))
+local build_python = env_bool("ICE_BUILD_PYTHON", has_python)
+if build_python and not has_python then
+    print("warning: Python/nanobind headers were not found; skipping the icepy target")
+    build_python = false
+end
+
+if build_python then
+    target("icepy")
+        set_kind("shared")
+        set_prefixname("")
+        add_files("src/icepy/module.cpp", path.join(nanobind_root, "src", "nb_combined.cpp"))
+        add_deps("icelib")
+        add_defines(source_define)
+        add_includedirs("include", python_include, path.join(nanobind_root, "include"), path.join(nanobind_root, "src"))
+        apply_fallbacks()
+        for _, package in ipairs(core_packages) do
+            add_packages(package)
+        end
+        if python_libdir then
+            add_linkdirs(python_libdir)
+        end
+        add_links(python_lib)
+        if is_linux then
+            add_links("dl")
+        end
+        add_installfiles("python/icepy_pcells.py", {prefixdir = "share/ice/python"})
+        add_installfiles("python/icepy_sim.py", {prefixdir = "share/ice/python"})
+        add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/ice/assets/simulation"})
+        add_installfiles("assets/layout/procedural_runner.py", {prefixdir = "share/ice/assets/layout"})
+        add_installfiles("assets/layout/generators/*.py", {prefixdir = "share/ice/assets/layout/generators"})
+end
 
 task("test")
     on_run(function ()
+        if is_plat("windows", "mingw") then
+            print("the doctest suite is not available on Windows")
+            return
+        end
         os.exec("xmake build doctest")
         os.exec("xmake run doctest")
     end)
@@ -230,13 +539,15 @@ task("test")
 
 task("test-python")
     on_run(function ()
-        os.exec("python3 tests/mcp_tools_smoke.py")
-        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_api_tests.py")
-        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_smoke.py")
-        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/icepy_sim_tests.py")
-        os.exec("env PYTHONPATH=build/linux/x86_64/release:python python3 tests/package_pcells_test.py")
-        os.exec("python3 tests/procedural_composition_test.py")
-        os.exec("python3 tests/procedural_router_test.py")
+        local python = os.getenv("ICE_PYTHON") or (is_host("windows") and "python" or "python3")
+        local builddir = path.join(os.projectdir(), "build", os.host(), os.arch(), "release")
+        os.exec(python .. " tests/mcp_tools_smoke.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_api_tests.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_smoke.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_sim_tests.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/package_pcells_test.py")
+        os.exec(python .. " tests/procedural_composition_test.py")
+        os.exec(python .. " tests/procedural_router_test.py")
     end)
     set_menu {usage = "Run MCP and Python integration tests"}
 
@@ -258,3 +569,56 @@ task("openroad-sdk")
         os.exec("bash scripts/build-ice-openroad.sh")
     end)
     set_menu {usage = "Build the pinned C++ OpenROAD backend"}
+
+-- ---------------------------------------------------------------------------
+-- Release packaging
+-- ---------------------------------------------------------------------------
+
+local xpack_targets = {"ice-cli", "ice-mcp", "ice-pkg"}
+if build_gui then
+    table.insert(xpack_targets, 1, "ice")
+end
+
+local xpack_formats
+if is_windows then
+    xpack_formats = {"nsis", "zip"}
+elseif is_macos then
+    xpack_formats = {"zip"}
+else
+    xpack_formats = {"targz", "zip"}
+end
+
+xpack("ice")
+    set_formats(xpack_formats)
+    set_title("ICE - Integrated Circuits Electronics Design Automation")
+    set_description("Schematic capture, IC layout, analog simulation, analysis, and programmable design workflows.")
+    set_homepage("https://github.com/ldapx/ice")
+    set_author("ICE contributors")
+    set_license("MIT")
+    set_licensefile("LICENSE")
+    set_basename("ice-v$(version)-$(plat)-$(arch)")
+    set_iconfile("assets/ice.ico")
+    add_targets(xpack_targets)
+    add_installfiles("symbols/*.svg", {prefixdir = "share/ice/symbols"})
+    add_installfiles("symbols/*.toml", {prefixdir = "share/ice/symbols"})
+    add_installfiles("assets/icons/(**)", {prefixdir = "share/ice/assets/icons"})
+    add_installfiles("assets/layout/(*.py)", {prefixdir = "share/ice/assets/layout"})
+    add_installfiles("assets/layout/generators/(*.py)", {prefixdir = "share/ice/assets/layout/generators"})
+    add_installfiles("assets/simulation/(*.py)", {prefixdir = "share/ice/assets/simulation"})
+    add_installfiles("assets/logo.png", {prefixdir = "share/ice/assets"})
+    add_installfiles("python/*.py", {prefixdir = "share/ice/python"})
+    add_installfiles("README.md", {prefixdir = "share/doc/ice"})
+    add_installfiles("LICENSE", {prefixdir = "share/doc/ice"})
+    if is_windows then
+        -- Bundle the MSYS2/vcpkg runtime DLLs and Qt plugins next to the
+        -- executables. The script also copies ngspice code models.
+        after_installcmd(function (package, batchcmds)
+            batchcmds:runv("bash", {path.join(os.projectdir(), "scripts", "bundle-windows-runtime.sh"),
+                                    package:installdir()})
+        end)
+    elseif is_macos then
+        after_installcmd(function (package, batchcmds)
+            batchcmds:runv("bash", {path.join(os.projectdir(), "scripts", "bundle-macos-runtime.sh"),
+                                    package:installdir()})
+        end)
+    end

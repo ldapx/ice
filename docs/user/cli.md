@@ -290,9 +290,12 @@ are not executed. The same helper provides read-only ODB tooling (`ice-openroad
 odb-info`, `ice-openroad odb-preview`) and native heat-map CSV export
 (`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). It is
 built with `xmake build ice-openroad` (also pulled in by `ice`, `ice-cli`, and
-`ice-mcp`) from the pinned OpenROAD/OpenSTA revisions; use
+`ice-mcp` on Linux) from the pinned OpenROAD/OpenSTA revisions; use
 `scripts/build-ice-openroad.sh --sdk-install <prefix>` for an SDK install. See
-`openroad_sdk/README.md`. Yosys synthesis is technology-independent and writes
+`openroad_sdk/README.md`. The helper is Linux-only by default; on Windows and
+macOS build with `ICE_ENABLE_OPENROAD=0`, which leaves the physical
+implementation commands unavailable but keeps schematics, layout editing,
+simulation, packages, and MCP fully functional. Yosys synthesis is technology-independent and writes
 the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform
 standard cells with `dfflibmap`/`abc`, writes `synth/2_tech_map.v`, records
 `logs/01-techmap.log` and `scripts/01-techmap.ys`, and copies the result to

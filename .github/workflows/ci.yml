@@ -3,22 +3,31 @@ name: CI
 on: [push, pull_request]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: xmake-io/github-action@v1
         with:
-          xmake-version: 2.9.8
-      - name: Install bazelisk
+          xmake-version: 3.1.2
+      - name: Install dependencies
         run: |
-          curl -fsSL -o /tmp/bazelisk \
-            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
-          sudo chmod +x /usr/local/bin/bazelisk
-      - run: xmake build doctest ice-cli ice-pkg ice-mcp
-      - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y ngspice iverilog
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git \
+            qt6-base-dev qt6-svg-dev libngspice0-dev \
+            libtomlplusplus-dev libssl-dev zlib1g-dev libcurl4-openssl-dev \
+            ngspice iverilog
+      - name: Build
+        env:
+          ICE_ENABLE_OPENROAD: "0"
+        run: xmake build -y doctest ice ice-cli ice-pkg ice-mcp
       - run: xmake run doctest
       - run: python3 tests/mcp_tools_smoke.py
+      - name: Package smoke test
+        env:
+          ICE_ENABLE_OPENROAD: "0"
+        run: xmake pack -f targz --autobuild=n -o dist
       - run: python3 -m pip install -r docs/requirements.txt
       - run: sphinx-build -b html docs docs/_build -W --keep-going

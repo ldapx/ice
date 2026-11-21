@@ -1,6 +1,7 @@
 #pragma once
 
 #include "icelib/core.hpp"
+#include "icelib/platform.hpp"
 #include "icelib/simulation.hpp"
 
 #include <chrono>
@@ -65,7 +66,6 @@ ReportProcessResult runProjectReport(const std::filesystem::path &projectRoot, c
                                      const std::filesystem::path &executablePath,
                                      std::chrono::milliseconds timeout = std::chrono::seconds(30));
 
-std::filesystem::path currentExecutablePath();
 std::filesystem::path reportRunnerScriptPath(const std::filesystem::path &executablePath);
 std::string reportPythonPath(const std::filesystem::path &executablePath);
 std::string reportPythonExecutable();

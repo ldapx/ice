@@ -17,7 +17,12 @@ You need an ICE build on your `PATH`:
 - `ice-pkg` — package and PDK management.
 - `ice-mcp` — the optional MCP server for agents (when built/installed).
 
-If you do not have binaries yet, follow {doc}`/developer/building`.
+If you do not have binaries yet, follow {doc}`/developer/building`. Tagged
+releases publish three packages: a Windows NSIS installer, a macOS zip with
+`ICE.app`, and a Linux `tar.gz`/zip with the four executables and shared
+resources. The Windows installer adds `bin` to `PATH`; on macOS move `ICE.app`
+to Applications; on Linux extract the archive and add its `bin` directory to
+`PATH`.
 
 ## Launch the desktop application
 

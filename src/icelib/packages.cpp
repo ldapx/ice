@@ -1,6 +1,7 @@
 #include "icelib/packages.hpp"
 
 #include "icelib/core.hpp"
+#include "icelib/process.hpp"
 
 #include <algorithm>
 #include <array>
@@ -153,17 +154,6 @@ bool satisfies(const std::string &version, const std::string &constraint) {
         return compareVersions(version, trimmed) >= 0;
     }
     return false;
-}
-
-std::string shellQuote(const std::string &value) {
-    std::string result = "'";
-    for (const char character : value) {
-        if (character == '\'')
-            result += "'\\''";
-        else
-            result += character;
-    }
-    return result + "'";
 }
 
 std::string trimText(std::string value) {
@@ -502,10 +492,18 @@ void PackageManager::installGit(const std::filesystem::path &repository, const s
     const auto destination = repository / name;
     if (std::filesystem::exists(destination))
         throw ProjectError("package.install", "Destination already exists: " + destination.string());
-    const auto cloneCommand = "git clone --depth 1 " +
-                              (revision.empty() ? std::string{} : "--branch " + shellQuote(revision) + " ") + "-- " +
-                              shellQuote(url) + " " + shellQuote(destination.string());
-    if (std::system(cloneCommand.c_str()) != 0)
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(destination.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded())
         throw ProjectError("package.install", "Git clone failed for: " + url);
     // Preserve upstream manifests; only generate one when the clone has none.
     if (std::filesystem::exists(destination / "package.toml"))
@@ -539,10 +537,18 @@ PackageSpec PackageManager::installGitPackage(const std::filesystem::path &repos
         throw ProjectError("package.install", "Package repository URL is required");
     std::filesystem::create_directories(repository);
     const auto temporary = temporaryInstallPath(repository);
-    const auto cloneCommand = "GIT_TERMINAL_PROMPT=0 git clone --depth 1 " +
-                              (revision.empty() ? std::string{} : "--branch " + shellQuote(revision) + " ") + "-- " +
-                              shellQuote(url) + " " + shellQuote(temporary.string());
-    if (std::system(cloneCommand.c_str()) != 0) {
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(temporary.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded()) {
         removeQuietly(temporary);
         throw ProjectError("package.install", "Git clone failed for: " + url);
     }
@@ -688,11 +694,18 @@ void PackageManager::cloneIndex(const std::filesystem::path &indexRoot, const st
     }
     if (!indexRoot.parent_path().empty())
         std::filesystem::create_directories(indexRoot.parent_path());
-    const auto cloneCommand = "GIT_TERMINAL_PROMPT=0 git clone --depth 1 --recurse-submodules "
-                              "--shallow-submodules " +
-                              (revision.empty() ? std::string{} : "--branch " + shellQuote(revision) + " ") + "-- " +
-                              shellQuote(url) + " " + shellQuote(indexRoot.string());
-    if (std::system(cloneCommand.c_str()) != 0) {
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1", "--recurse-submodules", "--shallow-submodules"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(indexRoot.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded()) {
         removeQuietly(indexRoot);
         throw ProjectError("package.index", "Unable to clone package index: " + url);
     }
@@ -707,12 +720,17 @@ void PackageManager::updateIndex(const std::filesystem::path &indexRoot) {
     // Best-effort fast-forward. A local checkout may intentionally have no
     // upstream, local commits, or offline remotes; submodule initialization and
     // scanning still work in those cases.
-    const auto pullCommand =
-        "GIT_TERMINAL_PROMPT=0 git -C " + shellQuote(indexRoot.string()) + " pull --ff-only --quiet >/dev/null 2>&1";
-    std::system(pullCommand.c_str());
-    const auto submoduleCommand =
-        "GIT_TERMINAL_PROMPT=0 git -C " + shellQuote(indexRoot.string()) + " submodule update --init --recursive";
-    if (std::system(submoduleCommand.c_str()) != 0)
+    ProcessOptions pull;
+    pull.arguments = {"git", "pull", "--ff-only", "--quiet"};
+    pull.workingDirectory = indexRoot;
+    pull.environment["GIT_TERMINAL_PROMPT"] = "0";
+    (void)runProcess(pull);
+    ProcessOptions submodules;
+    submodules.arguments = {"git", "submodule", "update", "--init", "--recursive"};
+    submodules.workingDirectory = indexRoot;
+    submodules.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto submoduleResult = runProcess(submodules);
+    if (!submoduleResult.succeeded())
         throw ProjectError("package.index", "Unable to update package index submodules");
 }
 

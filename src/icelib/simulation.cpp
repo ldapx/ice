@@ -3,6 +3,7 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/platform.hpp"
 #include "icelib/process.hpp"
 #include "icelib/vcd.hpp"
 
@@ -1667,4 +1668,38 @@ std::string serializeSimulationResult(const SimulationResult &result) {
     }
     return output.dump(2) + "\n";
 }
+bool ngspiceLibraryAvailable() {
+    const auto check = [](const std::filesystem::path &path) {
+        std::error_code status;
+        return !path.empty() && std::filesystem::is_regular_file(path, status) && !status;
+    };
+    std::vector<std::filesystem::path> candidates;
+    const auto executable = currentExecutablePath();
+    if (!executable.empty()) {
+#ifdef _WIN32
+        candidates.push_back(executable.parent_path() / "ngspice.dll");
+        candidates.push_back(executable.parent_path() / "libngspice.dll");
+#elif defined(__APPLE__)
+        candidates.push_back(executable.parent_path() / "libngspice.dylib");
+#else
+        candidates.push_back(executable.parent_path() / "libngspice.so");
+#endif
+    }
+#ifdef _WIN32
+    if (const auto found = findExecutableOnPath("ngspice.dll"))
+        candidates.push_back(*found);
+    if (const auto found = findExecutableOnPath("libngspice.dll"))
+        candidates.push_back(*found);
+#elif defined(__APPLE__)
+    candidates.insert(candidates.end(), {"/opt/homebrew/lib/libngspice.dylib", "/usr/local/lib/libngspice.dylib",
+                                         "/usr/lib/libngspice.dylib"});
+    if (const auto found = findExecutableOnPath("libngspice.dylib"))
+        candidates.push_back(*found);
+#else
+    candidates.insert(candidates.end(), {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0",
+                                         "/usr/lib/x86_64-linux-gnu/libngspice.so.0", "/usr/lib/libngspice.so"});
+#endif
+    return std::any_of(candidates.begin(), candidates.end(), check);
+}
+
 } // namespace ice
