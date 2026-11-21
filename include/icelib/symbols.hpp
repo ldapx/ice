@@ -83,7 +83,8 @@ std::vector<FileSymbol> builtinSymbols();
 std::vector<FileSymbol> availableSymbols(const std::string &pdk = genericPdkId);
 
 // Derives the physical pin side from a symbol-relative position using the
-// same rule as interactive placement: negative/positive x wins over y.
+// same rule as interactive placement: negative/positive x wins over y, and a
+// pin at the origin defaults to the right side (point-like symbols).
 PinDirection pinSideFromPosition(Coordinate x, Coordinate y);
 
 } // namespace ice

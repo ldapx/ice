@@ -3,10 +3,10 @@ name = "Output"
 artwork = "output.svg"
 category = "Ports"
 label_x = 0
-label_y = -42
+label_y = -27
 
 [[pin]]
 name = "OUT"
-x = -40
+x = -20
 y = 0
 direction = "output"

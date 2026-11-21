@@ -3,10 +3,10 @@ name = "Pin"
 artwork = "pin.svg"
 category = "Ports"
 label_x = 0
-label_y = -42
+label_y = -14
 
 [[pin]]
 name = "PIN"
-x = 40
+x = 0
 y = 0
 direction = "inout"

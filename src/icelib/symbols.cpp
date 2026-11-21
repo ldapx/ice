@@ -68,7 +68,12 @@ PinDirection pinSideFromPosition(Coordinate x, Coordinate y) {
         return PinDirection::left;
     if (x > 0)
         return PinDirection::right;
-    return y > 0 ? PinDirection::up : PinDirection::down;
+    if (y > 0)
+        return PinDirection::up;
+    if (y < 0)
+        return PinDirection::down;
+    // Point-like symbols have no geometric side; exit wires to the right.
+    return PinDirection::right;
 }
 
 namespace {
