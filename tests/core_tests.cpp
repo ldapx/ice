@@ -2831,6 +2831,13 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(pinCounts["Input"] == 1);
     CHECK(pinCounts["Pin"] == 1);
     CHECK(pinCounts["Output"] == 1);
+    const auto pinSymbol =
+        std::find_if(symbols.begin(), symbols.end(), [](const auto &symbol) { return symbol.name == "Pin"; });
+    REQUIRE(pinSymbol != symbols.end());
+    REQUIRE(!pinSymbol->pins.empty());
+    CHECK(pinSymbol->pins.front().x == 0);
+    CHECK(pinSymbol->pins.front().y == 0);
+    CHECK(pinSymbol->pins.front().direction == ice::PinDirection::right);
     // Passive and source symbols seed their editable default parameters.
     CHECK(defaults["Resistor"]["resistance"] == "1k");
     CHECK(defaults["Capacitor"]["capacitance"] == "1n");
