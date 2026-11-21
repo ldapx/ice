@@ -17,7 +17,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git \
             qt6-base-dev qt6-svg-dev libngspice0-dev \
-            libtomlplusplus-dev libssl-dev zlib1g-dev libcurl4-openssl-dev \
+            libtomlplusplus-dev libspdlog-dev nlohmann-json3-dev libsimdjson-dev \
+            libssl-dev zlib1g-dev libcurl4-openssl-dev \
             ngspice iverilog
       - name: Build
         env:
