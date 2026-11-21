@@ -136,6 +136,12 @@ TEST_CASE("Text SPICE subcircuits become hierarchical blocks with parameter over
     CHECK(cell.symbols.at(symbol).pins.size() == 2);
     CHECK(cell.symbols.at(symbol).pins[0].name == "IN");
     CHECK(cell.symbols.at(symbol).pins[1].name == "OUT");
+    CHECK(!cell.symbols.at(symbol).artwork.empty());
+    CHECK(cell.symbols.at(symbol).artwork.find("<svg") != std::string::npos);
+    CHECK(cell.symbols.at(symbol).artwork.find("filter") != std::string::npos);
+    project.schematicCells.at(parent).symbols.at(symbol).artwork.clear();
+    CHECK(ice::repairHierarchicalSymbolArtwork(project) >= 1);
+    CHECK(!project.schematicCells.at(parent).symbols.at(symbol).artwork.empty());
     CHECK(project.schematicCells.at(filter).parameters.size() == 2);
     ice::setSchematicParameter(project, parent, block, "R", "2k");
 
@@ -165,6 +171,7 @@ TEST_CASE("Text SPICE subcircuits become hierarchical blocks with parameter over
     const auto placed = ice::addSchematicComponent(project, secondParent, {"filter", {}, "X2", 0, 0, {}});
     CHECK(placed.instance != 0);
     CHECK(placed.pins.size() == 2);
+    CHECK(!project.schematicCells.at(secondParent).symbols.at(placed.symbol).artwork.empty());
 }
 
 TEST_CASE("Text SPICE bus ports expand into scalar block pins") {
@@ -223,6 +230,9 @@ TEST_CASE("Editing text SPICE source reconciles parent symbol pins") {
     REQUIRE(pins.size() == 2);
     CHECK(pins[0].name == "C");
     CHECK(pins[1].name == "D");
+    const auto &symbol = project.schematicCells.at(parent).symbols.at(symbolId);
+    CHECK(symbol.artwork.find(">C<") != std::string::npos);
+    CHECK(symbol.artwork.find(">D<") != std::string::npos);
     const auto netlist = ice::buildSchematicNetlist(project, parent);
     CHECK(std::find(netlist.begin(), netlist.end(), "X1 0 0 block") != netlist.end());
 }

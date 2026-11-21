@@ -2263,6 +2263,10 @@ TEST_CASE("Pin symbols define bidirectional schematic ports") {
 
     const auto parentId = ice::createSchematicCell(project, "top");
     const auto blockSymbol = ice::addHierarchicalSymbol(project, parentId, cellId);
+    const auto &block = project.schematicCells.at(parentId).symbols.at(blockSymbol);
+    CHECK(!block.artwork.empty());
+    CHECK(block.artwork.find("<svg") != std::string::npos);
+    CHECK(block.artwork.find("pin_block") != std::string::npos);
     ice::addSchematicInstance(project, parentId, blockSymbol, "X1", 0, 0);
     const auto parentNetlist = ice::buildSchematicNetlist(project, parentId);
     joined.clear();
