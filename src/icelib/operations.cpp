@@ -246,46 +246,90 @@ ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId
                : source.systemVerilogSchematic ? source.name + " HDL"
                                                : source.name;
     name = uniqueSchematicSymbolName(parent, name);
-    const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(artwork), sourceCellId);
+    auto tmpl = hierarchicalSymbolTemplate(source);
+    if (!artwork.empty())
+        tmpl.artwork = std::move(artwork);
+    const auto symbolId = addSymbol(project, parentCellId, std::move(name), std::move(tmpl.artwork), sourceCellId);
     auto &symbol = project.schematicCells.at(parentCellId).symbols.at(symbolId);
+    symbol.label = SymbolLabel{0, tmpl.labelY};
     auto nextPinId = project.nextId();
-    for (auto pin : hierarchicalSymbolPins(source)) {
+    for (auto pin : tmpl.pins) {
         pin.id = nextPinId++;
         symbol.pins.push_back(std::move(pin));
     }
     return symbolId;
 }
 
-std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) {
-    if (source.textSchematic) {
-        const auto interface = spiceInterfaceForCell(source);
-        if (!interface.ok)
-            throw ProjectError("schematic.spice.parse", interface.error);
-        return spiceSubcircuitPins(interface);
-    }
+HierarchicalSymbolTemplate hierarchicalSymbolTemplate(const SchematicCell &source) {
+    const auto fromHdl = [](HdlSymbolTemplate tmpl) {
+        return HierarchicalSymbolTemplate{std::move(tmpl.artwork), std::move(tmpl.pins), tmpl.labelY};
+    };
+
+    HdlModule module;
+    module.name = source.name;
     if (source.systemVerilogSchematic) {
         const auto parsed = parseSystemVerilogModule(source);
         if (!parsed.ok)
             throw ProjectError("schematic.hdl.parse", parsed.error);
-        return makeHdlSymbolTemplate(parsed.module, true).pins;
+        return fromHdl(makeHdlSymbolTemplate(parsed.module, true));
     }
-    const auto ports = schematicPortInstances(source);
-    const auto count = static_cast<int>(ports.size());
-    const auto spacing = 40;
-    std::vector<Pin> pins;
-    pins.reserve(ports.size());
-    int inputRow = 0;
-    int outputRow = 0;
-    for (const auto *port : ports) {
-        const auto portSymbol = source.symbols.find(port->symbol);
-        const auto kind = portSymbol == source.symbols.end() ? SchematicPortKind::none
-                                                             : schematicPortKindForSymbol(portSymbol->second.name);
-        const bool isOutput = kind == SchematicPortKind::output;
-        const auto row = isOutput ? outputRow++ : inputRow++;
-        pins.push_back({0, port->name, isOutput ? 70 : -70, count * spacing / 2 - row * spacing,
-                        isOutput ? PinDirection::right : PinDirection::left, 1, true});
+    if (source.textSchematic) {
+        const auto interface = spiceInterfaceForCell(source);
+        if (!interface.ok)
+            throw ProjectError("schematic.spice.parse", interface.error);
+        for (const auto &port : interface.ports)
+            module.ports.push_back({port, HdlPortDirection::input, 1, true, false});
+    } else {
+        for (const auto *port : schematicPortInstances(source)) {
+            const auto symbol = source.symbols.find(port->symbol);
+            const auto kind = symbol == source.symbols.end() ? SchematicPortKind::none
+                                                             : schematicPortKindForSymbol(symbol->second.name);
+            const auto direction =
+                kind == SchematicPortKind::output ? HdlPortDirection::output : HdlPortDirection::input;
+            module.ports.push_back({port->name, direction, 1, true, false});
+        }
     }
-    return pins;
+    return fromHdl(makeHdlSymbolTemplate(module, false));
+}
+
+std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) { return hierarchicalSymbolTemplate(source).pins; }
+
+std::size_t repairHierarchicalSymbolArtwork(Project &project) {
+    std::size_t repaired = 0;
+    for (auto &[_, parent] : project.schematicCells) {
+        for (auto &[__, symbol] : parent.symbols) {
+            if (symbol.sourceCell == 0 || !symbol.artwork.empty())
+                continue;
+            const auto source = project.schematicCells.find(symbol.sourceCell);
+            if (source == project.schematicCells.end())
+                continue;
+            HierarchicalSymbolTemplate tmpl;
+            try {
+                tmpl = hierarchicalSymbolTemplate(source->second);
+            } catch (const ProjectError &) {
+                continue;
+            }
+            if (tmpl.artwork.empty())
+                continue;
+            std::map<std::string, const Pin *> targetByName;
+            for (const auto &pin : tmpl.pins)
+                targetByName.emplace(lower(pin.name), &pin);
+            for (auto &pin : symbol.pins) {
+                const auto target = targetByName.find(lower(pin.name));
+                if (target == targetByName.end())
+                    continue;
+                pin.x = target->second->x;
+                pin.y = target->second->y;
+                pin.direction = target->second->direction;
+                pin.width = target->second->width;
+                pin.widthKnown = target->second->widthKnown;
+            }
+            symbol.artwork = std::move(tmpl.artwork);
+            symbol.label = SymbolLabel{0, tmpl.labelY};
+            ++repaired;
+        }
+    }
+    return repaired;
 }
 
 char spiceElementForSymbol(const std::string &symbolName) {
@@ -470,14 +514,14 @@ SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cell
     }
 
     std::vector<Parameter> newDefaults;
-    std::function<std::vector<Pin>(const Symbol &)> pinsForSymbol;
+    std::function<HierarchicalSymbolTemplate(const Symbol &)> templateForSymbol;
     if (systemVerilog) {
         const auto parsed = parseSystemVerilogModule(cell);
         if (!parsed.ok) {
             result.notes.push_back("SystemVerilog parse failed: " + parsed.error);
         } else {
             result.notes.insert(result.notes.end(), parsed.warnings.begin(), parsed.warnings.end());
-            pinsForSymbol = [parsed](const Symbol &symbol) {
+            templateForSymbol = [parsed](const Symbol &symbol) {
                 const bool hasBus =
                     std::any_of(parsed.module.ports.begin(), parsed.module.ports.end(),
                                 [](const HdlPort &port) { return port.widthKnown && port.width > 1 && !port.real; });
@@ -494,7 +538,8 @@ SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cell
                         flatten = symbol.pins.size() == expanded;
                     }
                 }
-                return makeHdlSymbolTemplate(parsed.module, flatten).pins;
+                auto hdl = makeHdlSymbolTemplate(parsed.module, flatten);
+                return HierarchicalSymbolTemplate{std::move(hdl.artwork), std::move(hdl.pins), hdl.labelY};
             };
         }
     } else {
@@ -505,17 +550,19 @@ SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cell
         } else {
             for (const auto &parameter : interface.parameters)
                 newDefaults.push_back({0, parameter.name, parameter.value});
-            pinsForSymbol = [interface](const Symbol &) { return spiceSubcircuitPins(interface); };
+            auto tmpl = hierarchicalSymbolTemplate(cell);
+            templateForSymbol = [tmpl](const Symbol &) { return tmpl; };
         }
     }
 
-    if (pinsForSymbol) {
+    if (templateForSymbol) {
         for (auto &[parentId, parent] : project.schematicCells) {
             (void)parentId;
             for (auto &[symbolId, symbol] : parent.symbols) {
                 if (symbol.sourceCell != cellId)
                     continue;
-                const auto targets = pinsForSymbol(symbol);
+                const auto tmpl = templateForSymbol(symbol);
+                const auto &targets = tmpl.pins;
                 if (targets.empty())
                     continue;
 
@@ -564,6 +611,8 @@ SchematicSourceEditResult setSchematicSourceText(Project &project, ObjectId cell
                 }
                 std::erase_if(parent.nets, [](const auto &entry) { return entry.second.pins.size() < 2; });
                 symbol.pins = std::move(reconciled);
+                symbol.artwork = tmpl.artwork;
+                symbol.label = SymbolLabel{0, tmpl.labelY};
                 updateInstanceDefaults(project, parent, symbolId, oldDefaults, newDefaults);
             }
         }

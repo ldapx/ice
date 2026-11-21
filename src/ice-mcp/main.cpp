@@ -3529,6 +3529,7 @@ class IceMcpServer {
                     pinInputs.push_back(std::move(input));
                 }
             }
+            ice::Coordinate symbolLabelY = 0;
             if (sourceCell != 0 && pinInputs.empty()) {
                 const auto &sourceCellRef = session.project().schematicCells.at(sourceCell);
                 if (sourceCellRef.systemVerilogSchematic) {
@@ -3538,40 +3539,16 @@ class IceMcpServer {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     if (artwork.empty())
                         artwork = templ.artwork;
+                    symbolLabelY = templ.labelY;
                     for (const auto &pin : templ.pins)
                         pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
-                } else if (sourceCellRef.textSchematic) {
-                    for (const auto &pin : ice::hierarchicalSymbolPins(sourceCellRef))
-                        pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
                 } else {
-                    // Drawn sub-cell: build the symbol from its ports in the
-                    // same order the netlister emits the .subckt port list
-                    // (inputs/inouts top-down, then outputs), directional
-                    // inputs and bidirectional pins on the left, outputs on
-                    // the right.
-                    const auto ports = ice::schematicPortInstances(sourceCellRef);
-                    if (!ports.empty()) {
-                        const auto lowerType = [](std::string text) {
-                            for (auto &character : text)
-                                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-                            return text;
-                        };
-                        const auto spacing = 40;
-                        int inputCount = 0;
-                        int outputCount = 0;
-                        for (const auto *port : ports) {
-                            const auto symbol = sourceCellRef.symbols.find(port->symbol);
-                            const auto type = symbol == sourceCellRef.symbols.end()
-                                                  ? std::string{}
-                                                  : ice::symbolTypeName(symbol->second.name);
-                            const bool isOutput = lowerType(type) == "output";
-                            const auto row = isOutput ? outputCount++ : inputCount++;
-                            const auto span = static_cast<int>(ports.size()) * spacing;
-                            pinInputs.push_back({port->name, isOutput ? 70 : -70, span / 2 - row * spacing,
-                                                 isOutput ? ice::PinDirection::right : ice::PinDirection::left, 1,
-                                                 true});
-                        }
-                    }
+                    const auto templ = ice::hierarchicalSymbolTemplate(sourceCellRef);
+                    if (artwork.empty())
+                        artwork = templ.artwork;
+                    symbolLabelY = templ.labelY;
+                    for (const auto &pin : templ.pins)
+                        pinInputs.push_back({pin.name, pin.x, pin.y, pin.direction, pin.width, pin.widthKnown});
                 }
             }
             if (sourceCell == 0) {
@@ -3633,6 +3610,8 @@ class IceMcpServer {
             session.execute("mcp schematic-add-symbol", [&](ice::Project &project) {
                 id = ice::addSymbol(project, cell, symbolName, artwork, sourceCell);
                 auto &symbol = project.schematicCells.at(cell).symbols.at(id);
+                if (sourceCell != 0)
+                    symbol.label = ice::SymbolLabel{0, symbolLabelY};
                 for (auto &input : pinInputs) {
                     const auto pinId = project.nextId();
                     symbol.pins.push_back(

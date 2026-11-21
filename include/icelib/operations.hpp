@@ -241,9 +241,23 @@ SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
                                std::string artwork = {});
 
+// Generated block symbol for a drawn, text SPICE, or SystemVerilog subcell.
+// The artwork is a titled rectangle with labeled pins; pin ids are zero and
+// callers assign project-stable ids.
+struct HierarchicalSymbolTemplate {
+    std::string artwork;
+    std::vector<Pin> pins;
+    Coordinate labelY = 0;
+};
+HierarchicalSymbolTemplate hierarchicalSymbolTemplate(const SchematicCell &source);
+
 // Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
 // them from the project. Useful for tools that build their own symbol.
 std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source);
+
+// Regenerates artwork and pin positions for hierarchical symbols that predate
+// generated block artwork. Symbols with custom artwork are left untouched.
+std::size_t repairHierarchicalSymbolArtwork(Project &project);
 
 // Returns a name for a new symbol that is not used by any symbol in `cell`.
 std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::string &base);

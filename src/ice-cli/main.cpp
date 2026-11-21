@@ -2270,6 +2270,7 @@ int main(int argc, char **argv) {
             }
             std::string artwork;
             std::vector<ice::Pin> templatePins;
+            ice::Coordinate templateLabelY = 0;
             if (source != 0) {
                 const auto &sourceCell = project.schematicCells.at(source);
                 if (sourceCell.systemVerilogSchematic) {
@@ -2279,9 +2280,12 @@ int main(int argc, char **argv) {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     artwork = templ.artwork;
                     templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
                 } else if (!blank) {
-                    // Drawn or text SPICE sub-cell: one pin per declared port.
-                    templatePins = ice::hierarchicalSymbolPins(sourceCell);
+                    const auto templ = ice::hierarchicalSymbolTemplate(sourceCell);
+                    artwork = templ.artwork;
+                    templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
                 }
             } else if (!blank) {
                 try {
@@ -2300,6 +2304,7 @@ int main(int argc, char **argv) {
             session.execute("schematic-add-symbol", [&](ice::Project &p) {
                 id = ice::addSymbol(p, cell, args[3], artwork, source);
                 auto &symbol = p.schematicCells.at(cell).symbols.at(id);
+                symbol.label = ice::SymbolLabel{0, templateLabelY};
                 for (auto pin : templatePins) {
                     pin.id = p.nextId();
                     symbol.pins.push_back(std::move(pin));

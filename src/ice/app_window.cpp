@@ -1332,6 +1332,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         backfillSchematicInstanceParameters(project);
+        ice::repairHierarchicalSymbolArtwork(project);
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         project_->subscribe([this] { updateFileTabDirtyIndicators(); });
         captureSavedFileBaselines();
