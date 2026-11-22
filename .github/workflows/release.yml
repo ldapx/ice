@@ -119,13 +119,13 @@ jobs:
         with:
           submodules: recursive
       - uses: msys2/setup-msys2@v2
-        id: msys2
         with:
           msystem: UCRT64
           update: true
           install: >-
             git
             pkgconf
+            mingw-w64-ucrt-x86_64-xmake
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
@@ -140,44 +140,9 @@ jobs:
             mingw-w64-ucrt-x86_64-curl
             mingw-w64-ucrt-x86_64-simdjson
             mingw-w64-ucrt-x86_64-ntldd
-      - name: Build and package
+      - name: Stage NSIS with UAC plugin
         shell: pwsh
         run: |
-          Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
-          Remove-Item Env:MSYSTEM_PREFIX -ErrorAction SilentlyContinue
-          Remove-Item Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
-          Remove-Item Env:MSYSTEM_CARCH -ErrorAction SilentlyContinue
-          Remove-Item Env:MSYSTEM_CHOST -ErrorAction SilentlyContinue
-
-          $msys = "${{ steps.msys2.outputs.msys2-location }}"
-          $ucrt = Join-Path $msys "ucrt64"
-          if (-not (Test-Path "$ucrt\bin\gcc.exe")) {
-            $gcc = Get-ChildItem -Path $msys -Filter gcc.exe -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'ucrt64[\\/]bin[\\/]gcc\.exe$' } | Select-Object -First 1
-            if ($gcc) { $ucrt = Split-Path (Split-Path $gcc.FullName -Parent) -Parent }
-          }
-          $ucrtXmake = $ucrt.Replace('\', '/')
-          Write-Host "MinGW SDK: $ucrtXmake"
-          & "$ucrt\bin\gcc.exe" --version | Select-Object -First 1
-          $env:PATH = "$ucrt\bin;$msys\usr\bin;$env:PATH"
-          $env:MINGW_PREFIX = $ucrt
-          $env:ICE_MINGW_SYSROOT = $ucrt
-          $env:CC = "$ucrt\bin\gcc.exe"
-          $env:CXX = "$ucrt\bin\g++.exe"
-          $env:AR = "$ucrt\bin\ar.exe"
-          $env:WINDRES = "$ucrt\bin\windres.exe"
-          $env:ICE_PKG_CONFIG_DIR = "$ucrtXmake/lib/pkgconfig"
-          $env:ICE_ENABLE_OPENROAD = "0"
-          $env:ICE_BUILD_PYTHON = "0"
-
-          $xmakeRoot = Join-Path $env:RUNNER_TEMP "xmake-win"
-          New-Item -ItemType Directory -Force -Path $xmakeRoot | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.1.2/xmake-v3.1.2.win64.zip" -OutFile "$xmakeRoot\xmake.zip"
-          Expand-Archive -Path "$xmakeRoot\xmake.zip" -DestinationPath $xmakeRoot -Force
-          $xmake = Join-Path $xmakeRoot "xmake\xmake.exe"
-
-          # Provide NSIS with the UAC plugin so xpack does not try to install
-          # its own host package (which is unavailable under MSYS).
           $nsisRoot = Join-Path $env:RUNNER_TEMP "nsis"
           New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
           Invoke-WebRequest -Uri "https://github.com/xmake-mirror/nsis/releases/download/v309/nsis-3.09.zip" -OutFile "$nsisRoot\nsis.zip"
@@ -190,14 +155,18 @@ jobs:
           Copy-Item "$nsisRoot\uac\Plugins\x86-unicode\*.dll" "$nsis\Plugins\x86-unicode\" -Force
           Invoke-WebRequest -Uri "https://github.com/xmake-mirror/nsis/releases/download/v309/nsis-3.09-strlen_8192.zip" -OutFile "$nsisRoot\strlen.zip"
           Expand-Archive -Path "$nsisRoot\strlen.zip" -DestinationPath $nsis -Force
-          $env:PATH = "$nsis\Bin;$nsis;$env:PATH"
-
-          & $xmake f -p mingw -a x86_64 --toolchain=mingw "--mingw=$ucrtXmake" -y -m release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $xmake build -y ice ice-cli ice-pkg ice-mcp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $xmake pack -f nsis,zip --autobuild=n -o dist
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and package
+        shell: msys2 {0}
+        run: |
+          nsis_dir="$(cygpath -u "$RUNNER_TEMP")/nsis/nsis-3.09"
+          export PATH="$nsis_dir/Bin:$nsis_dir:$PATH"
+          export ICE_ENABLE_OPENROAD=0
+          export ICE_BUILD_PYTHON=0
+          export ICE_MINGW_SYSROOT="$(cygpath -w "$MINGW_PREFIX")"
+          export ICE_PKG_CONFIG_DIR="$(cygpath -w "$MINGW_PREFIX/lib/pkgconfig")"
+          xmake f -p mingw -a x86_64 --toolchain=mingw --mingw="$(cygpath -w "$MINGW_PREFIX")" -y -m release
+          xmake build -y ice ice-cli ice-pkg ice-mcp
+          xmake pack -f nsis,zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
           name: ice-windows-x86_64
