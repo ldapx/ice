@@ -125,6 +125,7 @@ jobs:
           install: >-
             git
             pkgconf
+            zip
             mingw-w64-ucrt-x86_64-xmake
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
