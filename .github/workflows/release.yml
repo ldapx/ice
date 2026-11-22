@@ -109,9 +109,9 @@ jobs:
         with:
           submodules: recursive
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
-          location: ${{ runner.temp }}\msys64
           update: true
           install: >-
             git
@@ -139,11 +139,11 @@ jobs:
           Remove-Item Env:MSYSTEM_CARCH -ErrorAction SilentlyContinue
           Remove-Item Env:MSYSTEM_CHOST -ErrorAction SilentlyContinue
 
-          $msys = Join-Path $env:RUNNER_TEMP "msys64"
+          $msys = "${{ steps.msys2.outputs.msys2-location }}"
           $ucrt = Join-Path $msys "ucrt64"
           if (-not (Test-Path "$ucrt\bin\gcc.exe")) {
-            $gcc = Get-ChildItem -Path $env:RUNNER_TEMP -Filter gcc.exe -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'ucrt64' } | Select-Object -First 1
+            $gcc = Get-ChildItem -Path $msys -Filter gcc.exe -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'ucrt64[\\/]bin[\\/]gcc\.exe$' } | Select-Object -First 1
             if ($gcc) { $ucrt = Split-Path (Split-Path $gcc.FullName -Parent) -Parent }
           }
           $ucrtXmake = $ucrt.Replace('\', '/')
