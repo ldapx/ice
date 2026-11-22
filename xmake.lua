@@ -361,12 +361,16 @@ local toolchain_cxxflags = {}
 local mingw_sysroot = os.getenv("ICE_MINGW_SYSROOT")
 if is_windows and mingw_sysroot and mingw_sysroot ~= "" then
     -- MSYS2 installs the C headers directly under <prefix>/include; older
-    -- MinGW layouts use <prefix>/x86_64-w64-mingw32/include. Add both after
-    -- the built-in dirs so <cstdlib>'s #include_next <stdlib.h> resolves.
-    table.insert(toolchain_cxxflags, "-idirafter")
-    table.insert(toolchain_cxxflags, path.join(mingw_sysroot, "include"))
-    table.insert(toolchain_cxxflags, "-idirafter")
-    table.insert(toolchain_cxxflags, path.join(mingw_sysroot, "x86_64-w64-mingw32", "include"))
+    -- MinGW layouts use <prefix>/x86_64-w64-mingw32/include. Add only the
+    -- directory that exists so we do not pass a bogus compiler input path.
+    local mingw_include = path.join(mingw_sysroot, "include")
+    if not os.isdir(mingw_include) then
+        mingw_include = path.join(mingw_sysroot, "x86_64-w64-mingw32", "include")
+    end
+    if os.isdir(mingw_include) then
+        table.insert(toolchain_cxxflags, "-idirafter")
+        table.insert(toolchain_cxxflags, mingw_include)
+    end
 end
 local function apply_toolchain_flags()
     if #toolchain_cxxflags > 0 then
