@@ -517,6 +517,22 @@ std::string stripLogPrefix(std::string line) {
     return trimmed;
 }
 
+bool ngspiceLogHasError(const NgspiceLog &log) {
+    std::string text;
+    {
+        std::lock_guard lock(const_cast<NgspiceLog &>(log).mutex);
+        text = log.text;
+    }
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto body = stripLogPrefix(line);
+        if (body.starts_with("Error:") || body.starts_with("ERROR:"))
+            return true;
+    }
+    return false;
+}
+
 std::vector<std::string> displayVectorNames(const NgspiceLog &log) {
     std::vector<std::string> names;
     std::string text;
@@ -782,7 +798,11 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
             return result;
         }
     }
-    if (ngSpice_Circ(circuit.data()) != 0) {
+    // ngspice 42 returns success from ngSpice_Circ even when a .include file
+    // is missing (it only logs the error and leaves any previous circuit
+    // loaded). Treat captured error diagnostics as a load failure so a stale
+    // circuit is never simulated.
+    if (ngSpice_Circ(circuit.data()) != 0 || ngspiceLogHasError(log)) {
         result.state = JobState::failed;
         result.error = "ngspice could not load the circuit";
         appendFailureDetails(result.error, compactNgspiceLog(log));
