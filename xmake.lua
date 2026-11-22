@@ -365,7 +365,9 @@ if is_windows and mingw_sysroot and mingw_sysroot ~= "" then
 end
 local function apply_toolchain_flags()
     if #toolchain_cxxflags > 0 then
-        add_cxxflags(toolchain_cxxflags)
+        -- The directory is a compiler argument, not a probeable flag, so
+        -- force xmake to keep it on the command line.
+        add_cxxflags(toolchain_cxxflags, {force = true})
     end
 end
 
