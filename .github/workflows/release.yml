@@ -164,6 +164,7 @@ jobs:
           export ICE_BUILD_PYTHON=0
           export ICE_MINGW_SYSROOT="$(cygpath -w "$MINGW_PREFIX")"
           export ICE_PKG_CONFIG_DIR="$(cygpath -w "$MINGW_PREFIX/lib/pkgconfig")"
+          export ICE_BASH="$(cygpath -w /usr/bin/bash.exe)"
           xmake f -p mingw -a x86_64 --toolchain=mingw --mingw="$(cygpath -w "$MINGW_PREFIX")" -y -m release
           xmake build -y ice ice-cli ice-pkg ice-mcp
           xmake pack -f nsis,zip --autobuild=n -o dist

@@ -698,10 +698,12 @@ xpack("ice")
     add_installfiles("LICENSE", {prefixdir = "share/doc/ice"})
     if is_windows then
         -- Bundle the MSYS2/vcpkg runtime DLLs and Qt plugins next to the
-        -- executables. The script also copies ngspice code models.
+        -- executables. Use the MSYS2 bash explicitly: Windows ships a WSL
+        -- bash.exe in System32 that cannot run these scripts.
+        local windows_bash = os.getenv("ICE_BASH") or "bash"
         after_installcmd(function (package, batchcmds)
-            batchcmds:runv("bash", {path.join(os.projectdir(), "scripts", "bundle-windows-runtime.sh"),
-                                    package:installdir()})
+            batchcmds:runv(windows_bash, {path.join(os.projectdir(), "scripts", "bundle-windows-runtime.sh"),
+                                          package:installdir()})
         end)
     elseif is_macos then
         after_installcmd(function (package, batchcmds)
