@@ -67,7 +67,7 @@ if [[ -x "$bindir/ice" ]]; then
 PLIST
 
     if [[ -n "$qt_bin" && -x "$qt_bin/macdeployqt" ]]; then
-        "$qt_bin/macdeployqt" "$app" -always-overwrite -no-translations
+        "$qt_bin/macdeployqt" "$app" -always-overwrite
     fi
 
     if command -v dylibbundler >/dev/null 2>&1; then

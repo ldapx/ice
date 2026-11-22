@@ -133,6 +133,12 @@ jobs:
       - name: Build and package
         shell: pwsh
         run: |
+          Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+          Remove-Item Env:MSYSTEM_PREFIX -ErrorAction SilentlyContinue
+          Remove-Item Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
+          Remove-Item Env:MSYSTEM_CARCH -ErrorAction SilentlyContinue
+          Remove-Item Env:MSYSTEM_CHOST -ErrorAction SilentlyContinue
+
           $msys = Join-Path $env:RUNNER_TEMP "msys64"
           $ucrt = Join-Path $msys "ucrt64"
           if (-not (Test-Path "$ucrt\bin\gcc.exe")) {
@@ -158,6 +164,22 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.1.2/xmake-v3.1.2.win64.zip" -OutFile "$xmakeRoot\xmake.zip"
           Expand-Archive -Path "$xmakeRoot\xmake.zip" -DestinationPath $xmakeRoot -Force
           $xmake = Join-Path $xmakeRoot "xmake\xmake.exe"
+
+          # Provide NSIS with the UAC plugin so xpack does not try to install
+          # its own host package (which is unavailable under MSYS).
+          $nsisRoot = Join-Path $env:RUNNER_TEMP "nsis"
+          New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/xmake-mirror/nsis/releases/download/v309/nsis-3.09.zip" -OutFile "$nsisRoot\nsis.zip"
+          Expand-Archive -Path "$nsisRoot\nsis.zip" -DestinationPath $nsisRoot -Force
+          $nsis = Join-Path $nsisRoot "nsis-3.09"
+          Invoke-WebRequest -Uri "https://github.com/xmake-mirror/nsis/releases/download/v309/UAC.zip" -OutFile "$nsisRoot\uac.zip"
+          Expand-Archive -Path "$nsisRoot\uac.zip" -DestinationPath "$nsisRoot\uac" -Force
+          Copy-Item "$nsisRoot\uac\UAC.nsh" "$nsis\Include\UAC.nsh" -Force
+          Copy-Item "$nsisRoot\uac\Plugins\x86-ansi\*.dll" "$nsis\Plugins\x86-ansi\" -Force
+          Copy-Item "$nsisRoot\uac\Plugins\x86-unicode\*.dll" "$nsis\Plugins\x86-unicode\" -Force
+          Invoke-WebRequest -Uri "https://github.com/xmake-mirror/nsis/releases/download/v309/nsis-3.09-strlen_8192.zip" -OutFile "$nsisRoot\strlen.zip"
+          Expand-Archive -Path "$nsisRoot\strlen.zip" -DestinationPath $nsis -Force
+          $env:PATH = "$nsis\Bin;$nsis;$env:PATH"
 
           & $xmake f -p mingw -a x86_64 --toolchain=mingw "--mingw=$ucrtXmake" -y -m release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
