@@ -46,19 +46,9 @@ jobs:
           path: dist/*
 
   macos:
-    name: macOS ${{ matrix.arch }}
+    name: macOS x86_64
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            arch: arm64
-            artifact: ice-macos-arm64
-          - runner: macos-15-intel
-            arch: x86_64
-            artifact: ice-macos-x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15-intel
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -107,7 +97,7 @@ jobs:
         run: xmake pack -f zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ice-macos-x86_64
           path: dist/*
 
   windows:

@@ -157,8 +157,10 @@ creates `ICE.app` and deploys Qt frameworks; install `dylibbundler` to bundle
 non-Qt libraries as well.
 
 The `.github/workflows/release.yml` workflow builds Linux x86_64, macOS
-(arm64 and x86_64), and Windows x86_64 packages. Pushing a `v*` tag publishes the resulting archives
-and Windows installer to the GitHub release.
+x86_64, and Windows x86_64 packages. Pushing a `v*` tag publishes the
+resulting archives and Windows installer to the GitHub release. The macOS
+x86_64 package runs on Apple Silicon through Rosetta 2; a native arm64 package
+can be added when an ARM macOS runner is available.
 
 Build the desktop app (requires Qt 6):
 
