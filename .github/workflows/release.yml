@@ -80,9 +80,19 @@ jobs:
           echo "PKG_CONFIG_PATH=$pkg_config_path" >>"$GITHUB_ENV"
           echo "ICE_QT_PREFIX=$qt_prefix" >>"$GITHUB_ENV"
           echo "ICE_QT_BIN=$qt_prefix/bin" >>"$GITHUB_ENV"
-      - uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: '3.1.2'
+      - name: Install xmake
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            asset=xmake-bundle-v3.1.2.macos.arm64
+          else
+            asset=xmake-bundle-v3.1.2.macos.x86_64
+          fi
+          mkdir -p "$RUNNER_TEMP/xmake-bin"
+          curl -fsSL -o "$RUNNER_TEMP/xmake-bin/xmake" \
+            "https://github.com/xmake-io/xmake/releases/download/v3.1.2/$asset"
+          chmod +x "$RUNNER_TEMP/xmake-bin/xmake"
+          echo "$RUNNER_TEMP/xmake-bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/xmake-bin/xmake" --version
       - name: Build
         env:
           ICE_ENABLE_OPENROAD: "0"
@@ -151,6 +161,7 @@ jobs:
           & "$ucrt\bin\gcc.exe" --version | Select-Object -First 1
           $env:PATH = "$ucrt\bin;$msys\usr\bin;$env:PATH"
           $env:MINGW_PREFIX = $ucrt
+          $env:ICE_MINGW_SYSROOT = $ucrt
           $env:CC = "$ucrt\bin\gcc.exe"
           $env:CXX = "$ucrt\bin\g++.exe"
           $env:AR = "$ucrt\bin\ar.exe"

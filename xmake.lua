@@ -354,6 +354,21 @@ else
     first_party_warnings = {"-Wall", "-Wextra", "-Wpedantic", "-Wno-missing-field-initializers"}
 end
 
+-- MSYS2 UCRT64 GCC can be invoked from outside its shell without resolving the
+-- target C headers. Add the sysroot include after the built-in dirs so
+-- <cstdlib>'s #include_next <stdlib.h> still finds it.
+local toolchain_cxxflags = {}
+local mingw_sysroot = os.getenv("ICE_MINGW_SYSROOT")
+if is_windows and mingw_sysroot and mingw_sysroot ~= "" then
+    table.insert(toolchain_cxxflags, "-idirafter")
+    table.insert(toolchain_cxxflags, path.join(mingw_sysroot, "x86_64-w64-mingw32", "include"))
+end
+local function apply_toolchain_flags()
+    if #toolchain_cxxflags > 0 then
+        add_cxxflags(toolchain_cxxflags)
+    end
+end
+
 -- The C++ OpenROAD helper is required by the physical implementation flow
 -- and the ODB-backed previews. It is Linux-only in the default build because
 -- its pinned upstream toolchain is built with Bazel and Bash.
@@ -385,6 +400,7 @@ target("icelib")
         add_cxxflags("-fPIC", {public = true})
     end
     add_cxxflags(first_party_warnings)
+    apply_toolchain_flags()
     apply_fallbacks()
     for _, package in ipairs(core_packages) do
         add_packages(package, {public = true})
@@ -420,6 +436,7 @@ if has_agentsdk then
         if not is_msvc then
             add_cxxflags("-fPIC")
         end
+        apply_toolchain_flags()
         if is_windows then
             add_syslinks("ws2_32", "wsock32", "crypt32", "advapi32", "user32")
         elseif is_linux then
@@ -440,6 +457,7 @@ if build_gui then
         end
         add_defines(source_define)
         add_cxxflags(first_party_warnings)
+        apply_toolchain_flags()
         apply_fallbacks()
         for _, package in ipairs(core_packages) do
             add_packages(package)
@@ -482,6 +500,7 @@ target("ice-cli")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
     add_defines(source_define)
+    apply_toolchain_flags()
     apply_fallbacks()
     for _, package in ipairs(core_packages) do
         add_packages(package)
@@ -493,6 +512,7 @@ target("ice-pkg")
     add_deps("icelib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
+    apply_toolchain_flags()
     apply_fallbacks()
     for _, package in ipairs(core_packages) do
         add_packages(package)
@@ -508,6 +528,7 @@ target("ice-mcp")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
     add_defines(source_define)
+    apply_toolchain_flags()
     apply_fallbacks()
     for _, package in ipairs(core_packages) do
         add_packages(package)
@@ -562,6 +583,7 @@ if build_python then
         add_deps("icelib")
         add_defines(source_define)
         add_includedirs("include", python_include, path.join(nanobind_root, "include"), path.join(nanobind_root, "src"))
+        apply_toolchain_flags()
         apply_fallbacks()
         for _, package in ipairs(core_packages) do
             add_packages(package)
