@@ -674,8 +674,11 @@ follow the layout grid snap setting. After the
 first path click, scroll the wheel to move the
 next segment up or down one metal
 layer; ICE inserts the corresponding via at the connection point automatically.
-Starting a path on a port snaps to the port center and selects the port's
-drawing layer when that layer is in the routing stack. For the IHP stack, for
+Starting or ending a path on a port snaps to the port center and selects the
+port's drawing layer when that layer is in the routing stack. While the Path
+tool is active, every visible port shows a dot at its center; clicking a port
+snaps the pending endpoint there. Press **Enter** to commit the complete path
+as before. For the IHP stack, for
 example, scrolling from Metal2 down to Metal1 adds a Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
 Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
 stored as one path shape

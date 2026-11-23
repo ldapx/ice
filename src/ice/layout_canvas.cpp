@@ -1438,6 +1438,26 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return std::max(0, pathConfig_.layers[pathLayerIndex_].minimumWidth);
     }
 
+    int pathLayerIndexFor(ice::ObjectId layerId) const {
+        if (layerId == 0)
+            return -1;
+        for (std::size_t index = 0; index < pathConfig_.layers.size(); ++index)
+            if (pathConfig_.layers[index].layer == layerId)
+                return static_cast<int>(index);
+        return -1;
+    }
+
+    void activatePathLayer(int index) {
+        if (index < 0 || index >= static_cast<int>(pathConfig_.layers.size()) || pathLayerIndex_ == index)
+            return;
+        pathLayerIndex_ = index;
+        // Keep the pending segment at the destination layer's minimum width.
+        if (const auto minimum = currentPathMinimumWidth(); minimum > 0)
+            pathWidth_ = minimum;
+        if (pathLayerChanged_)
+            pathLayerChanged_(pathConfig_.layers[index].layer, pathConfig_.layers[index].name);
+    }
+
     std::string pathLayerName() const override {
         if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
             return {};
@@ -1551,6 +1571,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::path && pathActive_)
             drawPathPreview(*painter, rect);
+        if (tool_ == Tool::path && !readOnly_)
+            drawPathPortMarkers(*painter, rect);
         if (tool_ == Tool::polygon && polygonActive_)
             drawPolygonPreview(*painter, rect);
     }
@@ -1700,6 +1722,34 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
                 drawViaAt(pathPoints_.back(), pathViasBetween(previous, pathLayerIndex_),
                           pathConfig_.layers[pathLayerIndex_].layer);
+        }
+        painter.restore();
+    }
+
+    // While the path tool is active, mark every visible port center. The dot
+    // doubles as the snap target used when a path starts or ends on a port.
+    void drawPathPortMarkers(QPainter &painter, const QRectF &rect) {
+        if (!scene())
+            return;
+        const qreal scale = std::max<qreal>(1.0e-6, transform().m11());
+        const qreal radius = 4.0 / scale;
+        QPen outline(ice::uiColor(ice::UiColor::Text1));
+        outline.setCosmetic(true);
+        outline.setWidthF(1.2);
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(outline);
+        for (auto *item : scene()->items()) {
+            const bool layoutPort = item->data(2).toString() == QStringLiteral("layout-port");
+            const bool instancePort = item->data(3).toString() == QStringLiteral("instance-port");
+            if ((!layoutPort && !instancePort) || !item->isVisible())
+                continue;
+            QColor color = ice::uiColor(ice::UiColor::Accent4);
+            if (auto *portRect = dynamic_cast<QGraphicsRectItem *>(item))
+                color = portRect->pen().color();
+            painter.setBrush(color);
+            painter.drawEllipse(item->sceneBoundingRect().center(), radius, radius);
         }
         painter.restore();
     }
@@ -2040,21 +2090,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 if (!pathActive_) {
                     // Starting on a port uses that port's layer and center so
                     // paths connect to the port interface without extra setup.
-                    auto *hit = itemAt(event->pos());
-                    while (hit && hit->data(2).toString() != QStringLiteral("layout-port") &&
-                           hit->data(3).toString() != QStringLiteral("instance-port"))
-                        hit = hit->parentItem();
-                    if (hit) {
-                        const auto layerId = static_cast<ice::ObjectId>(hit->data(6).toULongLong());
-                        for (std::size_t index = 0; index < pathConfig_.layers.size(); ++index) {
-                            if (pathConfig_.layers[index].layer != layerId)
-                                continue;
-                            pathLayerIndex_ = static_cast<int>(index);
-                            if (pathLayerChanged_)
-                                pathLayerChanged_(pathConfig_.layers[index].layer, pathConfig_.layers[index].name);
-                            break;
-                        }
-                        point = snapPosition(hit->sceneBoundingRect().center());
+                    if (auto *port = pathPortItemAt(event->pos())) {
+                        activatePathLayer(pathLayerIndexFor(static_cast<ice::ObjectId>(port->data(6).toULongLong())));
+                        point = port->sceneBoundingRect().center();
                     }
                     const auto minimum = currentPathMinimumWidth();
                     pathWidth_ = minimum > 0 ? minimum : 200;
@@ -2067,7 +2105,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     pathSegmentLayerIndices_.clear();
                     pathStartLayerIndex_ = pathLayerIndex_;
                 } else {
-                    pathEnd_ = constrainedPathPoint(pathAnchor_, point, event->modifiers().testFlag(Qt::ShiftModifier));
+                    pathEnd_ = pathPreviewEndPoint(event->pos(), event->modifiers().testFlag(Qt::ShiftModifier));
                 }
                 pathDragging_ = true;
                 viewport()->update();
@@ -2347,8 +2385,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             return;
         }
         if (tool_ == Tool::path && pathActive_) {
-            pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(cursorScenePosition_),
-                                            event->modifiers().testFlag(Qt::ShiftModifier));
+            pathEnd_ = pathPreviewEndPoint(event->pos(), event->modifiers().testFlag(Qt::ShiftModifier));
             viewport()->update();
             event->accept();
             return;
@@ -2408,8 +2445,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 // Each segment keeps the minimum width of its own layer.
                 if (const auto minimum = currentPathMinimumWidth(); minimum > 0)
                     pathWidth_ = minimum;
-                pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(cursorScenePosition_),
-                                                QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier));
+                pathEnd_ = pathPreviewEndPoint(event->position().toPoint(),
+                                               QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier));
                 if (pathLayerChanged_)
                     pathLayerChanged_(pathConfig_.layers[pathLayerIndex_].layer,
                                       pathConfig_.layers[pathLayerIndex_].name);
@@ -2498,8 +2535,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
         }
         if (tool_ == Tool::path && event->button() == Qt::LeftButton && pathDragging_) {
             pathDragging_ = false;
-            pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(event->pos())),
-                                            event->modifiers().testFlag(Qt::ShiftModifier));
+            if (auto *port = pathPortItemAt(event->pos())) {
+                activatePathLayer(pathLayerIndexFor(static_cast<ice::ObjectId>(port->data(6).toULongLong())));
+                pathEnd_ = port->sceneBoundingRect().center();
+            } else {
+                pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(event->pos())),
+                                                event->modifiers().testFlag(Qt::ShiftModifier));
+            }
             if (QLineF(pathAnchor_, pathEnd_).length() >= 0.5 && !pathConfig_.layers.empty()) {
                 pathPoints_.push_back(pathEnd_);
                 pathSegmentWidths_.push_back(pathWidth_);
@@ -3027,6 +3069,20 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
         }
         return best;
+    }
+
+    QGraphicsItem *pathPortItemAt(const QPoint &position) const {
+        auto *hit = itemAt(position);
+        while (hit && hit->data(2).toString() != QStringLiteral("layout-port") &&
+               hit->data(3).toString() != QStringLiteral("instance-port"))
+            hit = hit->parentItem();
+        return hit;
+    }
+
+    QPointF pathPreviewEndPoint(const QPoint &position, bool orthogonal) const {
+        if (auto *port = pathPortItemAt(position))
+            return port->sceneBoundingRect().center();
+        return constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(position)), orthogonal);
     }
 
     QGraphicsItem *layoutFigureOwner(QGraphicsItem *item) const {
