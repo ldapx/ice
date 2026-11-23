@@ -632,6 +632,10 @@ layers are added or removed.
 The layout toolbar separates **Select** from **Move**. **Select** supports
 rubber-band selection and handle editing: drag path points, polygon vertices,
 and rectangle corner or edge handles, but it does not move whole objects.
+Click a path point to select it; the handle inverts its colors. Press **Delete**
+to remove the selected path point, or right-click it for the same action. A
+path always keeps at least two points. Click the path body to clear the point
+selection, then **Delete** removes the whole path.
 **Move** drags rectangles, polygons, paths, texts, planned devices, and placed
 instances; selection handles are hidden while Move is active.
 
@@ -716,6 +720,12 @@ subtracts the newer shapes from the oldest selected shape. Results with holes
 are split into independently fillable polygons, and an operation that produces
 no geometry leaves its operands unchanged. Use undo to restore the original
 shapes.
+
+Right-click a path body and choose **Flatten to Polygon** to replace it with
+filled polygon geometry. Segment outlines and point vias are unioned per layer,
+so a path that changes layers produces polygons on each layer it used, including
+squares on its via layers. Flattening an automatically routed path detaches it
+from its planned connection. Use undo to restore the path.
 
 The **Ruler** tool measures between two clicked points. The ruler line keeps a
 constant screen width as you zoom, and shows minor and major tick marks with

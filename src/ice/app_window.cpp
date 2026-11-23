@@ -3890,10 +3890,9 @@ class DocumentWindow : public QMainWindow {
                     auto y = planned.y + planned.height / 2 - portSize / 2;
                     x = std::clamp(x, planned.x, planned.x + std::max<ice::Coordinate>(0, planned.width - portSize));
                     y = std::clamp(y, planned.y, planned.y + std::max<ice::Coordinate>(0, planned.height - portSize));
-                    portId = ice::addPort(project, activeLayoutId_, name, portLayer,
-                                          ice::Rect{x, y, portSize, portSize},
-                                          portDirection.value_or(ice::PortDirection::inout), ice::PortSide::left,
-                                          portNet, name);
+                    portId = ice::addPort(
+                        project, activeLayoutId_, name, portLayer, ice::Rect{x, y, portSize, portSize},
+                        portDirection.value_or(ice::PortDirection::inout), ice::PortSide::left, portNet, name);
                     if (planned.schematicInstance != 0) {
                         auto &port = project.layoutCells.at(activeLayoutId_).ports.at(portId);
                         port.schematicInstance = planned.schematicInstance;
@@ -4548,6 +4547,31 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
+    void flattenLayoutPath(ice::ObjectId shapeId) {
+        if (!project_ || activeLayoutId_ == 0 || shapeId == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
+            return;
+
+        std::vector<ice::ObjectId> resultIds;
+        try {
+            project_->execute("flatten layout path", [&](ice::Project &project) {
+                resultIds = ice::flattenLayoutPath(project, activeLayoutId_, shapeId);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Flatten Path"), QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Flattened layout path to polygon");
+        refreshProject();
+        statusBar()->showMessage(
+            resultIds.size() == 1
+                ? QStringLiteral("Flattened path to a polygon")
+                : QStringLiteral("Flattened path to %1 polygons across its layers").arg(resultIds.size()));
+        QTimer::singleShot(0, this, [this, resultIds] { selectLayoutShapeItems(resultIds); });
+    }
+
     void addLayoutPath(const LayoutPathData &input) {
         if (!project_ || input.points.size() < 2 || input.widths.size() != input.points.size() - 1 ||
             input.segmentLayers.size() != input.widths.size())
@@ -4557,8 +4581,7 @@ class DocumentWindow : public QMainWindow {
             return;
         for (const auto layerId : input.segmentLayers) {
             if (!project_->project().layers.contains(layerId) ||
-                !layerAvailableForLayout(project_->project(), activeLayoutId_,
-                                         project_->project().layers.at(layerId)))
+                !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layerId)))
                 return;
         }
         for (const auto width : input.widths) {
@@ -6306,8 +6329,8 @@ class DocumentWindow : public QMainWindow {
             item->setZValue(6.0);
             item->setData(0, QVariant::fromValue<qulonglong>(id));
             item->setData(2, QStringLiteral("layout-port"));
-            auto pathLayer = port.layer == 0 ? ice::ObjectId{0}
-                                             : drawingLayerForPort(project, activeLayoutId_, port.layer);
+            auto pathLayer =
+                port.layer == 0 ? ice::ObjectId{0} : drawingLayerForPort(project, activeLayoutId_, port.layer);
             item->setData(6, QVariant::fromValue<qulonglong>(pathLayer != 0 ? pathLayer : port.layer));
             if (!readOnly) {
                 item->setFlag(QGraphicsItem::ItemIsSelectable);
@@ -6390,8 +6413,8 @@ class DocumentWindow : public QMainWindow {
                 portItem->setData(3, QStringLiteral("instance-port"));
                 portItem->setData(4, QVariant::fromValue<qulonglong>(instance.id));
                 portItem->setData(5, QVariant::fromValue<qulonglong>(portId));
-                auto pathLayer = port.layer == 0 ? ice::ObjectId{0}
-                                                 : drawingLayerForPort(project, childIt->first, port.layer);
+                auto pathLayer =
+                    port.layer == 0 ? ice::ObjectId{0} : drawingLayerForPort(project, childIt->first, port.layer);
                 portItem->setData(6, QVariant::fromValue<qulonglong>(pathLayer != 0 ? pathLayer : port.layer));
                 portItem->setToolTip(
                     QStringLiteral("Instance %1 port %2 · double-click to promote")
@@ -6622,6 +6645,9 @@ class DocumentWindow : public QMainWindow {
             return;
         case LayoutCanvas::FigureContextAction::flip:
             flipSelectedLayoutFigures();
+            return;
+        case LayoutCanvas::FigureContextAction::flattenPath:
+            flattenLayoutPath(id);
             return;
         case LayoutCanvas::FigureContextAction::copy:
             copySelectedLayoutShapes();
@@ -14343,8 +14369,7 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setSnapToGrid(layoutSnapToGrid_);
             connect(layoutCanvas_->scene(), &QGraphicsScene::selectionChanged, this,
                     [this] { refreshLayoutProperties(); });
-            layoutCanvas_->setPathCreatedCallback(
-                [this](const LayoutPathData &path) { addLayoutPath(path); });
+            layoutCanvas_->setPathCreatedCallback([this](const LayoutPathData &path) { addLayoutPath(path); });
             layoutCanvas_->setPathLayerChangedCallback([this](ice::ObjectId, const std::string &name) {
                 const auto width = layoutCanvas_ ? std::max(1, layoutCanvas_->pathWidth()) : 200;
                 statusBar()->showMessage(

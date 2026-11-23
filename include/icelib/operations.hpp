@@ -123,6 +123,14 @@ void movePolygonPoint(Project &project, ObjectId cellId, ObjectId shapeId, std::
 // Returns the ids of the new shapes and throws when the result is empty.
 std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
                                           BooleanOperation operation);
+// Converts a path into filled polygon shapes. Segments are grouped by their
+// drawing layer and point vias become square polygons on each via layer, so the
+// flattened geometry keeps every layer used by a multi-layer path. Overlapping
+// segment and via outlines are unioned and split into independently fillable
+// polygons. The original path is removed and an automatically routed path is
+// detached from its planned connection. Returns the new shape ids in layer
+// order and throws when the path has no flattenable geometry.
+std::vector<ObjectId> flattenLayoutPath(Project &project, ObjectId cellId, ObjectId shapeId);
 
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.

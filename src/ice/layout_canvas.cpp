@@ -333,11 +333,20 @@ class LayoutPathItem : public QGraphicsItem {
         handlePen.setCosmetic(true);
         handlePen.setWidthF(1.5);
         QBrush handleBrush(ice::uiColor(ice::UiColor::Background1));
-        painter->setPen(handlePen);
-        painter->setBrush(handleBrush);
-        for (int index = 0; index < static_cast<int>(points_.size()); ++index)
-            if (handleEditable(index))
-                painter->drawRect(handleRect(index));
+        QPen selectedPen(ice::uiColor(ice::UiColor::Background1));
+        selectedPen.setCosmetic(true);
+        selectedPen.setWidthF(1.5);
+        QBrush selectedBrush(accent);
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (!handleEditable(index))
+                continue;
+            // Invert the handle colors while the point itself is selected so
+            // Delete clearly targets that point instead of the whole path.
+            const bool selected = index == selectedHandle_;
+            painter->setPen(selected ? selectedPen : handlePen);
+            painter->setBrush(selected ? selectedBrush : handleBrush);
+            painter->drawRect(handleRect(index));
+        }
         painter->restore();
     }
 
@@ -351,6 +360,7 @@ class LayoutPathItem : public QGraphicsItem {
                             scene()->clearSelection();
                         setSelected(true);
                     }
+                    selectHandle(handle);
                     draggingHandle_ = handle;
                     handleDragStart_ = points_[static_cast<std::size_t>(handle)];
                     event->accept();
@@ -416,13 +426,44 @@ class LayoutPathItem : public QGraphicsItem {
 
     ice::ObjectId pathId() const { return id_; }
 
+    int selectedHandle() const { return pointEditingEnabled_ ? selectedHandle_ : -1; }
+
+    void selectHandle(int index) {
+        if (!pointEditingEnabled_ || !handleEditable(index))
+            return;
+        if (selectedHandle_ == index)
+            return;
+        selectedHandle_ = index;
+        update();
+    }
+
+    void clearHandleSelection() {
+        if (selectedHandle_ < 0)
+            return;
+        selectedHandle_ = -1;
+        update();
+    }
+
+    bool deleteSelectedHandle() {
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || selectedHandle_ < 0 || !pointDeleted_ ||
+            points_.size() <= 2 || !handleEditable(selectedHandle_))
+            return false;
+        const int index = selectedHandle_;
+        selectedHandle_ = -1;
+        update();
+        pointDeleted_(id_, index);
+        return true;
+    }
+
     void setPointEditingEnabled(bool enabled) {
         const auto effective = enabled && pointEditable_;
         if (pointEditingEnabled_ == effective)
             return;
         pointEditingEnabled_ = effective;
-        if (!effective)
+        if (!effective) {
             cancelHandleDrag();
+            clearHandleSelection();
+        }
         update();
     }
 
@@ -472,6 +513,16 @@ class LayoutPathItem : public QGraphicsItem {
         }
         draggingHandle_ = -1;
         update();
+    }
+
+  protected:
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override {
+        // Point selection is tied to the path's own selection. Clearing it here
+        // keeps Delete from removing a hidden point after another figure is
+        // selected or the path is deselected.
+        if (change == ItemSelectedHasChanged && !value.toBool())
+            clearHandleSelection();
+        return QGraphicsItem::itemChange(change, value);
     }
 
   private:
@@ -631,6 +682,7 @@ class LayoutPathItem : public QGraphicsItem {
     bool pointEditable_ = true;
     bool endpointHandlesOnly_ = false;
     bool pointEditingEnabled_ = true;
+    int selectedHandle_ = -1;
     int draggingHandle_ = -1;
     QPointF handleDragStart_;
     LayoutPathPointMovedCallback pointMoved_;
@@ -1257,6 +1309,23 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void deleteSelectedShapes() override {
         if (readOnly_)
             return;
+        // A selected path point is deleted before the owning figures, matching
+        // the handle selection shown by the path item.
+        bool pointSelected = false;
+        for (auto *item : scene()->selectedItems()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (!path || path->selectedHandle() < 0)
+                continue;
+            pointSelected = true;
+            if (path->deleteSelectedHandle())
+                return;
+        }
+        if (pointSelected) {
+            // A path cannot have fewer than two points. Keep the selection so
+            // the user can click the path body to clear it and delete the path.
+            QApplication::beep();
+            return;
+        }
         std::vector<ice::ObjectId> ids;
         for (auto *item : scene()->selectedItems())
             if (item->data(0).isValid())
@@ -1375,9 +1444,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return pathConfig_.layers[pathLayerIndex_].name;
     }
 
-    void setPathCreatedCallback(LayoutPathCreatedCallback callback) override {
-        pathCreated_ = std::move(callback);
-    }
+    void setPathCreatedCallback(LayoutPathCreatedCallback callback) override { pathCreated_ = std::move(callback); }
 
     void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) override {
         pathLayerChanged_ = std::move(callback);
@@ -1538,10 +1605,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
             } else {
                 std::vector<QPointF> left;
                 std::vector<QPointF> right;
-                appendPathJoin(left, points[index - 1], start, end, widths[index - 1] * 0.5,
-                               widths[index] * 0.5, 1.0);
-                appendPathJoin(right, points[index - 1], start, end, widths[index - 1] * 0.5,
-                               widths[index] * 0.5, -1.0);
+                appendPathJoin(left, points[index - 1], start, end, widths[index - 1] * 0.5, widths[index] * 0.5, 1.0);
+                appendPathJoin(right, points[index - 1], start, end, widths[index - 1] * 0.5, widths[index] * 0.5,
+                               -1.0);
                 startLeft = left.back();
                 startRight = right.back();
             }
@@ -1554,10 +1620,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
             } else {
                 std::vector<QPointF> left;
                 std::vector<QPointF> right;
-                appendPathJoin(left, start, end, points[index + 2], widths[index] * 0.5,
-                               widths[index + 1] * 0.5, 1.0);
-                appendPathJoin(right, start, end, points[index + 2], widths[index] * 0.5,
-                               widths[index + 1] * 0.5, -1.0);
+                appendPathJoin(left, start, end, points[index + 2], widths[index] * 0.5, widths[index + 1] * 0.5, 1.0);
+                appendPathJoin(right, start, end, points[index + 2], widths[index] * 0.5, widths[index + 1] * 0.5,
+                               -1.0);
                 endLeft = left.back();
                 endRight = right.back();
             }
@@ -1616,8 +1681,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     drawVia(layerId);
         };
 
-        if (!layerIndices.empty() && pathStartLayerIndex_ != layerIndices.front() &&
-            pathStartLayerIndex_ >= 0 && pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+        if (!layerIndices.empty() && pathStartLayerIndex_ != layerIndices.front() && pathStartLayerIndex_ >= 0 &&
+            pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
             drawViaAt(points.front(), pathViasBetween(pathStartLayerIndex_, layerIndices.front()),
                       pathConfig_.layers[layerIndices.front()].layer);
         for (std::size_t index = 1; index < layerIndices.size(); ++index) {
@@ -1629,8 +1694,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         // A layer switch after the latest click has no pending segment yet.
         // Show its via immediately so the pending layer transition is visible.
         if (!pathPoints_.empty() && QLineF(pathPoints_.back(), pathEnd_).length() <= 1.0e-9) {
-            const auto previous = pathSegmentLayerIndices_.empty() ? pathStartLayerIndex_
-                                                                   : pathSegmentLayerIndices_.back();
+            const auto previous =
+                pathSegmentLayerIndices_.empty() ? pathStartLayerIndex_ : pathSegmentLayerIndices_.back();
             if (previous != pathLayerIndex_ && pathLayerIndex_ >= 0 &&
                 pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
                 drawViaAt(pathPoints_.back(), pathViasBetween(previous, pathLayerIndex_),
@@ -1749,6 +1814,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
+    void clearPathHandleSelections(LayoutPathItem *except = nullptr) {
+        if (!scene())
+            return;
+        for (auto *item : scene()->items()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (path && path != except)
+                path->clearHandleSelection();
+        }
+    }
+
     void cancelManualPathDrag() {
         if (manualPathDragHandle_ >= 0) {
             if (auto *path = findPathItem(manualPathDragId_))
@@ -1785,14 +1860,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
             if (pathHandleAt(event->pos())) {
                 // Let the path item handle it and keep the figure menu closed.
                 suppressFigureContextMenu_ = true;
-            } else if (hit && hit->data(2).toString().isEmpty()) {
-                if (auto *figure = layoutFigureOwner(hit)) {
-                    if (!figure->isSelected())
-                        selectLayoutFigure(figure);
-                    cyclingFigureId_ = static_cast<ice::ObjectId>(figure->data(0).toULongLong());
-                    hasLastFigureClick_ = true;
-                    event->accept();
-                    return;
+            } else {
+                clearPathHandleSelections();
+                if (hit && hit->data(2).toString().isEmpty()) {
+                    if (auto *figure = layoutFigureOwner(hit)) {
+                        if (!figure->isSelected())
+                            selectLayoutFigure(figure);
+                        cyclingFigureId_ = static_cast<ice::ObjectId>(figure->data(0).toULongLong());
+                        hasLastFigureClick_ = true;
+                        event->accept();
+                        return;
+                    }
                 }
             }
         }
@@ -1835,11 +1913,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     }
                     draggingInstance_ = nullptr;
                     movingItem_ = nullptr;
+                    clearPathHandleSelections(bestPath);
                     if (!bestPath->isSelected()) {
                         if (!(event->modifiers() & Qt::ControlModifier))
                             scene()->clearSelection();
                         bestPath->setSelected(true);
                     }
+                    bestPath->selectHandle(bestHandle);
                     bestPath->beginHandleDrag(bestHandle);
                     manualPathDragId_ = bestPath->pathId();
                     manualPathDragHandle_ = bestHandle;
@@ -1996,6 +2076,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
             }
         }
         if ((tool_ == Tool::select || tool_ == Tool::move) && event->button() == Qt::LeftButton) {
+            // A press that did not land on a path point clears the point
+            // selection, so Delete applies to the whole figure again.
+            clearPathHandleSelections();
             auto *clicked = itemAt(event->pos());
             if (auto *owner = textPolygonOwner(clicked))
                 clicked = owner;
@@ -2173,7 +2256,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
         if (tool_ == Tool::select) {
             auto *hovered = itemAt(event->pos());
             const auto hoveredKind = hovered ? hovered->data(3).toString() : QString();
-            if (hoveredKind == QStringLiteral("polygon-handle")) {
+            if (pathHandleAt(event->pos())) {
+                setCursor(Qt::SizeAllCursor);
+            } else if (hoveredKind == QStringLiteral("polygon-handle")) {
                 setCursor(Qt::SizeAllCursor);
             } else if (hoveredKind == QStringLiteral("resize-handle")) {
                 switch (hovered->data(5).toInt()) {
@@ -2542,6 +2627,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     auto *traceAction = menu.addAction(QStringLiteral("Traced net"));
                     auto *rotateAction = menu.addAction(QStringLiteral("Rotate"));
                     auto *flipAction = menu.addAction(QStringLiteral("Flip"));
+                    QAction *flattenAction = nullptr;
+                    if (dynamic_cast<LayoutPathItem *>(figure))
+                        flattenAction = menu.addAction(QStringLiteral("Flatten to Polygon"));
                     menu.addSeparator();
                     auto *copyAction = menu.addAction(QStringLiteral("Copy"));
                     auto *cutAction = menu.addAction(QStringLiteral("Cut"));
@@ -2558,6 +2646,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
                         action = FigureContextAction::rotate;
                     else if (chosen == flipAction)
                         action = FigureContextAction::flip;
+                    else if (flattenAction && chosen == flattenAction)
+                        action = FigureContextAction::flattenPath;
                     else if (chosen == copyAction)
                         action = FigureContextAction::copy;
                     else if (chosen == cutAction)

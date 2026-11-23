@@ -1515,6 +1515,137 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
 }
 
 namespace {
+Polygon flattenedPathSegment(const LayoutPoint &start, const LayoutPoint &end, Coordinate width,
+                             Coordinate startExtension, Coordinate endExtension) {
+    const double dx = static_cast<double>(end.x) - static_cast<double>(start.x);
+    const double dy = static_cast<double>(end.y) - static_cast<double>(start.y);
+    const double length = std::hypot(dx, dy);
+    if (length <= 0.0 || width <= 0)
+        return {};
+    const double ux = dx / length;
+    const double uy = dy / length;
+    const double nx = -uy;
+    const double ny = ux;
+    const double half = static_cast<double>(width) * 0.5;
+    const auto extendedStart =
+        LayoutPoint{static_cast<Coordinate>(std::llround(start.x - ux * static_cast<double>(startExtension))),
+                    static_cast<Coordinate>(std::llround(start.y - uy * static_cast<double>(startExtension)))};
+    const auto extendedEnd =
+        LayoutPoint{static_cast<Coordinate>(std::llround(end.x + ux * static_cast<double>(endExtension))),
+                    static_cast<Coordinate>(std::llround(end.y + uy * static_cast<double>(endExtension)))};
+    const auto point = [&](const LayoutPoint &base, double normalSign) {
+        return Point{static_cast<Coordinate>(std::llround(base.x + nx * half * normalSign)),
+                     static_cast<Coordinate>(std::llround(base.y + ny * half * normalSign))};
+    };
+    return {point(extendedStart, 1.0), point(extendedEnd, 1.0), point(extendedEnd, -1.0), point(extendedStart, -1.0)};
+}
+} // namespace
+
+std::vector<ObjectId> flattenLayoutPath(Project &project, ObjectId cellId, ObjectId shapeId) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    auto shapeIt = cell.shapes.find(shapeId);
+    if (shapeIt == cell.shapes.end())
+        throw ProjectError("layout.shape", "Shape does not exist");
+    const auto &path = shapeIt->second;
+    if (!path.isPath())
+        throw ProjectError("layout.flatten", "Only path shapes can be flattened");
+
+    const auto requireLayer = [&](ObjectId layerId) {
+        if (!project.layers.contains(layerId))
+            throw ProjectError("layout.flatten", "Path references a layer that does not exist");
+    };
+    const auto segmentCount = path.centerline.size() - 1;
+    // A join is filled as if both segments were extended by half the larger
+    // width. For right-angle routes this reproduces the mitered corner shown by
+    // the canvas, and it also keeps the copper reaching the far edge of a via.
+    const auto pointExtent = [&](std::size_t index) {
+        Coordinate extent = 0;
+        if (index > 0 && index - 1 < segmentCount)
+            extent = std::max(extent, path.widthForSegment(index - 1));
+        if (index < segmentCount)
+            extent = std::max(extent, path.widthForSegment(index));
+        return extent > 0 ? extent : path.width;
+    };
+
+    std::map<ObjectId, MultiPolygon> layerPolygons;
+    for (std::size_t index = 0; index < segmentCount; ++index) {
+        const auto width = path.widthForSegment(index);
+        if (width <= 0)
+            throw ProjectError("layout.flatten", "Path segment has no width");
+        const auto layerId = path.layerForSegment(index);
+        requireLayer(layerId);
+        const auto startExtension = index == 0 ? 0 : pointExtent(index) / 2;
+        const auto endExtension = index + 1 == segmentCount ? 0 : pointExtent(index + 1) / 2;
+        auto polygon = flattenedPathSegment(path.centerline[index], path.centerline[index + 1], width, startExtension,
+                                            endExtension);
+        if (polygon.size() >= 3)
+            layerPolygons[layerId].push_back(std::move(polygon));
+    }
+    for (std::size_t index = 0; index < path.pointVias.size() && index < path.centerline.size(); ++index) {
+        if (path.pointVias[index].empty())
+            continue;
+        const auto half = pointExtent(index) / 2;
+        if (half <= 0)
+            continue;
+        const auto &point = path.centerline[index];
+        const Polygon square{{point.x - half, point.y - half},
+                             {point.x + half, point.y - half},
+                             {point.x + half, point.y + half},
+                             {point.x - half, point.y + half}};
+        std::set<ObjectId> seenLayers;
+        for (const auto viaLayer : path.pointVias[index]) {
+            requireLayer(viaLayer);
+            if (seenLayers.insert(viaLayer).second)
+                layerPolygons[viaLayer].push_back(square);
+        }
+    }
+    if (layerPolygons.empty())
+        throw ProjectError("layout.flatten", "Path does not contain flattenable geometry");
+
+    struct FlattenedPolygon {
+        ObjectId layer = 0;
+        Polygon polygon;
+    };
+    GeometryKernel kernel;
+    std::vector<FlattenedPolygon> flattened;
+    for (auto &[layerId, polygons] : layerPolygons) {
+        auto merged = kernel.booleanOp(polygons, {}, BooleanOperation::union_);
+        merged = kernel.cleanup(merged);
+        for (auto &polygon : merged) {
+            if (polygon.size() >= 3)
+                flattened.push_back({layerId, std::move(polygon)});
+        }
+    }
+    if (flattened.empty())
+        throw ProjectError("layout.flatten", "Path does not contain flattenable geometry");
+
+    const auto net = path.net;
+    const auto routedConnection = path.routedConnection;
+    cell.shapes.erase(shapeIt);
+    if (routedConnection != 0) {
+        if (auto connection = cell.plannedConnections.find(routedConnection);
+            connection != cell.plannedConnections.end())
+            connection->second.routed = false;
+    }
+
+    std::vector<ObjectId> resultIds;
+    resultIds.reserve(flattened.size());
+    for (auto &entry : flattened) {
+        const auto id = project.nextId();
+        const auto bounds = GeometryKernel::bounds(entry.polygon);
+        std::vector<LayoutPoint> points;
+        points.reserve(entry.polygon.size());
+        for (const auto &point : entry.polygon)
+            points.push_back({point.x, point.y});
+        Shape shape{id, entry.layer, net, bounds, std::move(points)};
+        shape.name = nextShapeName(cell, "Polygon");
+        cell.shapes.emplace(id, std::move(shape));
+        resultIds.push_back(id);
+    }
+    return resultIds;
+}
+
+namespace {
 std::vector<std::string> buildSchematicNetlistImpl(const Project &project, ObjectId cellId,
                                                    std::vector<std::string> *notes, SchematicNetlistMode mode,
                                                    double geometryScale, bool flattenHierarchy,

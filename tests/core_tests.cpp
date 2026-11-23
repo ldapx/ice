@@ -4157,6 +4157,75 @@ TEST_CASE("layout paths persist and move as one shape") {
     std::filesystem::remove(gds);
 }
 
+TEST_CASE("layout paths flatten to polygons on every used layer") {
+    ice::Project project;
+    project.identity = "flatten-path-test";
+    project.name = "flatten-path-test";
+    const auto metal1 = ice::addLayer(project, "Metal1", 1);
+    const auto metal2 = ice::addLayer(project, "Metal2", 2);
+    const auto via1 = ice::addLayer(project, "Via1", 3);
+    const auto cell = ice::createLayoutCell(project, "top");
+
+    const auto pathId = project.nextId();
+    ice::Shape path{pathId, metal1, std::nullopt, {0, -200, 1200, 400}, {}};
+    path.centerline = {{0, 0}, {1000, 0}, {1000, 1000}};
+    path.segmentLayers = {metal1, metal2};
+    path.pointVias = {{}, {via1}, {}};
+    path.width = 300;
+    path.segmentWidths = {200, 300};
+    project.layoutCells.at(cell).shapes.emplace(pathId, path);
+    REQUIRE(project.validate().empty());
+
+    const auto resultIds = ice::flattenLayoutPath(project, cell, pathId);
+    REQUIRE(resultIds.size() == 3);
+    const auto &flatCell = project.layoutCells.at(cell);
+    CHECK(flatCell.shapes.find(pathId) == flatCell.shapes.end());
+    CHECK(project.validate().empty());
+
+    std::map<ice::ObjectId, ice::Rect> boundsByLayer;
+    for (const auto resultId : resultIds) {
+        const auto &shape = flatCell.shapes.at(resultId);
+        CHECK(!shape.isPath());
+        CHECK(shape.centerline.empty());
+        CHECK(shape.segmentLayers.empty());
+        CHECK(shape.segmentWidths.empty());
+        CHECK(shape.pointVias.empty());
+        CHECK(shape.polygon.size() >= 3);
+        CHECK(shape.rectangle.valid());
+        CHECK(shape.name.starts_with("Polygon"));
+        boundsByLayer.emplace(shape.layer, shape.rectangle);
+    }
+    REQUIRE(boundsByLayer.contains(metal1));
+    REQUIRE(boundsByLayer.contains(metal2));
+    REQUIRE(boundsByLayer.contains(via1));
+    // Each segment reaches the middle of the via square, and the via itself is
+    // a path-width square on its own layer.
+    CHECK(boundsByLayer.at(metal1).x + boundsByLayer.at(metal1).width == 1150);
+    CHECK(boundsByLayer.at(metal2).y == -150);
+    CHECK(boundsByLayer.at(via1).x == 850);
+    CHECK(boundsByLayer.at(via1).y == -150);
+    CHECK(boundsByLayer.at(via1).width == 300);
+    CHECK(boundsByLayer.at(via1).height == 300);
+
+    // A single-layer path becomes one polygon, and its outside corner extends
+    // by half the path width like the mitered canvas outline.
+    const auto elbowId = project.nextId();
+    ice::Shape elbow{elbowId, metal1, std::nullopt, {0, 1900, 1200, 1100}, {}};
+    elbow.centerline = {{0, 2000}, {1000, 2000}, {1000, 3000}};
+    elbow.width = 200;
+    project.layoutCells.at(cell).shapes.emplace(elbowId, elbow);
+    REQUIRE(project.validate().empty());
+    const auto elbowResults = ice::flattenLayoutPath(project, cell, elbowId);
+    REQUIRE(elbowResults.size() == 1);
+    const auto &elbowPolygon = project.layoutCells.at(cell).shapes.at(elbowResults.front());
+    CHECK(elbowPolygon.layer == metal1);
+    CHECK(!elbowPolygon.isPath());
+    CHECK(elbowPolygon.rectangle.x == 0);
+    CHECK(elbowPolygon.rectangle.y == 1900);
+    CHECK(elbowPolygon.rectangle.x + elbowPolygon.rectangle.width == 1100);
+    CHECK(elbowPolygon.rectangle.y + elbowPolygon.rectangle.height == 3000);
+}
+
 TEST_CASE("flattened GDS export preserves child geometry") {
     ice::Project project;
     project.identity = "flatten-export-test";

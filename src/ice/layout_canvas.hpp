@@ -64,7 +64,7 @@ class LayoutCanvas : public QGraphicsView {
   public:
     enum class Tool { select, move, path, rectangle, polygon, port, placeDevice, ruler, text, textPolygon };
     // Entries of the right-click menu shown on a selected layout figure.
-    enum class FigureContextAction { traceNet, rotate, flip, copy, cut, paste, deleteShape };
+    enum class FigureContextAction { traceNet, rotate, flip, flattenPath, copy, cut, paste, deleteShape };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
