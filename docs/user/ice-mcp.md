@@ -100,6 +100,7 @@ and ask the user to rebuild/restart ICE.
 | `schematic_add_pin` | Add a pin to an existing symbol. |
 | `schematic_add_net` | Connect two or more pin ids or `<instance>.<pin>` names into a net. |
 | `schematic_netlist` | Return the SPICE netlist generated from a schematic. |
+| `schematic_wrap` | Wrap selected instances into a generated hierarchical child block. |
 | `schematic_add_instance` | Place a symbol instance by id or symbol name. |
 | `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. Use `bus_mode="flatten"` for buses. |
 | `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
@@ -134,6 +135,9 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_add_net` | Create a layout net. |
 | `layout_assign_port_net` | Assign or clear a port’s net. |
 | `layout_add_instance` | Instance another layout cell. |
+| `layout_duplicate` | Duplicate layout shapes with optional offsets while preserving path segments and vias. |
+| `layout_array` | Repeat layout shapes by row/column pitch. |
+| `layout_arrange` | Align or distribute layout shapes. |
 | `layout_info` | Read a layout cell's ports, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
 | `layout_export_gds` | Export a layout cell to GDSII or OASIS, including ports and labels. Instance hierarchy is preserved unless `flatten=true`; GDSII and OASIS are written natively. |

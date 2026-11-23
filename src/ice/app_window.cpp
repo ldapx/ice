@@ -4452,29 +4452,6 @@ class DocumentWindow : public QMainWindow {
         rebuildLayoutPathGeometry(shape);
     }
 
-    static void translateLayoutShape(ice::Shape &shape, ice::Coordinate dx, ice::Coordinate dy) {
-        if (shape.isPath()) {
-            translateLayoutPath(shape, dx, dy);
-            return;
-        }
-        for (auto &point : shape.polygon) {
-            point.x += dx;
-            point.y += dy;
-        }
-        shape.rectangle.x += dx;
-        shape.rectangle.y += dy;
-    }
-
-    static std::string layoutShapeTypeName(const ice::Shape &shape) {
-        if (shape.isPath())
-            return "Path";
-        if (shape.isText())
-            return "Text";
-        if (!shape.polygon.empty())
-            return "Polygon";
-        return "Rectangle";
-    }
-
     static void rebuildLayoutPathGeometry(ice::Shape &shape) {
         if (!shape.isPath() || shape.centerline.size() < 2)
             return;
@@ -7124,49 +7101,10 @@ class DocumentWindow : public QMainWindow {
             return;
         }
 
-        ice::Rect bounds;
-        bool hasBounds = false;
-        for (const auto id : ids) {
-            const auto shape = cellIt->second.shapes.find(id);
-            if (shape == cellIt->second.shapes.end() || !shape->second.rectangle.valid())
-                continue;
-            if (!hasBounds) {
-                bounds = shape->second.rectangle;
-                hasBounds = true;
-            } else {
-                const auto right =
-                    std::max(bounds.x + bounds.width, shape->second.rectangle.x + shape->second.rectangle.width);
-                const auto top =
-                    std::max(bounds.y + bounds.height, shape->second.rectangle.y + shape->second.rectangle.height);
-                bounds.x = std::min(bounds.x, shape->second.rectangle.x);
-                bounds.y = std::min(bounds.y, shape->second.rectangle.y);
-                bounds.width = right - bounds.x;
-                bounds.height = top - bounds.y;
-            }
-        }
-        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
-        const auto dx = hasBounds ? std::max<ice::Coordinate>(grid, bounds.width + grid) : grid * 10;
-        const auto dy = ice::Coordinate{0};
-
         std::vector<ice::ObjectId> created;
         try {
             project_->execute("duplicate layout shapes", [&](ice::Project &project) {
-                auto &cell = project.layoutCells.at(activeLayoutId_);
-                std::vector<ice::Shape> sources;
-                sources.reserve(ids.size());
-                for (const auto id : ids)
-                    if (const auto shape = cell.shapes.find(id); shape != cell.shapes.end())
-                        sources.push_back(shape->second);
-                for (const auto &source : sources) {
-                    auto clone = source;
-                    clone.id = project.nextId();
-                    clone.name = ice::nextShapeName(cell, layoutShapeTypeName(clone));
-                    clone.routedConnection = 0;
-                    clone.textGroup = 0;
-                    translateLayoutShape(clone, dx, dy);
-                    created.push_back(clone.id);
-                    cell.shapes.emplace(clone.id, std::move(clone));
-                }
+                created = ice::duplicateLayoutShapes(project, activeLayoutId_, ids);
             });
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(QStringLiteral("Duplicate failed: %1").arg(QString::fromStdString(error.what())),
@@ -7242,12 +7180,7 @@ class DocumentWindow : public QMainWindow {
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         if (dialog.exec() != QDialog::Accepted)
             return;
-        std::vector<ice::Shape> sources;
-        sources.reserve(ids.size());
-        for (const auto id : ids)
-            if (const auto shape = cellIt->second.shapes.find(id); shape != cellIt->second.shapes.end())
-                sources.push_back(shape->second);
-        const auto copyCount = static_cast<std::size_t>(rows->value() * columns->value() - 1) * sources.size();
+        const auto copyCount = static_cast<std::size_t>(rows->value() * columns->value() - 1) * ids.size();
         if (copyCount > 1000) {
             QMessageBox::warning(this, QStringLiteral("Create Array"),
                                  QStringLiteral("Limit the array to 1000 copies at a time."));
@@ -7257,25 +7190,8 @@ class DocumentWindow : public QMainWindow {
         std::vector<ice::ObjectId> created;
         try {
             project_->execute("create layout array", [&](ice::Project &project) {
-                auto &cell = project.layoutCells.at(activeLayoutId_);
-                for (int row = 0; row < rows->value(); ++row) {
-                    for (int column = 0; column < columns->value(); ++column) {
-                        if (row == 0 && column == 0)
-                            continue;
-                        const auto dx = static_cast<ice::Coordinate>(column) * pitchX->value();
-                        const auto dy = static_cast<ice::Coordinate>(row) * pitchY->value();
-                        for (const auto &source : sources) {
-                            auto clone = source;
-                            clone.id = project.nextId();
-                            clone.name = ice::nextShapeName(cell, layoutShapeTypeName(clone));
-                            clone.routedConnection = 0;
-                            clone.textGroup = 0;
-                            translateLayoutShape(clone, dx, dy);
-                            created.push_back(clone.id);
-                            cell.shapes.emplace(clone.id, std::move(clone));
-                        }
-                    }
-                }
+                created = ice::arrayLayoutShapes(project, activeLayoutId_, ids, rows->value(), columns->value(),
+                                                 pitchX->value(), pitchY->value());
             });
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(
@@ -7294,100 +7210,43 @@ class DocumentWindow : public QMainWindow {
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
             return;
-        struct Entry {
-            ice::ObjectId id = 0;
-            ice::Rect rect;
-        };
-        std::vector<Entry> entries;
-        for (const auto id : selectedLayoutShapeIds(cellIt->second)) {
-            const auto shape = cellIt->second.shapes.find(id);
-            if (shape == cellIt->second.shapes.end() || shape->second.routedConnection != 0 ||
-                !shape->second.rectangle.valid())
-                continue;
-            entries.push_back({id, shape->second.rectangle});
-        }
-        const bool distribute = action == LayoutCanvas::FigureContextAction::distributeX ||
-                                action == LayoutCanvas::FigureContextAction::distributeY;
-        if ((!distribute && entries.size() < 2) || (distribute && entries.size() < 3)) {
-            statusBar()->showMessage(distribute ? QStringLiteral("Select at least three shapes to distribute")
-                                                : QStringLiteral("Select at least two shapes to align"));
+        const auto ids = selectedLayoutShapeIds(cellIt->second);
+        if (ids.empty()) {
+            statusBar()->showMessage(QStringLiteral("Select layout shapes to arrange"));
             return;
         }
-
-        ice::Coordinate minX = entries.front().rect.x;
-        ice::Coordinate minY = entries.front().rect.y;
-        ice::Coordinate maxX = entries.front().rect.x + entries.front().rect.width;
-        ice::Coordinate maxY = entries.front().rect.y + entries.front().rect.height;
-        for (const auto &entry : entries) {
-            minX = std::min(minX, entry.rect.x);
-            minY = std::min(minY, entry.rect.y);
-            maxX = std::max(maxX, entry.rect.x + entry.rect.width);
-            maxY = std::max(maxY, entry.rect.y + entry.rect.height);
+        ice::LayoutArrange operation = ice::LayoutArrange::left;
+        switch (action) {
+        case LayoutCanvas::FigureContextAction::alignLeft:
+            operation = ice::LayoutArrange::left;
+            break;
+        case LayoutCanvas::FigureContextAction::alignRight:
+            operation = ice::LayoutArrange::right;
+            break;
+        case LayoutCanvas::FigureContextAction::alignTop:
+            operation = ice::LayoutArrange::top;
+            break;
+        case LayoutCanvas::FigureContextAction::alignBottom:
+            operation = ice::LayoutArrange::bottom;
+            break;
+        case LayoutCanvas::FigureContextAction::alignCenterX:
+            operation = ice::LayoutArrange::centerHorizontal;
+            break;
+        case LayoutCanvas::FigureContextAction::alignCenterY:
+            operation = ice::LayoutArrange::centerVertical;
+            break;
+        case LayoutCanvas::FigureContextAction::distributeX:
+            operation = ice::LayoutArrange::distributeHorizontal;
+            break;
+        case LayoutCanvas::FigureContextAction::distributeY:
+            operation = ice::LayoutArrange::distributeVertical;
+            break;
+        default:
+            return;
         }
-
-        std::map<ice::ObjectId, ice::LayoutPoint> offsets;
-        if (!distribute) {
-            for (const auto &entry : entries) {
-                ice::Coordinate dx = 0;
-                ice::Coordinate dy = 0;
-                switch (action) {
-                case LayoutCanvas::FigureContextAction::alignLeft:
-                    dx = minX - entry.rect.x;
-                    break;
-                case LayoutCanvas::FigureContextAction::alignRight:
-                    dx = maxX - (entry.rect.x + entry.rect.width);
-                    break;
-                case LayoutCanvas::FigureContextAction::alignTop:
-                    dy = maxY - (entry.rect.y + entry.rect.height);
-                    break;
-                case LayoutCanvas::FigureContextAction::alignBottom:
-                    dy = minY - entry.rect.y;
-                    break;
-                case LayoutCanvas::FigureContextAction::alignCenterX:
-                    dx = (minX + maxX) / 2 - (entry.rect.x + entry.rect.width / 2);
-                    break;
-                case LayoutCanvas::FigureContextAction::alignCenterY:
-                    dy = (minY + maxY) / 2 - (entry.rect.y + entry.rect.height / 2);
-                    break;
-                default:
-                    return;
-                }
-                offsets.emplace(entry.id, ice::LayoutPoint{dx, dy});
-            }
-        } else {
-            const bool horizontal = action == LayoutCanvas::FigureContextAction::distributeX;
-            std::sort(entries.begin(), entries.end(), [horizontal](const Entry &left, const Entry &right) {
-                const auto leftCenter =
-                    horizontal ? left.rect.x + left.rect.width / 2 : left.rect.y + left.rect.height / 2;
-                const auto rightCenter =
-                    horizontal ? right.rect.x + right.rect.width / 2 : right.rect.y + right.rect.height / 2;
-                return leftCenter < rightCenter;
-            });
-            const auto first = horizontal ? entries.front().rect.x + entries.front().rect.width / 2
-                                          : entries.front().rect.y + entries.front().rect.height / 2;
-            const auto last = horizontal ? entries.back().rect.x + entries.back().rect.width / 2
-                                         : entries.back().rect.y + entries.back().rect.height / 2;
-            for (std::size_t index = 0; index < entries.size(); ++index) {
-                const auto center = horizontal ? entries[index].rect.x + entries[index].rect.width / 2
-                                               : entries[index].rect.y + entries[index].rect.height / 2;
-                const auto target =
-                    first + static_cast<ice::Coordinate>(std::llround(static_cast<double>(last - first) * index /
-                                                                      static_cast<double>(entries.size() - 1)));
-                offsets.emplace(entries[index].id, horizontal ? ice::LayoutPoint{target - center, 0}
-                                                              : ice::LayoutPoint{0, target - center});
-            }
-        }
-
         try {
             project_->execute("arrange layout shapes", [&](ice::Project &project) {
-                auto &cell = project.layoutCells.at(activeLayoutId_);
-                for (const auto &[id, offset] : offsets) {
-                    const auto shape = cell.shapes.find(id);
-                    if (shape == cell.shapes.end())
-                        continue;
-                    translateLayoutShape(shape->second, offset.x, offset.y);
-                }
-                updateRoutedConnectionPaths(project);
+                ice::arrangeLayoutShapes(project, activeLayoutId_, ids, operation);
             });
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(QStringLiteral("Arrange failed: %1").arg(QString::fromStdString(error.what())),
@@ -7396,7 +7255,7 @@ class DocumentWindow : public QMainWindow {
         }
         project_->setLastHistoryLabel("Arranged layout shapes");
         refreshProject();
-        statusBar()->showMessage(QStringLiteral("Arranged %1 shape(s)").arg(entries.size()));
+        statusBar()->showMessage(QStringLiteral("Arranged %1 shape(s)").arg(ids.size()));
     }
 
     void flipSelectedLayoutFigures() {

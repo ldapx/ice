@@ -31,6 +31,26 @@ def main() -> int:
     assert any("R1" in line for line in netlist), netlist
     assert any("C1" in line for line in netlist), netlist
 
+    layout = project.create_layout_cell("layout")
+    layout.layer("Metal1", 1)
+    rectangle = layout.rectangle("Metal1", 0, 0, 100, 100)
+    second_rectangle = layout.rectangle("Metal1", 300, 50, 50, 50)
+    duplicates = layout.duplicate([rectangle], 200, 0)
+    assert len(duplicates) == 1, duplicates
+    default_duplicates = layout.duplicate([rectangle])
+    assert len(default_duplicates) == 1, default_duplicates
+    array = layout.array([rectangle], 2, 2, 200, 150)
+    assert len(array) == 3, array
+    layout.arrange([rectangle, second_rectangle], "left")
+    assert len(layout.cell().shapes) == 7, layout.cell().shapes
+
+    wrapped = schematic.wrap([resistor, capacitor], "wrapped")
+    assert wrapped.cell != 0, wrapped
+    assert wrapped.instance != 0, wrapped
+    wrapped_cell = project.schematic_cell("wrapped")
+    assert len(wrapped_cell.instances) == 2, wrapped_cell.instances
+    assert len(wrapped_cell.nets) == 1, wrapped_cell.nets
+
     text = project.create_text_schematic_cell(
         "rc", "V1 in 0 1\nR1 in out 1k\nC1 out 0 1n\n"
     )

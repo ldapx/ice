@@ -180,6 +180,52 @@ ice::ObjectId resolveLayout(const ice::Project &project, const std::string &text
     return resolveByIdOrName(project.layoutCells, text, "layout cell");
 }
 
+ice::ObjectId resolveSchematicInstance(const ice::Project &project, ice::ObjectId cellId, const std::string &text) {
+    const auto cell = project.schematicCells.find(cellId);
+    if (cell == project.schematicCells.end())
+        argumentError("Unknown schematic cell");
+    if (const auto id = parseUnsigned(text); id && cell->second.instances.contains(*id))
+        return *id;
+    for (const auto &[id, instance] : cell->second.instances) {
+        if (instance.name == text)
+            return id;
+    }
+    argumentError("Unknown schematic instance: " + text);
+}
+
+ice::ObjectId resolveLayoutShape(const ice::Project &project, ice::ObjectId cellId, const std::string &text) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        argumentError("Unknown layout cell");
+    if (const auto id = parseUnsigned(text); id && cell->second.shapes.contains(*id))
+        return *id;
+    for (const auto &[id, shape] : cell->second.shapes) {
+        if (!shape.name.empty() && shape.name == text)
+            return id;
+    }
+    argumentError("Unknown layout shape: " + text);
+}
+
+ice::LayoutArrange parseLayoutArrange(const std::string &text) {
+    if (text == "left")
+        return ice::LayoutArrange::left;
+    if (text == "right")
+        return ice::LayoutArrange::right;
+    if (text == "top")
+        return ice::LayoutArrange::top;
+    if (text == "bottom")
+        return ice::LayoutArrange::bottom;
+    if (text == "center-horizontal" || text == "center_horizontal")
+        return ice::LayoutArrange::centerHorizontal;
+    if (text == "center-vertical" || text == "center_vertical")
+        return ice::LayoutArrange::centerVertical;
+    if (text == "distribute-horizontal" || text == "distribute_horizontal")
+        return ice::LayoutArrange::distributeHorizontal;
+    if (text == "distribute-vertical" || text == "distribute_vertical")
+        return ice::LayoutArrange::distributeVertical;
+    argumentError("Unknown layout-arrange operation: " + text);
+}
+
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const std::string &text) {
     if (const auto id = parseUnsigned(text)) {
         if (project.layoutCells.contains(*id) || project.proceduralLayouts.contains(*id))
@@ -1252,6 +1298,7 @@ void printHelp() {
               << "  schematic-set-cell-parameter <project> <cell> <name> <value>\n"
               << "  schematic-remove-cell-parameter <project> <cell> <name>\n"
               << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
+              << "  schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]\n"
               << "  schematic-validate <project> <cell>\n"
               << "  schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->\n"
               << "  schematic-remove <project> <cell> [--dry-run] [--cascade]\n"
@@ -1285,6 +1332,11 @@ void printHelp() {
               << "  layout-add-net <project> <cell> <name>\n"
               << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
               << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
+              << "  layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]\n"
+              << "  layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> "
+                 "[--x-pitch <n>] [--y-pitch <n>]\n"
+              << "  layout-arrange <project> <cell> <left|right|top|bottom|center-horizontal|center-vertical|"
+                 "distribute-horizontal|distribute-vertical> <shape> <shape> ...\n"
               << "  layout-connectivity <project> <cell>\n"
               << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
@@ -2437,6 +2489,37 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        if (command == "schematic-wrap") {
+            expectArguments(args, 4, 1000, "schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<ice::ObjectId> instances;
+            std::string childName;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--name") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for --name");
+                    childName = args[++index];
+                } else {
+                    instances.push_back(resolveSchematicInstance(project, cell, args[index]));
+                }
+            }
+            if (instances.empty())
+                argumentError("Select at least one schematic instance to wrap");
+            ice::ProjectSession session(project);
+            ice::SchematicWrapResult result;
+            session.execute("schematic-wrap", [&](ice::Project &p) {
+                result = ice::wrapSchematicInstances(p, cell, instances, childName);
+            });
+            session.save(args[1]);
+            printJson({{"cell", result.cell},
+                       {"name", session.project().schematicCells.at(result.cell).name},
+                       {"symbol", result.symbol},
+                       {"instance", result.instance},
+                       {"ports", result.ports}});
+            return 0;
+        }
+
         if (command == "schematic-netlist") {
             expectArguments(args, 3, 3, "schematic-netlist <project> <cell>");
             const auto project = ice::Project::load(args[1]);
@@ -3061,6 +3144,96 @@ int main(int argc, char **argv) {
             });
             session.save(args[1]);
             printJson({{"id", id}, {"parent", parent}, {"child", child}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "layout-duplicate") {
+            expectArguments(args, 4, 1000,
+                            "layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            std::vector<ice::ObjectId> shapes;
+            std::optional<ice::Coordinate> dx;
+            std::optional<ice::Coordinate> dy;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--dx" || args[index] == "--dy") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + args[index]);
+                    const auto option = args[index];
+                    const auto value = parseInteger(args[++index], option.c_str());
+                    (option == "--dx" ? dx : dy) = value;
+                } else {
+                    shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+                }
+            }
+            if (shapes.empty())
+                argumentError("Select at least one layout shape to duplicate");
+            ice::ProjectSession session(project);
+            std::vector<ice::ObjectId> created;
+            session.execute("layout-duplicate",
+                            [&](ice::Project &p) { created = ice::duplicateLayoutShapes(p, cell, shapes, dx, dy); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"shapes", created}});
+            return 0;
+        }
+
+        if (command == "layout-array") {
+            expectArguments(args, 4, 1000,
+                            "layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> "
+                            "[--x-pitch <n>] [--y-pitch <n>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            std::vector<ice::ObjectId> shapes;
+            int rows = 0;
+            int columns = 0;
+            ice::Coordinate columnPitch = 0;
+            ice::Coordinate rowPitch = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--rows" || args[index] == "--columns" || args[index] == "--x-pitch" ||
+                    args[index] == "--y-pitch") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + args[index]);
+                    const auto option = args[index];
+                    const auto value = parseInteger(args[++index], option.c_str());
+                    if (option == "--rows")
+                        rows = static_cast<int>(value);
+                    else if (option == "--columns")
+                        columns = static_cast<int>(value);
+                    else if (option == "--x-pitch")
+                        columnPitch = value;
+                    else
+                        rowPitch = value;
+                } else {
+                    shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+                }
+            }
+            if (shapes.empty())
+                argumentError("Select at least one layout shape to array");
+            if (rows <= 0 || columns <= 0)
+                argumentError("layout-array requires positive --rows and --columns");
+            ice::ProjectSession session(project);
+            std::vector<ice::ObjectId> created;
+            session.execute("layout-array", [&](ice::Project &p) {
+                created = ice::arrayLayoutShapes(p, cell, shapes, rows, columns, columnPitch, rowPitch);
+            });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"shapes", created}});
+            return 0;
+        }
+
+        if (command == "layout-arrange") {
+            expectArguments(args, 5, 1000, "layout-arrange <project> <cell> <operation> <shape> <shape> ...");
+            const auto project = ice::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto operation = parseLayoutArrange(args[3]);
+            std::vector<ice::ObjectId> shapes;
+            for (std::size_t index = 4; index < args.size(); ++index)
+                shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+            ice::ProjectSession session(project);
+            session.execute("layout-arrange",
+                            [&](ice::Project &p) { ice::arrangeLayoutShapes(p, cell, shapes, operation); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"operation", args[3]}, {"shapes", shapes}});
             return 0;
         }
 

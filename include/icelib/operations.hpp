@@ -132,6 +132,34 @@ std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, con
 // order and throws when the path has no flattenable geometry.
 std::vector<ObjectId> flattenLayoutPath(Project &project, ObjectId cellId, ObjectId shapeId);
 
+// Translation, duplication, arrays, and alignment for layout shapes. Shape ids
+// must refer to entries in `cellId`. Duplicates and array copies preserve
+// polygon outlines, path centerlines, per-segment layers/widths, and point
+// vias; copied routed paths become standalone paths. Duplicate offsets default
+// to one selection width plus one grid step to the right. Array pitches default
+// to the corresponding selection extent plus one grid step. Array copies are
+// limited to 100000 shapes per call.
+std::vector<ObjectId> duplicateLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                            std::optional<Coordinate> dx = std::nullopt,
+                                            std::optional<Coordinate> dy = std::nullopt);
+std::vector<ObjectId> arrayLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                        int rows, int columns, Coordinate columnPitch = 0, Coordinate rowPitch = 0);
+
+enum class LayoutArrange {
+    left,
+    right,
+    top,
+    bottom,
+    centerHorizontal,
+    centerVertical,
+    distributeHorizontal,
+    distributeVertical,
+};
+// Aligns or distributes two or more layout shapes. Distribute operations need
+// at least three shapes. Routed paths and text-polygon members are ignored.
+void arrangeLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                         LayoutArrange operation);
+
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.
 void removeSchematicCell(Project &project, ObjectId cellId);

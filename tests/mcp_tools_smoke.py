@@ -123,6 +123,7 @@ def main() -> int:
                 "schematic_add_pin",
                 "schematic_add_net",
                 "schematic_netlist",
+                "schematic_wrap",
                 "project_repair",
                 "simulation_result",
                 "simulation_signals",
@@ -149,6 +150,9 @@ def main() -> int:
                 "ice_help",
                 "layout_add_instance",
                 "layout_add_port",
+                "layout_duplicate",
+                "layout_array",
+                "layout_arrange",
                 "layout_create_procedural",
                 "layout_regenerate",
                 "layout_get_script",
@@ -245,8 +249,61 @@ def main() -> int:
             assert len(info["nets"]) == 1
             assert info["symbols"][0]["pins"]
             mcp.tool("schematic_netlist", schematic="ring_test")
+            wrapped = mcp.tool(
+                "schematic_wrap",
+                schematic="ring_test",
+                instances="I1,I2",
+                name="ring_wrapped",
+            )
+            assert wrapped["cell"], wrapped
+            assert wrapped["instance"], wrapped
+            wrapped_info = mcp.tool("schematic_info", schematic="ring_wrapped")
+            assert len(wrapped_info["instances"]) == 2, wrapped_info
+            assert len(wrapped_info["nets"]) == 1, wrapped_info
 
             mcp.tool("layout_create", name="pin_test")
+            mcp.tool("layout_create", name="arrange_test")
+            mcp.tool("layout_add_layer", name="Metal1", number=1)
+            arrange_rect = mcp.tool(
+                "layout_add_rectangle",
+                cell="arrange_test",
+                layer="Metal1",
+                x=0,
+                y=0,
+                width=100,
+                height=100,
+            )
+            arrange_rect2 = mcp.tool(
+                "layout_add_rectangle",
+                cell="arrange_test",
+                layer="Metal1",
+                x=300,
+                y=50,
+                width=50,
+                height=50,
+            )
+            duplicate = mcp.tool(
+                "layout_duplicate",
+                cell="arrange_test",
+                shapes=str(arrange_rect["id"]),
+            )
+            assert len(duplicate["shapes"]) == 1, duplicate
+            array = mcp.tool(
+                "layout_array",
+                cell="arrange_test",
+                shapes=str(arrange_rect["id"]),
+                rows=2,
+                columns=2,
+                x_pitch=200,
+                y_pitch=150,
+            )
+            assert len(array["shapes"]) == 3, array
+            mcp.tool(
+                "layout_arrange",
+                cell="arrange_test",
+                shapes=f"{arrange_rect['id']},{arrange_rect2['id']}",
+                operation="left",
+            )
             procedural = mcp.tool("layout_create_procedural", name="proc_test")
             assert procedural["generated"], procedural
             assert procedural["generated_cell"], procedural

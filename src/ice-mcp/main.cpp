@@ -1431,6 +1431,48 @@ ice::ObjectId resolveLayoutPort(const ice::LayoutCell &cell, const json &value) 
     return lookupByIdOrName(cell.ports, value, "layout port");
 }
 
+std::vector<ice::ObjectId> resolveLayoutShapes(const ice::LayoutCell &cell, const json &value) {
+    const auto entries = parseSignalListValue(value, "shapes");
+    std::vector<ice::ObjectId> ids;
+    ids.reserve(entries.size());
+    for (const auto &entry : entries)
+        ids.push_back(lookupByIdOrName(cell.shapes, json(entry), "layout shape"));
+    if (ids.empty())
+        throw ToolError("Select at least one layout shape.");
+    return ids;
+}
+
+std::vector<ice::ObjectId> resolveSchematicInstances(const ice::SchematicCell &cell, const json &value) {
+    const auto entries = parseSignalListValue(value, "instances");
+    std::vector<ice::ObjectId> ids;
+    ids.reserve(entries.size());
+    for (const auto &entry : entries)
+        ids.push_back(lookupByIdOrName(cell.instances, json(entry), "schematic instance"));
+    if (ids.empty())
+        throw ToolError("Select at least one schematic instance.");
+    return ids;
+}
+
+ice::LayoutArrange parseLayoutArrangeArgument(const std::string &text) {
+    if (text == "left")
+        return ice::LayoutArrange::left;
+    if (text == "right")
+        return ice::LayoutArrange::right;
+    if (text == "top")
+        return ice::LayoutArrange::top;
+    if (text == "bottom")
+        return ice::LayoutArrange::bottom;
+    if (text == "center-horizontal" || text == "center_horizontal")
+        return ice::LayoutArrange::centerHorizontal;
+    if (text == "center-vertical" || text == "center_vertical")
+        return ice::LayoutArrange::centerVertical;
+    if (text == "distribute-horizontal" || text == "distribute_horizontal")
+        return ice::LayoutArrange::distributeHorizontal;
+    if (text == "distribute-vertical" || text == "distribute_vertical")
+        return ice::LayoutArrange::distributeVertical;
+    throw ToolError("Unknown layout arrangement operation: " + text);
+}
+
 ice::PortDirection parsePortDirectionArgument(const std::string &text) {
     if (const auto direction = ice::parsePortDirection(text))
         return *direction;
@@ -4303,6 +4345,60 @@ class IceMcpServer {
             });
             return {{"id", id}, {"parent", parent}, {"child", child}, {"name", instanceName}};
         }
+        if (name == "layout_duplicate") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto shapes =
+                resolveLayoutShapes(session.project().layoutCells.at(cell), requiredValue(arguments, "shapes"));
+            std::optional<ice::Coordinate> dx;
+            std::optional<ice::Coordinate> dy;
+            if (const auto value = optionalInteger(arguments, "dx"))
+                dx = static_cast<ice::Coordinate>(*value);
+            if (const auto value = optionalInteger(arguments, "dy"))
+                dy = static_cast<ice::Coordinate>(*value);
+            std::vector<ice::ObjectId> created;
+            session.execute("mcp layout-duplicate", [&](ice::Project &project) {
+                created = ice::duplicateLayoutShapes(project, cell, shapes, dx, dy);
+            });
+            return {{"cell", cell}, {"shapes", created}};
+        }
+        if (name == "layout_array") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto shapes =
+                resolveLayoutShapes(session.project().layoutCells.at(cell), requiredValue(arguments, "shapes"));
+            const auto rows = static_cast<int>(requiredInteger(arguments, "rows"));
+            const auto columns = static_cast<int>(requiredInteger(arguments, "columns"));
+            const auto columnPitch = static_cast<ice::Coordinate>(optionalInteger(arguments, "x_pitch").value_or(0));
+            const auto rowPitch = static_cast<ice::Coordinate>(optionalInteger(arguments, "y_pitch").value_or(0));
+            std::vector<ice::ObjectId> created;
+            session.execute("mcp layout-array", [&](ice::Project &project) {
+                created = ice::arrayLayoutShapes(project, cell, shapes, rows, columns, columnPitch, rowPitch);
+            });
+            return {{"cell", cell}, {"shapes", created}};
+        }
+        if (name == "layout_arrange") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto shapes =
+                resolveLayoutShapes(session.project().layoutCells.at(cell), requiredValue(arguments, "shapes"));
+            const auto operation = parseLayoutArrangeArgument(requiredString(arguments, "operation"));
+            session.execute("mcp layout-arrange",
+                            [&](ice::Project &project) { ice::arrangeLayoutShapes(project, cell, shapes, operation); });
+            return {{"cell", cell}, {"operation", requiredString(arguments, "operation")}, {"shapes", shapes}};
+        }
+        if (name == "schematic_wrap") {
+            const auto cell = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
+            const auto instances = resolveSchematicInstances(session.project().schematicCells.at(cell),
+                                                             requiredValue(arguments, "instances"));
+            const auto childName = optionalString(arguments, "name");
+            ice::SchematicWrapResult result;
+            session.execute("mcp schematic-wrap", [&](ice::Project &project) {
+                result = ice::wrapSchematicInstances(project, cell, instances, childName);
+            });
+            return {{"cell", result.cell},
+                    {"name", session.project().schematicCells.at(result.cell).name},
+                    {"symbol", result.symbol},
+                    {"instance", result.instance},
+                    {"ports", result.ports}};
+        }
         if (name == "layout_review") {
             const auto itemId = resolveLayoutItem(session.project(), requiredValue(arguments, "layout"));
             const auto procedural = session.project().proceduralLayouts.find(itemId);
@@ -5258,6 +5354,12 @@ class IceMcpServer {
                             .with_description("Validate schematic connectivity, component values, PDK setup, and HDL.")
                             .with_string_param("schematic", "Schematic name or id")
                             .build());
+        tools.push_back(tool_builder("schematic_wrap")
+                            .with_description("Wrap selected schematic instances into a hierarchical child block.")
+                            .with_string_param("schematic", "Schematic name or id")
+                            .with_string_param("instances", "Comma-separated instance names or ids")
+                            .with_string_param("name", "Optional child schematic name", false)
+                            .build());
         tools.push_back(customTool(
             "schematic_import_spice",
             "Create a text SPICE cell or a drawn R/C/L/V/I/D schematic from a SPICE source. Text imports retain "
@@ -5540,6 +5642,31 @@ class IceMcpServer {
                             .with_integer_param("x", "X coordinate")
                             .with_integer_param("y", "Y coordinate")
                             .with_string_param("orientation", "Optional orientation (r0, r90, ...)", false)
+                            .build());
+        tools.push_back(
+            tool_builder("layout_duplicate")
+                .with_description("Duplicate layout shapes, preserving path segments and vias.")
+                .with_string_param("cell", "Layout cell name or id")
+                .with_string_param("shapes", "Comma-separated shape names or ids")
+                .with_integer_param("dx", "Optional X offset (defaults to one selection width plus grid)", false)
+                .with_integer_param("dy", "Optional Y offset", false)
+                .build());
+        tools.push_back(tool_builder("layout_array")
+                            .with_description("Repeat layout shapes in a rectangular array.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("shapes", "Comma-separated shape names or ids")
+                            .with_integer_param("rows", "Row count")
+                            .with_integer_param("columns", "Column count")
+                            .with_integer_param("x_pitch", "Optional column pitch", false)
+                            .with_integer_param("y_pitch", "Optional row pitch", false)
+                            .build());
+        tools.push_back(tool_builder("layout_arrange")
+                            .with_description("Align or distribute layout shapes.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("shapes", "Comma-separated shape names or ids")
+                            .with_string_param("operation",
+                                               "left, right, top, bottom, center-horizontal, center-vertical, "
+                                               "distribute-horizontal, or distribute-vertical")
                             .build());
         tools.push_back(tool_builder("layout_info")
                             .with_description("Read a layout or procedural layout's metadata and generated state.")

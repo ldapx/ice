@@ -41,7 +41,7 @@ project = icepy.new_project("demo")
 builder = project.create_layout_cell("top", "ihp.sg13g2")
 
 builder.layer("Metal1", 8)
-builder.rectangle("Metal1", 0, 0, 4000, 600)
+rect = builder.rectangle("Metal1", 0, 0, 4000, 600)
 # Purpose-specific layers retain their GDS datatype.
 builder.layer("Metal1.pin", 8, 2)
 builder.polygon(
@@ -60,11 +60,24 @@ builder.port(
 )
 builder.parameter("w", "1u")
 
+# Copies preserve path segment layers, widths, and vias.
+builder.duplicate([rect], dx=5000)
+builder.array([rect], rows=2, columns=3, x_pitch=5000, y_pitch=1000)
+rect2 = builder.rectangle("Metal1", 8000, 0, 100, 100)
+builder.arrange([rect, rect2], "left")
+
 cell = builder.cell()
 print(cell.name, len(cell.shapes), cell.bounds)
 print(project.diagnostics())
 project.save("demo")
 ```
+
+`LayoutBuilder.duplicate`, `array`, and `arrange` use the same core operations
+as the desktop editor and CLI. `duplicate` returns new shape ids and defaults
+its offset to one selection width plus one grid step. `array` returns the new
+copies. `arrange` accepts `left`, `right`, `top`, `bottom`,
+`center-horizontal`, `center-vertical`, `distribute-horizontal`, or
+`distribute-vertical`.
 
 `Project.save()` and `Project.load()` use the split project-directory
 format. The root contains `project.icepro`, `sch/*.icesch`,
@@ -266,9 +279,12 @@ package PCells.
 
 `Project.create_schematic_cell`, `create_text_schematic_cell`, and
 `create_systemverilog_cell` return a `SchematicBuilder` with `symbol`, `pin`,
-`instance`, `net`, `component`, `set_parameter`, `set_cell_parameter`, and
-`netlist`. `Project.schematic_cells`, `schematic_cell`, and
-`schematic_cell_by_id` expose parsed cell data.
+`instance`, `net`, `component`, `set_parameter`, `set_cell_parameter`,
+`netlist`, and `wrap`. `Project.schematic_cells`, `schematic_cell`, and
+`schematic_cell_by_id` expose parsed cell data. `SchematicBuilder.wrap`
+moves selected instance ids into a child schematic, returns a
+`SchematicWrapResult` with the child cell, generated symbol, parent instance,
+and port ids, and preserves internal and boundary connectivity.
 
 ```python
 builder = project.create_schematic_cell("top")
@@ -277,6 +293,8 @@ a = builder.pin(resistor, "A", "left", -50, 0)
 b = builder.pin(resistor, "B", "right", 50, 0)
 r1 = builder.instance(resistor, "R1")
 builder.set_parameter(r1, "resistance", "10k")
+wrapped = builder.wrap([r1], "wrapped")
+print(wrapped.cell, wrapped.instance)
 ```
 
 Simulation definitions use `SimulationItem`. Set the schematic id, analysis,

@@ -40,6 +40,26 @@ Orientation parseOrientation(const std::string &text) {
     return it->second;
 }
 
+LayoutArrange parseLayoutArrange(const std::string &text) {
+    if (text == "left")
+        return LayoutArrange::left;
+    if (text == "right")
+        return LayoutArrange::right;
+    if (text == "top")
+        return LayoutArrange::top;
+    if (text == "bottom")
+        return LayoutArrange::bottom;
+    if (text == "center-horizontal" || text == "center_horizontal")
+        return LayoutArrange::centerHorizontal;
+    if (text == "center-vertical" || text == "center_vertical")
+        return LayoutArrange::centerVertical;
+    if (text == "distribute-horizontal" || text == "distribute_horizontal")
+        return LayoutArrange::distributeHorizontal;
+    if (text == "distribute-vertical" || text == "distribute_vertical")
+        return LayoutArrange::distributeVertical;
+    throw ProjectError("icepy.arrange", "Unknown layout arrangement operation: " + text);
+}
+
 std::optional<Rect> cellBounds(const LayoutCell &cell) {
     Coordinate minX = std::numeric_limits<Coordinate>::max();
     Coordinate minY = std::numeric_limits<Coordinate>::max();
@@ -181,6 +201,20 @@ class LayoutBuilder {
 
     void set_device(const std::string &device) { project_->layoutCells.at(cellId_).device = device; }
 
+    std::vector<ObjectId> duplicate(const std::vector<ObjectId> &shapes, std::optional<Coordinate> dx = std::nullopt,
+                                    std::optional<Coordinate> dy = std::nullopt) {
+        return ice::duplicateLayoutShapes(*project_, cellId_, shapes, dx, dy);
+    }
+
+    std::vector<ObjectId> array(const std::vector<ObjectId> &shapes, int rows, int columns, Coordinate xPitch = 0,
+                                Coordinate yPitch = 0) {
+        return ice::arrayLayoutShapes(*project_, cellId_, shapes, rows, columns, xPitch, yPitch);
+    }
+
+    void arrange(const std::vector<ObjectId> &shapes, const std::string &operation) {
+        ice::arrangeLayoutShapes(*project_, cellId_, shapes, parseLayoutArrange(operation));
+    }
+
     LayoutCell cell() const {
         const auto it = project_->layoutCells.find(cellId_);
         if (it == project_->layoutCells.end())
@@ -285,6 +319,10 @@ class SchematicBuilder {
         return ice::buildSchematicNetlist(*project_, cellId_, nullptr,
                                           mixed ? SchematicNetlistMode::mixed : SchematicNetlistMode::analog,
                                           ice::pdkNetlistGeometryScale(cell.pdk));
+    }
+
+    SchematicWrapResult wrap(const std::vector<ObjectId> &instances, const std::string &name = {}) {
+        return ice::wrapSchematicInstances(*project_, cellId_, instances, name);
     }
 
     SchematicCell cell() const {
@@ -758,6 +796,11 @@ NB_MODULE(icepy, module) {
         .def("instance", &LayoutBuilder::instance, nb::arg("cell"), nb::arg("x"), nb::arg("y"), nb::arg("name") = "",
              nb::arg("orientation") = "r0")
         .def("parameter", &LayoutBuilder::parameter, nb::arg("name"), nb::arg("value"))
+        .def("duplicate", &LayoutBuilder::duplicate, nb::arg("shapes"), nb::arg("dx") = nb::none(),
+             nb::arg("dy") = nb::none())
+        .def("array", &LayoutBuilder::array, nb::arg("shapes"), nb::arg("rows"), nb::arg("columns"),
+             nb::arg("x_pitch") = 0, nb::arg("y_pitch") = 0)
+        .def("arrange", &LayoutBuilder::arrange, nb::arg("shapes"), nb::arg("operation"))
         .def("set_library", &LayoutBuilder::set_library, nb::arg("library"))
         .def("set_device", &LayoutBuilder::set_device, nb::arg("device"))
         .def("cell", &LayoutBuilder::cell);
@@ -797,6 +840,12 @@ NB_MODULE(icepy, module) {
         .def_rw("pins", &Net::pins)
         .def_rw("x", &Net::x)
         .def_rw("y", &Net::y);
+
+    nb::class_<SchematicWrapResult>(module, "SchematicWrapResult")
+        .def_ro("cell", &SchematicWrapResult::cell)
+        .def_ro("symbol", &SchematicWrapResult::symbol)
+        .def_ro("instance", &SchematicWrapResult::instance)
+        .def_ro("ports", &SchematicWrapResult::ports);
 
     nb::class_<SchematicCell>(module, "SchematicCell")
         .def(nb::init<>())
@@ -853,6 +902,7 @@ NB_MODULE(icepy, module) {
         .def("set_cell_parameter", &SchematicBuilder::set_cell_parameter, nb::arg("name"), nb::arg("value"))
         .def("remove_cell_parameter", &SchematicBuilder::remove_cell_parameter, nb::arg("name"))
         .def("netlist", &SchematicBuilder::netlist, nb::arg("mixed") = false)
+        .def("wrap", &SchematicBuilder::wrap, nb::arg("instances"), nb::arg("name") = "")
         .def("cell", &SchematicBuilder::cell);
 
     nb::class_<SimulationDerivedTrace>(module, "SimulationDerivedTrace")

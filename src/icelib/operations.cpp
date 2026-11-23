@@ -1887,6 +1887,236 @@ std::vector<ObjectId> flattenLayoutPath(Project &project, ObjectId cellId, Objec
 }
 
 namespace {
+void translateShapeGeometry(Shape &shape, Coordinate dx, Coordinate dy) {
+    if (shape.isPath()) {
+        for (auto &point : shape.centerline) {
+            point.x += dx;
+            point.y += dy;
+        }
+        for (auto &point : shape.polygon) {
+            point.x += dx;
+            point.y += dy;
+        }
+        shape.rectangle.x += dx;
+        shape.rectangle.y += dy;
+        return;
+    }
+    for (auto &point : shape.polygon) {
+        point.x += dx;
+        point.y += dy;
+    }
+    shape.rectangle.x += dx;
+    shape.rectangle.y += dy;
+}
+
+std::string layoutShapeType(const Shape &shape) {
+    if (shape.isPath())
+        return "Path";
+    if (shape.isText())
+        return "Text";
+    if (!shape.polygon.empty())
+        return "Polygon";
+    return "Rectangle";
+}
+
+Rect selectionBounds(const LayoutCell &cell, const std::vector<ObjectId> &shapeIds) {
+    Rect bounds;
+    bool any = false;
+    for (const auto id : shapeIds) {
+        const auto shape = cell.shapes.find(id);
+        if (shape == cell.shapes.end() || !shape->second.rectangle.valid())
+            continue;
+        if (!any) {
+            bounds = shape->second.rectangle;
+            any = true;
+            continue;
+        }
+        const auto right = std::max(bounds.x + bounds.width, shape->second.rectangle.x + shape->second.rectangle.width);
+        const auto top = std::max(bounds.y + bounds.height, shape->second.rectangle.y + shape->second.rectangle.height);
+        bounds.x = std::min(bounds.x, shape->second.rectangle.x);
+        bounds.y = std::min(bounds.y, shape->second.rectangle.y);
+        bounds.width = right - bounds.x;
+        bounds.height = top - bounds.y;
+    }
+    return any ? bounds : Rect{};
+}
+
+std::vector<Shape> selectedShapeCopies(const LayoutCell &cell, const std::vector<ObjectId> &shapeIds) {
+    std::set<ObjectId> seen;
+    std::vector<Shape> shapes;
+    shapes.reserve(shapeIds.size());
+    for (const auto id : shapeIds) {
+        if (!seen.insert(id).second)
+            continue;
+        const auto shape = cell.shapes.find(id);
+        if (shape == cell.shapes.end())
+            throw ProjectError("layout.shape", "Shape does not exist");
+        shapes.push_back(shape->second);
+    }
+    if (shapes.empty())
+        throw ProjectError("layout.arrange", "Select at least one layout shape");
+    return shapes;
+}
+} // namespace
+
+std::vector<ObjectId> duplicateLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                            std::optional<Coordinate> dx, std::optional<Coordinate> dy) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    const auto sources = selectedShapeCopies(cell, shapeIds);
+    Coordinate actualDx = dx.value_or(0);
+    Coordinate actualDy = dy.value_or(0);
+    if (!dx && !dy) {
+        const auto bounds = selectionBounds(cell, shapeIds);
+        actualDx = bounds.valid() ? bounds.width + std::max<Coordinate>(1, project.grid) : project.grid * 10;
+        actualDy = 0;
+    }
+    std::vector<ObjectId> result;
+    result.reserve(sources.size());
+    for (const auto &source : sources) {
+        auto clone = source;
+        clone.id = project.nextId();
+        clone.name = nextShapeName(cell, layoutShapeType(clone));
+        clone.routedConnection = 0;
+        clone.textGroup = 0;
+        translateShapeGeometry(clone, actualDx, actualDy);
+        result.push_back(clone.id);
+        cell.shapes.emplace(clone.id, std::move(clone));
+    }
+    return result;
+}
+
+std::vector<ObjectId> arrayLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                                        int rows, int columns, Coordinate columnPitch, Coordinate rowPitch) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    if (rows <= 0 || columns <= 0)
+        throw ProjectError("layout.array", "Array rows and columns must be positive");
+    const auto sources = selectedShapeCopies(cell, shapeIds);
+    const auto gridCells = static_cast<std::int64_t>(rows) * static_cast<std::int64_t>(columns);
+    if (gridCells > 1 && (gridCells - 1) * static_cast<std::int64_t>(sources.size()) > 100000)
+        throw ProjectError("layout.array", "Array would create more than 100000 shapes");
+    const auto bounds = selectionBounds(cell, shapeIds);
+    const auto step = std::max<Coordinate>(1, project.grid);
+    const auto pitchX = columnPitch > 0 ? columnPitch : (bounds.valid() ? bounds.width + step : step * 10);
+    const auto pitchY = rowPitch > 0 ? rowPitch : (bounds.valid() ? bounds.height + step : step * 10);
+
+    std::vector<ObjectId> result;
+    result.reserve(static_cast<std::size_t>((gridCells - 1) * static_cast<std::int64_t>(sources.size())));
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            if (row == 0 && column == 0)
+                continue;
+            const auto dx = static_cast<Coordinate>(column) * pitchX;
+            const auto dy = static_cast<Coordinate>(row) * pitchY;
+            for (const auto &source : sources) {
+                auto clone = source;
+                clone.id = project.nextId();
+                clone.name = nextShapeName(cell, layoutShapeType(clone));
+                clone.routedConnection = 0;
+                clone.textGroup = 0;
+                translateShapeGeometry(clone, dx, dy);
+                result.push_back(clone.id);
+                cell.shapes.emplace(clone.id, std::move(clone));
+            }
+        }
+    }
+    return result;
+}
+
+void arrangeLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
+                         LayoutArrange operation) {
+    auto &cell = require(project.layoutCells, cellId, "layout.cell", "Layout cell does not exist");
+    struct Entry {
+        ObjectId id = 0;
+        Rect rect;
+    };
+    std::vector<Entry> entries;
+    std::set<ObjectId> seen;
+    for (const auto id : shapeIds) {
+        if (!seen.insert(id).second)
+            continue;
+        const auto shape = cell.shapes.find(id);
+        if (shape == cell.shapes.end())
+            throw ProjectError("layout.shape", "Shape does not exist");
+        if (shape->second.routedConnection != 0 || shape->second.textGroup != 0 || !shape->second.rectangle.valid())
+            continue;
+        entries.push_back({id, shape->second.rectangle});
+    }
+    const bool distribute =
+        operation == LayoutArrange::distributeHorizontal || operation == LayoutArrange::distributeVertical;
+    if ((!distribute && entries.size() < 2) || (distribute && entries.size() < 3))
+        throw ProjectError("layout.arrange", distribute ? "Select at least three shapes to distribute"
+                                                        : "Select at least two shapes to align");
+
+    Coordinate minX = entries.front().rect.x;
+    Coordinate minY = entries.front().rect.y;
+    Coordinate maxX = entries.front().rect.x + entries.front().rect.width;
+    Coordinate maxY = entries.front().rect.y + entries.front().rect.height;
+    for (const auto &entry : entries) {
+        minX = std::min(minX, entry.rect.x);
+        minY = std::min(minY, entry.rect.y);
+        maxX = std::max(maxX, entry.rect.x + entry.rect.width);
+        maxY = std::max(maxY, entry.rect.y + entry.rect.height);
+    }
+
+    std::map<ObjectId, LayoutPoint> offsets;
+    if (!distribute) {
+        for (const auto &entry : entries) {
+            Coordinate dx = 0;
+            Coordinate dy = 0;
+            switch (operation) {
+            case LayoutArrange::left:
+                dx = minX - entry.rect.x;
+                break;
+            case LayoutArrange::right:
+                dx = maxX - (entry.rect.x + entry.rect.width);
+                break;
+            case LayoutArrange::top:
+                dy = maxY - (entry.rect.y + entry.rect.height);
+                break;
+            case LayoutArrange::bottom:
+                dy = minY - entry.rect.y;
+                break;
+            case LayoutArrange::centerHorizontal:
+                dx = (minX + maxX) / 2 - (entry.rect.x + entry.rect.width / 2);
+                break;
+            case LayoutArrange::centerVertical:
+                dy = (minY + maxY) / 2 - (entry.rect.y + entry.rect.height / 2);
+                break;
+            default:
+                throw ProjectError("layout.arrange", "Invalid alignment operation");
+            }
+            offsets.emplace(entry.id, LayoutPoint{dx, dy});
+        }
+    } else {
+        const bool horizontal = operation == LayoutArrange::distributeHorizontal;
+        std::sort(entries.begin(), entries.end(), [horizontal](const Entry &left, const Entry &right) {
+            const auto leftCenter = horizontal ? left.rect.x + left.rect.width / 2 : left.rect.y + left.rect.height / 2;
+            const auto rightCenter =
+                horizontal ? right.rect.x + right.rect.width / 2 : right.rect.y + right.rect.height / 2;
+            return leftCenter < rightCenter;
+        });
+        const auto first = horizontal ? entries.front().rect.x + entries.front().rect.width / 2
+                                      : entries.front().rect.y + entries.front().rect.height / 2;
+        const auto last = horizontal ? entries.back().rect.x + entries.back().rect.width / 2
+                                     : entries.back().rect.y + entries.back().rect.height / 2;
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            const auto center = horizontal ? entries[index].rect.x + entries[index].rect.width / 2
+                                           : entries[index].rect.y + entries[index].rect.height / 2;
+            const auto target = first + static_cast<Coordinate>(std::llround(static_cast<double>(last - first) * index /
+                                                                             static_cast<double>(entries.size() - 1)));
+            offsets.emplace(entries[index].id,
+                            horizontal ? LayoutPoint{target - center, 0} : LayoutPoint{0, target - center});
+        }
+    }
+
+    for (const auto &[id, offset] : offsets) {
+        const auto shape = cell.shapes.find(id);
+        if (shape != cell.shapes.end())
+            translateShapeGeometry(shape->second, offset.x, offset.y);
+    }
+}
+
+namespace {
 std::vector<std::string> buildSchematicNetlistImpl(const Project &project, ObjectId cellId,
                                                    std::vector<std::string> *notes, SchematicNetlistMode mode,
                                                    double geometryScale, bool flattenHierarchy,

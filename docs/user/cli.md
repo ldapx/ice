@@ -60,6 +60,7 @@ ice-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
 ice-cli schematic-set-cell-parameter <project> <cell> <name> <value>
 ice-cli schematic-remove-cell-parameter <project> <cell> <name>
 ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
+ice-cli schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]
 ice-cli schematic-validate <project> <cell>
 ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
 ice-cli schematic-hdl-ports <project> <cell>
@@ -101,6 +102,13 @@ The generic `Ports` library includes `Input`, `Output`, and the bidirectional
 "nets":[{"name":"out","pins":["R1.1","C1.1"]}]}`
 and commits the whole circuit atomically. `schematic-validate` checks
 connectivity, component values, PDK setup, and mixed-signal hierarchy.
+`schematic-wrap` takes one or more instance names or ids, creates a child
+schematic containing them, generates a hierarchical block symbol, and replaces
+the selection with one block instance. Internal nets move into the child;
+boundary nets become child port instances and matching block pins. The response
+reports the child cell, generated symbol, parent instance, and port instance
+ids. `--name` sets the child schematic name; an existing name gets a numeric
+suffix.
 
 `schematic-import-spice` creates a text SPICE cell, or a drawn R/C/L/V/I/D
 schematic with `--mode drawn`. `--mode auto` chooses drawn only when the source
@@ -179,6 +187,9 @@ ice-cli layout-remove-port <project> <cell> <port>
 ice-cli layout-add-net <project> <cell> <name>
 ice-cli layout-assign-port-net <project> <cell> <port> <net|none>
 ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
+ice-cli layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]
+ice-cli layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> [--x-pitch <n>] [--y-pitch <n>]
+ice-cli layout-arrange <project> <cell> <operation> <shape> <shape> ...
 ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
@@ -192,6 +203,16 @@ Port options are `--direction input|output|inout|power|ground`, `--side
 left|right|top|bottom`, `--net <name-or-id>`, `--label <text>`, `--hidden`,
 `--locked`, and for updates `--layer`, `--unlocked`, `--visible`, `--name`, `--x`, `--y`,
 `--width`, and `--height`. A port layer cannot be cleared. Coordinates are integer database units.
+
+`layout-duplicate` copies shapes by name or id. Path copies retain their
+centerline, per-segment layers and widths, and point vias; automatically routed
+copies become standalone paths. Without offsets it places the copies one
+selection width plus one grid step to the right. `layout-array` repeats the
+selected shapes by row and column pitch, defaulting each pitch to the selection
+extent plus one grid step. `layout-arrange` accepts `left`, `right`, `top`,
+`bottom`, `center-horizontal`, `center-vertical`, `distribute-horizontal`, or
+`distribute-vertical`. These operations are also available in the GUI and
+Python, and are transactional when invoked through the CLI session.
 
 `layout-get-script` and `layout-set-script` read and replace a procedural
 layout's Python source without regenerating it. `layout-remove` accepts either

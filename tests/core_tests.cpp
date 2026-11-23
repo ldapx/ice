@@ -4226,6 +4226,64 @@ TEST_CASE("layout paths flatten to polygons on every used layer") {
     CHECK(elbowPolygon.rectangle.y + elbowPolygon.rectangle.height == 3000);
 }
 
+TEST_CASE("layout shape duplicate array and arrange operations are canonical") {
+    ice::Project project;
+    project.identity = "layout-arrange-test";
+    project.name = "layout-arrange-test";
+    project.grid = 10;
+    const auto layer = ice::addLayer(project, "Metal1", 1);
+    const auto cell = ice::createLayoutCell(project, "top");
+
+    const auto rectangle = ice::addRectangle(project, cell, layer, ice::Rect{0, 0, 100, 100});
+    const auto duplicate = ice::duplicateLayoutShapes(project, cell, {rectangle}, 200, 0);
+    REQUIRE(duplicate.size() == 1);
+    CHECK(project.layoutCells.at(cell).shapes.at(duplicate.front()).rectangle.x == 200);
+    const auto defaultDuplicate = ice::duplicateLayoutShapes(project, cell, {rectangle});
+    REQUIRE(defaultDuplicate.size() == 1);
+    CHECK(project.layoutCells.at(cell).shapes.at(defaultDuplicate.front()).rectangle.x == 110);
+
+    const auto array = ice::arrayLayoutShapes(project, cell, {rectangle}, 2, 2, 300, 200);
+    REQUIRE(array.size() == 3);
+    bool foundRight = false;
+    bool foundUp = false;
+    bool foundCorner = false;
+    for (const auto id : array) {
+        const auto rect = project.layoutCells.at(cell).shapes.at(id).rectangle;
+        foundRight = foundRight || (rect.x == 300 && rect.y == 0);
+        foundUp = foundUp || (rect.x == 0 && rect.y == 200);
+        foundCorner = foundCorner || (rect.x == 300 && rect.y == 200);
+    }
+    CHECK(foundRight);
+    CHECK(foundUp);
+    CHECK(foundCorner);
+
+    const auto pathId = project.nextId();
+    ice::Shape path{pathId, layer, std::nullopt, {0, 500, 200, 200}, {}};
+    path.centerline = {{0, 500}, {100, 600}};
+    path.width = 20;
+    path.segmentWidths = {20};
+    path.segmentLayers = {layer};
+    project.layoutCells.at(cell).shapes.emplace(pathId, path);
+    const auto pathDuplicate = ice::duplicateLayoutShapes(project, cell, {pathId}, 50, 25);
+    REQUIRE(pathDuplicate.size() == 1);
+    const auto &copiedPath = project.layoutCells.at(cell).shapes.at(pathDuplicate.front());
+    CHECK(copiedPath.isPath());
+    CHECK(copiedPath.centerline.size() == 2);
+    CHECK(copiedPath.centerline.front().x == 50);
+    CHECK(copiedPath.centerline.front().y == 525);
+    CHECK((copiedPath.segmentWidths == std::vector<ice::Coordinate>{20}));
+    CHECK((copiedPath.segmentLayers == std::vector<ice::ObjectId>{layer}));
+
+    const auto left = ice::addRectangle(project, cell, layer, ice::Rect{0, 1000, 100, 100});
+    const auto right = ice::addRectangle(project, cell, layer, ice::Rect{400, 1100, 50, 100});
+    ice::arrangeLayoutShapes(project, cell, {left, right}, ice::LayoutArrange::left);
+    CHECK(project.layoutCells.at(cell).shapes.at(left).rectangle.x == 0);
+    CHECK(project.layoutCells.at(cell).shapes.at(right).rectangle.x == 0);
+    ice::arrangeLayoutShapes(project, cell, {left, right}, ice::LayoutArrange::bottom);
+    CHECK(project.layoutCells.at(cell).shapes.at(left).rectangle.y == 1000);
+    CHECK(project.layoutCells.at(cell).shapes.at(right).rectangle.y == 1000);
+}
+
 TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
     ice::Project project;
     project.identity = "wrap-schematic-test";
