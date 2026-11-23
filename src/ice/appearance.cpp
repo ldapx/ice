@@ -1,14 +1,52 @@
 #include "appearance.hpp"
 
+#include "ui_colors.hpp"
+
 #include <QApplication>
 #include <QColor>
 #include <QGuiApplication>
+#include <QPainter>
+#include <QPen>
+#include <QProxyStyle>
 #include <QSettings>
 #include <QStyle>
 #include <QStyleHints>
+#include <QStyleOption>
+
+#include <algorithm>
 
 namespace ice {
 namespace {
+
+// Closes the tab with the same restrained X that the lucide icon set uses,
+// tinted from the active palette instead of the style's stock cross.
+class IceStyle : public QProxyStyle {
+  public:
+    explicit IceStyle(const QString &baseKey) : QProxyStyle(baseKey) {}
+
+    void drawPrimitive(PrimitiveElement element, const QStyleOption *option, QPainter *painter,
+                       const QWidget *widget) const override {
+        if (element != PE_IndicatorTabClose) {
+            QProxyStyle::drawPrimitive(element, option, painter, widget);
+            return;
+        }
+        if (!option || !painter)
+            return;
+        const auto color = uiColor((option->state & State_MouseOver) ? UiColor::Text1 : UiColor::Text2);
+        const auto side = std::min(option->rect.width(), option->rect.height());
+        const auto inset = std::max(3, side / 4);
+        const auto rect = option->rect.adjusted(inset, inset, -inset, -inset);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        QPen pen(color);
+        pen.setWidthF(1.3);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        painter->drawLine(rect.topLeft(), rect.bottomRight());
+        painter->drawLine(rect.topRight(), rect.bottomLeft());
+        painter->restore();
+    }
+};
 
 constexpr auto kAppearanceKey = "appearance/mode";
 
@@ -60,6 +98,8 @@ QPalette systemPalette() {
 }
 
 } // namespace
+
+QStyle *createAppStyle() { return new IceStyle(QStringLiteral("Fusion")); }
 
 AppearanceMode loadAppearanceMode() {
     QSettings settings;

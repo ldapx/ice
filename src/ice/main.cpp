@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
     app.setOrganizationName(QStringLiteral("ICE"));
     app.setApplicationName(QStringLiteral("ICE"));
     app.setApplicationVersion(QString::fromStdString(ice::version()));
-    QApplication::setStyle(QStringLiteral("Fusion"));
+    QApplication::setStyle(ice::createAppStyle());
     const auto appearance = ice::loadAppearanceMode();
     ice::applyAppearance(appearance);
 
