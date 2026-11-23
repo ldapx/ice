@@ -1224,8 +1224,8 @@ void validatePortForCell(const Project &project, const LayoutCell &cell, const P
         throw ProjectError("layout.port.label", "Port label must not be empty");
     if (!port.rectangle.valid())
         throw ProjectError("layout.port", "Port rectangle must have positive dimensions");
-    if (!project.layers.contains(port.layer))
-        throw ProjectError("layout.layer", "Layer does not exist");
+    if (port.layer == 0 || !project.layers.contains(port.layer))
+        throw ProjectError("layout.layer", "Port layer does not exist");
     if (port.net != 0 && !cell.nets.contains(port.net))
         throw ProjectError("layout.port.net", "Port references a missing layout net");
     const auto wanted = normalizedLayoutName(port.name);

@@ -440,11 +440,13 @@ void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const
                                                 ice::Rect{minX, minY, maxX - minX, maxY - minY}, std::move(polygon)});
     }
     for (const auto &sourcePort : sourcePorts) {
+        const auto existing = existingPorts.find(sourcePort.name);
+        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
+        if (sourcePort.layer == 0)
+            continue;
         const auto layerId = layerIdFor(sourcePort.layer, sourcePort.datatype);
         if (layerId == 0)
             continue;
-        const auto existing = existingPorts.find(sourcePort.name);
-        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
         ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;
@@ -474,12 +476,14 @@ void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const 
         layerNames[{layer.number, layer.datatype}] = layer.name;
     std::map<std::pair<int, int>, ice::ObjectId> layerIds;
     for (const auto &sourcePort : sourcePorts) {
+        const auto existing = existingPorts.find(sourcePort.name);
+        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
+        if (sourcePort.layer == 0)
+            continue;
         const auto layerId = layoutDeviceLayerId(project, layerNames, layerIds, sourcePort.layer, sourcePort.datatype,
                                                  cell.pdk, cell.stack);
         if (layerId == 0)
             continue;
-        const auto existing = existingPorts.find(sourcePort.name);
-        const auto id = existing == existingPorts.end() ? project.nextId() : existing->second.id;
         ice::Port port{id, sourcePort.name, layerId, sourcePort.rectangle};
         port.direction = sourcePort.direction;
         port.side = sourcePort.side;

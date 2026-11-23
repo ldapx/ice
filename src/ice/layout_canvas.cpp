@@ -1250,12 +1250,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
         cancelRectangleDrawing();
         clearRuler();
         clearLayoutNetHighlight();
-        if (pinDrawPreview_) {
-            scene()->removeItem(pinDrawPreview_);
-            delete pinDrawPreview_;
-            pinDrawPreview_ = nullptr;
+        if (portDrawPreview_) {
+            scene()->removeItem(portDrawPreview_);
+            delete portDrawPreview_;
+            portDrawPreview_ = nullptr;
         }
-        pinDrawing_ = false;
+        portDrawing_ = false;
         polygonActive_ = false;
         polygonPoints_.clear();
         polygonCursor_ = {};
@@ -1408,9 +1408,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) override {
         textPolygonPlaced_ = std::move(callback);
     }
-    void setPinPlacedCallback(LayoutPinPlacedCallback callback) override { pinPlaced_ = std::move(callback); }
-    void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) override {
-        instancePinActivated_ = std::move(callback);
+    void setPortPlacedCallback(LayoutPortPlacedCallback callback) override { portPlaced_ = std::move(callback); }
+    void setInstancePortActivatedCallback(LayoutInstancePortActivatedCallback callback) override {
+        instancePortActivated_ = std::move(callback);
     }
 
     void setPlannedDeviceActivatedCallback(LayoutPlannedDeviceActivatedCallback callback) override {
@@ -1819,14 +1819,14 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
-        if (tool_ == Tool::pin && event->button() == Qt::LeftButton) {
+        if (tool_ == Tool::port && event->button() == Qt::LeftButton) {
             if (readOnly_) {
                 QApplication::beep();
                 event->accept();
                 return;
             }
-            pinDrawing_ = true;
-            pinDrawStart_ = snapPosition(mapToScene(event->pos()));
+            portDrawing_ = true;
+            portDrawStart_ = snapPosition(mapToScene(event->pos()));
             const auto previewColor = rectangleStyle_.color;
             QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 45),
                                 rectangleStyle_.pattern);
@@ -1834,7 +1834,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 previewBrush = QBrush(Qt::NoBrush);
             QPen previewPen(previewColor, 1.0, Qt::DashLine);
             previewPen.setCosmetic(true);
-            pinDrawPreview_ = scene()->addRect(QRectF(pinDrawStart_, pinDrawStart_), previewPen, previewBrush);
+            portDrawPreview_ = scene()->addRect(QRectF(portDrawStart_, portDrawStart_), previewPen, previewBrush);
             event->accept();
             return;
         }
@@ -1881,8 +1881,26 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     event->accept();
                     return;
                 }
-                const auto point = snapPosition(mapToScene(event->pos()));
+                auto point = snapPosition(mapToScene(event->pos()));
                 if (!pathActive_) {
+                    // Starting on a port uses that port's layer and center so
+                    // paths connect to the port interface without extra setup.
+                    auto *hit = itemAt(event->pos());
+                    while (hit && hit->data(2).toString() != QStringLiteral("layout-port") &&
+                           hit->data(3).toString() != QStringLiteral("instance-port"))
+                        hit = hit->parentItem();
+                    if (hit) {
+                        const auto layerId = static_cast<ice::ObjectId>(hit->data(6).toULongLong());
+                        for (std::size_t index = 0; index < pathConfig_.layers.size(); ++index) {
+                            if (pathConfig_.layers[index].layer != layerId)
+                                continue;
+                            pathLayerIndex_ = static_cast<int>(index);
+                            if (pathLayerChanged_)
+                                pathLayerChanged_(pathConfig_.layers[index].layer, pathConfig_.layers[index].name);
+                            break;
+                        }
+                        point = snapPosition(hit->sceneBoundingRect().center());
+                    }
                     const auto minimum = currentPathMinimumWidth();
                     pathWidth_ = minimum > 0 ? minimum : 200;
                     pathActive_ = true;
@@ -2033,7 +2051,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 return;
             }
             // Move the owning figure even when the press lands on a child item
-            // such as a pin caption, which itself is not movable.
+            // such as a port caption, which itself is not movable.
             movingItem_ = clickedFigure ? clickedFigure : clicked;
             if (movingItem_)
                 movingStartPosition_ = movingItem_->pos();
@@ -2181,8 +2199,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
-        if (pinDrawing_ && pinDrawPreview_) {
-            pinDrawPreview_->setRect(QRectF(pinDrawStart_, snapPosition(mapToScene(event->pos()))).normalized());
+        if (portDrawing_ && portDrawPreview_) {
+            portDrawPreview_->setRect(QRectF(portDrawStart_, snapPosition(mapToScene(event->pos()))).normalized());
             event->accept();
             return;
         }
@@ -2274,17 +2292,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
             event->accept();
             return;
         }
-        if (pinDrawing_ && event->button() == Qt::LeftButton) {
+        if (portDrawing_ && event->button() == Qt::LeftButton) {
             const auto end = snapPosition(mapToScene(event->pos()));
-            const auto rectangle = QRectF(pinDrawStart_, end).normalized();
-            if (pinDrawPreview_) {
-                scene()->removeItem(pinDrawPreview_);
-                delete pinDrawPreview_;
-                pinDrawPreview_ = nullptr;
+            const auto rectangle = QRectF(portDrawStart_, end).normalized();
+            if (portDrawPreview_) {
+                scene()->removeItem(portDrawPreview_);
+                delete portDrawPreview_;
+                portDrawPreview_ = nullptr;
             }
-            pinDrawing_ = false;
-            if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && pinPlaced_)
-                pinPlaced_(pinDrawStart_, end);
+            portDrawing_ = false;
+            if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && portPlaced_)
+                portPlaced_(portDrawStart_, end);
             event->accept();
             return;
         }
@@ -2395,9 +2413,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
             auto *hit = itemAt(event->pos());
             while (hit && !hit->data(3).isValid())
                 hit = hit->parentItem();
-            if (hit && hit->data(3).toString() == QStringLiteral("instance-pin")) {
-                if (instancePinActivated_)
-                    instancePinActivated_(hit->data(4).toULongLong(), hit->data(5).toULongLong());
+            if (hit && hit->data(3).toString() == QStringLiteral("instance-port")) {
+                if (instancePortActivated_)
+                    instancePortActivated_(hit->data(4).toULongLong(), hit->data(5).toULongLong());
                 event->accept();
                 return;
             }
@@ -2511,7 +2529,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
-             tool_ == Tool::polygon || tool_ == Tool::pin || tool_ == Tool::ruler || tool_ == Tool::text ||
+             tool_ == Tool::polygon || tool_ == Tool::port || tool_ == Tool::ruler || tool_ == Tool::text ||
              tool_ == Tool::textPolygon)) {
             if (tool_ == Tool::rectangle) {
                 // Escape aborts the rectangle being drawn but leaves the tool
@@ -2542,12 +2560,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
     void abortActiveDrawing() {
         cancelRectangleDrawing();
         cancelManualPathDrag();
-        if (pinDrawPreview_) {
-            scene()->removeItem(pinDrawPreview_);
-            delete pinDrawPreview_;
-            pinDrawPreview_ = nullptr;
+        if (portDrawPreview_) {
+            scene()->removeItem(portDrawPreview_);
+            delete portDrawPreview_;
+            portDrawPreview_ = nullptr;
         }
-        pinDrawing_ = false;
+        portDrawing_ = false;
         polygonActive_ = false;
         polygonPoints_.clear();
         polygonCursor_ = {};
@@ -2792,8 +2810,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
-    // Figures are the top-level selectable layout objects (shapes, pins,
-    // paths, planned devices). Children such as pin captions and handles must
+    // Figures are the top-level selectable layout objects (shapes, ports,
+    // paths, planned devices). Children such as port captions and handles must
     // resolve to the figure that owns them.
     // Path point handles own the right-click menu (delete point), so the
     // figure menu must not steal right-clicks that land on one.
@@ -2824,7 +2842,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
             const auto kind = cursor->data(3).toString();
             if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
-                kind == QStringLiteral("instance-pin"))
+                kind == QStringLiteral("instance-port"))
                 return nullptr;
             if (cursor->data(1).toString() == QStringLiteral("layout-instance"))
                 return nullptr;
@@ -3153,8 +3171,8 @@ class LayoutCanvasImpl : public LayoutCanvas {
     LayoutPathFinishedCallback pathFinished_;
     LayoutTextPlacedCallback textPlaced_;
     LayoutTextPolygonPlacedCallback textPolygonPlaced_;
-    LayoutPinPlacedCallback pinPlaced_;
-    LayoutInstancePinActivatedCallback instancePinActivated_;
+    LayoutPortPlacedCallback portPlaced_;
+    LayoutInstancePortActivatedCallback instancePortActivated_;
     LayoutPolygonCreatedCallback polygonCreated_;
     LayoutPolygonPointMovedCallback polygonPointMoved_;
     bool polygonActive_ = false;
@@ -3162,7 +3180,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QPointF polygonCursor_;
     bool panning_ = false;
     bool drawing_ = false;
-    bool pinDrawing_ = false;
+    bool portDrawing_ = false;
     QPoint panStartPosition_;
     QPointF panStartCenterScene_;
     QPointF drawStart_;
@@ -3171,9 +3189,9 @@ class LayoutCanvasImpl : public LayoutCanvas {
     QLineEdit *rectangleSizeEditor_ = nullptr;
     QTimer *rectangleCommitTimer_ = nullptr;
     bool rectangleSizeValid_ = false;
-    QPointF pinDrawStart_;
+    QPointF portDrawStart_;
     QGraphicsRectItem *drawPreview_ = nullptr;
-    QGraphicsRectItem *pinDrawPreview_ = nullptr;
+    QGraphicsRectItem *portDrawPreview_ = nullptr;
     QGraphicsItem *movingItem_ = nullptr;
     // Remembers the last plain figure click so repeated clicks at the same
     // spot cycle through stacked figures instead of reselecting the top one.

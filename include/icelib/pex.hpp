@@ -31,7 +31,7 @@ struct PexOptions {
     // Perimeter (fringe) capacitance, in fF/um.
     double perimeterCapacitance = 0.01;
     // Extract devices from placed layout instances whose child cells carry
-    // device metadata (device-library cells with model parameters and pins).
+    // device metadata (device-library cells with model parameters and ports).
     bool extractPlacedDevices = true;
     // Extract devices recorded as planned-device metadata. Procedural layouts
     // flatten PCell geometry but keep model, parameter, and terminal-net
@@ -103,13 +103,13 @@ struct PexReport {
 // opened, edited, or simulated like any other SPICE text schematic.
 //
 // Placed devices are recognized from their device-library child cells: the
-// model parameters and child pin geometry provide the device type and
+// model parameters and child port geometry provide the device type and
 // terminals, and each terminal is matched to the overlapping parent net. If no
 // placed devices are extracted, the linked source schematic netlist can be
 // copied as a fallback.
 //
 // Conducting layers are recognized by name (metal, poly/gate, diffusion) and
-// via/contact layers by name. Shapes and pins are grouped using the same
+// via/contact layers by name. Shapes and ports are grouped using the same
 // geometric connectivity used by the layout connectivity view. Text and
 // non-drawing purpose layers are ignored.
 PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &options = {});

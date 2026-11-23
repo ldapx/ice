@@ -44,7 +44,7 @@ struct LvsReport {
     int schemaVersion = 1;
     std::string schematic;
     std::string layout;
-    // Number of top-level pins matched by normalized name.
+    // Number of top-level ports matched by normalized name.
     int portsMatched = 0;
     std::vector<LvsMismatch> mismatches;
     bool matched() const;

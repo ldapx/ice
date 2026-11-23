@@ -272,7 +272,7 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
         }
     }
 
-    // Text labels stay above geometry and below pin overlays, matching the
+    // Text labels stay above geometry and below port overlays, matching the
     // canvas z-order.
     for (const auto &shape : model.shapes) {
         if (shape.kind != LayoutPreviewShape::Kind::text || !layerVisible(shape.layer) ||
@@ -284,9 +284,10 @@ void paintModel(QPainter &painter, const LayoutPreviewModel &model, const Layout
 
     if (options.showPorts) {
         for (const auto &port : model.ports) {
-            if (!layerVisible(port.layer) || !netVisible(port.netId, false))
+            if ((!port.intrinsic && !layerVisible(port.layer)) || !netVisible(port.netId, false))
                 continue;
-            const auto style = styleFor(port.layer, styles, deviceStyles);
+            const auto style =
+                port.intrinsic ? LayerStyle{accent, Qt::SolidPattern} : styleFor(port.layer, styles, deviceStyles);
             const auto rectangle = transform.map(port.rectangle);
             QPen pen = penFor(style, options.outlineWidth);
             pen.setStyle(Qt::DashLine);
@@ -707,6 +708,7 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                     continue;
                 LayoutPreviewPort preview;
                 preview.layer = layerFor(project, port.layer);
+                preview.intrinsic = port.layer == 0;
                 const std::array<Point, 4> corners = {
                     Point{port.rectangle.x, port.rectangle.y},
                     Point{port.rectangle.x + port.rectangle.width, port.rectangle.y},
@@ -740,9 +742,9 @@ LayoutPreviewModel buildLayoutCellPreviewModel(const Project &project, const Lay
                 if (const auto device = current.plannedDevices.find(endpoint); device != current.plannedDevices.end())
                     return Point{device->second.x + device->second.width / 2,
                                  device->second.y + device->second.height / 2};
-                if (const auto pin = current.ports.find(endpoint); pin != current.ports.end())
-                    return Point{pin->second.rectangle.x + pin->second.rectangle.width / 2,
-                                 pin->second.rectangle.y + pin->second.rectangle.height / 2};
+                if (const auto port = current.ports.find(endpoint); port != current.ports.end())
+                    return Point{port->second.rectangle.x + port->second.rectangle.width / 2,
+                                 port->second.rectangle.y + port->second.rectangle.height / 2};
                 const auto instance = current.instances.find(endpoint);
                 if (instance == current.instances.end())
                     return std::nullopt;

@@ -4083,8 +4083,8 @@ class IceMcpServer {
             const auto path = requiredString(arguments, "path");
             ice::LayoutImportOptions options;
             options.topCell = optionalString(arguments, "top_cell");
-            if (const auto layer = optionalInteger(arguments, "pin_label_layer"))
-                options.pinLabelLayer = static_cast<int>(*layer);
+            if (const auto layer = optionalInteger(arguments, "port_label_layer"))
+                options.portLabelLayer = static_cast<int>(*layer);
             std::vector<std::string> warnings;
             options.warnings = &warnings;
             const auto imported = ice::LayoutInterchange::importStream(path, options);
@@ -4195,6 +4195,7 @@ class IceMcpServer {
             return {{"id", id},
                     {"cell", cell},
                     {"name", portName},
+                    {"layer", layer},
                     {"direction", ice::portDirectionName(direction)},
                     {"side", ice::portSideName(side)},
                     {"net", net == 0 ? json(nullptr) : json(net)}};
@@ -4242,6 +4243,8 @@ class IceMcpServer {
                 else
                     port.net = resolveLayoutNet(layout, arguments.at("net"));
             }
+            if (arguments.contains("layer"))
+                port.layer = resolveLayer(session.project(), arguments);
             if (arguments.contains("x"))
                 port.rectangle.x = requiredInteger(arguments, "x");
             if (arguments.contains("y"))
@@ -5433,14 +5436,15 @@ class IceMcpServer {
                             .with_integer_param("offset", "Optional entry offset", false)
                             .with_integer_param("limit", "Optional maximum entries (0 = all)", false)
                             .build());
-        tools.push_back(tool_builder("layout_import_gds")
-                            .with_description("Import a GDSII/OASIS stream into the open project and merge its "
-                                              "cells, layers, and hierarchy.")
-                            .with_string_param("path", "Input GDSII/OASIS path")
-                            .with_integer_param("pin_label_layer", "Optional GDS layer whose TEXT becomes pins", false)
-                            .with_string_param("top_cell", "Optional top structure name", false)
-                            .with_string_param("name_prefix", "Optional imported cell-name prefix", false)
-                            .build());
+        tools.push_back(
+            tool_builder("layout_import_gds")
+                .with_description("Import a GDSII/OASIS stream into the open project and merge its "
+                                  "cells, layers, and hierarchy.")
+                .with_string_param("path", "Input GDSII/OASIS path")
+                .with_integer_param("port_label_layer", "Optional GDS layer whose TEXT becomes layout ports", false)
+                .with_string_param("top_cell", "Optional top structure name", false)
+                .with_string_param("name_prefix", "Optional imported cell-name prefix", false)
+                .build());
         tools.push_back(tool_builder("layout_import_lef")
                             .with_description("Import a LEF macro into the open project as a layout cell.")
                             .with_string_param("path", "Input LEF path")
@@ -5476,10 +5480,10 @@ class IceMcpServer {
                             .with_integer_param("height", "Optional text height in database units", false)
                             .build());
         tools.push_back(tool_builder("layout_add_port")
-                            .with_description("Add a pin/port to a layout cell.")
+                            .with_description("Add a layout port. The layer association drives routing.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("name", "Port name")
-                            .with_string_param("layer", "Layer name or id")
+                            .with_string_param("layer", "Port layer name or id")
                             .with_integer_param("x", "X coordinate")
                             .with_integer_param("y", "Y coordinate")
                             .with_integer_param("width", "Width")
@@ -5488,15 +5492,15 @@ class IceMcpServer {
                             .with_string_param("side", "left, right, top, or bottom", false)
                             .with_string_param("net", "Optional layout net name or id", false)
                             .with_string_param("label", "Optional display label", false)
-                            .with_boolean_param("visible", "Show the pin", false)
-                            .with_boolean_param("locked", "Prevent editing the pin", false)
+                            .with_boolean_param("visible", "Show the port", false)
+                            .with_boolean_param("locked", "Prevent editing the port", false)
                             .build());
         tools.push_back(tool_builder("layout_list_ports")
-                            .with_description("List the pins/ports of a layout cell.")
+                            .with_description("List the ports of a layout cell.")
                             .with_string_param("cell", "Layout cell name or id")
                             .build());
         tools.push_back(tool_builder("layout_update_port")
-                            .with_description("Update a layout pin/port.")
+                            .with_description("Update a layout port.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("port", "Port name or id")
                             .with_string_param("name", "New port name", false)
@@ -5504,15 +5508,16 @@ class IceMcpServer {
                             .with_string_param("direction", "input, output, inout, power, or ground", false)
                             .with_string_param("side", "left, right, top, or bottom", false)
                             .with_string_param("net", "Layout net name or id, or null", false)
+                            .with_string_param("layer", "New port layer name or id", false)
                             .with_integer_param("x", "X coordinate", false)
                             .with_integer_param("y", "Y coordinate", false)
                             .with_integer_param("width", "Width", false)
                             .with_integer_param("height", "Height", false)
-                            .with_boolean_param("visible", "Show the pin", false)
-                            .with_boolean_param("locked", "Prevent editing the pin", false)
+                            .with_boolean_param("visible", "Show the port", false)
+                            .with_boolean_param("locked", "Prevent editing the port", false)
                             .build());
         tools.push_back(tool_builder("layout_remove_port")
-                            .with_description("Remove a layout pin/port.")
+                            .with_description("Remove a layout port.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("port", "Port name or id")
                             .build());
@@ -5522,7 +5527,7 @@ class IceMcpServer {
                             .with_string_param("name", "Net name")
                             .build());
         tools.push_back(tool_builder("layout_assign_port_net")
-                            .with_description("Assign or clear the net of a layout pin/port.")
+                            .with_description("Assign or clear the net of a layout port.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("port", "Port name or id")
                             .with_string_param("net", "Layout net name or id, or null", false)
@@ -5554,19 +5559,19 @@ class IceMcpServer {
                             .with_string_param("cell", "Layout cell name or id")
                             .build());
         tools.push_back(tool_builder("layout_export_gds")
-                            .with_description("Export a layout cell to GDSII or OASIS, including pins and labels. "
+                            .with_description("Export a layout cell to GDSII or OASIS, including ports and labels. "
                                               "Instance hierarchy is preserved unless flatten=true.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("path", "Output GDSII/OASIS path")
                             .with_boolean_param("flatten", "Flatten instance hierarchy into one structure", false)
                             .build());
         tools.push_back(tool_builder("layout_export_lef")
-                            .with_description("Export layout pin metadata as a minimal LEF macro.")
+                            .with_description("Export layout port metadata as a minimal LEF macro.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("path", "Output LEF path")
                             .build());
         tools.push_back(tool_builder("layout_export_def")
-                            .with_description("Export layout pins as a minimal DEF design.")
+                            .with_description("Export layout ports as a minimal DEF design.")
                             .with_string_param("cell", "Layout cell name or id")
                             .with_string_param("path", "Output DEF path")
                             .build());

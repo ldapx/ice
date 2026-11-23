@@ -359,7 +359,7 @@ std::vector<Diagnostic> Project::validate() const {
             }
         }
         for (const auto &[portId, port] : cell.ports) {
-            if (!layers.contains(port.layer))
+            if (port.layer == 0 || !layers.contains(port.layer))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.port.layer", "Port references a missing layer", portId});
             if (!port.rectangle.valid())
@@ -649,7 +649,6 @@ std::string Project::serialize() const {
         for (const auto &[pid, port] : cell.ports) {
             json p = {{"id", pid},
                       {"name", port.name},
-                      {"layer", port.layer},
                       {"rectangle", json::object()},
                       {"direction", portDirectionName(port.direction)},
                       {"side", portSideName(port.side)},
@@ -659,6 +658,7 @@ std::string Project::serialize() const {
                       {"locked", port.locked},
                       {"source_instance", port.sourceInstance},
                       {"source_port", port.sourcePort}};
+            p["layer"] = port.layer;
             if (port.internal)
                 p["internal"] = true;
             if (port.schematicInstance != 0)
@@ -2611,11 +2611,11 @@ BuildInfo buildInfo() {
                      "pdk_status",
                      "pdk_build",
                      "save_revision_guard",
-                     "layout_pins",
-                     "layout_pin_hierarchy",
+                     "layout_ports",
+                     "layout_port_hierarchy",
                      "layout_connectivity",
                      "layout_lef_def",
-                     "layout_pin_drc",
+                     "layout_port_drc",
                      "layout_references",
                      "layout_pex",
                      "pex_device_extraction",

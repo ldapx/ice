@@ -52,25 +52,25 @@ VerificationReport LocalVerificationAdapter::run(const Project &project, std::op
         }
         for (const auto &[portId, port] : layout.ports) {
             if (!port.rectangle.valid()) {
-                report.drc.push_back(
-                    {1, VerificationSeverity::error, "pin-area", "Pin has non-positive area", portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::error, "port-area", "Port has non-positive area", portId,
+                                      port.rectangle});
                 continue;
             }
-            if (!project.layers.contains(port.layer))
-                report.drc.push_back({1, VerificationSeverity::error, "pin-layer", "Pin references a missing layer",
+            if (port.layer == 0 || !project.layers.contains(port.layer))
+                report.drc.push_back({1, VerificationSeverity::error, "port-layer", "Port references a missing layer",
                                       portId, port.rectangle});
             if (port.rectangle.width < project.grid || port.rectangle.height < project.grid)
-                report.drc.push_back({1, VerificationSeverity::warning, "pin-min-width",
-                                      "Pin is narrower than the project grid", portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::warning, "port-min-width",
+                                      "Port is narrower than the project grid", portId, port.rectangle});
             if (port.net != 0 && !layout.nets.contains(port.net))
-                report.drc.push_back({1, VerificationSeverity::error, "pin-net", "Pin references a missing layout net",
-                                      portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::error, "port-net",
+                                      "Port references a missing layout net", portId, port.rectangle});
             if (haveContentBounds &&
                 (port.rectangle.x < contentBounds.x || port.rectangle.y < contentBounds.y ||
                  port.rectangle.x + port.rectangle.width > contentBounds.x + contentBounds.width ||
                  port.rectangle.y + port.rectangle.height > contentBounds.y + contentBounds.height))
-                report.drc.push_back({1, VerificationSeverity::warning, "pin-outside-cell",
-                                      "Pin extends outside the layout content bounds", portId, port.rectangle});
+                report.drc.push_back({1, VerificationSeverity::warning, "port-outside-cell",
+                                      "Port extends outside the layout content bounds", portId, port.rectangle});
         }
         for (auto left = layout.ports.begin(); left != layout.ports.end(); ++left) {
             for (auto right = std::next(left); right != layout.ports.end(); ++right) {
@@ -83,8 +83,8 @@ VerificationReport LocalVerificationAdapter::run(const Project &project, std::op
                 const auto &a = first.rectangle;
                 const auto &b = second.rectangle;
                 if (a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height)
-                    report.drc.push_back({1, VerificationSeverity::error, "pin-short",
-                                          "Pins '" + first.name + "' and '" + second.name +
+                    report.drc.push_back({1, VerificationSeverity::error, "port-short",
+                                          "Ports '" + first.name + "' and '" + second.name +
                                               "' on the same layer overlap but belong to different nets",
                                           right->first, b});
             }

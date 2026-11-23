@@ -716,7 +716,7 @@ class PackagePcell:
         )
         self.rect(builder, body, 0, 0, length, width)
         # Both terminals are contacted on the body itself; the pad, the contact
-        # stack, and the body must all overlap or the pin metal floats.
+        # stack, and the body must all overlap or the port metal floats.
         if body in ("nwell", "pwell"):
             # A well resistor is tapped through an ohmic diffusion tap; the well
             # itself cannot take a contact.
@@ -828,7 +828,7 @@ class PackagePcell:
             )
             plates.append((layer, inset))
         # Both terminal tabs overlap their plate; a tab flush with the inset top
-        # plate would leave a metal gap at the pin.
+        # plate would leave a metal gap at the port.
         top_layer, top_inset = plates[-1] if plates else ("met1", 0)
         self.rect(builder, "met1", -200, width // 2 - 100, 300, 200)
         self.rect(

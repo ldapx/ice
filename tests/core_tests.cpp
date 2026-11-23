@@ -2367,7 +2367,17 @@ TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
     CHECK(pins[0].x < pins[2].x);
 }
 
-TEST_CASE("layout pins and nets round-trip with required metadata") {
+TEST_CASE("layout ports require a layer") {
+    ice::Project project;
+    project.identity = "port-layer";
+    project.name = "port-layer";
+    const auto layout = ice::createLayoutCell(project, "top");
+    CHECK_THROWS_AS(ice::addPort(project, layout, "VIN", 0, ice::Rect{0, 0, 400, 400}, ice::PortDirection::input,
+                                 ice::PortSide::left),
+                    ice::ProjectError);
+}
+
+TEST_CASE("layout ports and nets round-trip with required metadata") {
     ice::Project project;
     project.identity = "pins";
     project.name = "pins";
@@ -2379,6 +2389,7 @@ TEST_CASE("layout pins and nets round-trip with required metadata") {
     CHECK(project.validate().empty());
 
     const auto &stored = project.layoutCells.at(layout).ports.at(port);
+    CHECK(stored.layer == layer);
     CHECK(stored.name == "VIN");
     CHECK(stored.direction == ice::PortDirection::input);
     CHECK(stored.side == ice::PortSide::left);
@@ -2395,6 +2406,7 @@ TEST_CASE("layout pins and nets round-trip with required metadata") {
     CHECK_THROWS_AS(ice::Project::deserialize(oldSchema), ice::ProjectError);
     const auto roundTrip = ice::Project::deserialize(serialized);
     const auto &roundTripPort = roundTrip.layoutCells.at(layout).ports.at(port);
+    CHECK(roundTripPort.layer == layer);
     CHECK(roundTripPort.name == "VIN");
     CHECK(roundTripPort.direction == ice::PortDirection::input);
     CHECK(roundTripPort.side == ice::PortSide::left);
@@ -4180,9 +4192,9 @@ TEST_CASE("flattened GDS export preserves child geometry") {
     const auto portedGds = std::filesystem::temp_directory_path() / "ice-ported-export-test.gds";
     ice::LayoutInterchange::exportFlattenedGds(project, parent, portedGds);
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 34;
-    options.pinWidth = 100;
-    options.pinHeight = 100;
+    options.portLabelLayer = 34;
+    options.portWidth = 100;
+    options.portHeight = 100;
     const auto ported = ice::LayoutInterchange::importGds(portedGds, options);
     REQUIRE(ported.layoutCells.size() == 1);
     const auto &portedCell = ported.layoutCells.begin()->second;
@@ -4217,7 +4229,7 @@ TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and p
     const auto gds = std::filesystem::temp_directory_path() / "ice-hierarchical-export-test.gds";
     ice::LayoutInterchange::exportGds(project, parent, gds);
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 34;
+    options.portLabelLayer = 34;
     const auto imported = ice::LayoutInterchange::importGds(gds, options);
     std::filesystem::remove(gds);
 

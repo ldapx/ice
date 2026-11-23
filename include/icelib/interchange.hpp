@@ -11,11 +11,11 @@
 namespace ice {
 
 struct LayoutImportOptions {
-    // GDS layer number whose TEXT elements become pins. Unset imports text as
+    // GDS layer number whose TEXT elements become layout ports. Unset imports text as
     // ordinary text shapes only.
-    std::optional<int> pinLabelLayer;
-    Coordinate pinWidth = 1000;
-    Coordinate pinHeight = 1000;
+    std::optional<int> portLabelLayer;
+    Coordinate portWidth = 1000;
+    Coordinate portHeight = 1000;
     // Optional top cell or GDSII structure name. Empty chooses the last
     // unreferenced structure, which matches the common GDS library convention.
     std::string topCell;
@@ -59,7 +59,7 @@ class LayoutInterchange {
     // name written to the stream.
     static std::string exportStream(const Project &project, ObjectId cellId, const std::filesystem::path &path,
                                     bool flatten = false);
-    // Exports pin metadata as a minimal LEF macro or DEF design. Geometry of
+    // Exports port metadata as a minimal LEF macro or DEF design. Geometry of
     // ordinary shapes is intentionally left to GDS.
     static void exportLef(const Project &project, ObjectId cellId, const std::filesystem::path &path);
     static void exportDef(const Project &project, ObjectId cellId, const std::filesystem::path &path);

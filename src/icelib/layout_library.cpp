@@ -91,7 +91,7 @@ LayoutDeviceLibrary LayoutDeviceLibrary::load(const std::filesystem::path &path)
             for (const auto &portJson : ports) {
                 LayoutDevicePort port;
                 port.name = portJson.at("name").get<std::string>();
-                port.layer = portJson.at("layer").get<int>();
+                port.layer = portJson.value("layer", 0);
                 port.datatype = portJson.value("datatype", 0);
                 const auto &boundsJson = portJson.at("rectangle");
                 const auto minX = coordinateAt(boundsJson.at("x"), "port X");
@@ -175,7 +175,7 @@ LayoutDeviceGeometry parseLayoutDeviceGeometry(const std::string &text) {
         for (const auto &portJson : document.value("ports", json::array())) {
             LayoutDevicePort port;
             port.name = portJson.at("name").get<std::string>();
-            port.layer = portJson.at("layer").get<int>();
+            port.layer = portJson.value("layer", 0);
             port.datatype = portJson.value("datatype", 0);
             const auto &boundsJson = portJson.at("rectangle");
             port.rectangle = Rect{coordinateAt(boundsJson.at("x"), "generated port X"),

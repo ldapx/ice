@@ -46,8 +46,8 @@ using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int 
 using LayoutPathFinishedCallback = std::function<void()>;
 using LayoutTextPlacedCallback = std::function<void(QPointF)>;
 using LayoutTextPolygonPlacedCallback = std::function<void(QPointF)>;
-using LayoutPinPlacedCallback = std::function<void(QPointF, QPointF)>;
-using LayoutInstancePinActivatedCallback = std::function<void(ice::ObjectId instance, ice::ObjectId port)>;
+using LayoutPortPlacedCallback = std::function<void(QPointF, QPointF)>;
+using LayoutInstancePortActivatedCallback = std::function<void(ice::ObjectId instance, ice::ObjectId port)>;
 using LayoutPlannedDeviceActivatedCallback = std::function<void(ice::ObjectId device)>;
 using LayoutPlannedConnectionActivatedCallback = std::function<void(ice::ObjectId connection)>;
 using LayoutPolygonCreatedCallback = std::function<void(const std::vector<QPointF> &points)>;
@@ -55,7 +55,7 @@ using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int
 
 class LayoutCanvas : public QGraphicsView {
   public:
-    enum class Tool { select, move, path, rectangle, polygon, pin, placeDevice, ruler, text, textPolygon };
+    enum class Tool { select, move, path, rectangle, polygon, port, placeDevice, ruler, text, textPolygon };
     // Entries of the right-click menu shown on a selected layout figure.
     enum class FigureContextAction { traceNet, rotate, flip, copy, cut, paste, deleteShape };
 
@@ -80,7 +80,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual ice::ObjectId selectedLayoutInstance() const = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
     virtual void deleteSelectedShapes() = 0;
-    // Drops any in-progress interaction (rectangle/pin preview, polygon, ruler,
+    // Drops any in-progress interaction (rectangle/port preview, polygon, ruler,
     // path drag) and then clears the scene. Use this instead of
     // scene()->clear(): the canvas keeps raw pointers to scene items used by
     // the current interaction, and clearing the scene behind its back left
@@ -108,8 +108,8 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setPathFinishedCallback(LayoutPathFinishedCallback callback) = 0;
     virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
     virtual void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) = 0;
-    virtual void setPinPlacedCallback(LayoutPinPlacedCallback callback) = 0;
-    virtual void setInstancePinActivatedCallback(LayoutInstancePinActivatedCallback callback) = 0;
+    virtual void setPortPlacedCallback(LayoutPortPlacedCallback callback) = 0;
+    virtual void setInstancePortActivatedCallback(LayoutInstancePortActivatedCallback callback) = 0;
     virtual void setPlannedDeviceActivatedCallback(LayoutPlannedDeviceActivatedCallback callback) = 0;
     virtual void setPlannedConnectionActivatedCallback(LayoutPlannedConnectionActivatedCallback callback) = 0;
     virtual void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) = 0;

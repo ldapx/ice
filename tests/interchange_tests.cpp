@@ -135,6 +135,7 @@ TEST_CASE("LEF export and import round-trip pin metadata") {
     CHECK(input->rectangle.y == 0);
     CHECK(input->rectangle.width == 1000);
     CHECK(input->rectangle.height == 500);
+    CHECK(input->layer != 0);
     CHECK(imported.layers.at(input->layer).name == "Metal1");
 }
 
@@ -227,9 +228,9 @@ TEST_CASE("GDS import recovers pin labels when a label layer is configured") {
     CHECK(withoutPins.layoutCells.begin()->second.ports.empty());
 
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 10;
-    options.pinWidth = 2000;
-    options.pinHeight = 3000;
+    options.portLabelLayer = 10;
+    options.portWidth = 2000;
+    options.portHeight = 3000;
     const auto withPins = ice::LayoutInterchange::importGds(path, options);
     std::filesystem::remove(path);
     CHECK(withPins.layoutCells.size() == 1);
@@ -339,7 +340,7 @@ TEST_CASE("OASIS import and export preserve hierarchy and pins") {
     const auto oasis = temporaryPath("hierarchy.oas");
     ice::LayoutInterchange::exportStream(project, parent, oasis, false);
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 34;
+    options.portLabelLayer = 34;
     const auto imported = ice::LayoutInterchange::importOasis(oasis, options);
     CHECK(imported.layoutCells.size() == 2);
     const auto &top = imported.layoutCells.begin()->second;

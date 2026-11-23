@@ -57,6 +57,20 @@ TEST_CASE("geometric connectivity merges same-layer and via-connected shapes") {
     CHECK(groupFor(groups, isolated) != upper);
 }
 
+TEST_CASE("ports connect to overlapping conductors on their layer") {
+    auto fixture = makeFixture();
+    const auto shape = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 500});
+    const auto pin = ice::addPort(fixture.project, fixture.cell, "VIN", fixture.metal,
+                                  ice::Rect{100, 100, 200, 200}, ice::PortDirection::input, ice::PortSide::left);
+
+    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    CHECK(groups.size() == 1);
+    if (groups.size() != 1)
+        return;
+    CHECK(groups.front().shapes == std::vector<ice::ObjectId>{shape});
+    CHECK(groups.front().ports == std::vector<ice::ObjectId>{pin});
+}
+
 TEST_CASE("via cuts only connect their own layer pair") {
     ice::Project project;
     project.identity = "via-endpoints";

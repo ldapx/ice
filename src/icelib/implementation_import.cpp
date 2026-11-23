@@ -115,7 +115,7 @@ int copyDefPins(Project &project, LayoutCell &cell, const std::filesystem::path 
     DefImportOptions options;
     options.pdk = pdk;
     options.stack = stack;
-    options.cellName = cell.name + " pins";
+    options.cellName = cell.name + " ports";
     options.importMasters = false;
     options.importRoutes = false;
     for (const auto &layer : package.pdk->layers)
@@ -170,9 +170,6 @@ int copyDefPins(Project &project, LayoutCell &cell, const std::filesystem::path 
     for (const auto &[_, port] : tempCell->second.ports) {
         if (!port.rectangle.valid())
             continue;
-        const auto layer = layerFor(port.layer);
-        if (layer == 0)
-            continue;
         const auto baseName = port.name.empty() ? port.label : port.name;
         if (baseName.empty())
             continue;
@@ -182,6 +179,9 @@ int copyDefPins(Project &project, LayoutCell &cell, const std::filesystem::path 
             name = baseName + "_" + std::to_string(suffix);
             key = normalizedName(name);
         }
+        const auto layer = layerFor(port.layer);
+        if (layer == 0)
+            continue;
         auto copy = port;
         copy.id = project.nextId();
         copy.name = name;
@@ -374,7 +374,7 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
     auto flattened = LayoutInterchange::flattenProject(imported, imported.layoutCells.begin()->first);
     copyFlattenedStream(project, cell, flattened, package, pdk, stack);
 
-    std::vector<Diagnostic> pinDiagnostics;
+    std::vector<Diagnostic> portDiagnostics;
     const auto def = findImplementationDef(projectRoot / run.directory);
     if (!def.empty()) {
         // Keep the import transactional if a malformed DEF pin section fails
@@ -384,20 +384,20 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
         try {
             const auto pins = copyDefPins(project, cell, def, package, pdk, stack);
             if (pins == 0)
-                pinDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.pins",
-                                          "No top-level pin geometry was found in " + def.filename().string() +
+                portDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.ports",
+                                          "No top-level port geometry was found in " + def.filename().string() +
                                               "; the digital device has no ports.",
                                           std::nullopt});
         } catch (const std::exception &error) {
             cell.ports = portsBackup;
             cell.nets = netsBackup;
-            pinDiagnostics.push_back(
-                {Diagnostic::Severity::warning, "implementation.pins",
-                 std::string("Unable to import top-level pins from ") + def.filename().string() + ": " + error.what(),
+            portDiagnostics.push_back(
+                {Diagnostic::Severity::warning, "implementation.ports",
+                 std::string("Unable to import top-level ports from ") + def.filename().string() + ": " + error.what(),
                  std::nullopt});
         }
     } else {
-        pinDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.pins",
+        portDiagnostics.push_back({Diagnostic::Severity::warning, "implementation.ports",
                                   "No DEF checkpoint was found; the digital device has no top-level ports.",
                                   std::nullopt});
     }
@@ -412,7 +412,7 @@ ImplementationLayoutImport importImplementationLayout(Project &project, Implemen
     ImplementationLayoutImport result;
     result.layout = cellId;
     result.referencePath = stream;
-    result.diagnostics = std::move(pinDiagnostics);
+    result.diagnostics = std::move(portDiagnostics);
     return result;
 }
 

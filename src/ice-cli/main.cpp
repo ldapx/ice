@@ -1278,9 +1278,9 @@ void printHelp() {
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
-              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [pin options]\n"
+              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]\n"
               << "  layout-list-ports <project> <cell>\n"
-              << "  layout-update-port <project> <cell> <port> [pin options]\n"
+              << "  layout-update-port <project> <cell> <port> [port options]\n"
               << "  layout-remove-port <project> <cell> <port>\n"
               << "  layout-add-net <project> <cell> <name>\n"
               << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
@@ -1289,7 +1289,7 @@ void printHelp() {
               << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
               << "  layout-export-def <project> <cell> <output.def>\n"
-              << "  layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]\n"
+              << "  layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]\n"
               << "  layout-import-lef <input.lef> <project> [--force]\n"
               << "  layout-import-def <input.def> <project> [--force]\n\n"
               << "Implementation:\n"
@@ -2979,6 +2979,8 @@ int main(int argc, char **argv) {
                 else if (option == "--net" && index + 1 < args.size()) {
                     const auto &value = args[++index];
                     port.net = value == "none" ? ice::ObjectId{0} : resolveLayoutNet(cellRef, value);
+                } else if (option == "--layer" && index + 1 < args.size()) {
+                    port.layer = resolveLayer(project, args[++index]);
                 } else if (option == "--x" && index + 1 < args.size())
                     port.rectangle.x = parseInteger(args[++index], "x");
                 else if (option == "--y" && index + 1 < args.size())
@@ -3096,7 +3098,7 @@ int main(int argc, char **argv) {
         if (command == "layout-import-gds") {
             if (args.size() < 3)
                 argumentError("Usage: ice-cli layout-import-gds <input.gds|oas> <project> "
-                              "[pin-label-layer] [--top-cell <name>] [--force]");
+                              "[port-label-layer] [--top-cell <name>] [--force]");
             ice::LayoutImportOptions options;
             bool force = false;
             for (std::size_t index = 3; index < args.size(); ++index) {
@@ -3107,7 +3109,7 @@ int main(int argc, char **argv) {
                 } else if (args[index] == "--force") {
                     force = true;
                 } else {
-                    options.pinLabelLayer = static_cast<int>(parseInteger(args[index], "pin-label-layer"));
+                    options.portLabelLayer = static_cast<int>(parseInteger(args[index], "port-label-layer"));
                 }
             }
             requireImportTargetAvailable(args[2], force);
@@ -3127,7 +3129,7 @@ int main(int argc, char **argv) {
                  {"name", project.name},
                  {"cells", project.layoutCells.size()},
                  {"top_cell", project.layoutCells.empty() ? std::string{} : project.layoutCells.begin()->second.name},
-                 {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
+                 {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
                  {"warnings", std::move(warningJson)}});
             return 0;
         }
@@ -3144,7 +3146,7 @@ int main(int argc, char **argv) {
             printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
                        {"name", project.name},
                        {"cells", project.layoutCells.size()},
-                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
             return 0;
         }
 
@@ -3160,7 +3162,7 @@ int main(int argc, char **argv) {
             printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
                        {"name", project.name},
                        {"cells", project.layoutCells.size()},
-                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
             return 0;
         }
 

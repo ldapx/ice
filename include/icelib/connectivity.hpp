@@ -11,7 +11,7 @@
 namespace ice {
 
 // Read-only geometric net extraction for a layout cell. Objects that carry the
-// same LayoutNet id are always merged. Shapes and pins that touch or overlap on
+// same LayoutNet id are always merged. Shapes and ports that touch or overlap on
 // the same layer are merged as well, providing a net view even before a full
 // device extractor is available. Pin-purpose variants such as Metal1.pin are
 // electrically connected to their Metal1 drawing layer.

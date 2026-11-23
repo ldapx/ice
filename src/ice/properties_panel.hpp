@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 class QFormLayout;
@@ -79,7 +80,9 @@ class PropertiesPanel : public QWidget {
     // text polygon), so the preview never shows the rest of the cell.
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
                         const std::string &typeName, const ice::LayoutPreviewModel &model);
-    void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName);
+    using LayoutPortLayer = std::pair<ice::ObjectId, std::string>;
+    void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName,
+                       const std::vector<LayoutPortLayer> &layers = {});
     void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model, int spacing);
 
   private:

@@ -172,9 +172,9 @@ ice-cli layout-add-layer <project> <name> <number> [datatype]
 ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
 ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
 ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
-ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [pin options]
+ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]
 ice-cli layout-list-ports <project> <cell>
-ice-cli layout-update-port <project> <cell> <port> [pin options]
+ice-cli layout-update-port <project> <cell> <port> [port options]
 ice-cli layout-remove-port <project> <cell> <port>
 ice-cli layout-add-net <project> <cell> <name>
 ice-cli layout-assign-port-net <project> <cell> <port> <net|none>
@@ -183,15 +183,15 @@ ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
 ice-cli layout-export-def <project> <cell> <output.def>
-ice-cli layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]
+ice-cli layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]
 ice-cli layout-import-lef <input.lef> <project> [--force]
 ice-cli layout-import-def <input.def> <project> [--force]
 ```
 
-Pin options are `--direction input|output|inout|power|ground`, `--side
+Port options are `--direction input|output|inout|power|ground`, `--side
 left|right|top|bottom`, `--net <name-or-id>`, `--label <text>`, `--hidden`,
-`--locked`, and for updates `--unlocked`, `--visible`, `--name`, `--x`, `--y`,
-`--width`, and `--height`. Coordinates are integer database units.
+`--locked`, and for updates `--layer`, `--unlocked`, `--visible`, `--name`, `--x`, `--y`,
+`--width`, and `--height`. A port layer cannot be cleared. Coordinates are integer database units.
 
 `layout-get-script` and `layout-set-script` read and replace a procedural
 layout's Python source without regenerating it. `layout-remove` accepts either
@@ -206,27 +206,29 @@ generated child is read-only and `layout-info` reports the same metadata,
 generation hashes, parameter values, and stale state. `layout-review` applies
 optional utilization, row-gap, composition, and plan checks to that stored
 metadata without regenerating the layout. `layout-set-parameter` edits a
-declared parameter without regenerating. `layout-export-gds` writes each visible
-pin as a boundary plus a TEXT label and preserves reachable cell hierarchy by
-default; `--flatten` writes one structure instead. The output extension selects
+declared parameter without regenerating. `layout-export-gds` projects each
+visible port as a boundary plus a TEXT label on the ICE annotation stream layer
+when the port has no process-layer hint, and preserves reachable cell hierarchy
+by default; `--flatten` writes one structure instead. The output extension selects
 GDSII (`.gds`/`.gdsii`) or OASIS (`.oas`/`.oasis`); both are written natively
 without KLayout or an intermediate file. The response reports the exported
 `top_cell` name for external DRC/P&R tools. `layout-connectivity` merges objects assigned to the same layout
 net and geometry that overlaps or touches on the same layer; via and contact
-layers also connect overlapping layers. Resistor bodies marked with a `*.res`
+layers also connect overlapping layers, and ports connect on their associated
+layers. Resistor bodies marked with a `*.res`
 purpose layer (or identified by planned-device metadata) are excluded from
 geometric net merging so their terminals do not alias. When other unlabeled
 geometry joins two explicitly named nets, the group keeps the first name and
 lists the rest under `aliases` instead of dropping them.
-`layout-export-lef` and `layout-export-def` write minimal pin metadata for
+`layout-export-lef` and `layout-export-def` write minimal port metadata for
 place-and-route exchange.
 `layout-import-gds` creates a new project from GDSII or OASIS and preserves
-structures as layout cells with instances. When a pin-label layer is given,
-matching TEXT records become pins on their containing cells. `--top-cell`
+structures as layout cells with instances. When a port-label layer is given,
+matching TEXT records become ports on their containing cells. `--top-cell`
 selects a specific top structure; otherwise the last unreferenced structure is
 used. The JSON response includes `top_cell` and any import `warnings`.
 `layout-import-lef` and `layout-import-def` create a new project from a macro or
-design's pins and nets. All three import commands refuse to replace an existing
+design's ports and nets. All three import commands refuse to replace an existing
 project unless `--force` is passed.
 
 ## Implementation runs
@@ -383,7 +385,7 @@ Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
 device types, shared device parameters including parameters missing from the
 layout, net topology from planned metadata plus shapes/routed paths/vias, and
-top-level pins matched by name, direction, and bound net. `m=` multiplicity is
+top-level ports matched by name, direction, and bound net. `m=` multiplicity is
 expanded, and renamed devices are matched by a topology fallback. The JSON report
 includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
 and `port-net` mismatch categories.

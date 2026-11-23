@@ -615,7 +615,7 @@ ice::ObjectId schematicInstanceNamed(const ice::Project &project, ice::ObjectId 
 }
 } // namespace
 
-TEST_CASE("LVS matches top-level schematic ports to layout pins") {
+TEST_CASE("LVS matches top-level schematic ports to layout ports") {
     auto fixture = makeFixture();
     const auto inputPin = addSchematicPort(fixture.project, fixture.schematic, "Input", "A", "in");
     const auto outputPin = addSchematicPort(fixture.project, fixture.schematic, "Output", "B", "out");

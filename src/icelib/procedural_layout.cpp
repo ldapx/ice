@@ -809,8 +809,10 @@ json layoutCellCatalog(const Project &project) {
                            {"y", port.rectangle.y},
                            {"width", port.rectangle.width},
                            {"height", port.rectangle.height}}}};
-            if (const auto layer = project.layers.find(port.layer); layer != project.layers.end())
-                item["layer"] = layer->second.name;
+            if (port.layer != 0) {
+                if (const auto layer = project.layers.find(port.layer); layer != project.layers.end())
+                    item["layer"] = layer->second.name;
+            }
             if (port.net != 0) {
                 if (const auto net = cell.nets.find(port.net); net != cell.nets.end())
                     item["net"] = net->second.name;
@@ -1196,7 +1198,7 @@ std::string defaultProceduralLayoutScript() {
 # layout.device("nmos", name="M1", x=0, y=0, w="1u", l="0.15u")
 # layout.connect(device_a, "G", device_b, "G", layer="Metal1", width=400, net="GATE")
 # layout.route((0, 0), (4000, 0), layer="Metal1", width=400, net="VDD")
-# layout.route(pin_a, pad_b, layers=["Metal1", "Metal2"], width=400, net="VDD")
+# layout.route(port_a, pad_b, layers=["Metal1", "Metal2"], width=400, net="VDD")
 # layout.instance("other_layout_cell", 0, 0, name="I1", orientation="r0")
 # layout.array("unit_cell", (2, 2), (2000, 2000))
 # layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)

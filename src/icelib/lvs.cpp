@@ -1635,7 +1635,7 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
     for (const auto &[name, port] : schematicPorts) {
         const auto layoutPort = layoutPorts.find(name);
         if (layoutPort == layoutPorts.end()) {
-            mismatches.push_back({1, "missing-port", "Schematic port '" + port.name + "' has no matching layout pin",
+            mismatches.push_back({1, "missing-port", "Schematic port '" + port.name + "' has no matching layout port",
                                   port.object, std::nullopt, VerificationSeverity::error});
             continue;
         }
@@ -1658,14 +1658,14 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
                 mismatches.push_back(
                     {1, "port-net",
                      "Port '" + port.name + "' is connected to net '" + port.net + "' in the schematic but '" +
-                         (layoutPort->second.net.empty() ? "an unassigned pin" : layoutPort->second.net) +
+                         (layoutPort->second.net.empty() ? "an unassigned port" : layoutPort->second.net) +
                          "' in the layout",
                      port.object, layoutPort->second.object, VerificationSeverity::error});
         }
     }
     for (const auto &[name, port] : layoutPorts) {
         if (!schematicPorts.contains(name))
-            mismatches.push_back({1, "extra-port", "Layout pin '" + port.name + "' has no matching schematic port",
+            mismatches.push_back({1, "extra-port", "Layout port '" + port.name + "' has no matching schematic port",
                                   std::nullopt, port.object, VerificationSeverity::error});
     }
     return matched;

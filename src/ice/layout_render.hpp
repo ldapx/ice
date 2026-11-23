@@ -56,6 +56,8 @@ struct LayoutPreviewPort {
     QString label;
     QString net;
     int netId = 0;
+    // True for intrinsic ICE ports with no process-layer association.
+    bool intrinsic = false;
 };
 
 struct LayoutPreviewPlannedDevice {
