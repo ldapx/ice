@@ -3537,9 +3537,10 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     const auto addKind = [&](Kind kind, const QString &label, const QString &icon, const QString &tooltip) {
         auto *button = new QPushButton(label);
         button->setCheckable(true);
-        button->setMinimumHeight(72);
-        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        setLucideIcon(button, icon, 20);
+        // Match the schematic chooser: a compact choice card, not a banner.
+        button->setFixedHeight(64);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setLucideIcon(button, icon, 18);
         button->setToolTip(tooltip);
         kindGroup_->addButton(button, static_cast<int>(kind));
         kindRow->addWidget(button, 1);
@@ -3548,7 +3549,7 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
             QStringLiteral("Create a static layout cell and draw geometry on the canvas."));
     addKind(Kind::ProceduralLayout, QStringLiteral("Procedural Layout"), QStringLiteral("notebook-text"),
             QStringLiteral("Create a layout from an editable procedural Python script."));
-    createLayout->addLayout(kindRow, 2);
+    createLayout->addLayout(kindRow, 0);
 
     kindDescription_ = new QLabel;
     kindDescription_->setWordWrap(true);
@@ -3578,7 +3579,8 @@ EmptyLayoutPanel::EmptyLayoutPanel(QWidget *parent) : QWidget(parent) {
     buttonRow->addWidget(createButton_);
     detailsLayout->addLayout(buttonRow);
     createLayout->addWidget(detailsCard, 0);
-    layout->addWidget(createSection_, 1);
+    layout->addWidget(createSection_, 0);
+    layout->addStretch(1);
 
     refreshPdks(configuredPackageInstallDirectory());
     setOpenCandidates({});
