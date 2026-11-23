@@ -20,6 +20,8 @@ std::filesystem::path iconDirectory() {
     const std::vector<std::filesystem::path> candidates = {
         std::filesystem::path(appDir) / "icons" / "lucide",
         std::filesystem::path(appDir) / "assets" / "icons" / "lucide",
+        std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "icons" / "lucide",
+        std::filesystem::path(appDir) / ".." / "Resources" / "assets" / "icons" / "lucide",
         std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "icons" / "lucide",
 #ifdef ICE_SOURCE_DIR
         std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "icons" / "lucide",
@@ -57,6 +59,8 @@ std::filesystem::path tabIconDirectory() {
     const std::vector<std::filesystem::path> candidates = {
         std::filesystem::path(appDir) / "icons" / "tabs",
         std::filesystem::path(appDir) / "assets" / "icons" / "tabs",
+        std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "icons" / "tabs",
+        std::filesystem::path(appDir) / ".." / "Resources" / "assets" / "icons" / "tabs",
         std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "icons" / "tabs",
 #ifdef ICE_SOURCE_DIR
         std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "icons" / "tabs",
@@ -171,6 +175,8 @@ QPixmap appLogo(int size) {
         const std::vector<std::filesystem::path> candidates = {
             std::filesystem::path(appDir) / "logo.png",
             std::filesystem::path(appDir) / "assets" / "logo.png",
+            std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "logo.png",
+            std::filesystem::path(appDir) / ".." / "Resources" / "assets" / "logo.png",
             std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "logo.png",
 #ifdef ICE_SOURCE_DIR
             std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "logo.png",

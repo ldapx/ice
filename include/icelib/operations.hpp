@@ -123,6 +123,14 @@ void movePolygonPoint(Project &project, ObjectId cellId, ObjectId shapeId, std::
 // Returns the ids of the new shapes and throws when the result is empty.
 std::vector<ObjectId> booleanLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
                                           BooleanOperation operation);
+// Converts a path into filled polygon shapes. Segments are grouped by their
+// drawing layer and point vias become square polygons on each via layer, so the
+// flattened geometry keeps every layer used by a multi-layer path. Overlapping
+// segment and via outlines are unioned and split into independently fillable
+// polygons. The original path is removed and an automatically routed path is
+// detached from its planned connection. Returns the new shape ids in layer
+// order and throws when the path has no flattenable geometry.
+std::vector<ObjectId> flattenLayoutPath(Project &project, ObjectId cellId, ObjectId shapeId);
 
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.
@@ -241,9 +249,23 @@ SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
                                std::string artwork = {});
 
+// Generated block symbol for a drawn, text SPICE, or SystemVerilog subcell.
+// The artwork is a titled rectangle with labeled pins; pin ids are zero and
+// callers assign project-stable ids.
+struct HierarchicalSymbolTemplate {
+    std::string artwork;
+    std::vector<Pin> pins;
+    Coordinate labelY = 0;
+};
+HierarchicalSymbolTemplate hierarchicalSymbolTemplate(const SchematicCell &source);
+
 // Pin layout used by addHierarchicalSymbol(). Pin ids are zero; callers assign
 // them from the project. Useful for tools that build their own symbol.
 std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source);
+
+// Regenerates artwork and pin positions for hierarchical symbols that predate
+// generated block artwork. Symbols with custom artwork are left untouched.
+std::size_t repairHierarchicalSymbolArtwork(Project &project);
 
 // Returns a name for a new symbol that is not used by any symbol in `cell`.
 std::string uniqueSchematicSymbolName(const SchematicCell &cell, const std::string &base);

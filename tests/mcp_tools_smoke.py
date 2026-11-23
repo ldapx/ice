@@ -207,7 +207,8 @@ def main() -> int:
             assert "layout_references" in version.get("features", []), version
             assert "project_migrate" not in version.get("features", []), version
 
-            mcp.tool("schematic_create", name="ring_test", pdk="sky130")
+            # Keep the smoke test independent of optional PDK packages.
+            mcp.tool("schematic_create", name="ring_test", pdk="generic")
             for symbol in ("inv1", "inv2"):
                 mcp.tool(
                     "schematic_add_symbol",

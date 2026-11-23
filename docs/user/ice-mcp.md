@@ -127,18 +127,18 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_add_rectangle` | Add a rectangle shape. |
 | `layout_add_text` | Add text to a layout cell on a layer. |
 | `layout_add_polygon` | Add a polygon shape. |
-| `layout_add_port` | Add a pin with required direction/side/label metadata and optional net. |
-| `layout_list_ports` | List pins and nets for a layout cell. |
-| `layout_update_port` | Update pin geometry, direction, label, visibility, lock state, or net. |
-| `layout_remove_port` | Remove a layout pin. |
+| `layout_add_port` | Add a layout port with required layer, direction/side/label metadata, and optional net. The layer drives routing. |
+| `layout_list_ports` | List ports and nets for a layout cell. |
+| `layout_update_port` | Update port geometry, direction, label, visibility, lock state, or net. |
+| `layout_remove_port` | Remove a layout port. |
 | `layout_add_net` | Create a layout net. |
-| `layout_assign_port_net` | Assign or clear a pin’s net. |
+| `layout_assign_port_net` | Assign or clear a port’s net. |
 | `layout_add_instance` | Instance another layout cell. |
-| `layout_info` | Read a layout cell's pins, nets, instances, and shape count. |
+| `layout_info` | Read a layout cell's ports, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
-| `layout_export_gds` | Export a layout cell to GDSII or OASIS, including pins and labels. Instance hierarchy is preserved unless `flatten=true`; GDSII and OASIS are written natively. |
-| `layout_export_lef` | Export pins as a minimal LEF macro. |
-| `layout_export_def` | Export pins and nets as a minimal DEF design. |
+| `layout_export_gds` | Export a layout cell to GDSII or OASIS, including ports and labels. Instance hierarchy is preserved unless `flatten=true`; GDSII and OASIS are written natively. |
+| `layout_export_lef` | Export ports as a minimal LEF macro. |
+| `layout_export_def` | Export ports and nets as a minimal DEF design. |
 | `layout_import_def` | Import a routed DEF into the open project as a layout cell. |
 | `implementation_create` | Create an RTL-to-GDS run for a PDK/stack with sources, source cells, SDC, floorplan, and execution policy. |
 | `implementation_update` | Edit a run's configuration and invalidate the selected and later stage checkpoints. |
@@ -154,7 +154,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
-| `lvs_run` | Compare a layout against a drawn, text SPICE, or SystemVerilog schematic and return the LVS report, including top-level pin matches. |
+| `lvs_run` | Compare a layout against a drawn, text SPICE, or SystemVerilog schematic and return the LVS report, including top-level port matches. |
 | `pex_run` | Extract planned, placed, and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports transient, DC, AC, OP, noise, transfer-function, mixed, and digital analyses. |
 | `simulation_update` | Update analysis fields, corners, sweeps, Monte Carlo settings, capture signals, and declarative measurements. |

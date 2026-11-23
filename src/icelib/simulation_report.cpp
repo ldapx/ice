@@ -1,5 +1,8 @@
 #include "icelib/simulation_report.hpp"
 
+#include "icelib/platform.hpp"
+#include "icelib/process.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -8,20 +11,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <random>
 #include <sstream>
 #include <system_error>
 #include <vector>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <sys/wait.h>
-#endif
 
 namespace ice {
 namespace {
@@ -63,30 +55,6 @@ void atomicWriteFile(const std::filesystem::path &path, const std::string &text)
     }
 }
 
-std::string shellQuote(const std::string &value) {
-#ifdef _WIN32
-    std::string quoted = "\"";
-    for (const char character : value) {
-        if (character == '"')
-            quoted += "\\\"";
-        else
-            quoted += character;
-    }
-    quoted += '"';
-    return quoted;
-#else
-    std::string quoted = "'";
-    for (const char character : value) {
-        if (character == '\'')
-            quoted += "'\\''";
-        else
-            quoted += character;
-    }
-    quoted += '\'';
-    return quoted;
-#endif
-}
-
 bool isRegularFile(const std::filesystem::path &path) {
     std::error_code status;
     return std::filesystem::is_regular_file(path, status) && !status;
@@ -108,12 +76,6 @@ std::filesystem::path normalizedExecutable(const std::filesystem::path &executab
         return executablePath;
     return absolute;
 }
-
-#ifdef _WIN32
-std::string pathSeparator() { return ";"; }
-#else
-std::string pathSeparator() { return ":"; }
-#endif
 
 } // namespace
 
@@ -304,51 +266,27 @@ void writeProjectReportSource(const std::filesystem::path &projectRoot, const Pr
     atomicWriteFile(projectReportPath(projectRoot, report), source);
 }
 
-std::filesystem::path currentExecutablePath() {
-#ifdef _WIN32
-    std::vector<wchar_t> buffer(32768);
-    const auto length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (length > 0 && length < buffer.size())
-        return std::filesystem::path(std::wstring(buffer.data(), length));
-#elif defined(__linux__)
-    std::error_code status;
-    auto path = std::filesystem::read_symlink("/proc/self/exe", status);
-    if (!status)
-        return path;
-#endif
-    return {};
-}
-
 std::filesystem::path reportRunnerScriptPath(const std::filesystem::path &executablePath) {
     if (const char *configured = std::getenv("ICE_REPORT_RUNNER"); configured && *configured) {
         if (isRegularFile(configured))
             return configured;
     }
 
-    const auto executable = normalizedExecutable(executablePath);
     std::vector<std::filesystem::path> candidates;
-#ifdef ICE_SOURCE_DIR
-    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "simulation" / "report_runner.py");
-#endif
-    auto directory = executable.parent_path();
-    for (int level = 0; level < 6 && !directory.empty(); ++level) {
-        candidates.push_back(directory / "assets" / "simulation" / "report_runner.py");
-        directory = directory.parent_path();
-    }
+    const auto executable = normalizedExecutable(executablePath);
     if (!executable.empty()) {
-        candidates.push_back(executable.parent_path() / ".." / "share" / "ice" / "assets" / "simulation" /
-                             "report_runner.py");
+        auto directory = executable.parent_path();
+        for (int level = 0; level < 6 && !directory.empty(); ++level) {
+            candidates.push_back(directory / "assets" / "simulation" / "report_runner.py");
+            candidates.push_back(directory / "share" / "ice" / "assets" / "simulation" / "report_runner.py");
+            directory = directory.parent_path();
+        }
     }
-    auto current = std::filesystem::current_path();
-    for (int level = 0; level < 5 && !current.empty(); ++level) {
-        candidates.push_back(current / "assets" / "simulation" / "report_runner.py");
-        current = current.parent_path();
-    }
-    candidates.push_back("/usr/share/ice/assets/simulation/report_runner.py");
-    candidates.push_back("/usr/local/share/ice/assets/simulation/report_runner.py");
-    if (const char *home = std::getenv("HOME"); home && *home)
-        candidates.push_back(std::filesystem::path(home) / ".local" / "share" / "ice" / "assets" / "simulation" /
-                             "report_runner.py");
+    for (const auto &root : applicationResourceDirectories())
+        candidates.push_back(root / "assets" / "simulation" / "report_runner.py");
+    const auto home = homeDirectory();
+    if (!home.empty())
+        candidates.push_back(home / ".local" / "share" / "ice" / "assets" / "simulation" / "report_runner.py");
     for (const auto &candidate : candidates) {
         if (isRegularFile(candidate))
             return candidate;
@@ -363,81 +301,39 @@ std::string reportPythonPath(const std::filesystem::path &executablePath) {
         if (!path.empty() && std::filesystem::is_directory(path, status) && !status)
             paths.push_back(path.string());
     };
-#ifdef ICE_SOURCE_DIR
-    appendIfDirectory(std::filesystem::path(ICE_SOURCE_DIR) / "python");
-#endif
-
+    for (const auto &root : applicationResourceDirectories()) {
+        appendIfDirectory(root / "python");
+        appendIfDirectory(root);
+    }
     const auto executable = normalizedExecutable(executablePath);
-    auto directory = executable.parent_path();
-    for (int level = 0; level < 6 && !directory.empty(); ++level) {
-        appendIfDirectory(directory);
-        appendIfDirectory(directory / "python");
-        appendIfDirectory(directory / "lib");
-        directory = directory.parent_path();
-    }
     if (!executable.empty()) {
-        appendIfDirectory(executable.parent_path() / ".." / "lib");
-        appendIfDirectory(executable.parent_path() / ".." / "share" / "ice" / "python");
+        const auto directory = executable.parent_path();
+        appendIfDirectory(directory / "python");
+        appendIfDirectory(directory / ".." / "lib");
+        appendIfDirectory(directory / ".." / "share" / "ice" / "python");
     }
-    auto current = std::filesystem::current_path();
-    for (int level = 0; level < 5 && !current.empty(); ++level) {
-        appendIfDirectory(current / "python");
-        current = current.parent_path();
+    const auto home = homeDirectory();
+    if (!home.empty()) {
+        appendIfDirectory(home / ".local" / "share" / "ice" / "python");
+        appendIfDirectory(home / ".local" / "lib");
     }
-    appendIfDirectory("/usr/share/ice/python");
-    appendIfDirectory("/usr/local/share/ice/python");
-    if (const char *home = std::getenv("HOME"); home && *home) {
-        appendIfDirectory(std::filesystem::path(home) / ".local" / "share" / "ice" / "python");
-        appendIfDirectory(std::filesystem::path(home) / ".local" / "lib");
-    }
-
     if (const char *inherited = std::getenv("PYTHONPATH"); inherited && *inherited) {
-#ifdef _WIN32
-        std::string value = inherited;
-        std::size_t start = 0;
-        while (start <= value.size()) {
-            const auto end = value.find(';', start);
-            const auto part = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
-            if (!part.empty())
-                paths.push_back(part);
-            if (end == std::string::npos)
-                break;
-            start = end + 1;
+        for (auto &entry : splitPathList(inherited)) {
+            if (!entry.empty())
+                paths.push_back(std::move(entry));
         }
-#else
-        std::string value = inherited;
-        std::size_t start = 0;
-        while (start <= value.size()) {
-            const auto end = value.find(':', start);
-            const auto part = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
-            if (!part.empty())
-                paths.push_back(part);
-            if (end == std::string::npos)
-                break;
-            start = end + 1;
-        }
-#endif
     }
 
-    const auto separator = pathSeparator();
     std::ostringstream result;
     for (std::size_t index = 0; index < paths.size(); ++index) {
         if (index)
-            result << separator;
+            result << pathListSeparator();
         result << paths[index];
     }
     return result.str();
 }
 
-std::string reportPythonExecutable() {
-    if (const char *python = std::getenv("ICE_PYTHON"); python && *python)
-        return python;
-#ifdef _WIN32
-    return "python";
-#else
-    return "python3";
-#endif
-}
+std::string reportPythonExecutable() { return defaultPythonExecutable(); }
 
 ReportProcessResult runProjectReport(const std::filesystem::path &projectRoot, const ProjectReport &report,
                                      const std::filesystem::path &executablePath, std::chrono::milliseconds timeout) {
@@ -452,55 +348,28 @@ ReportProcessResult runProjectReport(const std::filesystem::path &projectRoot, c
                                             "<prefix>/share/ice/assets/simulation/report_runner.py.");
     const auto python = reportPythonExecutable();
     const auto pythonPath = reportPythonPath(executablePath);
-
-    std::random_device random;
-    std::uniform_int_distribution<std::uint64_t> distribution;
-    std::ostringstream stem;
-    stem << "ice-report-" << std::hex << distribution(random);
-    const auto stdoutPath = std::filesystem::temp_directory_path() / (stem.str() + ".out");
-    const auto stderrPath = std::filesystem::temp_directory_path() / (stem.str() + ".err");
     const auto graphsPath = projectSimulationScriptGraphPath(root, report);
     std::error_code graphStatus;
     std::filesystem::create_directories(graphsPath.parent_path(), graphStatus);
     std::filesystem::remove(graphsPath, graphStatus);
 
-    std::ostringstream command;
-    command << "cd " << shellQuote(root.string()) << " && ";
-#ifdef _WIN32
-    _putenv_s("PYTHONPATH", pythonPath.c_str());
-    command << shellQuote(python) << " " << shellQuote(runner.string()) << " --project-root "
-            << shellQuote(root.string()) << " --report " << shellQuote(reportFile.string()) << " --graph-output "
-            << shellQuote(graphsPath.string());
-#else
-    if (timeout.count() > 0 && (isRegularFile("/usr/bin/timeout") || isRegularFile("/bin/timeout"))) {
-        const auto seconds = std::max<std::int64_t>(1, (timeout.count() + 999) / 1000);
-        command << "timeout " << seconds << "s ";
-    }
-    command << "env PYTHONPATH=" << shellQuote(pythonPath) << " " << shellQuote(python) << " "
-            << shellQuote(runner.string()) << " --project-root " << shellQuote(root.string()) << " --report "
-            << shellQuote(reportFile.string()) << " --graph-output " << shellQuote(graphsPath.string());
-#endif
-    command << " > " << shellQuote(stdoutPath.string()) << " 2> " << shellQuote(stderrPath.string());
+    ProcessOptions options;
+    options.arguments = {python,     runner.string(),     "--project-root", root.string(),
+                         "--report", reportFile.string(), "--graph-output", graphsPath.string()};
+    options.workingDirectory = root;
+    options.logTailBytes = 256 * 1024;
+    if (timeout.count() > 0)
+        options.timeoutSeconds = static_cast<int>(std::max<std::int64_t>(1, (timeout.count() + 999) / 1000));
+    if (!pythonPath.empty())
+        options.environment["PYTHONPATH"] = pythonPath;
 
+    const auto process = runProcess(options);
     ReportProcessResult result;
-    const int status = std::system(command.str().c_str());
-#ifndef _WIN32
-    if (status != -1) {
-        if (WIFEXITED(status))
-            result.exitCode = WEXITSTATUS(status);
-        else if (WIFSIGNALED(status))
-            result.exitCode = 128 + WTERMSIG(status);
-    }
-    result.timedOut = result.exitCode == 124;
-#else
-    result.exitCode = status;
-#endif
-    result.stdoutText = readFile(stdoutPath);
-    result.stderrText = readFile(stderrPath);
+    result.timedOut = process.timedOut;
+    result.exitCode = process.exitCode;
+    result.stdoutText = process.logTail;
+    result.stderrText = process.error;
     result.graphsText = readFile(graphsPath);
-    std::error_code removeStatus;
-    std::filesystem::remove(stdoutPath, removeStatus);
-    std::filesystem::remove(stderrPath, removeStatus);
     if (result.exitCode == -1 && result.stderrText.empty())
         result.stderrText = "Unable to start the report process.";
     return result;

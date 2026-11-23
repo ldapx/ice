@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <locale>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <spdlog/spdlog.h>
@@ -20,6 +21,14 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace ice {
@@ -350,7 +359,7 @@ std::vector<Diagnostic> Project::validate() const {
             }
         }
         for (const auto &[portId, port] : cell.ports) {
-            if (!layers.contains(port.layer))
+            if (port.layer == 0 || !layers.contains(port.layer))
                 result.push_back(
                     {Diagnostic::Severity::error, "layout.port.layer", "Port references a missing layer", portId});
             if (!port.rectangle.valid())
@@ -640,7 +649,6 @@ std::string Project::serialize() const {
         for (const auto &[pid, port] : cell.ports) {
             json p = {{"id", pid},
                       {"name", port.name},
-                      {"layer", port.layer},
                       {"rectangle", json::object()},
                       {"direction", portDirectionName(port.direction)},
                       {"side", portSideName(port.side)},
@@ -650,6 +658,7 @@ std::string Project::serialize() const {
                       {"locked", port.locked},
                       {"source_instance", port.sourceInstance},
                       {"source_port", port.sourcePort}};
+            p["layer"] = port.layer;
             if (port.internal)
                 p["internal"] = true;
             if (port.schematicInstance != 0)
@@ -951,6 +960,48 @@ const char *portSideName(PortSide side) {
         return "bottom";
     }
     throw ProjectError("project.port_side", "Unknown port side value");
+}
+
+std::optional<double> parseDoublePrefix(const std::string &text, std::size_t &consumed) {
+    consumed = 0;
+    std::size_t index = 0;
+    if (index < text.size() && (text[index] == '+' || text[index] == '-'))
+        ++index;
+
+    bool hasDigits = false;
+    while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+        ++index;
+        hasDigits = true;
+    }
+    if (index < text.size() && text[index] == '.') {
+        ++index;
+        while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+            ++index;
+            hasDigits = true;
+        }
+    }
+    if (!hasDigits)
+        return std::nullopt;
+
+    const auto mantissaEnd = index;
+    if (index < text.size() && (text[index] == 'e' || text[index] == 'E')) {
+        auto exponent = index + 1;
+        if (exponent < text.size() && (text[exponent] == '+' || text[exponent] == '-'))
+            ++exponent;
+        const auto exponentDigits = exponent;
+        while (exponent < text.size() && std::isdigit(static_cast<unsigned char>(text[exponent])))
+            ++exponent;
+        index = exponent > exponentDigits ? exponent : mantissaEnd;
+    }
+
+    std::istringstream stream(text.substr(0, index));
+    stream.imbue(std::locale::classic());
+    double value = 0.0;
+    stream >> value;
+    if (!stream || !stream.eof())
+        return std::nullopt;
+    consumed = index;
+    return value;
 }
 
 std::optional<PortDirection> parsePortDirection(const std::string &value) {
@@ -1519,7 +1570,8 @@ std::string projectRevision(const std::filesystem::path &root) {
         const auto size = std::filesystem::file_size(file, status);
         mix(status ? std::string("missing") : std::to_string(size));
         const auto modified = std::filesystem::last_write_time(file, status);
-        mix(status ? std::string("missing") : std::to_string(modified.time_since_epoch().count()));
+        mix(status ? std::string("missing")
+                   : std::to_string(static_cast<std::int64_t>(modified.time_since_epoch().count())));
     }
     std::ostringstream text;
     text << std::hex << hash;
@@ -1528,19 +1580,24 @@ std::string projectRevision(const std::filesystem::path &root) {
 
 class ProjectLock {
   public:
-    ProjectLock(const std::filesystem::path &root, int operation) {
-#ifndef _WIN32
+    ProjectLock(const std::filesystem::path &root, bool exclusive) {
         std::error_code status;
         std::filesystem::create_directories(root / "build", status);
         const auto path = root / "build" / ".ice-save.lock";
+#ifndef _WIN32
         descriptor_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
         if (descriptor_ >= 0) {
+            const auto operation = exclusive ? LOCK_EX : LOCK_SH;
             while (::flock(descriptor_, operation) != 0 && errno == EINTR) {
             }
         }
 #else
-        (void)root;
-        (void)operation;
+        handle_ = CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            LockFileEx(handle_, exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0, 0, MAXDWORD, MAXDWORD, &overlapped);
+        }
 #endif
     }
     ~ProjectLock() {
@@ -1548,6 +1605,12 @@ class ProjectLock {
         if (descriptor_ >= 0) {
             ::flock(descriptor_, LOCK_UN);
             ::close(descriptor_);
+        }
+#else
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
+            CloseHandle(handle_);
         }
 #endif
     }
@@ -1557,17 +1620,19 @@ class ProjectLock {
   private:
 #ifndef _WIN32
     int descriptor_ = -1;
+#else
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
 #endif
 };
 
 class ProjectSaveLock : public ProjectLock {
   public:
-    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_EX) {}
+    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, true) {}
 };
 
 class ProjectReadLock : public ProjectLock {
   public:
-    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, LOCK_SH) {}
+    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, false) {}
 };
 
 std::string recoveryHint() {
@@ -2546,11 +2611,11 @@ BuildInfo buildInfo() {
                      "pdk_status",
                      "pdk_build",
                      "save_revision_guard",
-                     "layout_pins",
-                     "layout_pin_hierarchy",
+                     "layout_ports",
+                     "layout_port_hierarchy",
                      "layout_connectivity",
                      "layout_lef_def",
-                     "layout_pin_drc",
+                     "layout_port_drc",
                      "layout_references",
                      "layout_pex",
                      "pex_device_extraction",

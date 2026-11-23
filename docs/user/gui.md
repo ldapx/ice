@@ -444,6 +444,10 @@ and richer hierarchy editing.
 
 ## Layout editor
 
+ICE uses **port** for the interface of a layout cell and **pin** for a
+schematic symbol or instance terminal. LEF, DEF, and GDS still use their own
+`PIN`/pin-label vocabulary at the file-format boundary.
+
 The layout editor should initially provide:
 
 - layer-aware rendering;
@@ -469,7 +473,7 @@ its parent. Creating a layout with a packaged PDK adds that package's complete
 device-library layer set for the selected stack up front; placing devices
 reuses those layers instead of adding new ones. The **Layers** panel
 groups GDS purpose variants under their base layer number: for example
-`Metal1.pin` and `Metal1.nofill` appear under `Metal1`. Pin, mask,
+`Metal1.pin` and `Metal1.nofill` appear under `Metal1`. Pin-purpose, mask,
 fill-blocking, and marker layers that use non-zero datatypes or marker base
 names start hidden; enable them with the child checkbox or the parent group
 checkbox. PDK packages may supply default layer colors, patterns, and
@@ -477,9 +481,10 @@ visibility in `technology/layer-styles.json`; these styles are applied when the
 package's layers are added, and layers without an entry keep the built-in
 number-based palette. Creating a custom layer opens a form with the layer name, assigned
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
-next to the search field can show only drawing layers or only pin layers. Its
-single eye button shows all layers when any layer is hidden and switches to
-hide all when every layer is visible. Layout entries use a notebook-pen icon.
+next to the search field can show only drawing layers. Its single eye button
+shows all layers when any layer is hidden and switches to hide all when every
+layer is visible. Ports are intrinsic ICE annotations with a required layer
+association for routing; they are not controlled by a PDK layer filter. Layout entries use a notebook-pen icon.
 Each layout node lists its child layout/device instances, planned devices,
 rectangles, polygons, paths, and texts directly, with a distinct icon for each
 entry type. Right-click an entry and choose
@@ -521,16 +526,16 @@ Parameters appear in a form above the script editor; edit a value and press
 **Regenerate layout** to apply it. `layout.device("nmos", ...)` places a device
 from the active package's device library, including generated PCells and fixed
 `.icelay` devices, with flattened geometry, prefixed ports, and device metadata
-for LVS. The call returns a placement object with absolute pin rectangles
+for LVS. The call returns a placement object with absolute port rectangles
 (`placement.G`, `placement.ports["G"]`). Pass `nets={"G": "GATE", ...}` to bind
 device terminals to layout nets and keep them through extraction.
 
-Placed pins can be routed with `layout.connect(device_a, "G", device_b, "G",
+Placed ports can be routed with `layout.connect(device_a, "G", device_b, "G",
 layer="met1.drawing", width=layout.um(0.4), net="GATE")`, or with
 `layout.route(start, end, layer, width, ...)` for point and rectangle endpoints.
 Both build a deterministic Manhattan route that avoids device bounds and
 other-net shapes, emits rectangles carrying the requested net, and reports the
-route length and bend count. For pins on different layers, pass
+route length and bend count. For ports on different layers, pass
 `layers=["met1.drawing", "met2.drawing", ...]` in vertical stack order, or omit
 `layers` to use the PDK package's declared routing stack; the router may insert
 via stacks between adjacent layers. Via cut layers and their default size and
@@ -553,7 +558,7 @@ layout.connect(m1, "G", m2, "G", layer="met1.drawing",
                width=layout.um(0.4), net="GATE")
 layout.connect(m1, "S", m2, "S", layer="met1.drawing", net="VSS")
 
-# Multi-layer route: met1 pin to a met2 pad, with an inferred SKY130 via.
+# Multi-layer route: met1 port to a met2 pad, with an inferred SKY130 via.
 out = layout.route(
     m2.D,
     (layout.um(20), layout.um(2), layout.um(1), layout.um(0.6)),
@@ -620,12 +625,17 @@ diffusion rectangles.
 
 Device placement ghosts and the Properties layout preview use the same layer
 color resolution and flattened geometry renderer as the canvas, including
-paths, text, pins, and planned devices. Layer colors are keyed by GDS layer
-number, so they remain stable when layers are added or removed.
+paths, text, ports, and planned devices. Port colors follow their associated
+layer; layer colors are keyed by GDS layer number, so they remain stable when
+layers are added or removed.
 
 The layout toolbar separates **Select** from **Move**. **Select** supports
 rubber-band selection and handle editing: drag path points, polygon vertices,
 and rectangle corner or edge handles, but it does not move whole objects.
+Click a path point to select it; the handle inverts its colors. Press **Delete**
+to remove the selected path point, or right-click it for the same action. A
+path always keeps at least two points. Click the path body to clear the point
+selection, then **Delete** removes the whole path.
 **Move** drags rectangles, polygons, paths, texts, planned devices, and placed
 instances; selection handles are hidden while Move is active.
 
@@ -651,18 +661,25 @@ each vertex; Shift constrains the current edge to horizontal or vertical.
 Double-click, Escape, or Space closes the polygon and leaves the tool. Select a
 polygon to show square vertex handles; drag a handle to move that vertex.
 
-The layout toolbar also provides a **Draw Path** tool for routing. Click to set
-the path start and click again to commit each segment. Escape or Space finishes
-the current path and leaves the tool. Holding Shift
+The layout toolbar also provides a **Draw Path** tool for routing. Clicks add
+bend points to one preview path without placing geometry. Press **Enter** to
+commit the whole path as one shape; **Backspace** removes the last point,
+**Escape** cancels the preview, and **Space** switches to Select. Holding Shift
 constrains the active segment to horizontal or vertical so all turns are right
 angles. While the Path tool is active, **Properties** shows the current path
-layer. Each segment is drawn at its layer's PDK minimum width, and the width is
-not user-editable. Path points follow the layout grid snap setting. After the
+layer. Each preview segment keeps the color of the layer it was drawn on, and
+layer transitions show their via stack in the preview. Each segment is drawn at
+its layer's PDK minimum width, and the width is not user-editable. Path points
+follow the layout grid snap setting. After the
 first path click, scroll the wheel to move the
 next segment up or down one metal
 layer; ICE inserts the corresponding via at the connection point automatically.
-For the IHP stack, for example, scrolling from Metal2 down to Metal1 adds a
-Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
+Starting or ending a path on a port snaps to the port center and selects the
+port's drawing layer when that layer is in the routing stack. While the Path
+tool is active, every visible port shows a dot at its center; clicking a port
+snaps the pending endpoint there. Press **Enter** to commit the complete path
+as before. For the IHP stack, for
+example, scrolling from Metal2 down to Metal1 adds a Via1 at the junction. When no path is being drawn, the mouse wheel zooms the
 Layout canvas; Ctrl+wheel also zooms while a path is active. A routed path is
 stored as one path shape
 with an editable centerline and cached outline; it moves as a single
@@ -672,7 +689,7 @@ are listed as Routed Path shapes with the route icon. Select a manual path to
 show its point handles; drag a handle to move a point, double-click a segment to
 insert a point, and right-click a handle to delete it. Automatically routed
 paths expose handles only at their endpoints; drag an endpoint to a different
-border of its pin to change which side the route attaches to. Routing avoids
+border of its port to change which side the route attaches to. Routing avoids
 other automatically routed paths on different nets by choosing another metal
 layer, trying an alternate Manhattan trace, or bridging a segment through an
 adjacent layer with vias. If no conflict-free route exists, the direct route is
@@ -707,6 +724,12 @@ are split into independently fillable polygons, and an operation that produces
 no geometry leaves its operands unchanged. Use undo to restore the original
 shapes.
 
+Right-click a path body and choose **Flatten to Polygon** to replace it with
+filled polygon geometry. Segment outlines and point vias are unioned per layer,
+so a path that changes layers produces polygons on each layer it used, including
+squares on its via layers. Flattening an automatically routed path detaches it
+from its planned connection. Use undo to restore the path.
+
 The **Ruler** tool measures between two clicked points. The ruler line keeps a
 constant screen width as you zoom, and shows minor and major tick marks with
 distance labels along its length.
@@ -728,23 +751,29 @@ a single object, while still participating in connectivity, DRC, and GDSII
 BOUNDARY export like ordinary layout polygons. Text polygons are excluded from
 Boolean operations.
 
-The **Create Pin** tool places a named layout pin on the currently selected
-layer. Drag from one corner to the other to define the pin rectangle; the
-preview uses the selected layer style while dragging. Pins are visible as
-layer-colored rectangles with centered labels, are selectable/movable/resizable,
-and can be locked or hidden. The Properties panel
-edits the pin name, label, direction, physical side, net, size, visibility, and
-lock state. Pins are exported as GDSII boundary geometry plus TEXT labels.
-Layout nets are created through the pin net field or
+The **Create Port** tool places a named ICE port on the selected layer. With a
+single available layer that layer is used automatically; with multiple layers,
+select one before drawing. Drag from one corner to the other to define the port
+rectangle. Ports are visible as accent-colored rectangles with
+centered labels, are selectable/movable/resizable, and can be locked or hidden.
+The Properties panel edits the port name, label, direction, physical side,
+layer, net, size, visibility, and lock state. Use the layer field to associate
+the port with the routing layer that automatic routing and the Path tool
+should use. Port metadata is stored in `.icelay`, including its required layer
+association. GDS/OASIS export projects ports onto their associated layers;
+there are no layerless ports.
+Layout nets are created through the port net field or
 `ice-cli layout-add-net`; assign a net by name in Properties or with
 `ice-cli layout-assign-port-net`. The **Hierarchy** panel lists each layout's
-pins with visibility checkboxes and pin details in the tooltip. Child-cell pins
+ports with visibility checkboxes and port details in the tooltip. Child-cell ports
 are drawn read-only inside instances; double-clicking one promotes it to a
-parent pin that keeps the source instance and child port link.
+parent port that keeps the source instance and child port link.
 
 **File → Open Layout Interchange** imports GDSII or OASIS. It asks which layer
-carries pin-label TEXT records (`-1` imports text as ordinary text shapes
+carries port-label TEXT records (`-1` imports text as ordinary text shapes
 only) and optionally a top-cell name for libraries with multiple candidates.
+Recovered ports are intrinsic ICE ports; the label layer is only an import
+filter.
 Structures become layout cells connected by instances; unsupported
 non-orthogonal or scaled references are flattened with a warning. OASIS is
 read and written natively without KLayout or an intermediate file.
@@ -755,26 +784,26 @@ LEF and DEF pin exchange is available through `ice-cli` and `ice-mcp`.
 Select a planned device box to highlight it. Double-click it, or right-click it,
 to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
 sources, ground symbols, and `Input`/`Output`/`Pin` port symbols instead offer
-**Convert to Pin**: a dialog lets you choose the pin
-layer, then the block is replaced by a single layout pin (an existing pin on the
-connection's net is reused when there is only one net), and all planned
-connections from the block are retargeted to that pin. Converted `Input`,
+**Convert to Port**: the block is replaced by a single layout port on the active
+layer (an existing port on the connection's net is reused when there is only
+one net), and all planned connections from the block are retargeted to that
+port. Converted `Input`,
 `Output`, and `Pin` symbols keep the corresponding input, output, or inout
 direction and name. The placement
 dialog lists the active PDK's PCells, suggests
-devices by model and pin compatibility, and lets you edit the PCell parameters
+devices by model and port compatibility, and lets you edit the PCell parameters
 before placement. Placing the device replaces the planned box with a layout
 instance and rewires the existing planned connections from the box to the new
-PCell pins. After placement, select the instance and edit its PCell parameters
+PCell ports. After placement, select the instance and edit its PCell parameters
 in **Properties**. Select a planned connection to highlight it. Double-click it,
 or right-click it, to choose **Draw Connection Manually** or **Route
 Automatically**. Automatic routing is enabled when both
-ends are placed device pins or layout pins; it routes on metal drawing layers,
-transitions from non-metal pins through the required contact/via stack, and
-leaves/enters rectangular pins from the middle of their narrowest sides. Automatically routed
+ends are placed device ports or layout ports; it routes on metal drawing layers,
+transitions from non-metal ports through the required contact/via stack, and
+leaves/enters rectangular ports from the middle of their narrowest sides. Automatically routed
 paths are recomputed when either endpoint moves, rotates, snaps, or is
 regenerated from changed PCell parameters, so the route stays attached to the
-device pins. The route leaves each pin outwards, turns with Manhattan segments,
+device ports. The route leaves each port outwards, turns with Manhattan segments,
 and can be edited with the normal path tools; moving either endpoint recomputes
 it and replaces those manual edits. Undo the routing to restore the planned
 connection.
@@ -801,10 +830,10 @@ parameters are compared numerically when both sides use compatible quantity
 values, so `0.15u` and `150n` are equivalent. If the layout has no planned
 connectivity, LVS reports a warning and compares devices only. Primitive
 sources and ground symbols are treated as external references rather than
-layout devices, and pins converted from them are not compared as schematic
+layout devices, and ports converted from them are not compared as schematic
 ports. Top-level schematic ports created with `Input`/`Output`/`Pin` symbols are
-matched to layout pins by name, including pins produced by **Convert to Pin**;
-missing pins, extra pins, direction changes, and net-binding changes are
+matched to layout ports by name, including ports produced by **Convert to Port**;
+missing ports, extra ports, direction changes, and net-binding changes are
 reported. Text SPICE schematics are parsed into logical devices and recursively
 flattened subcircuits; SystemVerilog cells are compared at module-port level.
 Results appear in the **Reports** tab with **LVS** selected, showing mismatch
@@ -819,11 +848,11 @@ perimeter, total resistance, and capacitance in the generated SPICE text
 schematic. A text SPICE cell named `<layout> PEX` is created — or updated on a
 later run — and selected in the Schematic tab, so it appears in the project
 hierarchy. Single-terminal nets use a series resistance with the capacitance to
-ground; multi-terminal nets use a resistance star between pins. Planned
+ground; multi-terminal nets use a resistance star between ports. Planned
 devices from procedural layouts are extracted first using their model,
 parameters, and terminal-net metadata, so flattened PCell resistors,
 capacitors, and transistors remain in the post-layout netlist. Placed
-device-library instances are extracted next: their terminal pin rectangles are
+device-library instances are extracted next: their terminal port rectangles are
 transformed into parent coordinates, matched to the parent nets they overlap,
 and emitted as SPICE primitives or PDK subcircuits with model parameters. If no
 planned or placed devices are recognized, PEX falls back to copying the inferred
@@ -864,7 +893,7 @@ Common defaults:
 - **Schematic place device**: R resistor, X NMOS, I input, O output, B pin, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
 - **Schematic comment**: Shift+C
 - **Layout rotate / flips**: Shift+R / H / J
-- **Layout rectangle / polygon / path / comment (text label) / text polygon / pin / ruler**: R / G / W / Shift+C / Shift+T / N / L
+- **Layout rectangle / polygon / path / comment (text label) / text polygon / port / ruler**: R / G / W / Shift+C / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
 
 **Ctrl+S** saves the file shown in the current schematic, layout, procedural
@@ -948,17 +977,20 @@ simulation run through the context (`simulations`, `runs`, `latest`,
 `latest_many`, and `load`) and can compare multiple simulations in one script.
 
 Scripts can generate GUI graphs with `ctx.graph(...)`. The generated graphs are
-shown in the **Graphs** tab; selecting a script opens **File** first, and a run
-that produces graphs switches to **Graphs**. Graphs can reference stored runs
-and signals, or use explicit `x` and `y` arrays computed by the script. Running
-the script replaces the previously generated graph tabs. The latest graph payload is
-cached under `build/simulation-scripts/` and reloaded when the script is selected,
-including runs started from `ice-cli`.
+shown as child entries under the script in the simulation hierarchy and in the
+**Graphs** tab; selecting a graph child opens the corresponding plot. Selecting a
+script opens **File** first, and a run that produces graphs switches to
+**Graphs**. Graphs can reference stored runs and signals, or use explicit `x`
+and `y` arrays computed by the script. Running the script replaces the
+previously generated graph tabs and refreshes its hierarchy children. The latest
+graph payload is cached under `build/simulation-scripts/` and reloaded when the
+script is selected, including runs started from `ice-cli`.
 
-The **Save** button saves the Python source immediately; edits also autosave
-after a short pause. **Run** saves any pending edits and executes the script.
-**Open File** opens the Python source externally. Deleting a script removes only
-its project metadata; the file remains on disk.
+Python source edits autosave after a short pause. The script **Graphs** page has
+the same vertical tool column as normal simulation graphs, with **Run**,
+**Open File**, and the graph grid toggle. **Run** saves any pending edits and
+executes the script; **Open File** opens the Python source externally. Deleting
+a script removes only its project metadata; the file remains on disk.
 
 Simulation plots downsample traces to at most two display points per horizontal
 pixel column. The minimum and maximum sample in each column are kept so narrow

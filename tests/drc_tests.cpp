@@ -321,7 +321,7 @@ TEST_CASE("gdscheck process and argument mapping is stable") {
                                                                        "/tmp/drc.lyrdb", "--suite", "main"}));
 }
 
-TEST_CASE("local verification checks pin geometry and pin shorts") {
+TEST_CASE("local verification checks port geometry and port shorts") {
     ice::Project project;
     project.identity = "pin-drc";
     project.name = "pin-drc";
@@ -346,7 +346,7 @@ TEST_CASE("local verification checks pin geometry and pin shorts") {
         return std::any_of(report.drc.begin(), report.drc.end(),
                            [&](const ice::DrcViolation &violation) { return violation.rule == rule; });
     };
-    CHECK(hasRule("pin-short"));
-    CHECK(hasRule("pin-min-width"));
-    CHECK(hasRule("pin-outside-cell"));
+    CHECK(hasRule("port-short"));
+    CHECK(hasRule("port-min-width"));
+    CHECK(hasRule("port-outside-cell"));
 }

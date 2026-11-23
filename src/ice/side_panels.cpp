@@ -7,9 +7,13 @@
 
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/simulation_report.hpp"
 
 #include <QAction>
 #include <QComboBox>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -38,6 +42,7 @@
 namespace {
 constexpr int kItemKindRole = Qt::UserRole + 1;
 constexpr int kReportIdRole = Qt::UserRole + 2;
+constexpr int kReportGraphIndexRole = Qt::UserRole + 6;
 constexpr int kInstanceIdRole = Qt::UserRole + 3;
 constexpr int kOwnerCellRole = Qt::UserRole + 4;
 constexpr int kSearchTextRole = Qt::UserRole + 5;
@@ -53,7 +58,7 @@ enum class HierarchyItemKind : int {
     polygon = 8,
     path = 9,
     text = 10,
-    pin = 11,
+    port = 11,
     textPolygon = 12,
     routedPath = 13,
     schematicDevice = 14
@@ -298,10 +303,10 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
             return;
         }
         const auto kind = item->data(0, kItemKindRole).toInt();
-        if (kind == static_cast<int>(HierarchyItemKind::pin)) {
+        if (kind == static_cast<int>(HierarchyItemKind::port)) {
             const auto cellId = static_cast<ice::ObjectId>(item->data(0, kOwnerCellRole).toULongLong());
-            if (onActivatePin_)
-                onActivatePin_(cellId, id);
+            if (onActivatePort_)
+                onActivatePort_(cellId, id);
             return;
         }
         if (kind != static_cast<int>(HierarchyItemKind::layout) &&
@@ -313,12 +318,12 @@ ProjectPanel::ProjectPanel(bool showLibraries, bool showLayers, bool showLayoutH
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
         if (rebuildingTree_ || !item || column != 0)
             return;
-        if (item->data(0, kItemKindRole).toInt() != static_cast<int>(HierarchyItemKind::pin))
+        if (item->data(0, kItemKindRole).toInt() != static_cast<int>(HierarchyItemKind::port))
             return;
-        const auto pinId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+        const auto portId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
         const auto cellId = static_cast<ice::ObjectId>(item->data(0, kOwnerCellRole).toULongLong());
-        if (pinId != 0 && cellId != 0 && onPinVisibilityChanged_)
-            onPinVisibilityChanged_(cellId, pinId, item->checkState(0) == Qt::Checked);
+        if (portId != 0 && cellId != 0 && onPortVisibilityChanged_)
+            onPortVisibilityChanged_(cellId, portId, item->checkState(0) == Qt::Checked);
     });
 }
 
@@ -367,10 +372,10 @@ void ProjectPanel::selectInstance(ice::ObjectId instanceId) {
     updateRemoveButton();
 }
 
-void ProjectPanel::setOnActivatePin(PinCallback callback) { onActivatePin_ = std::move(callback); }
+void ProjectPanel::setOnActivatePort(PortCallback callback) { onActivatePort_ = std::move(callback); }
 
-void ProjectPanel::setOnPinVisibilityChanged(PinVisibilityCallback callback) {
-    onPinVisibilityChanged_ = std::move(callback);
+void ProjectPanel::setOnPortVisibilityChanged(PortVisibilityCallback callback) {
+    onPortVisibilityChanged_ = std::move(callback);
 }
 
 void ProjectPanel::setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback) {
@@ -462,8 +467,7 @@ void ProjectPanel::rebuildTree() {
             });
             for (const auto &[deviceName, instance] : devices) {
                 const auto symbolIt = cell.symbols.find(instance->symbol);
-                const ice::ObjectId sourceCell =
-                    symbolIt == cell.symbols.end() ? 0 : symbolIt->second.sourceCell;
+                const ice::ObjectId sourceCell = symbolIt == cell.symbols.end() ? 0 : symbolIt->second.sourceCell;
                 const bool subcircuitInstance = sourceCell != 0 && project.schematicCells.contains(sourceCell);
                 const auto symbolName =
                     symbolIt == cell.symbols.end() ? QString() : QString::fromStdString(symbolIt->second.name);
@@ -478,8 +482,8 @@ void ProjectPanel::rebuildTree() {
                 if (deviceIcon.isNull())
                     deviceIcon = hierarchyIcon(subcircuitInstance ? "puzzle" : "circuit-board");
                 deviceItem->setIcon(0, deviceIcon);
-                const auto typeName = subcircuitInstance ? schematicFileLabel(project.schematicCells.at(sourceCell))
-                                                         : symbolName;
+                const auto typeName =
+                    subcircuitInstance ? schematicFileLabel(project.schematicCells.at(sourceCell)) : symbolName;
                 deviceItem->setToolTip(0, typeName.isEmpty() ? QStringLiteral("Device: %1").arg(label)
                                                              : QStringLiteral("Device: %1 · %2").arg(label, typeName));
                 deviceItem->setData(0, kSearchTextRole, QStringLiteral("%1 %2").arg(label, typeName));
@@ -791,9 +795,8 @@ bool ProjectPanel::filterTreeItem(QTreeWidgetItem *item, const QString &needle) 
     bool childMatches = false;
     for (int index = 0; index < item->childCount(); ++index)
         childMatches |= filterTreeItem(item->child(index), needle);
-    const bool selfMatches =
-        needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive) ||
-        item->data(0, kSearchTextRole).toString().contains(needle, Qt::CaseInsensitive);
+    const bool selfMatches = needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive) ||
+                             item->data(0, kSearchTextRole).toString().contains(needle, Qt::CaseInsensitive);
     const bool visible = selfMatches || childMatches;
     item->setHidden(!visible);
     return visible;
@@ -845,7 +848,7 @@ SimulationPanel::SimulationPanel(QWidget *parent) : QWidget(parent) {
         deleteButton_->setEnabled(currentSimulationId() != 0 || reportId != 0);
         if (reportId != 0) {
             if (onReportSelection_)
-                onReportSelection_(reportId);
+                onReportSelection_(reportId, currentReportGraphIndex());
             return;
         }
         if (onSelection_)
@@ -889,13 +892,30 @@ void SimulationPanel::setOnDeleteReport(std::function<void(ice::ObjectId)> cb) {
 void SimulationPanel::setOnSelection(SelectionCallback cb) { onSelection_ = std::move(cb); }
 void SimulationPanel::setOnReportSelection(ReportSelectionCallback cb) { onReportSelection_ = std::move(cb); }
 
+void SimulationPanel::setProjectRoot(const QString &projectRoot) { projectRoot_ = projectRoot; }
+
 void SimulationPanel::setProject(const ice::Project &project) {
     const ice::ObjectId prevSimId = currentSimulationId();
     const ice::ObjectId prevGraphId = currentGraphId();
     const ice::ObjectId prevReportId = currentReportId();
+    const int prevReportGraphIndex = currentReportGraphIndex();
     {
         QSignalBlocker blocker(tree_);
         tree_->clear();
+        const auto cachedScriptGraphs = [this](const ice::ProjectReport &report) {
+            std::vector<ice::SimulationScriptGraph> graphs;
+            if (projectRoot_.isEmpty() || report.id == 0)
+                return graphs;
+            try {
+                const auto path = ice::projectSimulationScriptGraphPath(projectRoot_.toStdString(), report);
+                QFile file(QString::fromStdString(path.string()));
+                if (!file.open(QIODevice::ReadOnly))
+                    return graphs;
+                return ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString());
+            } catch (const std::exception &) {
+                return graphs;
+            }
+        };
         for (const auto &[id, sim] : project.simulations) {
             const auto schematic = project.schematicCells.find(sim.schematic);
             if (schematic != project.schematicCells.end() && schematic->second.systemVerilogSchematic)
@@ -919,12 +939,28 @@ void SimulationPanel::setProject(const ice::Project &project) {
         for (const auto &[id, report] : project.reports) {
             auto *reportItem = new QTreeWidgetItem(tree_, {QString::fromStdString(report.name)});
             reportItem->setData(0, kReportIdRole, QVariant::fromValue<qulonglong>(id));
+            reportItem->setData(0, kReportGraphIndexRole, -1);
             reportItem->setIcon(0, hierarchyIcon("notebook-text"));
             reportItem->setToolTip(0, QString::fromStdString(report.path));
+            int graphIndex = 0;
+            for (const auto &graph : cachedScriptGraphs(report)) {
+                if (graph.x.empty() || graph.series.empty())
+                    continue;
+                auto *graphItem = new QTreeWidgetItem(reportItem, {QString::fromStdString(graph.name)});
+                graphItem->setData(0, kReportIdRole, QVariant::fromValue<qulonglong>(id));
+                graphItem->setData(0, kReportGraphIndexRole, graphIndex++);
+                graphItem->setIcon(0, hierarchyIcon("chart-spline"));
+                const auto xAxis = graph.xAxis.empty() ? QStringLiteral("time") : QString::fromStdString(graph.xAxis);
+                QStringList ySignals;
+                for (const auto &series : graph.series)
+                    ySignals << QString::fromStdString(series.name);
+                const auto yAxis = ySignals.isEmpty() ? QStringLiteral("auto") : ySignals.join(QStringLiteral(", "));
+                graphItem->setToolTip(0, QStringLiteral("X: %1  Y: %2").arg(xAxis, yAxis));
+            }
         }
         tree_->expandAll();
         if (prevReportId != 0)
-            selectReport(prevReportId);
+            selectReport(prevReportId, prevReportGraphIndex);
         else if (prevSimId != 0)
             selectSimulation(prevSimId, prevGraphId);
         if (search_)
@@ -975,6 +1011,13 @@ ice::ObjectId SimulationPanel::currentReportId() const {
     return static_cast<ice::ObjectId>(item->data(0, kReportIdRole).toULongLong());
 }
 
+int SimulationPanel::currentReportGraphIndex() const {
+    auto *item = tree_->currentItem();
+    if (!item || !item->data(0, kReportGraphIndexRole).isValid())
+        return -1;
+    return item->data(0, kReportGraphIndexRole).toInt();
+}
+
 void SimulationPanel::selectSimulation(ice::ObjectId id, ice::ObjectId graphId) {
     if (id == 0) {
         tree_->setCurrentItem(nullptr);
@@ -1000,17 +1043,27 @@ void SimulationPanel::selectSimulation(ice::ObjectId id, ice::ObjectId graphId) 
     tree_->setCurrentItem(nullptr);
 }
 
-void SimulationPanel::selectReport(ice::ObjectId id) {
+void SimulationPanel::selectReport(ice::ObjectId id, int graphIndex) {
     if (id == 0) {
         tree_->setCurrentItem(nullptr);
         return;
     }
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
         auto *item = tree_->topLevelItem(i);
-        if (static_cast<ice::ObjectId>(item->data(0, kReportIdRole).toULongLong()) == id) {
-            tree_->setCurrentItem(item);
-            return;
+        if (static_cast<ice::ObjectId>(item->data(0, kReportIdRole).toULongLong()) != id)
+            continue;
+        QTreeWidgetItem *target = item;
+        if (graphIndex >= 0) {
+            for (int child = 0; child < item->childCount(); ++child) {
+                auto *graphItem = item->child(child);
+                if (graphItem->data(0, kReportGraphIndexRole).toInt() == graphIndex) {
+                    target = graphItem;
+                    break;
+                }
+            }
         }
+        tree_->setCurrentItem(target);
+        return;
     }
     tree_->setCurrentItem(nullptr);
 }
@@ -1018,16 +1071,16 @@ void SimulationPanel::selectReport(ice::ObjectId id) {
 void SimulationPanel::applyFilter(const QString &text) {
     const auto needle = text.trimmed();
     for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
-        auto *simItem = tree_->topLevelItem(index);
-        const bool simMatches = needle.isEmpty() || simItem->text(0).contains(needle, Qt::CaseInsensitive);
-        bool anyGraphVisible = false;
-        for (int childIndex = 0; childIndex < simItem->childCount(); ++childIndex) {
-            auto *graphItem = simItem->child(childIndex);
-            const bool graphVisible = simMatches || graphItem->text(0).contains(needle, Qt::CaseInsensitive);
-            graphItem->setHidden(!graphVisible);
-            anyGraphVisible |= graphVisible;
+        auto *topItem = tree_->topLevelItem(index);
+        const bool topMatches = needle.isEmpty() || topItem->text(0).contains(needle, Qt::CaseInsensitive);
+        bool anyChildVisible = false;
+        for (int childIndex = 0; childIndex < topItem->childCount(); ++childIndex) {
+            auto *childItem = topItem->child(childIndex);
+            const bool childVisible = topMatches || childItem->text(0).contains(needle, Qt::CaseInsensitive);
+            childItem->setHidden(!childVisible);
+            anyChildVisible |= childVisible;
         }
-        simItem->setHidden(!simMatches && !anyGraphVisible);
+        topItem->setHidden(!topMatches && !anyChildVisible);
     }
     if (!needle.isEmpty())
         tree_->expandAll();
@@ -1040,11 +1093,19 @@ void SimulationPanel::showContextMenu(const QPoint &pos) {
         return;
     if (clicked->data(0, kReportIdRole).isValid()) {
         const auto reportId = static_cast<ice::ObjectId>(clicked->data(0, kReportIdRole).toULongLong());
+        int graphIndex = -1;
+        if (clicked->data(0, kReportGraphIndexRole).isValid())
+            graphIndex = clicked->data(0, kReportGraphIndexRole).toInt();
         QMenu menu(this);
+        QAction *openGraphAction = nullptr;
+        if (graphIndex >= 0)
+            openGraphAction = menu.addAction(QStringLiteral("Open graph"));
         auto *openAction = menu.addAction(QStringLiteral("Open simulation script"));
         auto *deleteAction = menu.addAction(QStringLiteral("Delete simulation script"));
         const auto *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
-        if (chosen == openAction && onOpenReport_)
+        if (chosen == openGraphAction && onReportSelection_)
+            onReportSelection_(reportId, graphIndex);
+        else if (chosen == openAction && onOpenReport_)
             onOpenReport_(reportId);
         else if (chosen == deleteAction && onDeleteReport_)
             onDeleteReport_(reportId);
@@ -1086,12 +1147,6 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     drawingButton->setAccessibleName(QStringLiteral("Show only drawing layers"));
     setLucideIcon(drawingButton, QStringLiteral("square"), 16);
     controls->addWidget(drawingButton);
-    auto *pinButton = new QPushButton;
-    pinButton->setFixedWidth(28);
-    pinButton->setToolTip(QStringLiteral("Show only pin layers"));
-    pinButton->setAccessibleName(QStringLiteral("Show only pin layers"));
-    setLucideIcon(pinButton, QStringLiteral("circle-dot"), 16);
-    controls->addWidget(pinButton);
     visibilityButton_ = new QPushButton;
     visibilityButton_->setFixedWidth(28);
     setLucideIcon(visibilityButton_, QStringLiteral("eye"), 16);
@@ -1110,12 +1165,8 @@ LayersPanel::LayersPanel(QWidget *parent) : QWidget(parent) {
     setMinimumWidth(190);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     connect(drawingButton, &QPushButton::clicked, this, [this] {
-        if (onLayerVisibilityFilter_)
-            onLayerVisibilityFilter_(false);
-    });
-    connect(pinButton, &QPushButton::clicked, this, [this] {
-        if (onLayerVisibilityFilter_)
-            onLayerVisibilityFilter_(true);
+        if (onShowDrawingLayers_)
+            onShowDrawingLayers_();
     });
     connect(visibilityButton_, &QPushButton::clicked, this, [this] {
         if (!onAllLayersVisibilityChanged_)
@@ -1235,9 +1286,7 @@ void LayersPanel::setOnAllLayersVisibilityChanged(std::function<void(bool)> call
     onAllLayersVisibilityChanged_ = std::move(callback);
 }
 
-void LayersPanel::setOnLayerVisibilityFilter(std::function<void(bool pinOnly)> callback) {
-    onLayerVisibilityFilter_ = std::move(callback);
-}
+void LayersPanel::setOnShowDrawingLayers(std::function<void()> callback) { onShowDrawingLayers_ = std::move(callback); }
 
 void LayersPanel::updateVisibilityButton() {
     if (!visibilityButton_)

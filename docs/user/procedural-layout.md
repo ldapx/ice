@@ -152,13 +152,15 @@ PDK extensions such as dummy fill can inspect the completed builder:
 
 ## Ports
 
-`layout.port(...)` adds a pin to the generated cell. Ports participate in
-hierarchy wiring, connectivity checks, and LVS.
+`layout.port(...)` adds an intrinsic ICE port to the generated cell. Ports
+participate in hierarchy wiring, connectivity checks, and LVS. ICE uses
+**port** for a layout-cell terminal and **pin** for a schematic-symbol
+terminal; LEF/DEF keep their `PIN` keyword at the file-format boundary.
 
 ```python
 layout.port(
     "OUT",
-    "Metal1.pin",
+    "Metal1",
     3000,
     0,
     1000,
@@ -169,6 +171,12 @@ layout.port(
     label="OUT",
 )
 ```
+
+The layer argument is required. It is stored as the port's layer association
+and is used by the router. It does not make the port process-layer geometry,
+and the named layer may be a routing layer rather than a PDK pin purpose. The
+port rectangle, name, direction, side, label, net, and layer are saved in the
+generated cell's ports.
 
 - `direction` is `input`, `output`, `inout`, `power`, or `ground`.
 - `side` is `left`, `right`, `top`, or `bottom`.
@@ -259,9 +267,9 @@ m2 = layout.device(
 ```
 
 The returned {py:class}`procedural_runner.DevicePlacement` exposes
-absolute pin rectangles as attributes (`m1.G`) and as a mapping
+absolute port rectangles as attributes (`m1.G`) and as a mapping
 (`m1.ports["G"]`). It also reports `device`, `model`, `parameters`, `bounds`,
-and per-pin `port_info`. Emitted device ports are prefixed with the instance
+and per-port `port_info`. Emitted device ports are prefixed with the instance
 name and marked internal, so multiple copies can coexist.
 
 Device parameters are passed as keyword strings. Matching is case-insensitive
@@ -327,7 +335,7 @@ layout.distance(m1, m2, axis="x")
 layout.measure(core)           # bounds, width, height, area
 ```
 
-Every handle also exposes `bounds`, `width`, `height`, `ports`, `pin(name)`,
+Every handle also exposes `bounds`, `width`, `height`, `ports`, `port(name)`,
 `anchor(name)`, `move(dx, dy)`, `mirror(axis)`, and `is_empty`. Composition and
 shape bounds are `(x0, y0, x1, y1)` tuples; `DevicePlacement.bounds` keeps the
 existing `x`/`y`/`width`/`height` mapping for router compatibility.
@@ -477,7 +485,7 @@ roughly 20–25% with no unexplained row gap above roughly 10 µm.
 ## Routing
 
 The builder includes a deterministic Manhattan router for both points and
-placed device or layout-instance pins.
+placed device or layout-instance ports.
 
 ### Point and rectangle routing
 
@@ -492,22 +500,22 @@ route = layout.route(
 print(route.length, route.bends, route.via_count)
 ```
 
-`start` and `end` may be `(x, y)` points, `(x, y, width, height)` pin
-rectangles, or pin tuples from a `DevicePlacement` or
+`start` and `end` may be `(x, y)` points, `(x, y, width, height)` port
+rectangles, or port tuples from a `DevicePlacement` or
 `LayoutInstancePlacement`. Rectangle endpoints escape from `start_side` /
 `end_side` (or the side nearest the other endpoint) by `escape`. The router
 avoids placed device and instance bounds and other-net shapes by default and
 raises an error rather than emitting a short when no legal path exists.
 
-### Connecting device and instance pins
+### Connecting device and instance ports
 
 ```python
 layout.connect(m1, "G", m2, "G", layer="Metal1", net="GATE")
 layout.connect(m1, "D", digital, "out", layer="Metal1", net="OUT")
 ```
 
-`connect(device_a, pin_a, device_b, pin_b, ...)` reads pin layers, sides, and
-nets from the placements. Same-layer pins can use `layer`; pins on different
+`connect(device_a, pin_a, device_b, pin_b, ...)` reads port layers, sides, and
+nets from the placements. Same-layer ports can use `layer`; ports on different
 layers require `layers=[...]` in vertical stack order. The router inserts via
 stacks between adjacent layers when the package exposes via metadata.
 
@@ -537,7 +545,7 @@ Additional routing controls:
 | --- | --- |
 | `width` | Trace width; default 0.4 µm. |
 | `clearance` | Edge-to-edge clearance; default `max(width, 0.2 µm)`. |
-| `escape` | Pin escape distance; default `max(2 * width, 0.5 µm)`. |
+| `escape` | Port escape distance; default `max(2 * width, 0.5 µm)`. |
 | `obstacles` | Extra rectangles, a list, or per-layer obstacle mappings. |
 | `bend_penalty` | Extra cost per bend; default `max(2 * width, 1 µm)`. |
 | `include_devices` | Treat other device bounds as obstacles. |

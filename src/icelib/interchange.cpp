@@ -628,7 +628,7 @@ Project LayoutInterchange::flattenProject(const Project &project, ObjectId cellI
     flatCell.pdk = cell->second.pdk;
     flatCell.stack = cell->second.stack;
     // Flattening removes the instance hierarchy but must preserve the top
-    // cell's logical interface so pin labels survive the export.
+    // cell's logical interface so port labels survive the export.
     flatCell.ports = cell->second.ports;
     flatCell.nets = cell->second.nets;
     std::set<ObjectId> ancestors{cellId};
@@ -705,6 +705,25 @@ std::string layerNameFor(const Project &project, ObjectId layerId) {
         name.erase(datatype);
     return name;
 }
+
+// LEF/DEF pins need a layer even though intrinsic ICE ports do not. Prefer the
+// layer of the geometry the port annotates, then fall back to a stable
+// annotation name that importers can round-trip.
+std::string portLayerName(const Project &project, const LayoutCell &cell, const Port &port) {
+    if (port.layer != 0)
+        return layerNameFor(project, port.layer);
+    for (const auto &[_, shape] : cell.shapes) {
+        if (shape.isText() || !shape.rectangle.valid())
+            continue;
+        const auto &rectangle = shape.rectangle;
+        if (port.rectangle.x <= rectangle.x + rectangle.width &&
+            rectangle.x <= port.rectangle.x + port.rectangle.width &&
+            port.rectangle.y <= rectangle.y + rectangle.height &&
+            rectangle.y <= port.rectangle.y + port.rectangle.height)
+            return layerNameFor(project, shape.layer);
+    }
+    return "ICE_PORT";
+}
 std::string interchangeIdentifier(std::string name) {
     for (auto &character : name) {
         if (std::isalnum(static_cast<unsigned char>(character)) == 0 && character != '_')
@@ -740,7 +759,7 @@ void LayoutInterchange::exportLef(const Project &project, ObjectId cellId, const
                << "    DIRECTION " << lefDirection(port.direction) << " ;\n"
                << "    USE " << lefUse(port.direction) << " ;\n"
                << "    PORT\n"
-               << "      LAYER " << layerNameFor(project, port.layer) << " ;\n"
+               << "      LAYER " << portLayerName(project, cell->second, port) << " ;\n"
                << "        RECT " << port.rectangle.x / 1000.0 << " " << port.rectangle.y / 1000.0 << " "
                << (port.rectangle.x + port.rectangle.width) / 1000.0 << " "
                << (port.rectangle.y + port.rectangle.height) / 1000.0 << " ;\n"
@@ -781,7 +800,7 @@ void LayoutInterchange::exportDef(const Project &project, ObjectId cellId, const
         output << "  - " << port.name << " + NET " << netName << "\n"
                << "    + DIRECTION " << lefDirection(port.direction) << "\n"
                << "    + USE " << lefUse(port.direction) << "\n"
-               << "    + LAYER " << layerNameFor(project, port.layer) << " ( " << port.rectangle.x << " "
+               << "    + LAYER " << portLayerName(project, cell->second, port) << " ( " << port.rectangle.x << " "
                << port.rectangle.y << " ) ( " << port.rectangle.x + port.rectangle.width << " "
                << port.rectangle.y + port.rectangle.height << " )\n";
     }
@@ -829,11 +848,11 @@ double parseInterchangeNumber(const std::string &token) {
     // Use from_chars so exchange files remain locale-independent. Qt switches
     // the numeric locale at startup (for example es_CL uses a comma decimal
     // separator), which makes std::stod reject "0.230".
-    double value = 0.0;
-    const auto result = std::from_chars(token.data(), token.data() + token.size(), value);
-    if (result.ec != std::errc{} || result.ptr != token.data() + token.size())
+    std::size_t consumed = 0;
+    const auto parsed = parseDoublePrefix(token, consumed);
+    if (!parsed || consumed != token.size())
         throw ProjectError("interchange.parse", "Invalid interchange coordinate: " + token);
-    return value;
+    return *parsed;
 }
 
 std::string uppercase(std::string text) {
@@ -1301,7 +1320,7 @@ Project LayoutInterchange::importLef(const std::filesystem::path &path) {
                     port.direction = PortDirection::ground;
             } else if (tokens[cursor] == "LAYER" && cursor + 1 < tokens.size() && tokens[cursor + 1] != ";") {
                 port.layer = interchangeLayer(project, layers, tokens[cursor + 1]);
-            } else if (tokens[cursor] == "RECT" && port.layer != 0 && !haveRectangle) {
+            } else if (tokens[cursor] == "RECT" && !haveRectangle) {
                 std::vector<double> values;
                 std::size_t valueIndex = cursor + 1;
                 for (; valueIndex < tokens.size() && tokens[valueIndex] != ";" && values.size() < 4; ++valueIndex)
@@ -1316,7 +1335,7 @@ Project LayoutInterchange::importLef(const std::filesystem::path &path) {
                 }
             }
         }
-        if (port.layer != 0 && haveRectangle) {
+        if (haveRectangle) {
             const auto sideBounds = macroBounds.valid() ? macroBounds : port.rectangle;
             port.side = sideForRectangle(port.rectangle, sideBounds);
             const auto id = project.nextId();
@@ -1616,8 +1635,8 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
             }
             ++index;
         }
-        if (!currentLayer.empty() && pin.port.rectangle.valid()) {
-            pin.port.layer = layerFor(currentLayer);
+        if (pin.port.rectangle.valid()) {
+            pin.port.layer = currentLayer.empty() ? ObjectId{0} : layerFor(currentLayer);
             pins.push_back(std::move(pin));
         }
     }
@@ -1754,7 +1773,7 @@ ObjectId LayoutInterchange::importDefIntoProject(Project &project, const std::fi
                     port.id = portId;
                     port.name = pin.name;
                     port.label = pin.name;
-                    port.layer = layerFor(pin.layer);
+                    port.layer = pin.layer.empty() ? ObjectId{0} : layerFor(pin.layer);
                     port.rectangle = pin.rectangle;
                     port.direction = pin.direction;
                     const auto bounds = macro->second.bounds.valid() ? macro->second.bounds : pin.rectangle;
@@ -2445,7 +2464,7 @@ Project buildGdsProject(const std::filesystem::path &path, const GdsDocument &do
                 Shape textShape{id, layer, std::nullopt, {x, y - height, textWidth, height}, {}};
                 textShape.text = shape.text;
                 cell.shapes.emplace(id, textShape);
-                if (options.pinLabelLayer && *options.pinLabelLayer == shape.layer) {
+                if (options.portLabelLayer && *options.portLabelLayer == shape.layer) {
                     const auto name = trimmed(shape.text);
                     if (!name.empty()) {
                         auto &used = portNames[cellIds[index]];
@@ -2453,14 +2472,14 @@ Project buildGdsProject(const std::filesystem::path &path, const GdsDocument &do
                         for (int suffix = 2; used.contains(lowerCopy(uniqueName)); ++suffix)
                             uniqueName = name + "_" + std::to_string(suffix);
                         used.insert(lowerCopy(uniqueName));
-                        const auto pinWidth = std::max<Coordinate>(1, options.pinWidth);
-                        const auto pinHeight = std::max<Coordinate>(1, options.pinHeight);
+                        const auto portWidth = std::max<Coordinate>(1, options.portWidth);
+                        const auto portHeight = std::max<Coordinate>(1, options.portHeight);
                         Port port;
                         port.id = project.nextId();
                         port.name = uniqueName;
                         port.label = shape.text;
                         port.layer = layer;
-                        port.rectangle = {x - pinWidth / 2, y - pinHeight / 2, pinWidth, pinHeight};
+                        port.rectangle = {x - portWidth / 2, y - portHeight / 2, portWidth, portHeight};
                         port.direction = PortDirection::inout;
                         port.side = PortSide::left;
                         cell.ports.emplace(port.id, std::move(port));

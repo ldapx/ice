@@ -455,7 +455,11 @@ have no generator metadata and are stored as `layout/devices/fixed/*.icelay`
 cells.
 The `index.json` index also carries the library layers, ordering, categories,
 and a `cell_prefix` used for instance names (for example `IHP `, `SKY130 `, or
-`GF180 `). No global PDK installation is consulted.
+`GF180 `). No global PDK installation is consulted. Device-library port
+records may carry a layer or datatype as a generator/routing hint. When a cell
+is placed, those records become ICE ports in the project layout. The port name,
+rectangle, direction, side, net, label, and layer are stored in `.icelay`; the
+layer is required and drives routing and interchange.
 
 The IHP SG13G2 package ships its complete device library plus vendored IHP
 PyCell sources under `vendor/ihp`. Parametric regeneration runs the package's

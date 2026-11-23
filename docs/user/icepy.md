@@ -53,6 +53,7 @@ builder.polygon(
     ],
 )
 builder.layout_net("VIN")
+# The layer argument is required and is stored as the port's routing layer.
 builder.port(
     "P1", "Metal1", 0, 0, 200, 200,
     direction="input", side="left", net="VIN", label="VIN",
@@ -174,8 +175,8 @@ polygons (including holes), boolean operations, paths, text, vias, rectangular
 arrays, ports, instances, package device placement through
 `layout.device(...)` with an installed PDK package, and Manhattan routing with
 `layout.route(...)`/`layout.connect(...)`. A placement returns a
-`DevicePlacement` with absolute pin rectangles and `device`/`model` metadata;
-pass `nets={"G": "GATE", ...}` to bind pins. The generated cell also stores
+`DevicePlacement` with absolute port rectangles and `device`/`model` metadata;
+pass `nets={"G": "GATE", ...}` to bind device ports. The generated cell also stores
 planned-device metadata, so LVS can match flattened PCells by model, W/L/M, and
 terminal nets. Generated children are read-only and can be inspected, exported,
 or instanced by other layout cells. `ProceduralLayout` exposes the generated
@@ -213,7 +214,7 @@ with the ICE layout API.
 inside the IHP package under `vendor/ihp`. The package owns the ICE-side bridge
 in `layout/devices/pcell/ihp_runtime.py`; it bootstraps the CNI/PyCell layer,
 transfers generated polygons directly into an `icepy` layout cell, and converts
-the PyCell `MkPin` terminal declarations into layout pins:
+the PyCell `MkPin` terminal declarations into layout ports:
 
 ```python
 import sys

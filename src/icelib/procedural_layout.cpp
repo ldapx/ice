@@ -1,5 +1,7 @@
 #include "icelib/procedural_layout.hpp"
 
+#include "icelib/platform.hpp"
+
 #include "icelib/geometry.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/packages.hpp"
@@ -129,15 +131,7 @@ std::filesystem::path normalizedExecutable(const std::filesystem::path &path) {
     return status ? absolute : canonical;
 }
 
-std::string proceduralPythonExecutable() {
-    if (const char *python = std::getenv("ICE_PYTHON"); python && *python)
-        return python;
-#ifdef _WIN32
-    return "python";
-#else
-    return "python3";
-#endif
-}
+std::string proceduralPythonExecutable() { return defaultPythonExecutable(); }
 
 std::string hashText(const std::string &text) {
     constexpr std::uint64_t offset = 1469598103934665603ULL;
@@ -815,8 +809,10 @@ json layoutCellCatalog(const Project &project) {
                            {"y", port.rectangle.y},
                            {"width", port.rectangle.width},
                            {"height", port.rectangle.height}}}};
-            if (const auto layer = project.layers.find(port.layer); layer != project.layers.end())
-                item["layer"] = layer->second.name;
+            if (port.layer != 0) {
+                if (const auto layer = project.layers.find(port.layer); layer != project.layers.end())
+                    item["layer"] = layer->second.name;
+            }
             if (port.net != 0) {
                 if (const auto net = cell.nets.find(port.net); net != cell.nets.end())
                     item["net"] = net->second.name;
@@ -1165,27 +1161,19 @@ std::filesystem::path proceduralRunnerScriptPath(const std::filesystem::path &ex
     }
     const auto executable = normalizedExecutable(executablePath);
     std::vector<std::filesystem::path> candidates;
-#ifdef ICE_SOURCE_DIR
-    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "layout" / "procedural_runner.py");
-#endif
-    auto directory = executable.parent_path();
-    for (int level = 0; level < 6 && !directory.empty(); ++level) {
-        candidates.push_back(directory / "assets" / "layout" / "procedural_runner.py");
-        directory = directory.parent_path();
+    if (!executable.empty()) {
+        auto directory = executable.parent_path();
+        for (int level = 0; level < 6 && !directory.empty(); ++level) {
+            candidates.push_back(directory / "assets" / "layout" / "procedural_runner.py");
+            candidates.push_back(directory / "share" / "ice" / "assets" / "layout" / "procedural_runner.py");
+            directory = directory.parent_path();
+        }
     }
-    if (!executable.empty())
-        candidates.push_back(executable.parent_path() / ".." / "share" / "ice" / "assets" / "layout" /
-                             "procedural_runner.py");
-    auto current = std::filesystem::current_path();
-    for (int level = 0; level < 5 && !current.empty(); ++level) {
-        candidates.push_back(current / "assets" / "layout" / "procedural_runner.py");
-        current = current.parent_path();
-    }
-    candidates.push_back("/usr/share/ice/assets/layout/procedural_runner.py");
-    candidates.push_back("/usr/local/share/ice/assets/layout/procedural_runner.py");
-    if (const char *home = std::getenv("HOME"); home && *home)
-        candidates.push_back(std::filesystem::path(home) / ".local" / "share" / "ice" / "assets" / "layout" /
-                             "procedural_runner.py");
+    for (const auto &root : applicationResourceDirectories())
+        candidates.push_back(root / "assets" / "layout" / "procedural_runner.py");
+    const auto home = homeDirectory();
+    if (!home.empty())
+        candidates.push_back(home / ".local" / "share" / "ice" / "assets" / "layout" / "procedural_runner.py");
     for (const auto &candidate : candidates) {
         if (isRegularFile(candidate))
             return candidate;
@@ -1210,7 +1198,7 @@ std::string defaultProceduralLayoutScript() {
 # layout.device("nmos", name="M1", x=0, y=0, w="1u", l="0.15u")
 # layout.connect(device_a, "G", device_b, "G", layer="Metal1", width=400, net="GATE")
 # layout.route((0, 0), (4000, 0), layer="Metal1", width=400, net="VDD")
-# layout.route(pin_a, pad_b, layers=["Metal1", "Metal2"], width=400, net="VDD")
+# layout.route(port_a, pad_b, layers=["Metal1", "Metal2"], width=400, net="VDD")
 # layout.instance("other_layout_cell", 0, 0, name="I1", orientation="r0")
 # layout.array("unit_cell", (2, 2), (2000, 2000))
 # layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)

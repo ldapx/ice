@@ -41,6 +41,8 @@ struct LayoutDeviceGenerator {
 
 struct LayoutDevicePort {
     std::string name;
+    // Source layer for the device port. Placed project ports require a valid
+    // layer mapping.
     int layer = 0;
     int datatype = 0;
     Rect rectangle;

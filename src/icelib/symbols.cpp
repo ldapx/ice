@@ -1,5 +1,7 @@
 #include "icelib/symbols.hpp"
 
+#include "icelib/platform.hpp"
+
 #include "icelib/pdk.hpp"
 
 #include <algorithm>
@@ -23,8 +25,7 @@ void validateSymbolArtwork(const std::string &svg, const std::string &source) {
     // Namespace declarations legitimately contain http(s) URIs, so ignore
     // them when looking for external resource references.
     std::string scrubbed = svg;
-    for (std::string::size_type at = scrubbed.find("xmlns"); at != std::string::npos;
-         at = scrubbed.find("xmlns", at)) {
+    for (std::string::size_type at = scrubbed.find("xmlns"); at != std::string::npos; at = scrubbed.find("xmlns", at)) {
         const auto quote = scrubbed.find_first_of("\"'", at);
         if (quote == std::string::npos)
             break;
@@ -35,8 +36,7 @@ void validateSymbolArtwork(const std::string &svg, const std::string &source) {
     }
     for (const char *marker : {"http://", "https://"})
         if (scrubbed.find(marker) != std::string::npos)
-            throw ProjectError("symbol.artwork",
-                               "Symbol artwork must not reference external resources" + where);
+            throw ProjectError("symbol.artwork", "Symbol artwork must not reference external resources" + where);
 }
 
 namespace {
@@ -68,7 +68,12 @@ PinDirection pinSideFromPosition(Coordinate x, Coordinate y) {
         return PinDirection::left;
     if (x > 0)
         return PinDirection::right;
-    return y > 0 ? PinDirection::up : PinDirection::down;
+    if (y > 0)
+        return PinDirection::up;
+    if (y < 0)
+        return PinDirection::down;
+    // Point-like symbols have no geometric side; exit wires to the right.
+    return PinDirection::right;
 }
 
 namespace {
@@ -208,11 +213,8 @@ std::filesystem::path builtinSymbolDirectory() {
     std::vector<std::filesystem::path> candidates;
     if (const auto *configured = std::getenv("ICE_SYMBOL_DIR"); configured && *configured)
         candidates.emplace_back(configured);
-#ifdef ICE_SOURCE_DIR
-    candidates.emplace_back(std::filesystem::path(ICE_SOURCE_DIR) / "symbols");
-#endif
-    candidates.emplace_back(std::filesystem::current_path() / "symbols");
-    candidates.emplace_back("/usr/share/ice/symbols");
+    for (const auto &root : applicationResourceDirectories())
+        candidates.push_back(root / "symbols");
     for (const auto &candidate : candidates) {
         std::error_code status;
         if (std::filesystem::is_directory(candidate, status) && !status)

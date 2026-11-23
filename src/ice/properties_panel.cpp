@@ -123,7 +123,7 @@ PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(pa
     splitter->setSizes({75, 500});
     contentSplitter_ = splitter;
     emptyHint_ = new QLabel(QStringLiteral("Select a device, net, or the schematic background to inspect its "
-                                          "properties."));
+                                           "properties."));
     emptyHint_->setAlignment(Qt::AlignCenter);
     emptyHint_->setWordWrap(true);
     emptyHint_->setContentsMargins(16, 16, 16, 16);
@@ -431,7 +431,8 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     updateParameterButtons();
 }
 
-void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName) {
+void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName,
+                                    const std::string &netName, const std::vector<LayoutPortLayer> &layers) {
     setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
@@ -467,7 +468,33 @@ void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &la
     addRow(QStringLiteral("label"), QString::fromStdString(port.label), true);
     addRow(QStringLiteral("direction"), QString::fromStdString(ice::portDirectionName(port.direction)), true);
     addRow(QStringLiteral("side"), QString::fromStdString(ice::portSideName(port.side)), true);
-    addRow(QStringLiteral("layer"), QString::fromStdString(layerName), false);
+    if (!layers.empty()) {
+        const int row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *nameItem = new QTableWidgetItem(QStringLiteral("layer"));
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(row, 0, nameItem);
+        auto *combo = new QComboBox;
+        for (const auto &[layerId, name] : layers)
+            combo->addItem(QString::fromStdString(name), QVariant::fromValue<qulonglong>(layerId));
+        int index = combo->findData(QVariant::fromValue<qulonglong>(port.layer));
+        if (index < 0 && port.layer != 0) {
+            combo->addItem(QString::fromStdString(layerName), QVariant::fromValue<qulonglong>(port.layer));
+            index = combo->count() - 1;
+        }
+        if (index >= 0)
+            combo->setCurrentIndex(index);
+        connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, combo](int index) {
+            if (index < 0)
+                return;
+            layoutPort_.layer = static_cast<ice::ObjectId>(combo->itemData(index).toULongLong());
+            if (onLayoutPortChanged_)
+                onLayoutPortChanged_(layoutPort_, layoutPortNetName_);
+        });
+        parameters_->setCellWidget(row, 1, combo);
+    } else if (!layerName.empty()) {
+        addRow(QStringLiteral("layer"), QString::fromStdString(layerName), false);
+    }
     addRow(QStringLiteral("x (nm)"), QString::number(port.rectangle.x), false);
     addRow(QStringLiteral("y (nm)"), QString::number(port.rectangle.y), false);
     addRow(QStringLiteral("width (nm)"), QString::number(port.rectangle.width), true);

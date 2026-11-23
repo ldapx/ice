@@ -129,6 +129,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -209,10 +210,6 @@ QString layerPurposeSuffix(const ice::Layer &layer) {
     if (dot < 0 || dot + 1 >= name.size())
         return {};
     return name.mid(dot + 1).toLower();
-}
-
-bool layerIsPinLayer(const ice::Layer &layer) {
-    return layerPurposeSuffix(layer) == QStringLiteral("pin") || layer.datatype == 2;
 }
 
 bool layerIsDrawingLayer(const ice::Layer &layer) {
@@ -353,8 +350,8 @@ std::optional<QRectF> layoutConnectionEndpointSceneRect(const ice::Project &proj
                                                         ice::ObjectId endpoint, ice::ObjectId port) {
     if (const auto device = cell.plannedDevices.find(endpoint); device != cell.plannedDevices.end())
         return layoutPlannedDeviceSceneRect(device->second);
-    if (const auto pin = cell.ports.find(endpoint); pin != cell.ports.end())
-        return layoutRectToScene(pin->second.rectangle);
+    if (const auto port = cell.ports.find(endpoint); port != cell.ports.end())
+        return layoutRectToScene(port->second.rectangle);
     const auto instance = cell.instances.find(endpoint);
     if (instance == cell.instances.end())
         return std::nullopt;
@@ -481,19 +478,19 @@ std::string layerKey(std::string name) {
     return result;
 }
 
-ice::ObjectId drawingLayerForPin(const ice::Project &project, ice::ObjectId cellId, ice::ObjectId layerId) {
-    const auto pin = project.layers.find(layerId);
-    if (pin == project.layers.end())
+ice::ObjectId drawingLayerForPort(const ice::Project &project, ice::ObjectId cellId, ice::ObjectId layerId) {
+    const auto portLayer = project.layers.find(layerId);
+    if (portLayer == project.layers.end())
         return 0;
-    if (!layerIsPinLayer(pin->second))
+    if (layerIsDrawingLayer(portLayer->second))
         return layerId;
 
-    auto baseName = pin->second.name;
+    auto baseName = portLayer->second.name;
     if (const auto dot = baseName.find('.'); dot != std::string::npos)
         baseName = baseName.substr(0, dot);
     const auto baseKey = layerKey(baseName);
     for (const auto &[id, layer] : project.layers) {
-        if (id == layerId || layer.number != pin->second.number || layerIsPinLayer(layer))
+        if (id == layerId || layer.number != portLayer->second.number || !layerIsDrawingLayer(layer))
             continue;
         if (!layerAvailableForLayout(project, cellId, layer))
             continue;
@@ -501,7 +498,7 @@ ice::ObjectId drawingLayerForPin(const ice::Project &project, ice::ObjectId cell
             return id;
     }
     for (const auto &[id, layer] : project.layers) {
-        if (id == layerId || layer.number != pin->second.number || layerIsPinLayer(layer))
+        if (id == layerId || layer.number != portLayer->second.number || !layerIsDrawingLayer(layer))
             continue;
         if (layerAvailableForLayout(project, cellId, layer))
             return id;
@@ -516,11 +513,11 @@ struct LayoutRouteEndpoint {
 
 std::optional<LayoutRouteEndpoint> layoutRouteEndpoint(const ice::Project &project, const ice::LayoutCell &cell,
                                                        ice::ObjectId endpointId, ice::ObjectId portId) {
-    // Top-level layout pins, including converted source/ground pins.
-    if (const auto pin = cell.ports.find(endpointId); pin != cell.ports.end()) {
-        if (!pin->second.rectangle.valid() || pin->second.layer == 0)
+    // Top-level layout ports, including converted source/ground ports.
+    if (const auto port = cell.ports.find(endpointId); port != cell.ports.end()) {
+        if (!port->second.rectangle.valid())
             return std::nullopt;
-        return LayoutRouteEndpoint{pin->second.rectangle, pin->second.layer};
+        return LayoutRouteEndpoint{port->second.rectangle, port->second.layer};
     }
     const auto instance = cell.instances.find(endpointId);
     if (instance == cell.instances.end() || portId == 0)
@@ -549,13 +546,13 @@ ice::PortSide layoutPointSide(const ice::Rect &rect, ice::LayoutPoint point) {
     return dy >= 0.0 ? ice::PortSide::top : ice::PortSide::bottom;
 }
 
-struct PinRoutePoint {
+struct PortRoutePoint {
     ice::LayoutPoint point;
     ice::LayoutPoint normal;
 };
 
-PinRoutePoint pinRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
-                            std::optional<ice::PortSide> preferredSide = std::nullopt) {
+PortRoutePoint portRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
+                              std::optional<ice::PortSide> preferredSide = std::nullopt) {
     if (rect.width <= 0 || rect.height <= 0)
         return {{rect.x + rect.width / 2, rect.y + rect.height / 2}, {0, 0}};
     const auto centerX = rect.x + rect.width / 2;
@@ -575,19 +572,20 @@ PinRoutePoint pinRoutePoint(const ice::Rect &rect, ice::LayoutPoint toward,
     const auto dx = toward.x - centerX;
     const auto dy = toward.y - centerY;
     if (rect.width < rect.height) {
-        return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}}
-                       : PinRoutePoint{{centerX, rect.y}, {0, -1}};
+        return dy >= 0 ? PortRoutePoint{{centerX, rect.y + rect.height}, {0, 1}}
+                       : PortRoutePoint{{centerX, rect.y}, {0, -1}};
     }
     if (rect.height < rect.width) {
-        return dx >= 0 ? PinRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
-                       : PinRoutePoint{{rect.x, centerY}, {-1, 0}};
+        return dx >= 0 ? PortRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
+                       : PortRoutePoint{{rect.x, centerY}, {-1, 0}};
     }
     const auto absDx = dx >= 0 ? dx : -dx;
     const auto absDy = dy >= 0 ? dy : -dy;
     if (absDx >= absDy)
-        return dx >= 0 ? PinRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
-                       : PinRoutePoint{{rect.x, centerY}, {-1, 0}};
-    return dy >= 0 ? PinRoutePoint{{centerX, rect.y + rect.height}, {0, 1}} : PinRoutePoint{{centerX, rect.y}, {0, -1}};
+        return dx >= 0 ? PortRoutePoint{{rect.x + rect.width, centerY}, {1, 0}}
+                       : PortRoutePoint{{rect.x, centerY}, {-1, 0}};
+    return dy >= 0 ? PortRoutePoint{{centerX, rect.y + rect.height}, {0, 1}}
+                   : PortRoutePoint{{centerX, rect.y}, {0, -1}};
 }
 
 struct AutoRouteGeometry {
@@ -733,7 +731,7 @@ int autoRouteConflictCount(const std::vector<ice::LayoutPoint> &points, const st
     return conflicts;
 }
 
-std::vector<ice::LayoutPoint> buildAutoRoutePoints(const PinRoutePoint &start, const PinRoutePoint &end,
+std::vector<ice::LayoutPoint> buildAutoRoutePoints(const PortRoutePoint &start, const PortRoutePoint &end,
                                                    const ice::LayoutPoint &startStub, const ice::LayoutPoint &endStub,
                                                    std::optional<ice::Coordinate> variant) {
     std::vector<ice::LayoutPoint> points;
@@ -763,7 +761,7 @@ std::vector<ice::LayoutPoint> buildAutoRoutePoints(const PinRoutePoint &start, c
     return points;
 }
 
-std::vector<ice::Coordinate> buildAutoRouteVariants(const PinRoutePoint &start, const PinRoutePoint &end,
+std::vector<ice::Coordinate> buildAutoRouteVariants(const PortRoutePoint &start, const PortRoutePoint &end,
                                                     const ice::LayoutPoint &startStub,
                                                     const ice::LayoutPoint &endStub) {
     std::vector<ice::Coordinate> variants;
@@ -814,16 +812,24 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     const auto source = layoutRouteEndpoint(project, cellIt->second, connection.from, connection.fromPort);
     const auto target = layoutRouteEndpoint(project, cellIt->second, connection.to, connection.toPort);
     if (!source || !target)
-        return fail("Automatic routing requires placed device pins or layout pins on both ends.");
-    if (source->layer == 0 || target->layer == 0)
-        return fail("One of the pins has no conductive layer.");
-
-    const auto sourceLayer = drawingLayerForPin(project, cellId, source->layer);
-    const auto targetLayer = drawingLayerForPin(project, cellId, target->layer);
-    if (sourceLayer == 0 || targetLayer == 0)
-        return fail("A pin layer has no drawing layer to route from.");
+        return fail("Automatic routing requires placed device ports or layout ports on both ends.");
 
     const auto connectivity = ice::inferLayoutConnectivity(project, cellIt->second.pdk);
+    const auto defaultRoutingLayer = [&]() -> ice::ObjectId {
+        for (const auto layerId : connectivity.routingOrder) {
+            const auto layer = project.layers.find(layerId);
+            if (layer != project.layers.end() && layerAvailableForLayout(project, cellId, layer->second) &&
+                layerIsDrawingLayer(layer->second))
+                return layerId;
+        }
+        return 0;
+    }();
+    const auto sourceLayer =
+        source->layer == 0 ? defaultRoutingLayer : drawingLayerForPort(project, cellId, source->layer);
+    const auto targetLayer =
+        target->layer == 0 ? defaultRoutingLayer : drawingLayerForPort(project, cellId, target->layer);
+    if (sourceLayer == 0 || targetLayer == 0)
+        return fail("No drawing layer is available to route from these ports.");
     std::map<ice::ObjectId, std::vector<std::pair<ice::ObjectId, ice::ObjectId>>> graph;
     for (const auto &[via, conductors] : connectivity.viaConductors) {
         for (const auto left : conductors) {
@@ -892,7 +898,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
             continue;
         const auto layerIt = project.layers.find(layer);
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
-            layerIsPinLayer(layerIt->second))
+            !layerIsDrawingLayer(layerIt->second))
             continue;
         if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
@@ -910,7 +916,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
         layerOptions.push_back({layer, distance + other->second, sourceVias, targetVias});
     }
     if (layerOptions.empty())
-        return fail("No metal layer is reachable from both pins.");
+        return fail("No metal layer is reachable from both ports.");
     std::sort(layerOptions.begin(), layerOptions.end(), [](const auto &left, const auto &right) {
         if (left.viaCount != right.viaCount)
             return left.viaCount < right.viaCount;
@@ -921,19 +927,19 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
                                         source->rect.y + source->rect.height / 2};
     const ice::LayoutPoint targetCenter{target->rect.x + target->rect.width / 2,
                                         target->rect.y + target->rect.height / 2};
-    const auto start = pinRoutePoint(source->rect, targetCenter, connection.fromSide);
-    const auto end = pinRoutePoint(target->rect, sourceCenter, connection.toSide);
+    const auto start = portRoutePoint(source->rect, targetCenter, connection.fromSide);
+    const auto end = portRoutePoint(target->rect, sourceCenter, connection.toSide);
     if (start.point.x == end.point.x && start.point.y == end.point.y)
-        return fail("The two pins already touch; no route is needed.");
+        return fail("The two ports already touch; no route is needed.");
 
-    // Leave and enter the pins from the outside of their narrow sides so the
-    // route does not run along the pin rectangle. Keep the stubs inside the
-    // gap so they never overshoot into the opposite pin.
+    // Leave and enter the ports from the outside of their narrow sides so the
+    // route does not run along the port rectangle. Keep the stubs inside the
+    // gap so they never overshoot into the opposite port.
     const auto clearance = std::max<ice::Coordinate>(1, project.snap(400));
-    const auto stub = [&](const PinRoutePoint &pin, ice::LayoutPoint other) {
-        const auto delta = (other.x - pin.point.x) * pin.normal.x + (other.y - pin.point.y) * pin.normal.y;
+    const auto stub = [&](const PortRoutePoint &port, ice::LayoutPoint other) {
+        const auto delta = (other.x - port.point.x) * port.normal.x + (other.y - port.point.y) * port.normal.y;
         const auto length = delta > 0 ? std::min(clearance, std::max<ice::Coordinate>(1, delta / 2)) : clearance;
-        return ice::LayoutPoint{pin.point.x + pin.normal.x * length, pin.point.y + pin.normal.y * length};
+        return ice::LayoutPoint{port.point.x + port.normal.x * length, port.point.y + port.normal.y * length};
     };
     const auto startStub = stub(start, end.point);
     const auto endStub = stub(end, start.point);
@@ -1048,7 +1054,7 @@ std::optional<AutoRouteGeometry> computeLayoutAutoRoute(const ice::Project &proj
     for (const auto &[neighbor, via] : graph[bridgeBase.layer]) {
         const auto layerIt = project.layers.find(neighbor);
         if (layerIt == project.layers.end() || !layerAvailableForLayout(project, cellId, layerIt->second) ||
-            layerIsPinLayer(layerIt->second))
+            !layerIsDrawingLayer(layerIt->second))
             continue;
         if (!connectivity.routingLayers.contains(layerIt->second.id))
             continue;
@@ -1190,12 +1196,14 @@ class DocumentWindow : public QMainWindow {
         toolEscapeShortcut_->setEnabled(false);
         connect(toolEscapeShortcut_, &QShortcut::activated, this, [this] { selectSchematicTool(); });
         showStartup();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this](Qt::ColorScheme) {
             if (appearanceMode_ != ice::AppearanceMode::System)
                 return;
             ice::applyAppearance(appearanceMode_);
             refreshAppearance();
         });
+#endif
     }
 
     ~DocumentWindow() override {
@@ -1225,8 +1233,7 @@ class DocumentWindow : public QMainWindow {
     // is resolved from the installed package instead of guessing.
     static std::filesystem::path pdkSymbolDirectory(const std::string &pdk) {
         const auto packageRoot = installedPdkPackageRoot(pdk);
-        return packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols"
-                                   : packageRoot / "symbols";
+        return packageRoot.empty() ? configuredPackageInstallDirectory() / pdk / "symbols" : packageRoot / "symbols";
     }
 
     std::vector<SymbolDefinition> symbolLibraryForPdk(const std::string &pdk) const {
@@ -1333,6 +1340,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         backfillSchematicInstanceParameters(project);
+        ice::repairHierarchicalSymbolArtwork(project);
         project_ = std::make_unique<ice::ProjectSession>(std::move(project));
         project_->subscribe([this] { updateFileTabDirtyIndicators(); });
         captureSavedFileBaselines();
@@ -1347,8 +1355,6 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
-        activeLayoutPathId_ = 0;
-        activeLayoutPathCellId_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -1430,6 +1436,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_.clear();
             restoreProjectTabState();
             clearProjectWatcher();
+            refreshSimulationPanelTree();
             if (implementationController_)
                 implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
             return;
@@ -1439,6 +1446,7 @@ class DocumentWindow : public QMainWindow {
         restoreProjectTabState();
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        refreshSimulationPanelTree();
         configureProjectWatcher();
         if (implementationController_)
             implementationController_->setProject(project_ ? &project_->project() : nullptr, projectPath_);
@@ -1561,6 +1569,7 @@ class DocumentWindow : public QMainWindow {
             implementationController_->setProject(&project_->project(), projectPath_);
         if (activityPanel_)
             activityPanel_->setProjectPath(QString::fromStdString(root.string()));
+        refreshSimulationPanelTree();
         configureProjectWatcher();
         addRecentProject(projectPath_);
         if (startupView_)
@@ -1589,6 +1598,7 @@ class DocumentWindow : public QMainWindow {
                 implementationController_->setProject(&project_->project(), projectPath_);
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath).absolutePath());
+            refreshSimulationPanelTree();
             configureProjectWatcher();
             addRecentProject(projectPath_);
             statusBar()->showMessage(QStringLiteral("Project opened"));
@@ -1781,6 +1791,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_ = QFileInfo(path).isDir() ? QDir(path).filePath(QStringLiteral("project.icepro")) : path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            refreshSimulationPanelTree();
             projectDiskChangePending_ = false;
             configureProjectWatcher();
             if (projectWatcherResumeTimer_)
@@ -2310,6 +2321,7 @@ class DocumentWindow : public QMainWindow {
         projectPath_ = path;
         if (activityPanel_)
             activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+        refreshSimulationPanelTree();
         openSchematicTabs_ = openSchematics;
         openLayoutTabs_ = openLayouts;
         knownSchematicCells_ = knownSchematics;
@@ -2364,6 +2376,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_ = path;
             if (activityPanel_)
                 activityPanel_->setProjectPath(QFileInfo(projectPath_).absolutePath());
+            refreshSimulationPanelTree();
             configureProjectWatcher();
         } catch (const ice::ProjectError &error) {
             statusBar()->showMessage(
@@ -2383,9 +2396,9 @@ class DocumentWindow : public QMainWindow {
             return;
         try {
             bool accepted = false;
-            const auto pinLayer = QInputDialog::getInt(this, QStringLiteral("GDS/OASIS Pin Labels"),
-                                                       QStringLiteral("Pin label layer (-1 imports text only):"), -1,
-                                                       -1, 65535, 1, &accepted);
+            const auto portLayer = QInputDialog::getInt(this, QStringLiteral("GDS/OASIS Port Labels"),
+                                                        QStringLiteral("Port label layer (-1 imports text only):"), -1,
+                                                        -1, 65535, 1, &accepted);
             if (!accepted)
                 return;
             bool acceptedTop = false;
@@ -2395,8 +2408,8 @@ class DocumentWindow : public QMainWindow {
             if (!acceptedTop)
                 return;
             ice::LayoutImportOptions options;
-            if (pinLayer >= 0)
-                options.pinLabelLayer = pinLayer;
+            if (portLayer >= 0)
+                options.portLabelLayer = portLayer;
             options.topCell = topCell.trimmed().toStdString();
             std::vector<std::string> warnings;
             options.warnings = &warnings;
@@ -2404,6 +2417,7 @@ class DocumentWindow : public QMainWindow {
             projectPath_.clear();
             if (activityPanel_)
                 activityPanel_->setProjectPath({});
+            refreshSimulationPanelTree();
             if (!warnings.empty()) {
                 QStringList lines;
                 for (const auto &warning : warnings)
@@ -2456,8 +2470,6 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
-        activeLayoutPathId_ = 0;
-        activeLayoutPathCellId_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -3753,11 +3765,11 @@ class DocumentWindow : public QMainWindow {
 
         const auto element = plannedDeviceSpiceElement(project_->project(), planned->second);
         if (element == 'V' || element == 'I' || element == 'G' || element == 'P') {
-            QMenu pinMenu(this);
-            auto *convert = pinMenu.addAction(QStringLiteral("Convert to Pin"));
-            auto *chosenPin = pinMenu.exec(QCursor::pos());
-            if (chosenPin == convert)
-                convertPlannedDeviceToPin(deviceId);
+            QMenu portMenu(this);
+            auto *convert = portMenu.addAction(QStringLiteral("Convert to Port"));
+            auto *chosen = portMenu.exec(QCursor::pos());
+            if (chosen == convert)
+                convertPlannedDeviceToPort(deviceId);
             return;
         }
 
@@ -3786,7 +3798,7 @@ class DocumentWindow : public QMainWindow {
             placeLayoutDeviceForPlanned(deviceId);
     }
 
-    void convertPlannedDeviceToPin(ice::ObjectId deviceId) {
+    void convertPlannedDeviceToPort(ice::ObjectId deviceId) {
         if (!project_ || deviceId == 0)
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
@@ -3810,121 +3822,34 @@ class DocumentWindow : public QMainWindow {
                 connectedNets.insert(connection.net);
         }
 
-        const auto layers = layoutLayers(project_->project(), activeLayoutId_);
-        if (layers.empty()) {
-            QMessageBox::information(
-                this, QStringLiteral("Convert to Pin"),
-                QStringLiteral("Create a layout layer before converting sources or grounds to pins."));
+        const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
+        if (availableLayers.empty()) {
+            QMessageBox::information(this, QStringLiteral("Convert to Port"),
+                                     QStringLiteral("Create a layer before converting sources or grounds to ports."));
             return;
         }
-        const auto connectivity = ice::inferLayoutConnectivity(project_->project(), cellIt->second.pdk);
-        std::set<std::string> routingBases;
-        for (const auto layerId : connectivity.routingLayers) {
-            const auto layer = project_->project().layers.find(layerId);
-            if (layer != project_->project().layers.end()) {
-                auto base = layer->second.name;
-                if (const auto dot = base.find('.'); dot != std::string::npos)
-                    base = base.substr(0, dot);
-                routingBases.insert(layerKey(base));
-            }
+        if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
+            QMessageBox::information(this, QStringLiteral("Convert to Port"),
+                                     QStringLiteral("Select a layer before converting to a port."));
+            return;
         }
-        const auto isMetalLayer = [&](const ice::Layer &layer) {
-            if (connectivity.routingLayers.contains(layer.id))
-                return true;
-            auto base = layer.name;
-            if (const auto dot = base.find('.'); dot != std::string::npos)
-                base = base.substr(0, dot);
-            if (routingBases.contains(layerKey(base)))
-                return true;
-            return routingBases.empty() && layerKey(layer.name).find("metal") != std::string::npos;
-        };
-        const auto isPinLayer = [](const ice::Layer &layer) { return layerIsPinLayer(layer); };
+        const auto portLayer = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
 
-        ice::ObjectId existingPin = 0;
+        ice::ObjectId existingPort = 0;
         if (element != 'P' && connectedNets.size() == 1) {
             const auto net = *connectedNets.begin();
             for (const auto &[portId, port] : cellIt->second.ports) {
                 if (port.net == net) {
-                    existingPin = portId;
+                    existingPort = portId;
                     break;
                 }
             }
         }
 
-        // Prefer a metal pin layer, then any pin layer, then a metal drawing
-        // layer, then whatever the layout provides.
-        ice::ObjectId defaultLayer = 0;
-        for (const auto &[_, layer] : project_->project().layers) {
-            if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isPinLayer(layer) &&
-                isMetalLayer(layer)) {
-                defaultLayer = layer.id;
-                break;
-            }
-        }
-        if (defaultLayer == 0) {
-            for (const auto &[_, layer] : project_->project().layers) {
-                if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isPinLayer(layer)) {
-                    defaultLayer = layer.id;
-                    break;
-                }
-            }
-        }
-        if (defaultLayer == 0) {
-            for (const auto &[_, layer] : project_->project().layers) {
-                if (layerAvailableForLayout(project_->project(), activeLayoutId_, layer) && isMetalLayer(layer)) {
-                    defaultLayer = layer.id;
-                    break;
-                }
-            }
-        }
-        if (defaultLayer == 0)
-            defaultLayer = layers.front().get().id;
-
-        std::vector<ice::ObjectId> candidateLayers;
-        const auto appendCandidates = [&](const auto &predicate) {
-            for (const auto &layerRef : layers) {
-                const auto &layer = layerRef.get();
-                if (!predicate(layer) ||
-                    std::find(candidateLayers.begin(), candidateLayers.end(), layer.id) != candidateLayers.end())
-                    continue;
-                candidateLayers.push_back(layer.id);
-            }
-        };
-        appendCandidates([&](const ice::Layer &layer) { return isPinLayer(layer) && isMetalLayer(layer); });
-        appendCandidates(isPinLayer);
-        if (candidateLayers.empty())
-            appendCandidates([&](const ice::Layer &layer) { return isMetalLayer(layer); });
-        if (candidateLayers.empty())
-            appendCandidates([](const ice::Layer &) { return true; });
-        if (candidateLayers.empty())
-            return;
-
-        auto pinLayer = candidateLayers.front();
-        if (existingPin == 0 && candidateLayers.size() > 1) {
-            QDialog layerDialog(this);
-            layerDialog.setWindowTitle(QStringLiteral("Convert to Pin"));
-            auto *layerLayout = new QVBoxLayout(&layerDialog);
-            layerLayout->addWidget(new QLabel(QStringLiteral("Pin layer:"), &layerDialog));
-            auto *layerCombo = new QComboBox(&layerDialog);
-            for (const auto layerId : candidateLayers)
-                layerCombo->addItem(QString::fromStdString(project_->project().layers.at(layerId).name));
-            if (const auto it = std::find(candidateLayers.begin(), candidateLayers.end(), defaultLayer);
-                it != candidateLayers.end())
-                layerCombo->setCurrentIndex(static_cast<int>(std::distance(candidateLayers.begin(), it)));
-            layerLayout->addWidget(layerCombo);
-            auto *layerButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &layerDialog);
-            connect(layerButtons, &QDialogButtonBox::accepted, &layerDialog, &QDialog::accept);
-            connect(layerButtons, &QDialogButtonBox::rejected, &layerDialog, &QDialog::reject);
-            layerLayout->addWidget(layerButtons);
-            if (layerDialog.exec() != QDialog::Accepted)
-                return;
-            pinLayer = candidateLayers.at(static_cast<std::size_t>(layerCombo->currentIndex()));
-        }
-
-        const auto pinSize = std::max<ice::Coordinate>(1, project_->project().snap(400));
+        const auto portSize = std::max<ice::Coordinate>(1, project_->project().snap(400));
         ice::ObjectId usedPort = 0;
         try {
-            project_->execute("convert planned device to pin", [&](ice::Project &project) {
+            project_->execute("convert planned device to port", [&](ice::Project &project) {
                 auto cell = project.layoutCells.find(activeLayoutId_);
                 if (cell == project.layoutCells.end() || cell->second.library)
                     return;
@@ -3938,10 +3863,10 @@ class DocumentWindow : public QMainWindow {
                 for (const auto &[_, port] : layout.ports)
                     names.insert(normalized(port.name));
 
-                const auto pinNet = connectedNets.size() == 1 ? *connectedNets.begin() : ice::ObjectId{0};
+                const auto portNet = connectedNets.size() == 1 ? *connectedNets.begin() : ice::ObjectId{0};
                 std::string base;
-                if (element != 'P' && pinNet != 0) {
-                    if (const auto netIt = layout.nets.find(pinNet); netIt != layout.nets.end())
+                if (element != 'P' && portNet != 0) {
+                    if (const auto netIt = layout.nets.find(portNet); netIt != layout.nets.end())
                         base = netIt->second.name;
                     if (base == "0")
                         base = "GND";
@@ -3952,22 +3877,22 @@ class DocumentWindow : public QMainWindow {
                     else if (!planned.name.empty())
                         base = planned.name;
                     else
-                        base = "PIN";
+                        base = "PORT";
                 }
                 std::string name = base;
                 for (int suffix = 2; names.contains(normalized(name)); ++suffix)
                     name = base + "_" + std::to_string(suffix);
                 names.insert(normalized(name));
 
-                auto portId = existingPin;
+                auto portId = existingPort;
                 if (portId == 0) {
-                    auto x = planned.x + planned.width / 2 - pinSize / 2;
-                    auto y = planned.y + planned.height / 2 - pinSize / 2;
-                    x = std::clamp(x, planned.x, planned.x + std::max<ice::Coordinate>(0, planned.width - pinSize));
-                    y = std::clamp(y, planned.y, planned.y + std::max<ice::Coordinate>(0, planned.height - pinSize));
-                    portId = ice::addPort(project, activeLayoutId_, name, pinLayer, ice::Rect{x, y, pinSize, pinSize},
-                                          portDirection.value_or(ice::PortDirection::inout), ice::PortSide::left,
-                                          pinNet, name);
+                    auto x = planned.x + planned.width / 2 - portSize / 2;
+                    auto y = planned.y + planned.height / 2 - portSize / 2;
+                    x = std::clamp(x, planned.x, planned.x + std::max<ice::Coordinate>(0, planned.width - portSize));
+                    y = std::clamp(y, planned.y, planned.y + std::max<ice::Coordinate>(0, planned.height - portSize));
+                    portId = ice::addPort(
+                        project, activeLayoutId_, name, portLayer, ice::Rect{x, y, portSize, portSize},
+                        portDirection.value_or(ice::PortDirection::inout), ice::PortSide::left, portNet, name);
                     if (planned.schematicInstance != 0) {
                         auto &port = project.layoutCells.at(activeLayoutId_).ports.at(portId);
                         port.schematicInstance = planned.schematicInstance;
@@ -3999,18 +3924,18 @@ class DocumentWindow : public QMainWindow {
                 updateRoutedConnectionPaths(project);
             });
         } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Convert to Pin"), QString::fromStdString(error.what()));
+            QMessageBox::critical(this, QStringLiteral("Convert to Port"), QString::fromStdString(error.what()));
             return;
         }
         if (usedPort == 0) {
-            statusBar()->showMessage(QStringLiteral("Could not create a layout pin"));
+            statusBar()->showMessage(QStringLiteral("Could not create a layout port"));
             return;
         }
-        project_->setLastHistoryLabel("Converted layout planned device " + planned.name + " to pin");
+        project_->setLastHistoryLabel("Converted layout planned device " + planned.name + " to port");
         refreshProject();
         QTimer::singleShot(0, this, [this, portId = usedPort] { selectLayoutShapeItem(portId); });
         statusBar()->showMessage(
-            QStringLiteral("Converted %1 to a layout pin.").arg(QString::fromStdString(planned.name)));
+            QStringLiteral("Converted %1 to a layout port.").arg(QString::fromStdString(planned.name)));
     }
 
     void placeLayoutDeviceForPlanned(ice::ObjectId deviceId) {
@@ -4150,8 +4075,8 @@ class DocumentWindow : public QMainWindow {
 
     bool layoutPlannedEndpointIsRoutable(const ice::LayoutCell &cell, ice::ObjectId endpoint,
                                          ice::ObjectId port) const {
-        if (const auto pin = cell.ports.find(endpoint); pin != cell.ports.end())
-            return pin->second.layer != 0 && pin->second.rectangle.valid();
+        if (const auto port = cell.ports.find(endpoint); port != cell.ports.end())
+            return port->second.layer != 0 && port->second.rectangle.valid();
         if (port == 0 || !project_)
             return false;
         const auto instance = cell.instances.find(endpoint);
@@ -4182,7 +4107,7 @@ class DocumentWindow : public QMainWindow {
         automatic->setEnabled(fromRoutable && toRoutable);
         if (!automatic->isEnabled())
             automatic->setToolTip(
-                QStringLiteral("Automatic routing requires placed device pins or layout pins on both ends."));
+                QStringLiteral("Automatic routing requires placed device ports or layout ports on both ends."));
         auto *chosen = menu.exec(QCursor::pos());
         if (chosen == manual) {
             project_->execute("break planned connection", [&](ice::Project &project) {
@@ -4231,7 +4156,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         if (!geometry) {
-            if (routeError == "The two pins already touch; no route is needed.")
+            if (routeError == "The two ports already touch; no route is needed.")
                 statusBar()->showMessage(QString::fromStdString(routeError));
             else
                 QMessageBox::information(this, QStringLiteral("Automatic Routing"), QString::fromStdString(routeError));
@@ -4473,8 +4398,6 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    void finishActiveLayoutPath() { activeLayoutPathId_ = 0; }
-
     void moveLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
         if (!project_ || activeLayoutId_ == 0)
             return;
@@ -4495,12 +4418,12 @@ class DocumentWindow : public QMainWindow {
                 const bool fromEnd = index == 0;
                 const auto endpoint = fromEnd ? connectionIt->second.from : connectionIt->second.to;
                 const auto port = fromEnd ? connectionIt->second.fromPort : connectionIt->second.toPort;
-                const auto pin = layoutRouteEndpoint(currentProject, cellIt->second, endpoint, port);
-                if (!pin)
+                const auto routeEndpoint = layoutRouteEndpoint(currentProject, cellIt->second, endpoint, port);
+                if (!routeEndpoint)
                     return;
-                const auto side = layoutPointSide(pin->rect, ice::LayoutPoint{x, y});
+                const auto side = layoutPointSide(routeEndpoint->rect, ice::LayoutPoint{x, y});
                 try {
-                    project_->execute("change routed pin side", [&](ice::Project &project) {
+                    project_->execute("change routed port side", [&](ice::Project &project) {
                         auto &cell = project.layoutCells.at(activeLayoutId_);
                         const auto connection = cell.plannedConnections.find(connectionId);
                         if (connection == cell.plannedConnections.end())
@@ -4510,10 +4433,10 @@ class DocumentWindow : public QMainWindow {
                     });
                 } catch (const ice::ProjectError &error) {
                     statusBar()->showMessage(
-                        QStringLiteral("Change routed pin side: %1").arg(QString::fromStdString(error.what())), 5000);
+                        QStringLiteral("Change routed port side: %1").arg(QString::fromStdString(error.what())), 5000);
                     return;
                 }
-                project_->setLastHistoryLabel("Changed layout routed pin side");
+                project_->setLastHistoryLabel("Changed layout routed port side");
                 refreshProject();
                 return;
             }
@@ -4624,75 +4547,74 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
-    void addLayoutPathSegment(QPointF start, QPointF end, int width, ice::ObjectId layerId,
-                              const std::vector<ice::ObjectId> &viaLayers) {
-        if (!project_ || width <= 0)
+    void flattenLayoutPath(ice::ObjectId shapeId) {
+        if (!project_ || activeLayoutId_ == 0 || shapeId == 0)
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
-        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
-            !project_->project().layers.contains(layerId) ||
-            !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layerId)))
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
             return;
+
+        std::vector<ice::ObjectId> resultIds;
+        try {
+            project_->execute("flatten layout path", [&](ice::Project &project) {
+                resultIds = ice::flattenLayoutPath(project, activeLayoutId_, shapeId);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Flatten Path"), QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Flattened layout path to polygon");
+        refreshProject();
+        statusBar()->showMessage(
+            resultIds.size() == 1
+                ? QStringLiteral("Flattened path to a polygon")
+                : QStringLiteral("Flattened path to %1 polygons across its layers").arg(resultIds.size()));
+        QTimer::singleShot(0, this, [this, resultIds] { selectLayoutShapeItems(resultIds); });
+    }
+
+    void addLayoutPath(const LayoutPathData &input) {
+        if (!project_ || input.points.size() < 2 || input.widths.size() != input.points.size() - 1 ||
+            input.segmentLayers.size() != input.widths.size())
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        for (const auto layerId : input.segmentLayers) {
+            if (!project_->project().layers.contains(layerId) ||
+                !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layerId)))
+                return;
+        }
+        for (const auto width : input.widths) {
+            if (width <= 0)
+                return;
+        }
+
         const auto toModelPoint = [](QPointF point) {
             return ice::LayoutPoint{static_cast<ice::Coordinate>(std::lround(point.x())),
                                     static_cast<ice::Coordinate>(std::lround(-point.y()))};
         };
-        const auto startPoint = toModelPoint(start);
-        const auto endPoint = toModelPoint(end);
         try {
             project_->execute("draw layout path", [&](ice::Project &project) {
                 auto &cell = project.layoutCells.at(activeLayoutId_);
-                auto shape = activeLayoutPathId_ == 0 ? cell.shapes.end() : cell.shapes.find(activeLayoutPathId_);
-                const bool append = shape != cell.shapes.end() && shape->second.isPath();
-                if (!append) {
-                    const auto shapeId = project.nextId();
-                    ice::Shape path{shapeId, layerId, std::nullopt, {}, {}};
-                    path.name = ice::nextShapeName(cell, "Path");
-                    path.centerline = {startPoint, endPoint};
-                    path.segmentLayers = {layerId};
-                    path.segmentWidths = {width};
-                    path.pointVias = {{}, {}};
-                    for (const auto viaLayer : viaLayers) {
+                const auto shapeId = project.nextId();
+                ice::Shape path{shapeId, input.segmentLayers.front(), std::nullopt, {}, {}};
+                path.name = ice::nextShapeName(cell, "Path");
+                path.centerline.reserve(input.points.size());
+                for (const auto &point : input.points)
+                    path.centerline.push_back(toModelPoint(point));
+                path.segmentLayers = input.segmentLayers;
+                path.segmentWidths.assign(input.widths.begin(), input.widths.end());
+                path.pointVias.resize(input.points.size());
+                for (std::size_t index = 0; index < input.pointVias.size() && index < path.pointVias.size(); ++index) {
+                    for (const auto viaLayer : input.pointVias[index]) {
                         if (viaLayer != 0 && project.layers.contains(viaLayer) &&
                             layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
-                            path.pointVias.front().push_back(viaLayer);
+                            path.pointVias[index].push_back(viaLayer);
                     }
-                    path.width = width;
-                    rebuildLayoutPathGeometry(path);
-                    cell.shapes.emplace(shapeId, std::move(path));
-                    activeLayoutPathId_ = shapeId;
-                    activeLayoutPathCellId_ = activeLayoutId_;
-                } else {
-                    activeLayoutPathCellId_ = activeLayoutId_;
-                    auto &path = shape->second;
-                    if (path.segmentLayers.empty())
-                        path.segmentLayers.assign(path.centerline.size() > 0 ? path.centerline.size() - 1 : 0,
-                                                  path.layer);
-                    if (path.segmentWidths.empty() && path.centerline.size() > 1)
-                        path.segmentWidths.assign(path.centerline.size() - 1, path.width);
-                    if (path.pointVias.size() != path.centerline.size())
-                        path.pointVias.resize(path.centerline.size());
-                    for (const auto viaLayer : viaLayers) {
-                        if (viaLayer == 0 || !project.layers.contains(viaLayer) ||
-                            !layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
-                            continue;
-                        auto &vias = path.pointVias.back();
-                        if (std::find(vias.begin(), vias.end(), viaLayer) == vias.end())
-                            vias.push_back(viaLayer);
-                    }
-                    if (path.centerline.empty() || path.centerline.back().x != endPoint.x ||
-                        path.centerline.back().y != endPoint.y) {
-                        path.centerline.push_back(endPoint);
-                        path.segmentLayers.push_back(layerId);
-                        path.segmentWidths.push_back(width);
-                        path.pointVias.emplace_back();
-                    }
-                    // Each segment keeps its own layer minimum; `width` remains
-                    // the nominal maximum used by bounds and via size.
-                    if (width > path.width)
-                        path.width = width;
-                    rebuildLayoutPathGeometry(path);
                 }
+                path.width = *std::max_element(input.widths.begin(), input.widths.end());
+                rebuildLayoutPathGeometry(path);
+                cell.shapes.emplace(shapeId, std::move(path));
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Draw Path"), QString::fromStdString(error.what()));
@@ -4740,26 +4662,26 @@ class DocumentWindow : public QMainWindow {
         });
     }
 
-    void selectLayoutPin(ice::ObjectId cellId, ice::ObjectId pinId) {
-        if (!project_ || cellId == 0 || pinId == 0)
+    void selectLayoutPort(ice::ObjectId cellId, ice::ObjectId portId) {
+        if (!project_ || cellId == 0 || portId == 0)
             return;
         const auto &project = project_->project();
         const auto cell = project.layoutCells.find(cellId);
-        if (cell == project.layoutCells.end() || !cell->second.ports.contains(pinId))
+        if (cell == project.layoutCells.end() || !cell->second.ports.contains(portId))
             return;
         selectLayoutTab(cellId);
-        QTimer::singleShot(0, this, [this, pinId] { selectLayoutShapeItem(pinId); });
+        QTimer::singleShot(0, this, [this, portId] { selectLayoutShapeItem(portId); });
     }
 
-    void setLayoutPinVisible(ice::ObjectId cellId, ice::ObjectId pinId, bool visible) {
-        if (!project_ || cellId == 0 || pinId == 0)
+    void setLayoutPortVisible(ice::ObjectId cellId, ice::ObjectId portId, bool visible) {
+        if (!project_ || cellId == 0 || portId == 0)
             return;
         try {
-            project_->execute("set layout pin visibility", [&](ice::Project &project) {
+            project_->execute("set layout port visibility", [&](ice::Project &project) {
                 const auto cell = project.layoutCells.find(cellId);
                 if (cell == project.layoutCells.end())
                     return;
-                const auto found = cell->second.ports.find(pinId);
+                const auto found = cell->second.ports.find(portId);
                 if (found == cell->second.ports.end())
                     return;
                 auto port = found->second;
@@ -5565,7 +5487,7 @@ class DocumentWindow : public QMainWindow {
                                      .arg(QString::fromStdString(project_->project().layers.at(layerId).name)));
     }
 
-    void addLayoutPin(QPointF first, QPointF second) {
+    void addLayoutPort(QPointF first, QPointF second) {
         if (!project_ || activeLayoutId_ == 0)
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
@@ -5573,13 +5495,13 @@ class DocumentWindow : public QMainWindow {
             return;
         const auto availableLayers = layoutLayers(project_->project(), activeLayoutId_);
         if (availableLayers.empty()) {
-            QMessageBox::information(this, QStringLiteral("Create Pin"),
-                                     QStringLiteral("Create a layer before drawing pins."));
+            QMessageBox::information(this, QStringLiteral("Create Port"),
+                                     QStringLiteral("Create a layer before drawing ports."));
             return;
         }
         if (availableLayers.size() > 1 && activeLayoutLayerId_ == 0) {
-            QMessageBox::information(this, QStringLiteral("Create Pin"),
-                                     QStringLiteral("Select a layer before drawing pins."));
+            QMessageBox::information(this, QStringLiteral("Create Port"),
+                                     QStringLiteral("Select a layer before drawing ports."));
             return;
         }
         const auto layerId = activeLayoutLayerId_ != 0 ? activeLayoutLayerId_ : availableLayers.front().get().id;
@@ -5590,9 +5512,9 @@ class DocumentWindow : public QMainWindow {
         const auto y = static_cast<ice::Coordinate>(std::lround(-rectangle.bottom()));
         const auto width = static_cast<ice::Coordinate>(std::lround(rectangle.width()));
         const auto height = static_cast<ice::Coordinate>(std::lround(rectangle.height()));
-        std::string name = "PIN1";
+        std::string name = "PORT1";
         for (int index = 1;; ++index) {
-            name = "PIN" + std::to_string(index);
+            name = "PORT" + std::to_string(index);
             const bool exists = std::any_of(cellIt->second.ports.begin(), cellIt->second.ports.end(),
                                             [&](const auto &entry) { return entry.second.name == name; });
             if (!exists)
@@ -5600,12 +5522,12 @@ class DocumentWindow : public QMainWindow {
         }
         ice::ObjectId portId = 0;
         try {
-            project_->execute("create layout pin", [&](ice::Project &project) {
+            project_->execute("create layout port", [&](ice::Project &project) {
                 portId = ice::addPort(project, activeLayoutId_, name, layerId, ice::Rect{x, y, width, height},
                                       ice::PortDirection::inout, ice::PortSide::left, 0, name);
             });
         } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Create Pin"), QString::fromStdString(error.what()));
+            QMessageBox::critical(this, QStringLiteral("Create Port"), QString::fromStdString(error.what()));
             return;
         }
         refreshProject();
@@ -5613,12 +5535,12 @@ class DocumentWindow : public QMainWindow {
             QTimer::singleShot(0, this, [this, portId] { selectLayoutShapeItem(portId); });
         if (layoutPropertiesPanel_ && layoutRightTabs_)
             layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
-        statusBar()->showMessage(QStringLiteral("Created pin %1 on %2")
+        statusBar()->showMessage(QStringLiteral("Created port %1 on %2")
                                      .arg(QString::fromStdString(name),
                                           QString::fromStdString(project_->project().layers.at(layerId).name)));
     }
 
-    void promoteInstancePin(ice::ObjectId instanceId, ice::ObjectId childPortId) {
+    void promoteInstancePort(ice::ObjectId instanceId, ice::ObjectId childPortId) {
         if (!project_ || activeLayoutId_ == 0 || instanceId == 0 || childPortId == 0)
             return;
         const auto &project = project_->project();
@@ -5670,7 +5592,7 @@ class DocumentWindow : public QMainWindow {
                 }
                 if (netId == 0) {
                     try {
-                        project_->execute("promote layout pin", [&](ice::Project &project) {
+                        project_->execute("promote layout port", [&](ice::Project &project) {
                             netId = ice::createLayoutNet(project, activeLayoutId_, childNet->second.name);
                         });
                     } catch (const ice::ProjectError &) {
@@ -5679,10 +5601,23 @@ class DocumentWindow : public QMainWindow {
                 }
             }
         }
+        auto portLayer = childPort.layer;
+        if (portLayer == 0 || !project.layers.contains(portLayer))
+            portLayer = activeLayoutLayerId_;
+        if (portLayer == 0) {
+            const auto layers = layoutLayers(project, activeLayoutId_);
+            if (!layers.empty())
+                portLayer = layers.front().get().id;
+        }
+        if (portLayer == 0) {
+            QMessageBox::warning(this, QStringLiteral("Promote Port"),
+                                 QStringLiteral("Select a layer before promoting a port."));
+            return;
+        }
         ice::ObjectId portId = 0;
         try {
-            project_->execute("promote layout pin", [&](ice::Project &project) {
-                portId = ice::addPort(project, activeLayoutId_, name, childPort.layer, rectangle, childPort.direction,
+            project_->execute("promote layout port", [&](ice::Project &project) {
+                portId = ice::addPort(project, activeLayoutId_, name, portLayer, rectangle, childPort.direction,
                                       childPort.side, netId, childPort.label);
                 auto &port = project.layoutCells.at(activeLayoutId_).ports.at(portId);
                 port.sourceInstance = instanceId;
@@ -5690,7 +5625,7 @@ class DocumentWindow : public QMainWindow {
                 ice::updatePort(project, activeLayoutId_, port);
             });
         } catch (const ice::ProjectError &error) {
-            QMessageBox::warning(this, QStringLiteral("Promote Pin"), QString::fromStdString(error.what()));
+            QMessageBox::warning(this, QStringLiteral("Promote Port"), QString::fromStdString(error.what()));
             return;
         }
         refreshProject();
@@ -6051,9 +5986,10 @@ class DocumentWindow : public QMainWindow {
                                 ? std::filesystem::path(cell.reference->path)
                                 : root / cell.reference->path;
         std::error_code status;
-        const auto stamp = std::filesystem::is_regular_file(source, status) && !status
-                               ? std::filesystem::last_write_time(source, status).time_since_epoch().count()
-                               : 0;
+        const auto stamp =
+            std::filesystem::is_regular_file(source, status) && !status
+                ? static_cast<std::int64_t>(std::filesystem::last_write_time(source, status).time_since_epoch().count())
+                : std::int64_t{0};
         std::ostringstream key;
         key << cell.reference->path << "|" << cell.reference->format << "|" << cell.reference->topCell << "|" << stamp;
         const auto keyText = QString::fromStdString(key.str());
@@ -6108,10 +6044,6 @@ class DocumentWindow : public QMainWindow {
             cellIt = editable;
             activeLayoutId_ = cellIt->first;
         }
-        if (activeLayoutPathCellId_ != activeLayoutId_) {
-            finishActiveLayoutPath();
-            activeLayoutPathCellId_ = activeLayoutId_;
-        }
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
             layoutDevicesPanel_->setProjectDevices(project, cellIt->second.pdk);
@@ -6134,8 +6066,8 @@ class DocumentWindow : public QMainWindow {
             layoutTextTool_->setEnabled(!readOnly && !availableLayers.empty());
         if (layoutTextPolygonTool_)
             layoutTextPolygonTool_->setEnabled(!readOnly && !availableLayers.empty());
-        if (layoutPinTool_)
-            layoutPinTool_->setEnabled(!readOnly && !availableLayers.empty());
+        if (layoutPortTool_)
+            layoutPortTool_->setEnabled(!readOnly);
         if (layoutDeleteTool_)
             layoutDeleteTool_->setEnabled(!readOnly);
         if (layoutCanvas_) {
@@ -6190,10 +6122,7 @@ class DocumentWindow : public QMainWindow {
                     if (shape.layer.id == 0)
                         options.hiddenLayers.insert(ice::layoutPreviewLayerKey(shape.layer));
                 }
-                for (const auto &port : referencePreviewModel_->ports) {
-                    if (port.layer.id == 0)
-                        options.hiddenLayers.insert(ice::layoutPreviewLayerKey(port.layer));
-                }
+
                 auto *item = createLayoutPreviewItem(*referencePreviewModel_, styles, deviceStyles, options);
                 layoutCanvas_->scene()->addItem(item);
                 layoutCanvas_->scene()->setSceneRect(layoutCanvas_->scene()->itemsBoundingRect());
@@ -6399,7 +6328,10 @@ class DocumentWindow : public QMainWindow {
             auto *item = layoutCanvas_->scene()->addRect(rect, pen, QBrush(fill));
             item->setZValue(6.0);
             item->setData(0, QVariant::fromValue<qulonglong>(id));
-            item->setData(2, QStringLiteral("layout-pin"));
+            item->setData(2, QStringLiteral("layout-port"));
+            auto pathLayer =
+                port.layer == 0 ? ice::ObjectId{0} : drawingLayerForPort(project, activeLayoutId_, port.layer);
+            item->setData(6, QVariant::fromValue<qulonglong>(pathLayer != 0 ? pathLayer : port.layer));
             if (!readOnly) {
                 item->setFlag(QGraphicsItem::ItemIsSelectable);
                 if (!port.locked)
@@ -6415,7 +6347,7 @@ class DocumentWindow : public QMainWindow {
                           rect.center().y() - labelBounds.height() / 2.0);
             label->setPen(layoutLabelHaloPen());
             label->setAcceptedMouseButtons(Qt::NoButton);
-            item->setToolTip(QStringLiteral("Pin %1 · %2 · %3")
+            item->setToolTip(QStringLiteral("Port %1 · %2 · %3")
                                  .arg(QString::fromStdString(port.name),
                                       QString::fromStdString(ice::portDirectionName(port.direction)),
                                       QString::fromStdString(ice::portSideName(port.side))));
@@ -6470,29 +6402,33 @@ class DocumentWindow : public QMainWindow {
                 const auto first = transform.apply({port.rectangle.x, port.rectangle.y});
                 const auto second = transform.apply(
                     {port.rectangle.x + port.rectangle.width, port.rectangle.y + port.rectangle.height});
-                const QRectF pinRect(QPointF(std::min(first.x, second.x), -std::max(first.y, second.y)),
-                                     QPointF(std::max(first.x, second.x), -std::min(first.y, second.y)));
-                QPen pinPen(style.color, 1.0, Qt::DashLine);
-                pinPen.setCosmetic(true);
-                QColor pinFill = style.color;
-                pinFill.setAlpha(30);
-                auto *pinItem = layoutCanvas_->scene()->addRect(pinRect.normalized(), pinPen, QBrush(pinFill));
-                pinItem->setZValue(7.0);
-                pinItem->setData(3, QStringLiteral("instance-pin"));
-                pinItem->setData(4, QVariant::fromValue<qulonglong>(instance.id));
-                pinItem->setData(5, QVariant::fromValue<qulonglong>(portId));
-                pinItem->setToolTip(QStringLiteral("Instance %1 pin %2 · double-click to promote")
-                                        .arg(QString::fromStdString(instance.name), QString::fromStdString(port.name)));
-                auto *pinLabel = new QGraphicsSimpleTextItem(QString::fromStdString(port.label), pinItem);
-                QFont pinFont = pinLabel->font();
-                pinFont.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, pinRect.height() * 0.3))));
-                pinLabel->setFont(pinFont);
-                pinLabel->setBrush(QBrush(style.color));
-                const auto pinLabelBounds = pinLabel->boundingRect();
-                pinLabel->setPos(pinRect.center().x() - pinLabelBounds.width() / 2.0,
-                                 pinRect.center().y() - pinLabelBounds.height() / 2.0);
-                pinLabel->setPen(layoutLabelHaloPen());
-                pinLabel->setAcceptedMouseButtons(Qt::NoButton);
+                const QRectF portRect(QPointF(std::min(first.x, second.x), -std::max(first.y, second.y)),
+                                      QPointF(std::max(first.x, second.x), -std::min(first.y, second.y)));
+                QPen portPen(style.color, 1.0, Qt::DashLine);
+                portPen.setCosmetic(true);
+                QColor portFill = style.color;
+                portFill.setAlpha(30);
+                auto *portItem = layoutCanvas_->scene()->addRect(portRect.normalized(), portPen, QBrush(portFill));
+                portItem->setZValue(7.0);
+                portItem->setData(3, QStringLiteral("instance-port"));
+                portItem->setData(4, QVariant::fromValue<qulonglong>(instance.id));
+                portItem->setData(5, QVariant::fromValue<qulonglong>(portId));
+                auto pathLayer =
+                    port.layer == 0 ? ice::ObjectId{0} : drawingLayerForPort(project, childIt->first, port.layer);
+                portItem->setData(6, QVariant::fromValue<qulonglong>(pathLayer != 0 ? pathLayer : port.layer));
+                portItem->setToolTip(
+                    QStringLiteral("Instance %1 port %2 · double-click to promote")
+                        .arg(QString::fromStdString(instance.name), QString::fromStdString(port.name)));
+                auto *portLabel = new QGraphicsSimpleTextItem(QString::fromStdString(port.label), portItem);
+                QFont portFont = portLabel->font();
+                portFont.setPixelSize(std::max(1, static_cast<int>(std::max<qreal>(1.0, portRect.height() * 0.3))));
+                portLabel->setFont(portFont);
+                portLabel->setBrush(QBrush(style.color));
+                const auto portLabelBounds = portLabel->boundingRect();
+                portLabel->setPos(portRect.center().x() - portLabelBounds.width() / 2.0,
+                                  portRect.center().y() - portLabelBounds.height() / 2.0);
+                portLabel->setPen(layoutLabelHaloPen());
+                portLabel->setAcceptedMouseButtons(Qt::NoButton);
             }
             const auto bounds = group->childrenBoundingRect();
             if (bounds.isValid() && !bounds.isNull()) {
@@ -6644,7 +6580,7 @@ class DocumentWindow : public QMainWindow {
         set(layoutTextPolygonTool_, tool == LayoutCanvas::Tool::textPolygon);
         set(layoutPathTool_, tool == LayoutCanvas::Tool::path);
         set(layoutTextTool_, tool == LayoutCanvas::Tool::text);
-        set(layoutPinTool_, tool == LayoutCanvas::Tool::pin);
+        set(layoutPortTool_, tool == LayoutCanvas::Tool::port);
         set(layoutRulerTool_, tool == LayoutCanvas::Tool::ruler);
     }
 
@@ -6674,7 +6610,7 @@ class DocumentWindow : public QMainWindow {
         addToolEntry(layoutPolygonTool_);
         addToolEntry(layoutPathTool_);
         addToolEntry(layoutTextTool_);
-        addToolEntry(layoutPinTool_);
+        addToolEntry(layoutPortTool_);
         addToolEntry(layoutRulerTool_);
         menu.exec(globalPos);
     }
@@ -6709,6 +6645,9 @@ class DocumentWindow : public QMainWindow {
             return;
         case LayoutCanvas::FigureContextAction::flip:
             flipSelectedLayoutFigures();
+            return;
+        case LayoutCanvas::FigureContextAction::flattenPath:
+            flattenLayoutPath(id);
             return;
         case LayoutCanvas::FigureContextAction::copy:
             copySelectedLayoutShapes();
@@ -7130,7 +7069,11 @@ class DocumentWindow : public QMainWindow {
                     QString netName;
                     if (const auto netIt = activeIt->second.nets.find(port.net); netIt != activeIt->second.nets.end())
                         netName = QString::fromStdString(netIt->second.name);
-                    layoutPropertiesPanel_->setLayoutPort(port, layerName.toStdString(), netName.toStdString());
+                    std::vector<PropertiesPanel::LayoutPortLayer> portLayers;
+                    for (const auto &layerRef : layoutLayers(project_->project(), activeLayoutId_))
+                        portLayers.emplace_back(layerRef.get().id, layerRef.get().name);
+                    layoutPropertiesPanel_->setLayoutPort(port, layerName.toStdString(), netName.toStdString(),
+                                                          portLayers);
                     if (bringToFront && layoutRightTabs_)
                         layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
                     return;
@@ -7639,7 +7582,7 @@ class DocumentWindow : public QMainWindow {
         if (!project_ || activeLayoutId_ == 0)
             return;
         try {
-            project_->execute("edit layout pin", [&](ice::Project &project) {
+            project_->execute("edit layout port", [&](ice::Project &project) {
                 auto &cell = project.layoutCells.at(activeLayoutId_);
                 auto edited = port;
                 if (!netName.empty()) {
@@ -7658,7 +7601,7 @@ class DocumentWindow : public QMainWindow {
                 ice::updatePort(project, activeLayoutId_, edited);
             });
         } catch (const ice::ProjectError &error) {
-            QMessageBox::warning(this, QStringLiteral("Edit Pin"), QString::fromStdString(error.what()));
+            QMessageBox::warning(this, QStringLiteral("Edit Port"), QString::fromStdString(error.what()));
             refreshLayoutProperties();
             return;
         }
@@ -7797,8 +7740,9 @@ class DocumentWindow : public QMainWindow {
                         continue;
                     auto &parameters = instance->second.parameters;
                     const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
-                        return entry.id != parameterId && QString::fromStdString(entry.name).compare(
-                                                                 QString::fromStdString(name), Qt::CaseInsensitive) == 0;
+                        return entry.id != parameterId &&
+                               QString::fromStdString(entry.name)
+                                       .compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0;
                     });
                     if (duplicate)
                         return;
@@ -7835,8 +7779,8 @@ class DocumentWindow : public QMainWindow {
                 auto &parameters = cell->second.parameters;
                 const auto duplicate = std::any_of(parameters.begin(), parameters.end(), [&](const auto &entry) {
                     return entry.id != parameterId &&
-                           QString::fromStdString(entry.name).compare(QString::fromStdString(name),
-                                                                      Qt::CaseInsensitive) == 0;
+                           QString::fromStdString(entry.name)
+                                   .compare(QString::fromStdString(name), Qt::CaseInsensitive) == 0;
                 });
                 if (duplicate)
                     return;
@@ -8106,7 +8050,7 @@ class DocumentWindow : public QMainWindow {
         });
         const auto &storedSimulation = project_->project().simulations.at(simId);
         rebuildGraphTabs(storedSimulation.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         for (int index = 0; index < graphTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
                 graphTabs_->setCurrentIndex(index);
@@ -8166,7 +8110,7 @@ class DocumentWindow : public QMainWindow {
     void refreshGraphAfterLabelEdit(ice::ObjectId simId, ice::ObjectId graphId, const QString &message) {
         const auto &simulation = project_->project().simulations.at(simId);
         rebuildGraphTabs(simulation.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         // Rebuild keeps the previous tab index; select the edited graph's tab.
         for (int index = 0; index < graphTabs_->count(); ++index) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(index).toULongLong()) == graphId) {
@@ -8575,7 +8519,7 @@ class DocumentWindow : public QMainWindow {
             sim.graphs.push_back(std::move(graph));
             project.simulations.emplace(newId, std::move(sim));
         });
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         simulationPanel_->selectSimulation(newId);
         statusBar()->showMessage(QStringLiteral("Simulation added"));
     }
@@ -8627,7 +8571,7 @@ class DocumentWindow : public QMainWindow {
             project_->setLastHistoryLabel("Created SystemVerilog testbench " + name.trimmed().toStdString());
             refreshProject();
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             selectDigitalTestbenchSimulation(simulationId);
             if (documents_ && simulationTestbenchPage_)
                 documents_->setCurrentWidget(simulationTestbenchPage_);
@@ -8662,12 +8606,8 @@ class DocumentWindow : public QMainWindow {
     }
 
     void setReportStatus(const QString &text, bool error = false) {
-        if (!reportStatusLabel_)
-            return;
-        reportStatusLabel_->setText(text);
-        reportStatusLabel_->setStyleSheet(
-            error ? QStringLiteral("color: #d9534f; font-weight: bold;")
-                  : QStringLiteral("color: %1;").arg(ice::uiColor(ice::UiColor::Text2).name()));
+        if (error && !text.isEmpty())
+            statusBar()->showMessage(text, 10000);
     }
 
     void beginImplementationJob(const QString &title, ice::ImplementationStage stage) {
@@ -8733,8 +8673,6 @@ class DocumentWindow : public QMainWindow {
         const auto *report = selectedReport();
         if (!report) {
             clearScriptGraphs();
-            if (reportTitleLabel_)
-                reportTitleLabel_->setText(QStringLiteral("No simulation script selected"));
             if (reportCodeEditor_) {
                 const QSignalBlocker blocker(reportCodeEditor_);
                 reportCodeEditor_->clear();
@@ -8744,27 +8682,30 @@ class DocumentWindow : public QMainWindow {
             reportDirty_ = false;
             if (reportSaveTimer_)
                 reportSaveTimer_->stop();
-            if (reportSaveButton_)
-                reportSaveButton_->setEnabled(false);
             if (reportRunButton_)
                 reportRunButton_->setEnabled(false);
             if (reportOpenButton_)
                 reportOpenButton_->setEnabled(false);
+            if (scriptGridButton_)
+                scriptGridButton_->setEnabled(false);
             if (simulationRightStack_ && simulationEditorPage_ &&
                 simulationRightStack_->currentWidget() == reportsView_)
                 simulationRightStack_->setCurrentWidget(simulationEditorPage_);
             return;
         }
-        if (reportTitleLabel_)
-            reportTitleLabel_->setText(QString::fromStdString(report->name));
         if (reportCodeEditor_)
             reportCodeEditor_->setReadOnly(false);
-        if (reportSaveButton_)
-            reportSaveButton_->setEnabled(true);
         if (reportRunButton_)
             reportRunButton_->setEnabled(true);
         if (reportOpenButton_)
             reportOpenButton_->setEnabled(true);
+        if (scriptGridButton_) {
+            scriptGridButton_->setEnabled(true);
+            if (scriptGridButton_->isChecked() != graphGridVisible_) {
+                const QSignalBlocker blocker(scriptGridButton_);
+                scriptGridButton_->setChecked(graphGridVisible_);
+            }
+        }
     }
 
     void loadReportSource() {
@@ -8829,7 +8770,7 @@ class DocumentWindow : public QMainWindow {
         return true;
     }
 
-    void selectReport(ice::ObjectId id) {
+    void selectReport(ice::ObjectId id, int graphIndex = -1) {
         if (selectingReport_)
             return;
         if (activeReportId_ != 0 && reportDirty_ && !saveReportSource()) {
@@ -8845,22 +8786,25 @@ class DocumentWindow : public QMainWindow {
         activeReportId_ = id;
         clearScriptGraphs();
         if (simulationPanel_)
-            simulationPanel_->selectReport(id);
+            simulationPanel_->selectReport(id, graphIndex);
         if (simulationRightStack_ && reportsView_)
             simulationRightStack_->setCurrentWidget(reportsView_);
         if (scriptTabs_)
-            scriptTabs_->setCurrentIndex(0);
+            scriptTabs_->setCurrentIndex(graphIndex >= 0 && scriptGraphsPage_ ? scriptTabs_->indexOf(scriptGraphsPage_)
+                                                                              : 0);
         if (documents_ && simulationPage_)
             documents_->setCurrentWidget(simulationPage_);
         selectingReport_ = false;
         loadReportSource();
-        loadCachedScriptGraphs();
+        loadCachedScriptGraphs(graphIndex);
     }
 
     std::filesystem::path reportRunnerPath() const {
         const auto appDir = QCoreApplication::applicationDirPath().toStdString();
         const std::vector<std::filesystem::path> candidates = {
             std::filesystem::path(appDir) / "assets" / "simulation" / "report_runner.py",
+            std::filesystem::path(appDir) / ".." / "share" / "ice" / "assets" / "simulation" / "report_runner.py",
+            std::filesystem::path(appDir) / ".." / "Resources" / "assets" / "simulation" / "report_runner.py",
             std::filesystem::path(appDir) / ".." / ".." / ".." / ".." / "assets" / "simulation" / "report_runner.py",
 #ifdef ICE_SOURCE_DIR
             std::filesystem::path(ICE_SOURCE_DIR) / "assets" / "simulation" / "report_runner.py",
@@ -8888,10 +8832,13 @@ class DocumentWindow : public QMainWindow {
             scriptGraphViewStack_->setCurrentIndex(0);
     }
 
-    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false) {
+    void displayScriptGraphs(const std::vector<ice::SimulationScriptGraph> &graphs, bool reveal = false,
+                             int selectedGraph = -1) {
         if (!scriptGraphTabs_)
             return;
         clearScriptGraphs();
+        int graphIndex = 0;
+        int selectedTab = -1;
         for (const auto &graph : graphs) {
             if (graph.x.empty() || graph.series.empty())
                 continue;
@@ -8915,10 +8862,13 @@ class DocumentWindow : public QMainWindow {
             plot->setGridVisible(graphGridVisible_);
             plot->setGraph(definition);
             plot->setResult(result);
+            if (graphIndex == selectedGraph)
+                selectedTab = scriptGraphTabs_->count();
             scriptGraphTabs_->addTab(plot, QString::fromStdString(graph.name));
+            ++graphIndex;
         }
         if (scriptGraphTabs_->count() > 0) {
-            scriptGraphTabs_->setCurrentIndex(0);
+            scriptGraphTabs_->setCurrentIndex(selectedTab >= 0 ? selectedTab : 0);
             if (scriptGraphViewStack_)
                 scriptGraphViewStack_->setCurrentIndex(1);
             if (reveal && scriptTabs_ && scriptGraphsPage_)
@@ -8928,7 +8878,7 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    void loadCachedScriptGraphs() {
+    void loadCachedScriptGraphs(int selectedGraph = -1) {
         const auto *report = selectedReport();
         if (!report || projectPath_.isEmpty()) {
             clearScriptGraphs();
@@ -8943,7 +8893,8 @@ class DocumentWindow : public QMainWindow {
             return;
         }
         try {
-            displayScriptGraphs(ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString()));
+            displayScriptGraphs(ice::parseSimulationScriptGraphs(QString::fromUtf8(file.readAll()).toStdString()),
+                                selectedGraph >= 0, selectedGraph);
         } catch (const ice::ProjectError &) {
             clearScriptGraphs();
         }
@@ -9030,8 +8981,10 @@ class DocumentWindow : public QMainWindow {
             try {
                 const auto graphs =
                     ice::parseSimulationScriptGraphs(QString::fromUtf8(graphFile.readAll()).toStdString());
-                if (!graphs.empty())
+                if (!graphs.empty()) {
                     displayScriptGraphs(graphs, true);
+                    refreshSimulationPanelTree();
+                }
             } catch (const ice::ProjectError &error) {
                 appendReportMessage(QStringLiteral("[Simulation script] %1: unable to read graphs: %2")
                                         .arg(reportName, QString::fromStdString(error.what())));
@@ -9173,7 +9126,7 @@ class DocumentWindow : public QMainWindow {
             return;
         project_->execute("delete simulation", [id](ice::Project &project) { project.simulations.erase(id); });
         activeSimulationId_ = 0;
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         rebuildGraphTabs({});
         updateSimulationNetlistState();
         statusBar()->showMessage(QStringLiteral("Simulation deleted"));
@@ -9208,7 +9161,7 @@ class DocumentWindow : public QMainWindow {
         if (newGraphId == 0)
             return;
         // Refresh the panel tree, select the simulation and the new graph tab.
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         activeSimulationId_ = 0; // force rebuild on next load
         simulationPanel_->selectSimulation(simId, newGraphId);
         statusBar()->showMessage(QStringLiteral("Graph added"));
@@ -9244,7 +9197,7 @@ class DocumentWindow : public QMainWindow {
         // Rebuild tabs from the surviving graphs and refresh the panel tree.
         const auto &updatedSim = project_->project().simulations.at(simId);
         rebuildGraphTabs(updatedSim.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         statusBar()->showMessage(QStringLiteral("Graph deleted"));
     }
 
@@ -9452,7 +9405,7 @@ class DocumentWindow : public QMainWindow {
         // Rebuild tabs to reflect new name and refresh the panel tree.
         const auto &updatedSim = project_->project().simulations.at(simId);
         rebuildGraphTabs(updatedSim.graphs);
-        simulationPanel_->setProject(project_->project());
+        refreshSimulationPanelTree();
         // Restore to the same graph (by id).
         for (int i = 0; i < graphTabs_->count(); ++i) {
             if (static_cast<ice::ObjectId>(graphTabs_->tabBar()->tabData(i).toULongLong()) == graphId) {
@@ -10213,7 +10166,7 @@ class DocumentWindow : public QMainWindow {
             QSignalBlocker blocker(signalsCapture_);
             signalsCapture_->setText(QString::fromStdString(updated->second.captureSignals));
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             rebuildGraphTabs(updated->second.graphs);
         }
         auto result = std::make_shared<ice::SimulationResult>();
@@ -10368,7 +10321,7 @@ class DocumentWindow : public QMainWindow {
             QSignalBlocker blocker(signalsCapture_);
             signalsCapture_->setText(QString::fromStdString(sim.captureSignals));
             if (simulationPanel_)
-                simulationPanel_->setProject(project_->project());
+                refreshSimulationPanelTree();
             if (!digitalSimulation)
                 rebuildGraphTabs(sim.graphs);
         }
@@ -11144,6 +11097,16 @@ class DocumentWindow : public QMainWindow {
             documents_->setCurrentWidget(layoutPage_);
     }
 
+    void refreshSimulationPanelTree() {
+        if (!simulationPanel_)
+            return;
+        simulationPanel_->setProjectRoot(projectPath_.isEmpty() ? QString() : QFileInfo(projectPath_).absolutePath());
+        if (project_)
+            simulationPanel_->setProject(project_->project());
+        else
+            simulationPanel_->clear();
+    }
+
     void refreshEmbeddedPanels() {
         const ice::Project empty;
         const auto &project = project_ ? project_->project() : empty;
@@ -11267,8 +11230,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         // Refresh simulation panel and project-level simulation scripts.
-        if (simulationPanel_)
-            simulationPanel_->setProject(project);
+        refreshSimulationPanelTree();
         refreshReportPanel();
         updateEmptyWorkspaceState();
     }
@@ -11359,11 +11321,11 @@ class DocumentWindow : public QMainWindow {
             return std::nullopt;
         const auto last = text.find_last_not_of(" \t\r\n");
         const auto trimmed = text.substr(first, last - first + 1);
-        double value = 0.0;
-        const auto parsed = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr == trimmed.data())
+        std::size_t consumed = 0;
+        const auto parsed = ice::parseDoublePrefix(trimmed, consumed);
+        if (!parsed || consumed == 0)
             return std::nullopt;
-        std::size_t consumed = static_cast<std::size_t>(parsed.ptr - trimmed.data());
+        double value = *parsed;
         while (consumed < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[consumed])))
             ++consumed;
         double scale = 1.0;
@@ -12982,11 +12944,11 @@ class DocumentWindow : public QMainWindow {
         layoutHierarchy_->setOnInstanceSelected([this](ice::ObjectId ownerId, ice::ObjectId instanceId) {
             selectLayoutInstanceFromHierarchy(ownerId, instanceId);
         });
-        layoutHierarchy_->setOnActivatePin([this](ice::ObjectId cellId, ice::ObjectId pinId) {
-            QTimer::singleShot(0, this, [this, cellId, pinId] { selectLayoutPin(cellId, pinId); });
+        layoutHierarchy_->setOnActivatePort([this](ice::ObjectId cellId, ice::ObjectId portId) {
+            QTimer::singleShot(0, this, [this, cellId, portId] { selectLayoutPort(cellId, portId); });
         });
-        layoutHierarchy_->setOnPinVisibilityChanged([this](ice::ObjectId cellId, ice::ObjectId pinId, bool visible) {
-            setLayoutPinVisible(cellId, pinId, visible);
+        layoutHierarchy_->setOnPortVisibilityChanged([this](ice::ObjectId cellId, ice::ObjectId portId, bool visible) {
+            setLayoutPortVisible(cellId, portId, visible);
         });
         layoutHierarchy_->setOnRegenerateProceduralLayout([this](ice::ObjectId id) { regenerateProceduralLayout(id); });
         layoutHierarchy_->setOnRenameLayout(
@@ -13146,22 +13108,21 @@ class DocumentWindow : public QMainWindow {
                 if (changed)
                     refreshLayout();
             });
-        layersPanel_->setOnLayerVisibilityFilter([this](bool pinOnly) {
+        layersPanel_->setOnShowDrawingLayers([this] {
             if (!project_)
                 return;
             bool changed = false;
-            project_->execute(
-                pinOnly ? "show only pin layers" : "show only drawing layers", [&](ice::Project &project) {
-                    for (auto &[_, layer] : project.layers) {
-                        if (!layerAvailableForLayout(project, activeLayoutId_, layer))
-                            continue;
-                        const bool visible = pinOnly ? layerIsPinLayer(layer) : layerIsDrawingLayer(layer);
-                        if (layer.visible == visible)
-                            continue;
-                        layer.visible = visible;
-                        changed = true;
-                    }
-                });
+            project_->execute("show only drawing layers", [&](ice::Project &project) {
+                for (auto &[_, layer] : project.layers) {
+                    if (!layerAvailableForLayout(project, activeLayoutId_, layer))
+                        continue;
+                    const bool visible = layerIsDrawingLayer(layer);
+                    if (layer.visible == visible)
+                        continue;
+                    layer.visible = visible;
+                    changed = true;
+                }
+            });
             if (changed)
                 refreshLayout();
         });
@@ -13644,7 +13605,8 @@ class DocumentWindow : public QMainWindow {
             if (simId != 0 && documents_ && simulationPage_)
                 documents_->setCurrentWidget(simulationPage_);
         });
-        simulationPanel_->setOnReportSelection([this](ice::ObjectId reportId) { selectReport(reportId); });
+        simulationPanel_->setOnReportSelection(
+            [this](ice::ObjectId reportId, int graphIndex) { selectReport(reportId, graphIndex); });
         simulationPanel_->setOnAddGraph([this](ice::ObjectId simId) { addGraph(simId); });
         simulationPanel_->setOnDeleteGraph(
             [this](ice::ObjectId simId, ice::ObjectId graphId) { deleteGraph(simId, graphId); });
@@ -13693,6 +13655,10 @@ class DocumentWindow : public QMainWindow {
         connect(simulationEditGraphButton_, &QPushButton::clicked, this, [this] { editGraph(); });
         connect(simulationGridButton_, &QPushButton::toggled, this, [this](bool visible) {
             graphGridVisible_ = visible;
+            if (scriptGridButton_ && scriptGridButton_->isChecked() != visible) {
+                const QSignalBlocker blocker(scriptGridButton_);
+                scriptGridButton_->setChecked(visible);
+            }
             if (!graphTabs_)
                 return;
             for (int index = 0; index < graphTabs_->count(); ++index)
@@ -13911,25 +13877,6 @@ class DocumentWindow : public QMainWindow {
         reportsView_ = reportsView;
         auto *reportsLayout = new QVBoxLayout(reportsView_);
         reportsLayout->setContentsMargins(0, 0, 0, 0);
-        auto *reportsToolbar = new QHBoxLayout;
-        reportsToolbar->setContentsMargins(4, 4, 4, 4);
-        reportTitleLabel_ = new QLabel(QStringLiteral("No simulation script selected"));
-        reportTitleLabel_->setStyleSheet(QStringLiteral("font-weight: 600;"));
-        reportsToolbar->addWidget(reportTitleLabel_, 1);
-        reportStatusLabel_ = new QLabel;
-        reportsToolbar->addWidget(reportStatusLabel_);
-        reportSaveButton_ = new QPushButton(QStringLiteral("Save"));
-        reportSaveButton_->setToolTip(QStringLiteral("Save the simulation script source"));
-        reportsToolbar->addWidget(reportSaveButton_);
-        reportRunButton_ = new QPushButton(QStringLiteral("Run"));
-        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected simulation script"));
-        setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
-        reportsToolbar->addWidget(reportRunButton_);
-        reportOpenButton_ = new QPushButton(QStringLiteral("Open File"));
-        reportOpenButton_->setToolTip(QStringLiteral("Open the simulation script source in an external editor"));
-        setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
-        reportsToolbar->addWidget(reportOpenButton_);
-        reportsLayout->addLayout(reportsToolbar);
 
         reportCodeEditor_ = new QPlainTextEdit;
         reportCodeEditor_->setReadOnly(true);
@@ -13951,10 +13898,41 @@ class DocumentWindow : public QMainWindow {
         scriptTabs_->addTab(filePage, QStringLiteral("File"));
 
         scriptGraphsPage_ = new QWidget;
-        auto *scriptGraphsLayout = new QVBoxLayout(scriptGraphsPage_);
+        auto *scriptGraphsLayout = new QHBoxLayout(scriptGraphsPage_);
         scriptGraphsLayout->setContentsMargins(0, 0, 0, 0);
-        scriptGraphViewStack_ = new QStackedWidget;
+        scriptGraphsLayout->setSpacing(4);
+        auto *scriptGraphControls = new QWidget;
+        scriptGraphControls->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        auto *scriptGraphControlsLayout = new QVBoxLayout(scriptGraphControls);
+        scriptGraphControlsLayout->setContentsMargins(0, 0, 0, 0);
+        scriptGraphControlsLayout->setSpacing(2);
+        reportRunButton_ = new QPushButton;
+        reportRunButton_->setToolTip(QStringLiteral("Save and run the selected simulation script"));
+        reportRunButton_->setAccessibleName(QStringLiteral("Run simulation script"));
+        reportRunButton_->setFixedWidth(32);
+        reportRunButton_->setEnabled(false);
+        setLucideIcon(reportRunButton_, QStringLiteral("play"), 16);
+        reportOpenButton_ = new QPushButton;
+        reportOpenButton_->setToolTip(QStringLiteral("Open the simulation script source in an external editor"));
+        reportOpenButton_->setAccessibleName(QStringLiteral("Open simulation script file"));
+        reportOpenButton_->setFixedWidth(32);
+        reportOpenButton_->setEnabled(false);
+        setLucideIcon(reportOpenButton_, QStringLiteral("notebook-text"), 16);
+        scriptGridButton_ = new QPushButton;
+        scriptGridButton_->setCheckable(true);
+        scriptGridButton_->setChecked(true);
+        scriptGridButton_->setToolTip(QStringLiteral("Show or hide the graph grid"));
+        scriptGridButton_->setAccessibleName(QStringLiteral("Toggle script graph grid"));
+        scriptGridButton_->setFixedWidth(32);
+        scriptGridButton_->setEnabled(false);
+        setLucideIcon(scriptGridButton_, QStringLiteral("grid-3x3"), 16);
+        scriptGraphControlsLayout->addStretch(1);
+        scriptGraphControlsLayout->addWidget(reportRunButton_);
+        scriptGraphControlsLayout->addWidget(reportOpenButton_);
+        scriptGraphControlsLayout->addWidget(scriptGridButton_);
+        scriptGraphControlsLayout->addStretch(1);
 
+        scriptGraphViewStack_ = new QStackedWidget;
         auto *graphPlaceholder = new QWidget;
         auto *graphPlaceholderLayout = new QVBoxLayout(graphPlaceholder);
         graphPlaceholderLayout->setContentsMargins(12, 12, 12, 12);
@@ -13969,6 +13947,7 @@ class DocumentWindow : public QMainWindow {
         scriptGraphViewStack_->addWidget(graphPlaceholder);
         scriptGraphViewStack_->addWidget(scriptGraphTabs_);
         scriptGraphViewStack_->setCurrentWidget(graphPlaceholder);
+        scriptGraphsLayout->addWidget(scriptGraphControls, 0);
         scriptGraphsLayout->addWidget(scriptGraphViewStack_, 1);
         scriptTabs_->addTab(scriptGraphsPage_, QStringLiteral("Graphs"));
         reportsLayout->addWidget(scriptTabs_, 1);
@@ -13986,16 +13965,27 @@ class DocumentWindow : public QMainWindow {
             if (reportSaveTimer_)
                 reportSaveTimer_->start();
         });
-        connect(reportSaveButton_, &QPushButton::clicked, this, [this] { saveReportSource(); });
         connect(reportRunButton_, &QPushButton::clicked, this, [this] { runSelectedReport(); });
         connect(reportOpenButton_, &QPushButton::clicked, this, [this] { openSelectedReportFile(); });
+        connect(scriptGridButton_, &QPushButton::toggled, this, [this](bool visible) {
+            graphGridVisible_ = visible;
+            if (simulationGridButton_ && simulationGridButton_->isChecked() != visible) {
+                const QSignalBlocker blocker(simulationGridButton_);
+                simulationGridButton_->setChecked(visible);
+            }
+            if (!scriptGraphTabs_)
+                return;
+            for (int index = 0; index < scriptGraphTabs_->count(); ++index)
+                if (auto *plot = dynamic_cast<SimulationPlot *>(scriptGraphTabs_->widget(index)))
+                    plot->setGridVisible(visible);
+        });
         connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
             if (reportDirty_)
                 saveReportSource();
         });
-        reportSaveButton_->setEnabled(false);
         reportRunButton_->setEnabled(false);
         reportOpenButton_->setEnabled(false);
+        scriptGridButton_->setEnabled(false);
 
         workspaceStack_ = new WorkspaceStack;
         startupView_ = new StartupView;
@@ -14387,10 +14377,7 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setSnapToGrid(layoutSnapToGrid_);
             connect(layoutCanvas_->scene(), &QGraphicsScene::selectionChanged, this,
                     [this] { refreshLayoutProperties(); });
-            layoutCanvas_->setPathSegmentCallback([this](QPointF start, QPointF end, int width, ice::ObjectId layer,
-                                                         const std::vector<ice::ObjectId> &viaLayers) {
-                addLayoutPathSegment(start, end, width, layer, viaLayers);
-            });
+            layoutCanvas_->setPathCreatedCallback([this](const LayoutPathData &path) { addLayoutPath(path); });
             layoutCanvas_->setPathLayerChangedCallback([this](ice::ObjectId, const std::string &name) {
                 const auto width = layoutCanvas_ ? std::max(1, layoutCanvas_->pathWidth()) : 200;
                 statusBar()->showMessage(
@@ -14398,12 +14385,12 @@ class DocumentWindow : public QMainWindow {
                 if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
                     layoutPropertiesPanel_->setPathTool(name);
             });
-            layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
             layoutCanvas_->setTextPolygonPlacedCallback([this](QPointF position) { addLayoutTextPolygon(position); });
-            layoutCanvas_->setPinPlacedCallback([this](QPointF first, QPointF second) { addLayoutPin(first, second); });
-            layoutCanvas_->setInstancePinActivatedCallback(
-                [this](ice::ObjectId instance, ice::ObjectId port) { promoteInstancePin(instance, port); });
+            layoutCanvas_->setPortPlacedCallback(
+                [this](QPointF first, QPointF second) { addLayoutPort(first, second); });
+            layoutCanvas_->setInstancePortActivatedCallback(
+                [this](ice::ObjectId instance, ice::ObjectId port) { promoteInstancePort(instance, port); });
             layoutCanvas_->setPolygonCreatedCallback(
                 [this](const std::vector<QPointF> &points) { addLayoutPolygon(points); });
             layoutCanvas_->setPolygonPointMovedCallback(
@@ -14713,19 +14700,19 @@ class DocumentWindow : public QMainWindow {
                         [followDefaultAction, textPolygonTool] { followDefaultAction(textPolygonTool); });
             }
 
-            auto *pinTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Pin"));
-            pinTool->setCheckable(true);
-            pinTool->setToolTip(QStringLiteral("Create pin by dragging (N)"));
-            pinTool->setStatusTip(QStringLiteral("Create pin by dragging (N)"));
-            layoutPinTool_ = pinTool;
-            addShortcut(pinTool, QStringLiteral("layout.pin"), ice::ShortcutScope::layout,
+            auto *portTool = addTool(QStringLiteral("circle-dot"), QStringLiteral("Create Port"));
+            portTool->setCheckable(true);
+            portTool->setToolTip(QStringLiteral("Create port by dragging (N)"));
+            portTool->setStatusTip(QStringLiteral("Create port by dragging (N)"));
+            layoutPortTool_ = portTool;
+            addShortcut(portTool, QStringLiteral("layout.port"), ice::ShortcutScope::layout,
                         QKeySequence(QStringLiteral("N")));
-            connect(pinTool, &QAction::triggered, this, [this] {
+            connect(portTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
-                    layoutCanvas_->setTool(LayoutCanvas::Tool::pin);
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::port);
                     layoutCanvas_->setFocus();
                 }
-                statusBar()->showMessage(QStringLiteral("Pin: drag to size a pin on the active layer"));
+                statusBar()->showMessage(QStringLiteral("Port: drag to size an intrinsic ICE port"));
             });
             connect(textTool, &QAction::triggered, this, [this] {
                 if (layoutCanvas_) {
@@ -14774,7 +14761,7 @@ class DocumentWindow : public QMainWindow {
             auto *toolGroup = new QActionGroup(toolbar);
             toolGroup->setExclusive(true);
             for (auto *action : {selectTool, moveTool, placeSymbolTool, rectangleTool, polygonTool, pathTool, rulerTool,
-                                 textTool, textPolygonTool, pinTool})
+                                 textTool, textPolygonTool, portTool})
                 toolGroup->addAction(action);
 
             connect(selectTool, &QAction::triggered, this, [this] {
@@ -15198,8 +15185,6 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
-    ice::ObjectId activeLayoutPathId_ = 0;
-    ice::ObjectId activeLayoutPathCellId_ = 0;
     // Shapes captured by the layout figure context menu's Copy/Cut entries.
     std::vector<ice::Shape> layoutShapeClipboard_;
     std::set<ice::ObjectId> openSchematicTabs_;
@@ -15277,13 +15262,11 @@ class DocumentWindow : public QMainWindow {
     QWidget *scriptGraphsPage_ = nullptr;
     QStackedWidget *scriptGraphViewStack_ = nullptr;
     QTabWidget *scriptGraphTabs_ = nullptr;
-    QLabel *reportTitleLabel_ = nullptr;
     QPlainTextEdit *reportCodeEditor_ = nullptr;
     PythonSyntaxHighlighter *reportHighlighter_ = nullptr;
-    QLabel *reportStatusLabel_ = nullptr;
-    QPushButton *reportSaveButton_ = nullptr;
     QPushButton *reportRunButton_ = nullptr;
     QPushButton *reportOpenButton_ = nullptr;
+    QPushButton *scriptGridButton_ = nullptr;
     QTimer *reportSaveTimer_ = nullptr;
     QString loadedCachedRunPath_;
     ice::ObjectId activeReportId_ = 0;
@@ -15357,7 +15340,7 @@ class DocumentWindow : public QMainWindow {
     QAction *layoutPolygonTool_ = nullptr;
     QAction *layoutTextTool_ = nullptr;
     QAction *layoutTextPolygonTool_ = nullptr;
-    QAction *layoutPinTool_ = nullptr;
+    QAction *layoutPortTool_ = nullptr;
     QAction *layoutRulerTool_ = nullptr;
     QAction *layoutUnionTool_ = nullptr;
     QAction *layoutIntersectionTool_ = nullptr;

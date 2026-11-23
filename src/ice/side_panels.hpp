@@ -34,10 +34,10 @@ class ProjectPanel : public QWidget {
     // Highlights the tree row for a placed instance without re-emitting the
     // selection callback. Used to mirror canvas selections into the hierarchy.
     void selectInstance(ice::ObjectId instanceId);
-    using PinCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId pinId)>;
-    using PinVisibilityCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId pinId, bool visible)>;
-    void setOnActivatePin(PinCallback callback);
-    void setOnPinVisibilityChanged(PinVisibilityCallback callback);
+    using PortCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId portId)>;
+    using PortVisibilityCallback = std::function<void(ice::ObjectId cellId, ice::ObjectId portId, bool visible)>;
+    void setOnActivatePort(PortCallback callback);
+    void setOnPortVisibilityChanged(PortVisibilityCallback callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
     void setOnRunPex(std::function<void(ice::ObjectId)> callback);
     using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
@@ -75,8 +75,8 @@ class ProjectPanel : public QWidget {
     std::function<void(ice::ObjectId)> onActivateSchematic_;
     std::function<void(ice::ObjectId)> onActivateLayout_;
     InstanceCallback onInstanceSelected_;
-    PinCallback onActivatePin_;
-    PinVisibilityCallback onPinVisibilityChanged_;
+    PortCallback onActivatePort_;
+    PortVisibilityCallback onPortVisibilityChanged_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
     std::function<void(ice::ObjectId)> onRunPex_;
     RenameCallback onRenameLayout_;
@@ -92,7 +92,7 @@ class ProjectPanel : public QWidget {
 class SimulationPanel : public QWidget {
   public:
     using SelectionCallback = std::function<void(ice::ObjectId simulationId, ice::ObjectId graphId)>;
-    using ReportSelectionCallback = std::function<void(ice::ObjectId reportId)>;
+    using ReportSelectionCallback = std::function<void(ice::ObjectId reportId, int graphIndex)>;
 
     explicit SimulationPanel(QWidget *parent = nullptr);
     void setOnAddClicked(std::function<void()> cb);
@@ -104,13 +104,15 @@ class SimulationPanel : public QWidget {
     void setOnDeleteReport(std::function<void(ice::ObjectId)> cb);
     void setOnSelection(SelectionCallback cb);
     void setOnReportSelection(ReportSelectionCallback cb);
+    void setProjectRoot(const QString &projectRoot);
     void setProject(const ice::Project &project);
     void clear();
     ice::ObjectId currentSimulationId() const;
     ice::ObjectId currentGraphId() const;
     ice::ObjectId currentReportId() const;
+    int currentReportGraphIndex() const;
     void selectSimulation(ice::ObjectId id, ice::ObjectId graphId = 0);
-    void selectReport(ice::ObjectId id);
+    void selectReport(ice::ObjectId id, int graphIndex = -1);
 
   private:
     void applyFilter(const QString &text);
@@ -120,6 +122,7 @@ class SimulationPanel : public QWidget {
     QLineEdit *search_ = nullptr;
     QPushButton *addButton_ = nullptr;
     QPushButton *deleteButton_ = nullptr;
+    QString projectRoot_;
     SelectionCallback onSelection_;
     ReportSelectionCallback onReportSelection_;
     std::function<void()> onAdd_;
@@ -141,7 +144,7 @@ class LayersPanel : public QWidget {
     void setOnLayerVisibilityChanged(std::function<void(ice::ObjectId, bool)> callback);
     void setOnLayerGroupVisibilityChanged(std::function<void(const std::vector<ice::ObjectId> &, bool)> callback);
     void setOnAllLayersVisibilityChanged(std::function<void(bool)> callback);
-    void setOnLayerVisibilityFilter(std::function<void(bool pinOnly)> callback);
+    void setOnShowDrawingLayers(std::function<void()> callback);
 
   private:
     void applyFilter(const QString &text);
@@ -154,7 +157,7 @@ class LayersPanel : public QWidget {
     std::function<void(ice::ObjectId, bool)> onLayerVisibilityChanged_;
     std::function<void(const std::vector<ice::ObjectId> &, bool)> onLayerGroupVisibilityChanged_;
     std::function<void(bool)> onAllLayersVisibilityChanged_;
-    std::function<void(bool)> onLayerVisibilityFilter_;
+    std::function<void()> onShowDrawingLayers_;
     std::function<void()> onCreateLayer_;
     std::function<void(ice::ObjectId)> onLayerSelected_;
 };

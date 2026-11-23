@@ -1,5 +1,6 @@
 #include "icelib/implementation.hpp"
 
+#include "icelib/platform.hpp"
 #include "icelib/simulation_report.hpp"
 
 #include <algorithm>
@@ -50,12 +51,10 @@ std::optional<double> parseLeadingNumber(const std::string &text, std::size_t &c
     consumed = 0;
     if (text.empty())
         return std::nullopt;
-    double value = 0.0;
-    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-    consumed = static_cast<std::size_t>(result.ptr - text.data());
-    if (result.ec != std::errc{} || consumed == 0)
+    const auto parsed = parseDoublePrefix(text, consumed);
+    if (!parsed || consumed == 0)
         return std::nullopt;
-    return value;
+    return parsed;
 }
 
 std::string trim(std::string value) {
@@ -100,21 +99,8 @@ std::optional<std::filesystem::path> findGraphviz() {
     if (const auto *overridePath = std::getenv("ICE_DOT"); overridePath && *overridePath)
         if (const auto found = check(overridePath))
             return found;
-    if (const auto *path = std::getenv("PATH"); path && *path) {
-#ifdef _WIN32
-        constexpr char separator = ';';
-#else
-        constexpr char separator = ':';
-#endif
-        std::stringstream entries(path);
-        std::string entry;
-        while (std::getline(entries, entry, separator)) {
-            if (entry.empty())
-                entry = ".";
-            if (const auto found = check(std::filesystem::path(entry) / "dot"))
-                return found;
-        }
-    }
+    if (const auto found = findExecutableOnPath("dot"))
+        return found;
     return std::nullopt;
 }
 
@@ -338,16 +324,8 @@ std::optional<std::filesystem::path> findIceOpenRoadHelper() {
         if (const auto found = check(executable.parent_path() / "ice-openroad"))
             return found;
     }
-    if (const auto *path = std::getenv("PATH"); path && *path) {
-        std::stringstream entries(path);
-        std::string entry;
-        while (std::getline(entries, entry, ':')) {
-            if (entry.empty())
-                entry = ".";
-            if (const auto found = check(std::filesystem::path(entry) / "ice-openroad"))
-                return found;
-        }
-    }
+    if (const auto found = findExecutableOnPath("ice-openroad"))
+        return found;
     return std::nullopt;
 }
 
@@ -859,8 +837,7 @@ ImplementationExecutionResult executeImplementationRun(Project &project, Impleme
 
         // Elaboration and synthesis are Yosys stages. Every physical stage runs
         // through the required ice-openroad helper; there is no Tcl fallback.
-        const bool useCppStage =
-            stage != ImplementationStage::elaboration && stage != ImplementationStage::synthesis;
+        const bool useCppStage = stage != ImplementationStage::elaboration && stage != ImplementationStage::synthesis;
         std::error_code fileStatus;
         if (stage == ImplementationStage::floorplan) {
             const auto mappedNetlist = runDirectory / implementationMappedNetlistRelativePath();

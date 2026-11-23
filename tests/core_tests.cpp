@@ -2263,6 +2263,10 @@ TEST_CASE("Pin symbols define bidirectional schematic ports") {
 
     const auto parentId = ice::createSchematicCell(project, "top");
     const auto blockSymbol = ice::addHierarchicalSymbol(project, parentId, cellId);
+    const auto &block = project.schematicCells.at(parentId).symbols.at(blockSymbol);
+    CHECK(!block.artwork.empty());
+    CHECK(block.artwork.find("<svg") != std::string::npos);
+    CHECK(block.artwork.find("pin_block") != std::string::npos);
     ice::addSchematicInstance(project, parentId, blockSymbol, "X1", 0, 0);
     const auto parentNetlist = ice::buildSchematicNetlist(project, parentId);
     joined.clear();
@@ -2363,7 +2367,17 @@ TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
     CHECK(pins[0].x < pins[2].x);
 }
 
-TEST_CASE("layout pins and nets round-trip with required metadata") {
+TEST_CASE("layout ports require a layer") {
+    ice::Project project;
+    project.identity = "port-layer";
+    project.name = "port-layer";
+    const auto layout = ice::createLayoutCell(project, "top");
+    CHECK_THROWS_AS(ice::addPort(project, layout, "VIN", 0, ice::Rect{0, 0, 400, 400}, ice::PortDirection::input,
+                                 ice::PortSide::left),
+                    ice::ProjectError);
+}
+
+TEST_CASE("layout ports and nets round-trip with required metadata") {
     ice::Project project;
     project.identity = "pins";
     project.name = "pins";
@@ -2375,6 +2389,7 @@ TEST_CASE("layout pins and nets round-trip with required metadata") {
     CHECK(project.validate().empty());
 
     const auto &stored = project.layoutCells.at(layout).ports.at(port);
+    CHECK(stored.layer == layer);
     CHECK(stored.name == "VIN");
     CHECK(stored.direction == ice::PortDirection::input);
     CHECK(stored.side == ice::PortSide::left);
@@ -2391,6 +2406,7 @@ TEST_CASE("layout pins and nets round-trip with required metadata") {
     CHECK_THROWS_AS(ice::Project::deserialize(oldSchema), ice::ProjectError);
     const auto roundTrip = ice::Project::deserialize(serialized);
     const auto &roundTripPort = roundTrip.layoutCells.at(layout).ports.at(port);
+    CHECK(roundTripPort.layer == layer);
     CHECK(roundTripPort.name == "VIN");
     CHECK(roundTripPort.direction == ice::PortDirection::input);
     CHECK(roundTripPort.side == ice::PortSide::left);
@@ -2827,6 +2843,13 @@ TEST_CASE("shipped file symbol library loads") {
     CHECK(pinCounts["Input"] == 1);
     CHECK(pinCounts["Pin"] == 1);
     CHECK(pinCounts["Output"] == 1);
+    const auto pinSymbol =
+        std::find_if(symbols.begin(), symbols.end(), [](const auto &symbol) { return symbol.name == "Pin"; });
+    REQUIRE(pinSymbol != symbols.end());
+    REQUIRE(!pinSymbol->pins.empty());
+    CHECK(pinSymbol->pins.front().x == 0);
+    CHECK(pinSymbol->pins.front().y == 0);
+    CHECK(pinSymbol->pins.front().direction == ice::PinDirection::right);
     // Passive and source symbols seed their editable default parameters.
     CHECK(defaults["Resistor"]["resistance"] == "1k");
     CHECK(defaults["Capacitor"]["capacitance"] == "1n");
@@ -4134,6 +4157,75 @@ TEST_CASE("layout paths persist and move as one shape") {
     std::filesystem::remove(gds);
 }
 
+TEST_CASE("layout paths flatten to polygons on every used layer") {
+    ice::Project project;
+    project.identity = "flatten-path-test";
+    project.name = "flatten-path-test";
+    const auto metal1 = ice::addLayer(project, "Metal1", 1);
+    const auto metal2 = ice::addLayer(project, "Metal2", 2);
+    const auto via1 = ice::addLayer(project, "Via1", 3);
+    const auto cell = ice::createLayoutCell(project, "top");
+
+    const auto pathId = project.nextId();
+    ice::Shape path{pathId, metal1, std::nullopt, {0, -200, 1200, 400}, {}};
+    path.centerline = {{0, 0}, {1000, 0}, {1000, 1000}};
+    path.segmentLayers = {metal1, metal2};
+    path.pointVias = {{}, {via1}, {}};
+    path.width = 300;
+    path.segmentWidths = {200, 300};
+    project.layoutCells.at(cell).shapes.emplace(pathId, path);
+    REQUIRE(project.validate().empty());
+
+    const auto resultIds = ice::flattenLayoutPath(project, cell, pathId);
+    REQUIRE(resultIds.size() == 3);
+    const auto &flatCell = project.layoutCells.at(cell);
+    CHECK(flatCell.shapes.find(pathId) == flatCell.shapes.end());
+    CHECK(project.validate().empty());
+
+    std::map<ice::ObjectId, ice::Rect> boundsByLayer;
+    for (const auto resultId : resultIds) {
+        const auto &shape = flatCell.shapes.at(resultId);
+        CHECK(!shape.isPath());
+        CHECK(shape.centerline.empty());
+        CHECK(shape.segmentLayers.empty());
+        CHECK(shape.segmentWidths.empty());
+        CHECK(shape.pointVias.empty());
+        CHECK(shape.polygon.size() >= 3);
+        CHECK(shape.rectangle.valid());
+        CHECK(shape.name.starts_with("Polygon"));
+        boundsByLayer.emplace(shape.layer, shape.rectangle);
+    }
+    REQUIRE(boundsByLayer.contains(metal1));
+    REQUIRE(boundsByLayer.contains(metal2));
+    REQUIRE(boundsByLayer.contains(via1));
+    // Each segment reaches the middle of the via square, and the via itself is
+    // a path-width square on its own layer.
+    CHECK(boundsByLayer.at(metal1).x + boundsByLayer.at(metal1).width == 1150);
+    CHECK(boundsByLayer.at(metal2).y == -150);
+    CHECK(boundsByLayer.at(via1).x == 850);
+    CHECK(boundsByLayer.at(via1).y == -150);
+    CHECK(boundsByLayer.at(via1).width == 300);
+    CHECK(boundsByLayer.at(via1).height == 300);
+
+    // A single-layer path becomes one polygon, and its outside corner extends
+    // by half the path width like the mitered canvas outline.
+    const auto elbowId = project.nextId();
+    ice::Shape elbow{elbowId, metal1, std::nullopt, {0, 1900, 1200, 1100}, {}};
+    elbow.centerline = {{0, 2000}, {1000, 2000}, {1000, 3000}};
+    elbow.width = 200;
+    project.layoutCells.at(cell).shapes.emplace(elbowId, elbow);
+    REQUIRE(project.validate().empty());
+    const auto elbowResults = ice::flattenLayoutPath(project, cell, elbowId);
+    REQUIRE(elbowResults.size() == 1);
+    const auto &elbowPolygon = project.layoutCells.at(cell).shapes.at(elbowResults.front());
+    CHECK(elbowPolygon.layer == metal1);
+    CHECK(!elbowPolygon.isPath());
+    CHECK(elbowPolygon.rectangle.x == 0);
+    CHECK(elbowPolygon.rectangle.y == 1900);
+    CHECK(elbowPolygon.rectangle.x + elbowPolygon.rectangle.width == 1100);
+    CHECK(elbowPolygon.rectangle.y + elbowPolygon.rectangle.height == 3000);
+}
+
 TEST_CASE("flattened GDS export preserves child geometry") {
     ice::Project project;
     project.identity = "flatten-export-test";
@@ -4169,9 +4261,9 @@ TEST_CASE("flattened GDS export preserves child geometry") {
     const auto portedGds = std::filesystem::temp_directory_path() / "ice-ported-export-test.gds";
     ice::LayoutInterchange::exportFlattenedGds(project, parent, portedGds);
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 34;
-    options.pinWidth = 100;
-    options.pinHeight = 100;
+    options.portLabelLayer = 34;
+    options.portWidth = 100;
+    options.portHeight = 100;
     const auto ported = ice::LayoutInterchange::importGds(portedGds, options);
     REQUIRE(ported.layoutCells.size() == 1);
     const auto &portedCell = ported.layoutCells.begin()->second;
@@ -4206,7 +4298,7 @@ TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and p
     const auto gds = std::filesystem::temp_directory_path() / "ice-hierarchical-export-test.gds";
     ice::LayoutInterchange::exportGds(project, parent, gds);
     ice::LayoutImportOptions options;
-    options.pinLabelLayer = 34;
+    options.portLabelLayer = 34;
     const auto imported = ice::LayoutInterchange::importGds(gds, options);
     std::filesystem::remove(gds);
 

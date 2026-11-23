@@ -3,6 +3,7 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
 #include "icelib/pdk.hpp"
+#include "icelib/platform.hpp"
 #include "icelib/process.hpp"
 #include "icelib/vcd.hpp"
 
@@ -516,6 +517,22 @@ std::string stripLogPrefix(std::string line) {
     return trimmed;
 }
 
+bool ngspiceLogHasError(const NgspiceLog &log) {
+    std::string text;
+    {
+        std::lock_guard lock(const_cast<NgspiceLog &>(log).mutex);
+        text = log.text;
+    }
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto body = stripLogPrefix(line);
+        if (body.starts_with("Error:") || body.starts_with("ERROR:"))
+            return true;
+    }
+    return false;
+}
+
 std::vector<std::string> displayVectorNames(const NgspiceLog &log) {
     std::vector<std::string> names;
     std::string text;
@@ -781,7 +798,11 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
             return result;
         }
     }
-    if (ngSpice_Circ(circuit.data()) != 0) {
+    // ngspice 42 returns success from ngSpice_Circ even when a .include file
+    // is missing (it only logs the error and leaves any previous circuit
+    // loaded). Treat captured error diagnostics as a load failure so a stale
+    // circuit is never simulated.
+    if (ngSpice_Circ(circuit.data()) != 0 || ngspiceLogHasError(log)) {
         result.state = JobState::failed;
         result.error = "ngspice could not load the circuit";
         appendFailureDetails(result.error, compactNgspiceLog(log));
@@ -1667,4 +1688,38 @@ std::string serializeSimulationResult(const SimulationResult &result) {
     }
     return output.dump(2) + "\n";
 }
+bool ngspiceLibraryAvailable() {
+    const auto check = [](const std::filesystem::path &path) {
+        std::error_code status;
+        return !path.empty() && std::filesystem::is_regular_file(path, status) && !status;
+    };
+    std::vector<std::filesystem::path> candidates;
+    const auto executable = currentExecutablePath();
+    if (!executable.empty()) {
+#ifdef _WIN32
+        candidates.push_back(executable.parent_path() / "ngspice.dll");
+        candidates.push_back(executable.parent_path() / "libngspice.dll");
+#elif defined(__APPLE__)
+        candidates.push_back(executable.parent_path() / "libngspice.dylib");
+#else
+        candidates.push_back(executable.parent_path() / "libngspice.so");
+#endif
+    }
+#ifdef _WIN32
+    if (const auto found = findExecutableOnPath("ngspice.dll"))
+        candidates.push_back(*found);
+    if (const auto found = findExecutableOnPath("libngspice.dll"))
+        candidates.push_back(*found);
+#elif defined(__APPLE__)
+    candidates.insert(candidates.end(), {"/opt/homebrew/lib/libngspice.dylib", "/usr/local/lib/libngspice.dylib",
+                                         "/usr/lib/libngspice.dylib"});
+    if (const auto found = findExecutableOnPath("libngspice.dylib"))
+        candidates.push_back(*found);
+#else
+    candidates.insert(candidates.end(), {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0",
+                                         "/usr/lib/x86_64-linux-gnu/libngspice.so.0", "/usr/lib/libngspice.so"});
+#endif
+    return std::any_of(candidates.begin(), candidates.end(), check);
+}
+
 } // namespace ice

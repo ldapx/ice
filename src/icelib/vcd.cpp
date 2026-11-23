@@ -33,11 +33,11 @@ double parseTimeValue(const std::string &text) {
     std::string_view view(text);
     if (!view.empty() && view.front() == '+')
         view.remove_prefix(1);
-    double value = 0.0;
-    const auto result = std::from_chars(view.data(), view.data() + view.size(), value);
-    if (result.ec != std::errc{} || result.ptr != view.data() + view.size())
+    std::size_t consumed = 0;
+    const auto parsed = parseDoublePrefix(std::string(view), consumed);
+    if (!parsed || consumed != view.size())
         return 0.0;
-    return value;
+    return *parsed;
 }
 
 double timescaleMultiplier(std::string unit) {
@@ -95,13 +95,13 @@ double valueForChange(const VcdSignal &signal, const std::string &value, bool &o
         std::string_view view(text);
         if (!view.empty() && view.front() == '+')
             view.remove_prefix(1);
-        double result = 0.0;
-        const auto parsed = std::from_chars(view.data(), view.data() + view.size(), result);
-        if (parsed.ec != std::errc{} || parsed.ptr != view.data() + view.size()) {
+        std::size_t consumed = 0;
+        const auto parsed = parseDoublePrefix(std::string(view), consumed);
+        if (!parsed || consumed != view.size()) {
             ok = false;
             return 0.0;
         }
-        return result;
+        return *parsed;
     }
     if (value.front() == 'b' || value.front() == 'B') {
         double result = 0.0;

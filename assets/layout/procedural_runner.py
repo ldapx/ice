@@ -503,8 +503,10 @@ class Shape:
         return {}
 
     def pin(self, name):
-        """Shapes have no device pins; raises ``KeyError``."""
-        raise KeyError(f"shape '{self.name}' has no pin '{name}'")
+        """Shapes have no ports; raises ``KeyError``."""
+        raise KeyError(f"shape '{self.name}' has no port '{name}'")
+
+    port = pin
 
     def anchor(self, name="center"):
         """Return an anchor point on the shape bounds."""
@@ -563,27 +565,27 @@ class DevicePlacement:
     """Handle returned by :meth:`Layout.device`.
 
     The device geometry is flattened into the generated layout, but this
-    object keeps the absolute pin rectangles and the device metadata so a
+    object keeps the absolute port rectangles and the device metadata so a
     script can route to the device and LVS can recognize it.
 
-    Pin rectangles are available both as attributes and through
-    :attr:`ports`, for example ``m1.G`` and ``m1.ports["G"]``. Each pin
+    Port rectangles are available both as attributes and through
+    :attr:`ports`, for example ``m1.G`` and ``m1.ports["G"]``. Each port
     rectangle is a ``(x, y, width, height)`` tuple in database units and can
     be passed directly to :meth:`Layout.route`.
 
-    :ivar name: Instance name used to prefix emitted pin and shape names.
+    :ivar name: Instance name used to prefix emitted port and shape names.
     :ivar device: Device-library cell name.
     :ivar model: SPICE model name when the device library declares one.
     :ivar parameters: Resolved device parameter values as strings.
     :ivar shapes: Flattened :class:`Shape` handles emitted for the device.
-    :ivar ports: Mapping of pin name to absolute ``(x, y, width, height)``.
-    :ivar port_info: Per-pin metadata with ``rectangle``, ``layer``, ``side``,
+    :ivar ports: Mapping of port name to absolute ``(x, y, width, height)``.
+    :ivar port_info: Per-port metadata with ``rectangle``, ``layer``, ``side``,
         ``direction``, and ``net`` keys.
     :ivar bounds: Absolute device bounding box as ``x``, ``y``, ``width``,
         and ``height`` keys.
 
     Iterating a placement yields its flattened shapes, ``len(placement)`` is
-    the shape count, and indexing with a pin name returns that pin rectangle.
+    the shape count, and indexing with a port name returns that port rectangle.
     """
 
     def __init__(
@@ -624,12 +626,14 @@ class DevicePlacement:
 
     @property
     def is_empty(self):
-        """Whether the device has no flattened shapes or pins."""
+        """Whether the device has no flattened shapes or ports."""
         return not self.shapes and not self.ports
 
     def pin(self, name):
-        """Return the absolute pin rectangle for ``name``."""
+        """Return the absolute port rectangle for ``name``."""
         return self.ports[str(name)]
+
+    port = pin
 
     def anchor(self, name="center"):
         """Return an anchor point on the device bounds."""
@@ -652,7 +656,7 @@ class DevicePlacement:
         )
 
     def move(self, dx, dy):
-        """Translate the device geometry, pins, and metadata in place."""
+        """Translate the device geometry, ports, and metadata in place."""
         if self._layout is not None:
             self._layout._layout_state["manual_moves"] += 1
         dx = _coordinate(dx, "move dx")
@@ -687,7 +691,7 @@ class DevicePlacement:
         return self
 
     def mirror(self, axis="y"):
-        """Mirror the device geometry and pin metadata in place."""
+        """Mirror the device geometry and port metadata in place."""
         bounds = self.bounds
         if not bounds:
             return self
@@ -730,7 +734,7 @@ class DevicePlacement:
         return self
 
     def refresh(self):
-        """Refresh pin/bounds caches after composition moved the records."""
+        """Refresh port/bounds caches after composition moved the records."""
         record = self._device_record
         if not isinstance(record, dict):
             return self
@@ -912,6 +916,8 @@ class LayoutInstancePlacement:
         """Return the absolute ``(x, y, width, height)`` port rectangle."""
         return self.ports[str(name)]
 
+    port = pin
+
     def anchor(self, name="center"):
         """Return an anchor point on the instance bounds."""
         bounds = self.bounds
@@ -953,13 +959,13 @@ class LayoutInstancePlacement:
         return self
 
     def __getitem__(self, key):
-        return self.pin(key)
+        return self.port(key)
 
     def __getattr__(self, name):
         info = self.__dict__.get("_cell_info") or {}
         for port in info.get("ports", []):
             if str(port.get("name", "")) == name:
-                return self.pin(name)
+                return self.port(name)
         raise AttributeError(name)
 
 
@@ -974,7 +980,7 @@ class Route:
     :ivar net: Net name carried by the emitted shapes.
     :ivar layer: Layer of the first route point.
     :ivar width: Route width in database units.
-    :ivar points: Ordered ``(x, y)`` route points, including pin centers.
+    :ivar points: Ordered ``(x, y)`` route points, including port centers.
     :ivar point_layers: Layer name for each entry in ``points``.
     :ivar segments: Straight segments with ``start``, ``end``, and ``layer``.
     :ivar vias: Via records with ``x``, ``y``, ``lower``, ``upper``,
@@ -1048,8 +1054,10 @@ class Route:
         return {}
 
     def pin(self, name):
-        """Routes have no device pins; raises ``KeyError``."""
-        raise KeyError(f"route '{self.net or ''}' has no pin '{name}'")
+        """Routes have no ports; raises ``KeyError``."""
+        raise KeyError(f"route '{self.net or ''}' has no port '{name}'")
+
+    port = pin
 
     def anchor(self, name="center"):
         """Return an anchor point on the route bounds."""
@@ -1995,9 +2003,9 @@ def _route_choose_side(rectangle, preferred, other_center, distance, inflated):
         return side, center, escape
     x, y, width, height = rectangle
     raise RuntimeError(
-        "no clear escape from the pin at ({}, {}) size {}x{}: every side is blocked by "
+        "no clear escape from the port at ({}, {}) size {}x{}: every side is blocked by "
         "metal within the route clearance. Reduce the route width/clearance, move the "
-        "device, or escape from a different pin.".format(x, y, width, height)
+        "device, or escape from a different port.".format(x, y, width, height)
     )
 
 
@@ -2724,7 +2732,7 @@ class Layout:
         visible=True,
         locked=False,
     ):
-        """Add a pin/port to the generated layout cell.
+        """Add an intrinsic port to the generated layout cell.
 
         Ports are part of the generated cell's interface and can be used for
         hierarchy wiring, connectivity checks, LVS, and routing.
@@ -3066,7 +3074,7 @@ class Layout:
         The device geometry is flattened into the generated layout, while a
         device record preserves its model, parameters, and terminal nets for
         LVS and extraction. Ports are prefixed with the instance name so
-        multiple copies can coexist. ``nets`` maps device pin names to layout
+        multiple copies can coexist. ``nets`` maps device port names to layout
         net names, for example ``nets={"G": "GATE", "S": "VSS"}``.
 
         :param device_name: Device-library cell name; matching is
@@ -3076,10 +3084,10 @@ class Layout:
         :param orientation: ``r0``, ``r90``, ``r180``, ``r270``, ``mx``, or
             ``my``.
         :param name: Optional instance name; defaults to ``device_<n>``.
-        :param nets: Optional mapping of pin names to layout net names.
+        :param nets: Optional mapping of port names to layout net names.
         :param parameters: Device parameters as keyword arguments, for
             example ``w="2u"`` or ``nf="2"``.
-        :returns: A :class:`DevicePlacement` with absolute pin rectangles.
+        :returns: A :class:`DevicePlacement` with absolute port rectangles.
         :raises RuntimeError: If the active package has no device library,
             the device cannot be found, or its generator fails.
         """
@@ -3220,9 +3228,9 @@ class Layout:
                     "rectangle": dict(rectangle),
                 }
             )
-        # Propagate pin nets to the device geometry that carries each pin.
+        # Propagate port nets to the device geometry that carries each port.
         # This lets the router treat other terminals as obstacles while
-        # allowing a connection to travel along its own pin metal.
+        # allowing a connection to travel along its own port metal.
         for shape in shapes:
             record = shape._record
             shape_layer = record.get("layer")
@@ -3635,14 +3643,14 @@ class Layout:
         common names such as ``via``/``via2``, ``Via1``/``Via2`` and
         ``Metal1``/``Metal2`` are used as a fallback.
 
-        Endpoints may be ``(x, y)`` points, ``(x, y, width, height)`` pin
-        rectangles, or pin tuples from a :class:`DevicePlacement`. Rectangle
+        Endpoints may be ``(x, y)`` points, ``(x, y, width, height)`` port
+        rectangles, or port tuples from a :class:`DevicePlacement`. Rectangle
         endpoints escape from the requested or nearest side by ``escape``.
         The router is deterministic and raises an error instead of emitting a
         short when no legal path exists.
 
-        :param start: Start point or pin rectangle.
-        :param end: End point or pin rectangle.
+        :param start: Start point or port rectangle.
+        :param end: End point or port rectangle.
         :param layer: Single routing layer name or :class:`Layer` handle.
         :param width: Route width in database units (default 0.4 µm).
         :param net: Optional net name carried by the emitted shapes.
@@ -3653,7 +3661,7 @@ class Layout:
             from layer name to obstacle rectangles.
         :param clearance: Edge-to-edge clearance in database units (default
             ``max(width, 0.2 µm)``).
-        :param escape: Pin escape distance (default ``max(2 * width, 0.5 µm)``).
+        :param escape: Port escape distance (default ``max(2 * width, 0.5 µm)``).
         :param bend_penalty: Extra cost per bend (default
             ``max(2 * width, 1 µm)``).
         :param include_devices: Treat placed device bounds as obstacles.
@@ -3741,14 +3749,14 @@ class Layout:
                     raise ValueError(f"route layer '{name}' is not in the layer stack")
                 if info and info.get("layer") and info["layer"] != name:
                     raise ValueError(
-                        f"pin layer '{info['layer']}' does not match route layer '{name}'"
+                        f"port layer '{info['layer']}' does not match route layer '{name}'"
                     )
                 return name
             if info and info.get("layer"):
                 if info["layer"] in layer_names:
                     return info["layer"]
                 raise ValueError(
-                    f"pin layer '{info['layer']}' is not in the route layer stack"
+                    f"port layer '{info['layer']}' is not in the route layer stack"
                 )
             return default
 
@@ -4095,29 +4103,29 @@ class Layout:
         via_enclosure=None,
         via_cost=None,
     ):
-        """Route directly between two pins of placed devices or layout instances.
+        """Route directly between two ports of placed devices or layout instances.
 
         ``device_a`` and ``device_b`` may be :class:`DevicePlacement` objects
         returned by :meth:`device` or :class:`LayoutInstancePlacement` handles
         returned by :meth:`instance`. For a single-layer connection,
-        ``layer`` is optional when both pins already share a layer. For pins
+        ``layer`` is optional when both ports already share a layer. For ports
         on different layers, pass ``layers=[...]`` in vertical stack order
         and, if the package does not expose inferable via names, a
-        ``via_layers`` mapping. The net is inferred from the pin metadata
-        when ``net`` is omitted, and connecting pins on different nets is
+        ``via_layers`` mapping. The net is inferred from the port metadata
+        when ``net`` is omitted, and connecting ports on different nets is
         rejected.
 
         :param device_a: First placed device or layout instance.
-        :param pin_a: Pin name on ``device_a`` (for example ``"G"``).
+        :param pin_a: Port name on ``device_a`` (for example ``"G"``).
         :param device_b: Second placed device or layout instance.
-        :param pin_b: Pin name on ``device_b``.
+        :param pin_b: Port name on ``device_b``.
         :param layer: Single routing layer for a same-layer connection.
         :param width: Route width in database units (default 0.4 µm).
-        :param net: Optional net name; must agree with pin nets when set.
+        :param net: Optional net name; must agree with port nets when set.
         :param obstacles: Extra obstacle rectangle(s), a list, or a mapping
             from layer name to obstacle rectangles.
         :param clearance: Edge-to-edge clearance in database units.
-        :param escape: Pin escape distance in database units.
+        :param escape: Port escape distance in database units.
         :param bend_penalty: Extra cost per bend.
         :param include_devices: Treat other device bounds as obstacles.
         :param include_shapes: Treat other-net layout shapes as obstacles.
@@ -4128,7 +4136,7 @@ class Layout:
         :param via_cost: Cost of changing layers.
         :returns: A :class:`Route` describing the emitted connection.
         :raises TypeError: If an argument is not a device or layout instance.
-        :raises ValueError: If a pin or layer is unknown, or the pins belong
+        :raises ValueError: If a port or layer is unknown, or the ports belong
             to different nets.
         :raises RuntimeError: If no legal path or via transition exists.
         """
@@ -4141,29 +4149,29 @@ class Layout:
         info_a = device_a.port_info.get(str(pin_a))
         info_b = device_b.port_info.get(str(pin_b))
         if info_a is None:
-            raise ValueError(f"device '{device_a.name}' has no pin '{pin_a}'")
+            raise ValueError(f"device '{device_a.name}' has no port '{pin_a}'")
         if info_b is None:
-            raise ValueError(f"device '{device_b.name}' has no pin '{pin_b}'")
+            raise ValueError(f"device '{device_b.name}' has no port '{pin_b}'")
         layer_a = info_a.get("layer")
         layer_b = info_b.get("layer")
         if layers is None:
             if layer is None:
                 if layer_a and layer_b and layer_a != layer_b:
                     raise ValueError(
-                        "connect pins are on different layers; pass layers=[...] "
+                        "connect ports are on different layers; pass layers=[...] "
                         "and optionally via_layers=..."
                     )
                 layer = layer_a or layer_b
             if layer is None:
                 raise ValueError(
-                    "connect requires a layer for pins without layer metadata"
+                    "connect requires a layer for ports without layer metadata"
                 )
             layer_name = self._layer_name(layer)
             for label, info in (("start", info_a), ("end", info_b)):
                 pin_layer = info.get("layer")
                 if pin_layer and pin_layer != layer_name:
                     raise ValueError(
-                        f"{label} pin is on {pin_layer}, not {layer_name}; "
+                        f"{label} port is on {pin_layer}, not {layer_name}; "
                         "pass layers=[...] and a via layer mapping"
                     )
             layer_names = [layer_name]
@@ -4174,9 +4182,9 @@ class Layout:
                 raise ValueError("pass either layer or layers, not both")
             layer_names = self._normalize_route_layers(None, layers)
             if not layer_a or not layer_b:
-                raise ValueError("connect pins need layer metadata for a layer stack")
+                raise ValueError("connect ports need layer metadata for a layer stack")
             if layer_a not in layer_names or layer_b not in layer_names:
-                raise ValueError("both pin layers must be included in the layers stack")
+                raise ValueError("both port layers must be included in the layers stack")
             start_layer_name = layer_a
             end_layer_name = layer_b
         start_net = info_a.get("net")
@@ -4187,9 +4195,9 @@ class Layout:
             net = start_net or end_net
         else:
             if start_net and start_net != net:
-                raise ValueError(f"start pin belongs to net '{start_net}', not '{net}'")
+                raise ValueError(f"start port belongs to net '{start_net}', not '{net}'")
             if end_net and end_net != net:
-                raise ValueError(f"end pin belongs to net '{end_net}', not '{net}'")
+                raise ValueError(f"end port belongs to net '{end_net}', not '{net}'")
         if width is None:
             width = self.um(0.4)
         return self.route(
@@ -4669,7 +4677,7 @@ class Layout:
             if maximum_gap > threshold:
                 warnings.append(
                     f"largest row gap is {maximum_gap * self.db_unit_nm / 1000.0:.1f} um; "
-                    "start rows/columns at gap=0 and let the router space pins"
+                    "start rows/columns at gap=0 and let the router space ports"
                 )
             placement_style = (
                 "composed"

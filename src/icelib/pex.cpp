@@ -439,7 +439,7 @@ extractPlacedDevice(const LayoutCell &parent, const LayoutInstance &instance, co
     const auto geometryScale = pdkNetlistGeometryScale(parent.pdk);
     if (child.ports.empty()) {
         if (!model.empty() || !child.device.empty())
-            notes.push_back("Placed instance '" + instance.name + "' has no terminal pins and was not extracted.");
+            notes.push_back("Placed instance '" + instance.name + "' has no terminal ports and was not extracted.");
         return std::nullopt;
     }
     if (kind == PlacedDeviceKind::unknown) {
@@ -882,6 +882,7 @@ ExtractionGeometry buildExtractionGeometry(const Project &project, const LayoutC
         const auto layerIt = project.layers.find(layer);
         if (layerIt == project.layers.end())
             return;
+        const auto key = layoutLayerConnectivityKey(layerIt->second);
         ExtractionShape shape;
         shape.id = id;
         shape.layer = layer;
@@ -890,7 +891,6 @@ ExtractionGeometry buildExtractionGeometry(const Project &project, const LayoutC
         shape.group = group;
         shape.net = net;
         shape.port = port;
-        const auto key = layoutLayerConnectivityKey(layerIt->second);
         const auto index = geometry.shapes.size();
         geometry.shapes.push_back(std::move(shape));
         if (!port)
@@ -1540,7 +1540,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     const auto &connectivityLayout = connectivitySource->layoutCells.at(layoutCellId);
     const auto groups = extractLayoutNets(*connectivitySource, layoutCellId);
     if (groups.empty())
-        throw ProjectError("pex.geometry", "Layout has no shapes or pins to extract");
+        throw ProjectError("pex.geometry", "Layout has no shapes or ports to extract");
 
     PexReport report;
     report.layoutCell = layoutCellId;
@@ -2088,8 +2088,8 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
         }
     }
 
-    // Reserve every visible pin name first so a net without a pin cannot take a
-    // name that later needs to be used for an actual layout pin.
+    // Reserve every visible port name first so a net without a port cannot take a
+    // name that later needs to be used for an actual layout port.
     SpiceNameAllocator names;
     std::map<ObjectId, std::string> portNodeById;
     std::vector<std::pair<ObjectId, const Port *>> visiblePorts;
@@ -2142,7 +2142,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
     }
 
     // Build a geometry lookup aligned with the extracted nets so placed-device
-    // terminal pins can be matched to the parent net that touches them.
+    // terminal ports can be matched to the parent net that touches them.
     std::vector<std::vector<NetObjectGeometry>> netGeometry(groups.size());
     for (std::size_t index = 0; index < groups.size(); ++index) {
         const auto &group = groups[index];
@@ -2344,7 +2344,7 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
          << (report.devicesFromLayout ? "layout" : (report.devicesFromSchematic ? "linked schematic" : "none")) << "\n";
     for (const auto &note : notes)
         text << "* Note: " << note << "\n";
-    text << "* Layout net names are top-level SPICE nodes (pin names are used when a net has no explicit name).\n";
+    text << "* Layout net names are top-level SPICE nodes (port names are used when a net has no explicit name).\n";
     text << "* Add sources or devices in a testbench as needed.\n";
     text << ".title " << name << "\n";
     if (!report.devices.empty()) {

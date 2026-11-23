@@ -155,7 +155,7 @@ struct Layer {
     ObjectId layout = 0;
     std::string pdk;
     // GDSII datatype/purpose. Layers with the same number but different
-    // datatypes are separate entries so geometry and pins keep their exact
+    // datatypes are separate entries so geometry and ports keep their exact
     // stream identity. The Layers panel groups them by number for display.
     int datatype = 0;
     // Empty color and pattern -1 mean the UI derives both from the layer
@@ -234,6 +234,12 @@ enum class PortSide { left, right, top, bottom };
 
 const char *portDirectionName(PortDirection direction);
 const char *portSideName(PortSide side);
+// Locale-independent floating-point parser. Parses a decimal number from the
+// beginning of `text` and returns the number of consumed bytes. This is a
+// portable replacement for std::from_chars(double), which libc++ does not
+// implement.
+std::optional<double> parseDoublePrefix(const std::string &text, std::size_t &consumed);
+
 std::optional<PortDirection> parsePortDirection(const std::string &value);
 std::optional<PortSide> parsePortSide(const std::string &value);
 
@@ -242,25 +248,29 @@ struct LayoutNet {
     std::string name;
 };
 
+// Ports are intrinsic ICE annotations with a required process-layer
+// association. The layer is persisted in `.icelay` files and drives routing,
+// DRC/LVS matching, and interchange.
 struct Port {
     ObjectId id = 0;
     std::string name;
+    // Required associated layout layer. Ports are validated and saved with it.
     ObjectId layer = 0;
     Rect rectangle;
     PortDirection direction = PortDirection::inout;
     PortSide side = PortSide::left;
-    // LayoutNet id, or zero when the pin is intentionally unassigned.
+    // LayoutNet id, or zero when the port is intentionally unassigned.
     ObjectId net = 0;
     std::string label;
     bool visible = true;
     bool locked = false;
-    // True for automatically promoted device terminals. Internal pins are
+    // True for automatically promoted device terminals. Internal ports are
     // useful for routing and connectivity but are not top-level LVS ports.
     bool internal = false;
-    // Set when this pin is promoted from a child layout instance.
+    // Set when this port is promoted from a child layout instance.
     ObjectId sourceInstance = 0;
     ObjectId sourcePort = 0;
-    // Set when this pin replaces a schematic source or ground instance.
+    // Set when this port replaces a schematic source or ground instance.
     ObjectId schematicInstance = 0;
 };
 
@@ -302,7 +312,7 @@ struct PlannedDevice {
 };
 
 // A straight logical connection between two planned devices, placed layout
-// instances, or top-level layout pins. The net points at a LayoutNet in the
+// instances, or top-level layout ports. The net points at a LayoutNet in the
 // same cell. For a placed instance endpoint, fromPort/toPort identify the child
 // layout port; the fromPin/toPin names preserve the schematic pin that created
 // the connection.
@@ -316,7 +326,7 @@ struct PlannedConnection {
     std::string fromPin;
     std::string toPin;
     // Optional border overrides for automatically routed endpoints. When
-    // unset, the router uses the pin's narrowest side facing the other pin.
+    // unset, the router uses the port's narrowest side facing the other port.
     std::optional<PortSide> fromSide;
     std::optional<PortSide> toSide;
     // True once a physical path has been created for this logical connection.
@@ -666,7 +676,7 @@ class Project {
 
     // Returns a fresh object id. Ids are monotonic even when several are
     // allocated before the objects are inserted (for example a copied symbol
-    // together with its pins).
+    // together with its ports).
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;
     std::vector<Diagnostic> validate() const;

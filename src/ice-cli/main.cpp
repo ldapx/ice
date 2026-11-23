@@ -9,6 +9,7 @@
 #include "icelib/pdk.hpp"
 #include "icelib/pex.hpp"
 #include "icelib/procedural_layout.hpp"
+#include "icelib/process.hpp"
 #include "icelib/simulation.hpp"
 #include "icelib/simulation_report.hpp"
 #include "icelib/simulation_store.hpp"
@@ -86,11 +87,11 @@ ice::Coordinate parseInteger(const std::string &text, const char *what) {
 
 double parseDouble(const std::string &text, const char *what) {
     try {
-        double value = 0.0;
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr == text.data())
+        std::size_t used = 0;
+        const auto parsed = ice::parseDoublePrefix(text, used);
+        if (!parsed || used == 0)
             throw std::invalid_argument("invalid number");
-        const auto used = static_cast<std::size_t>(parsed.ptr - text.data());
+        double value = *parsed;
         auto suffix = text.substr(used);
         std::transform(suffix.begin(), suffix.end(), suffix.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1083,17 +1084,16 @@ json doctorJson(const std::filesystem::path &executablePath, const std::optional
                 bool probe = false) {
     const auto runner = ice::reportRunnerScriptPath(executablePath);
     const auto python = ice::reportPythonExecutable();
-    const bool pythonAvailable = !python.empty() && std::system((python + " --version >/dev/null 2>&1").c_str()) == 0;
-    bool ngspiceLibrary = false;
-    for (const auto *candidate :
-         {"/usr/lib/libngspice.so.0", "/usr/lib64/libngspice.so.0", "/usr/lib/x86_64-linux-gnu/libngspice.so.0"}) {
-        std::error_code status;
-        if (std::filesystem::exists(candidate, status) && !status) {
-            ngspiceLibrary = true;
-            break;
-        }
-    }
-    const bool ngspiceExecutable = std::system("ngspice --version >/dev/null 2>&1") == 0;
+    const auto commandAvailable = [](const std::string &program) {
+        ice::ProcessOptions options;
+        options.arguments = {program, "--version"};
+        options.timeoutSeconds = 10;
+        const auto result = ice::runProcess(options);
+        return result.started && result.exitCode == 0;
+    };
+    const bool pythonAvailable = !python.empty() && commandAvailable(python);
+    const bool ngspiceLibrary = ice::ngspiceLibraryAvailable();
+    const bool ngspiceExecutable = commandAvailable("ngspice");
 
     const auto roots = ice::defaultPdkRoots();
     const auto pdks = ice::discoverPdks(roots);
@@ -1278,9 +1278,9 @@ void printHelp() {
               << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
               << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
               << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
-              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [pin options]\n"
+              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]\n"
               << "  layout-list-ports <project> <cell>\n"
-              << "  layout-update-port <project> <cell> <port> [pin options]\n"
+              << "  layout-update-port <project> <cell> <port> [port options]\n"
               << "  layout-remove-port <project> <cell> <port>\n"
               << "  layout-add-net <project> <cell> <name>\n"
               << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
@@ -1289,7 +1289,7 @@ void printHelp() {
               << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
               << "  layout-export-def <project> <cell> <output.def>\n"
-              << "  layout-import-gds <input.gds|oas> <project> [pin-label-layer] [--top-cell <name>] [--force]\n"
+              << "  layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]\n"
               << "  layout-import-lef <input.lef> <project> [--force]\n"
               << "  layout-import-def <input.def> <project> [--force]\n\n"
               << "Implementation:\n"
@@ -2270,6 +2270,7 @@ int main(int argc, char **argv) {
             }
             std::string artwork;
             std::vector<ice::Pin> templatePins;
+            ice::Coordinate templateLabelY = 0;
             if (source != 0) {
                 const auto &sourceCell = project.schematicCells.at(source);
                 if (sourceCell.systemVerilogSchematic) {
@@ -2279,9 +2280,12 @@ int main(int argc, char **argv) {
                     const auto templ = ice::makeHdlSymbolTemplate(parsed.module);
                     artwork = templ.artwork;
                     templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
                 } else if (!blank) {
-                    // Drawn or text SPICE sub-cell: one pin per declared port.
-                    templatePins = ice::hierarchicalSymbolPins(sourceCell);
+                    const auto templ = ice::hierarchicalSymbolTemplate(sourceCell);
+                    artwork = templ.artwork;
+                    templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
                 }
             } else if (!blank) {
                 try {
@@ -2300,6 +2304,7 @@ int main(int argc, char **argv) {
             session.execute("schematic-add-symbol", [&](ice::Project &p) {
                 id = ice::addSymbol(p, cell, args[3], artwork, source);
                 auto &symbol = p.schematicCells.at(cell).symbols.at(id);
+                symbol.label = ice::SymbolLabel{0, templateLabelY};
                 for (auto pin : templatePins) {
                     pin.id = p.nextId();
                     symbol.pins.push_back(std::move(pin));
@@ -2974,6 +2979,8 @@ int main(int argc, char **argv) {
                 else if (option == "--net" && index + 1 < args.size()) {
                     const auto &value = args[++index];
                     port.net = value == "none" ? ice::ObjectId{0} : resolveLayoutNet(cellRef, value);
+                } else if (option == "--layer" && index + 1 < args.size()) {
+                    port.layer = resolveLayer(project, args[++index]);
                 } else if (option == "--x" && index + 1 < args.size())
                     port.rectangle.x = parseInteger(args[++index], "x");
                 else if (option == "--y" && index + 1 < args.size())
@@ -3091,7 +3098,7 @@ int main(int argc, char **argv) {
         if (command == "layout-import-gds") {
             if (args.size() < 3)
                 argumentError("Usage: ice-cli layout-import-gds <input.gds|oas> <project> "
-                              "[pin-label-layer] [--top-cell <name>] [--force]");
+                              "[port-label-layer] [--top-cell <name>] [--force]");
             ice::LayoutImportOptions options;
             bool force = false;
             for (std::size_t index = 3; index < args.size(); ++index) {
@@ -3102,7 +3109,7 @@ int main(int argc, char **argv) {
                 } else if (args[index] == "--force") {
                     force = true;
                 } else {
-                    options.pinLabelLayer = static_cast<int>(parseInteger(args[index], "pin-label-layer"));
+                    options.portLabelLayer = static_cast<int>(parseInteger(args[index], "port-label-layer"));
                 }
             }
             requireImportTargetAvailable(args[2], force);
@@ -3122,7 +3129,7 @@ int main(int argc, char **argv) {
                  {"name", project.name},
                  {"cells", project.layoutCells.size()},
                  {"top_cell", project.layoutCells.empty() ? std::string{} : project.layoutCells.begin()->second.name},
-                 {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
+                 {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
                  {"warnings", std::move(warningJson)}});
             return 0;
         }
@@ -3139,7 +3146,7 @@ int main(int argc, char **argv) {
             printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
                        {"name", project.name},
                        {"cells", project.layoutCells.size()},
-                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
             return 0;
         }
 
@@ -3155,7 +3162,7 @@ int main(int argc, char **argv) {
             printJson({{"path", (projectRootForCli(args[2]) / "project.icepro").string()},
                        {"name", project.name},
                        {"cells", project.layoutCells.size()},
-                       {"pins", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
             return 0;
         }
 

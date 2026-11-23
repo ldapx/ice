@@ -131,7 +131,7 @@ const ice::LayoutDeviceCell *findLayoutDeviceForCellName(const ice::LayoutDevice
 void applyLayoutDeviceShapes(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                              const std::vector<ice::LayoutDeviceShape> &sourceShapes,
                              const std::vector<ice::LayoutDevicePort> &sourcePorts = {});
-// Backfills pins on an existing library cell without regenerating geometry.
+// Backfills ports on an existing library cell without regenerating geometry.
 void applyLayoutDevicePorts(ice::Project &project, ice::LayoutCell &cell, const ice::LayoutDeviceLibrary &library,
                             const std::vector<ice::LayoutDevicePort> &sourcePorts);
 std::optional<ice::LayoutDeviceGeometry> generateLayoutDeviceGeometry(const ice::LayoutDeviceCell &device,

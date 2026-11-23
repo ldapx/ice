@@ -450,6 +450,17 @@ Design
 └── PDK
 ```
 
+ICE calls a layout-cell terminal a **port** and a schematic-symbol terminal a
+**pin**. LEF, DEF, and GDS use `PIN`/pin-label vocabulary as file-format
+keywords. Ports are intrinsic ICE annotations. They carry a name, rectangle,
+direction, side, net, and label, and do not require a process-layer
+association: the layer is required, persisted with the port, and drives
+routing, DRC/LVS matching, and interchange. A PDK pin-purpose or label layer is
+only an optional interchange projection, never the source of truth for port
+identity. GDS/OASIS writers project each port onto its layer; LEF/DEF writers
+use the same layer. `ICE_PORT` remains a fallback for malformed interchange
+input with no layer.
+
 A shape can conceptually contain:
 
 ```text
@@ -1622,12 +1633,12 @@ via arrays at one location divide their resistance. The generated deck reports
 area, perimeter, effective resistance, and total capacitance to ground for
 each net. Single-terminal nets model the extracted resistance in series with
 their capacitance to ground; multi-terminal nets use a resistance star between
-their layout pins. Planned-device metadata from procedural layouts is extracted
+their layout ports. Planned-device metadata from procedural layouts is extracted
 first, using its model, parameter values, and terminal-net ids; this preserves
 flattened PCell passives such as poly resistors and MIM capacitors in the
 post-layout deck. Placed device-library instances are extracted when their
-child cells provide terminal pins and model parameters; each terminal is
-matched to the parent net that overlaps its transformed pin geometry, and the
+child cells provide terminal ports and model parameters; each terminal is
+matched to the parent net that overlaps its transformed port geometry, and the
 device is emitted as a SPICE primitive or PDK subcircuit. If no planned or
 placed devices are recognized, the extractor falls back to copying the inferred
 source schematic's device netlist before the parasitics.
