@@ -24,6 +24,7 @@ CLI invokes the same operations through `ProjectSession`.
 | High-level component authoring | Yes | Schematic canvas | `schematic-add-component`, `schematic-add-circuit` | Core API |
 | Parameterized schematic cells | Yes | Schematic Properties parameters | `schematic-set-cell-parameter`, `schematic-remove-cell-parameter`, `schematic-set-parameter` | `setSchematicCellParameter`, `setSchematicParameter` |
 | Schematic editing | Yes | Schematic canvas | Schematic commands | `Project.create_schematic_cell`, `SchematicBuilder` |
+| Schematic hierarchy wrap | Yes | Wrap into Symbol | Core API (C++) | — |
 | Schematic validation | Yes | Diagnostics | `schematic-validate` | Core API |
 | Simulation configuration and execution | Yes | Analysis selector + experiment dialog | Simulation commands | `Project.create_simulation`, `run_simulation` |
 | SPICE import and hierarchy | Yes | Schematic import | `schematic-import-spice`, `schematic-add-spice-instance` | Core API |

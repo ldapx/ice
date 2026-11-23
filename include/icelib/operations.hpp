@@ -249,6 +249,21 @@ SchematicPortKind schematicPortKindForSymbol(const std::string &symbolName);
 ObjectId addHierarchicalSymbol(Project &project, ObjectId parentCellId, ObjectId sourceCellId, std::string name = {},
                                std::string artwork = {});
 
+// Wraps selected instances of a drawn schematic into a new child cell and
+// replaces them with one hierarchical block instance in the parent. Nets that
+// stay inside the selection move to the child; nets that also connect to
+// unselected instances become child port instances with matching pins on the
+// parent block. The parent block is positioned at the center of the original
+// selection and selected by the caller. Duplicate selected ids are ignored.
+struct SchematicWrapResult {
+    ObjectId cell = 0;
+    ObjectId symbol = 0;
+    ObjectId instance = 0;
+    std::vector<ObjectId> ports;
+};
+SchematicWrapResult wrapSchematicInstances(Project &project, ObjectId parentCellId,
+                                           const std::vector<ObjectId> &instanceIds, std::string childName = {});
+
 // Generated block symbol for a drawn, text SPICE, or SystemVerilog subcell.
 // The artwork is a titled rectangle with labeled pins; pin ids are zero and
 // callers assign project-stable ids.

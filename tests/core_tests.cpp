@@ -4226,6 +4226,108 @@ TEST_CASE("layout paths flatten to polygons on every used layer") {
     CHECK(elbowPolygon.rectangle.y + elbowPolygon.rectangle.height == 3000);
 }
 
+TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
+    ice::Project project;
+    project.identity = "wrap-schematic-test";
+    project.name = "wrap-schematic-test";
+    const auto parent = ice::createSchematicCell(project, "top");
+    auto &cell = project.schematicCells.at(parent);
+
+    const auto addSymbol = [&](const std::string &name) {
+        ice::Symbol symbol;
+        symbol.id = project.nextId();
+        symbol.name = name;
+        for (int index = 0; index < 2; ++index) {
+            ice::Pin pin;
+            pin.id = project.nextId();
+            pin.name = std::string(1, static_cast<char>('A' + index));
+            pin.x = index == 0 ? -20 : 20;
+            pin.direction = index == 0 ? ice::PinDirection::left : ice::PinDirection::right;
+            symbol.pins.push_back(pin);
+        }
+        const auto id = symbol.id;
+        cell.symbols.emplace(id, std::move(symbol));
+        return id;
+    };
+    const auto firstSymbol = addSymbol("first");
+    const auto secondSymbol = addSymbol("second");
+    const auto outsideSymbol = addSymbol("outside");
+    const auto place = [&](ice::ObjectId symbol, const std::string &name, ice::Coordinate x) {
+        const auto id = project.nextId();
+        cell.instances.emplace(id, ice::SchematicInstance{id, symbol, name, x, 0});
+        return id;
+    };
+    const auto first = place(firstSymbol, "R1", 0);
+    const auto second = place(secondSymbol, "R2", 300);
+    const auto outside = place(outsideSymbol, "R3", 600);
+    const auto pin = [&](ice::ObjectId symbol, std::size_t index) { return cell.symbols.at(symbol).pins.at(index).id; };
+    const auto firstInputPin = pin(firstSymbol, 0);
+    const auto firstOutputPin = pin(firstSymbol, 1);
+    const auto secondInputPin = pin(secondSymbol, 0);
+    const auto secondOutputPin = pin(secondSymbol, 1);
+    const auto outsideInputPin = pin(outsideSymbol, 0);
+    const auto outsideOutputPin = pin(outsideSymbol, 1);
+
+    const auto inputNet = ice::addNet(project, parent, "IN", {firstInputPin, outsideInputPin});
+    const auto internalNet = ice::addNet(project, parent, "MID", {firstOutputPin, secondInputPin});
+    const auto outputNet = ice::addNet(project, parent, "OUT", {secondOutputPin, outsideOutputPin});
+    REQUIRE(project.validate().empty());
+
+    const auto result = ice::wrapSchematicInstances(project, parent, {first, second}, "wrapped");
+    CHECK(result.cell != 0);
+    CHECK(result.instance != 0);
+    CHECK(result.ports.size() == 2);
+    CHECK(project.validate().empty());
+
+    const auto &wrappedParent = project.schematicCells.at(parent);
+    const auto &child = project.schematicCells.at(result.cell);
+    CHECK(wrappedParent.instances.size() == 2);
+    CHECK(wrappedParent.instances.contains(result.instance));
+    CHECK(wrappedParent.instances.contains(outside));
+    CHECK(!wrappedParent.instances.contains(first));
+    CHECK(!wrappedParent.instances.contains(second));
+    CHECK(!wrappedParent.nets.contains(internalNet));
+    REQUIRE(wrappedParent.nets.contains(inputNet));
+    REQUIRE(wrappedParent.nets.contains(outputNet));
+    CHECK(wrappedParent.nets.at(inputNet).pins.size() == 2);
+    CHECK(wrappedParent.nets.at(outputNet).pins.size() == 2);
+    CHECK(std::find(wrappedParent.nets.at(inputNet).pins.begin(), wrappedParent.nets.at(inputNet).pins.end(),
+                    firstInputPin) == wrappedParent.nets.at(inputNet).pins.end());
+
+    CHECK(child.name == "wrapped");
+    CHECK(child.instances.size() == 4);
+    CHECK(child.nets.size() == 3);
+    REQUIRE(child.nets.contains(internalNet));
+    CHECK((child.nets.at(internalNet).pins == std::vector<ice::ObjectId>{firstOutputPin, secondInputPin}));
+    bool foundInputPort = false;
+    bool foundOutputPort = false;
+    for (const auto &[_, net] : child.nets) {
+        if (net.id == internalNet)
+            continue;
+        CHECK(net.pins.size() == 2);
+        if (net.name == "IN")
+            foundInputPort = true;
+        if (net.name == "OUT")
+            foundOutputPort = true;
+    }
+    CHECK(foundInputPort);
+    CHECK(foundOutputPort);
+
+    const auto &blockInstance = wrappedParent.instances.at(result.instance);
+    const auto &blockSymbol = wrappedParent.symbols.at(blockInstance.symbol);
+    CHECK(blockSymbol.sourceCell == result.cell);
+    CHECK(blockSymbol.pins.size() == 2);
+    std::set<ice::ObjectId> blockPinIds;
+    for (const auto &pin : blockSymbol.pins)
+        blockPinIds.insert(pin.id);
+    const auto hasBlockPin = [&](ice::ObjectId netId) {
+        const auto &pins = wrappedParent.nets.at(netId).pins;
+        return std::any_of(pins.begin(), pins.end(), [&](ice::ObjectId pinId) { return blockPinIds.contains(pinId); });
+    };
+    CHECK(hasBlockPin(inputNet));
+    CHECK(hasBlockPin(outputNet));
+}
+
 TEST_CASE("flattened GDS export preserves child geometry") {
     ice::Project project;
     project.identity = "flatten-export-test";

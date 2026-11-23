@@ -324,6 +324,13 @@ single-terminal bidirectional port marker: place it in a child schematic to
 expose an `inout` port in the generated `.subckt` and hierarchical block
 symbol. Connectors attach to its `PIN` pin. It is skipped by device netlisting
 just like `Input` and `Output`, and LVS treats it as an `inout` schematic pin.
+The **Wrap into Symbol** toolbar action takes the selected schematic
+instances, creates a new child schematic cell containing them, and replaces the
+selection with one hierarchical block instance. Nets that stay inside the
+selection move with it; nets that also connect to unselected devices become
+child port instances and matching pins on the generated block symbol. The new
+block is selected in the parent and the child cell opens as a normal schematic
+tab. Use undo to restore the original flat schematic.
 Connecting two pins merges their nets, and schematic wire routes are cached per
 net and branch. Editing a connection re-routes only the affected net, while
 moving or rotating a symbol re-routes nets attached to it or whose wires

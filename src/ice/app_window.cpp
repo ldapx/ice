@@ -3441,6 +3441,55 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    // Wraps the selected schematic instances into a new child cell, replaces
+    // them with one hierarchical block, and reconnects boundary nets to the
+    // generated block pins.
+    void wrapSelectedSchematicInstances() {
+        if (!project_ || activeSchematicId_ == 0 || !schematicCanvas_) {
+            statusBar()->showMessage(QStringLiteral("Open a drawn schematic first"));
+            return;
+        }
+        const auto cellIt = project_->project().schematicCells.find(activeSchematicId_);
+        if (cellIt == project_->project().schematicCells.end() || cellIt->second.isTextSource()) {
+            statusBar()->showMessage(QStringLiteral("Only drawn schematics can wrap instances"));
+            return;
+        }
+        const auto instanceIds = schematicCanvas_->selectedInstanceIds();
+        if (instanceIds.empty()) {
+            statusBar()->showMessage(QStringLiteral("Select one or more schematic instances to wrap"));
+            return;
+        }
+        auto defaultName = QString::fromStdString(cellIt->second.name + " Block");
+        bool accepted = false;
+        const auto name =
+            QInputDialog::getText(this, QStringLiteral("Wrap into Symbol"), QStringLiteral("New schematic name:"),
+                                  QLineEdit::Normal, defaultName, &accepted);
+        if (!accepted || name.trimmed().isEmpty())
+            return;
+
+        ice::SchematicWrapResult result;
+        const auto parentCellId = activeSchematicId_;
+        try {
+            project_->execute("wrap schematic instances", [&](ice::Project &project) {
+                result = ice::wrapSchematicInstances(project, parentCellId, instanceIds, name.trimmed().toStdString());
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::warning(this, QStringLiteral("Wrap into Symbol"), QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Wrapped schematic selection into " + name.trimmed().toStdString());
+        refreshProject();
+        selectSchematicTab(parentCellId);
+        if (schematicCanvas_)
+            schematicCanvas_->selectInstance(result.instance);
+        QString wrappedName = name.trimmed();
+        if (const auto created = project_->project().schematicCells.find(result.cell);
+            created != project_->project().schematicCells.end())
+            wrappedName = QString::fromStdString(created->second.name);
+        statusBar()->showMessage(
+            QStringLiteral("Wrapped %1 instance(s) into %2").arg(instanceIds.size()).arg(wrappedName));
+    }
+
     // An instance whose symbol was created from another schematic cell
     // (Symbol::sourceCell) descends into that cell, so "go down" follows the
     // selected instance and "go up" returns to the cell that instantiates the
@@ -15611,8 +15660,9 @@ class DocumentWindow : public QMainWindow {
 
         toolbar->addSeparator();
         auto *wrapTool = addTool(QStringLiteral("package"), QStringLiteral("Wrap into Symbol"));
-        connect(wrapTool, &QAction::triggered, this,
-                [this] { statusBar()->showMessage(QStringLiteral("Wrapping symbols is not available yet")); });
+        wrapTool->setToolTip(QStringLiteral("Wrap selected schematic instances into a hierarchical block"));
+        wrapTool->setStatusTip(wrapTool->toolTip());
+        connect(wrapTool, &QAction::triggered, this, [this] { wrapSelectedSchematicInstances(); });
         auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
         deleteTool->setToolTip(QStringLiteral("Delete selected devices (Del)"));
         deleteTool->setStatusTip(QStringLiteral("Delete selected devices (Del)"));

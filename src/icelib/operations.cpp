@@ -294,6 +294,247 @@ HierarchicalSymbolTemplate hierarchicalSymbolTemplate(const SchematicCell &sourc
 
 std::vector<Pin> hierarchicalSymbolPins(const SchematicCell &source) { return hierarchicalSymbolTemplate(source).pins; }
 
+SchematicWrapResult wrapSchematicInstances(Project &project, ObjectId parentCellId,
+                                           const std::vector<ObjectId> &instanceIds, std::string childName) {
+    auto &parent = require(project.schematicCells, parentCellId, "schematic.cell", "Schematic cell does not exist");
+    if (parent.isTextSource())
+        throw ProjectError("schematic.wrap.cell", "Only drawn schematics can wrap instances");
+
+    std::vector<ObjectId> selectedIds;
+    for (const auto id : instanceIds) {
+        if (!parent.instances.contains(id))
+            throw ProjectError("schematic.wrap.instance", "Selected instance does not exist");
+        if (std::find(selectedIds.begin(), selectedIds.end(), id) == selectedIds.end())
+            selectedIds.push_back(id);
+    }
+    if (selectedIds.empty())
+        throw ProjectError("schematic.wrap.empty", "Select at least one schematic instance to wrap");
+
+    std::map<ObjectId, int> symbolUsage;
+    for (const auto &[_, instance] : parent.instances)
+        ++symbolUsage[instance.symbol];
+
+    std::vector<SchematicInstance> selectedInstances;
+    std::map<ObjectId, Symbol> selectedSymbols;
+    std::set<ObjectId> selectedPinIds;
+    std::map<ObjectId, Point> pinPositions;
+    Coordinate minX = std::numeric_limits<Coordinate>::max();
+    Coordinate minY = std::numeric_limits<Coordinate>::max();
+    Coordinate maxX = std::numeric_limits<Coordinate>::lowest();
+    Coordinate maxY = std::numeric_limits<Coordinate>::lowest();
+    for (const auto id : selectedIds) {
+        const auto &instance = parent.instances.at(id);
+        const auto symbol = parent.symbols.find(instance.symbol);
+        if (symbol == parent.symbols.end())
+            throw ProjectError("schematic.wrap.symbol", "Selected instance references a missing symbol");
+        if (symbol->second.sourceCell == parentCellId)
+            throw ProjectError("schematic.wrap.recursive", "A schematic cannot wrap an instance of itself");
+        if (symbolUsage[instance.symbol] != 1)
+            throw ProjectError("schematic.wrap.shared_symbol",
+                               "Selected instances share a symbol with another instance; wrap is ambiguous");
+        selectedSymbols.emplace(instance.symbol, symbol->second);
+        selectedInstances.push_back(instance);
+        minX = std::min(minX, instance.x);
+        minY = std::min(minY, instance.y);
+        maxX = std::max(maxX, instance.x);
+        maxY = std::max(maxY, instance.y);
+        const Transform transform{instance.x, instance.y, instance.orientation};
+        for (const auto &pin : symbol->second.pins) {
+            const auto position = transform.apply({pin.x, pin.y});
+            selectedPinIds.insert(pin.id);
+            pinPositions.emplace(pin.id, position);
+            minX = std::min(minX, position.x);
+            minY = std::min(minY, position.y);
+            maxX = std::max(maxX, position.x);
+            maxY = std::max(maxY, position.y);
+        }
+    }
+    const auto centerX = (minX + maxX) / 2;
+    const auto centerY = (minY + maxY) / 2;
+
+    const auto nameTaken = [&](const std::string &candidate) {
+        const auto wanted = lower(candidate);
+        return std::any_of(project.schematicCells.begin(), project.schematicCells.end(),
+                           [&](const auto &entry) { return lower(entry.second.name) == wanted; });
+    };
+    auto baseName = childName.empty() ? parent.name + " Block" : std::move(childName);
+    if (baseName.empty())
+        baseName = "Wrapped Circuit";
+    auto uniqueName = baseName;
+    for (int suffix = 2; nameTaken(uniqueName); ++suffix)
+        uniqueName = baseName + " " + std::to_string(suffix);
+    const auto childCellId = createSchematicCell(project, uniqueName, parent.pdk);
+    auto &child = project.schematicCells.at(childCellId);
+    for (auto parameter : parent.parameters) {
+        parameter.id = project.nextId();
+        child.parameters.push_back(std::move(parameter));
+    }
+
+    for (auto &[_, symbol] : selectedSymbols) {
+        child.symbols.emplace(symbol.id, std::move(symbol));
+    }
+    for (const auto &[symbolId, _] : selectedSymbols)
+        parent.symbols.erase(symbolId);
+    for (auto &instance : selectedInstances) {
+        parent.instances.erase(instance.id);
+        child.instances.emplace(instance.id, std::move(instance));
+    }
+
+    struct Boundary {
+        ObjectId parentNet = 0;
+        std::string name;
+        std::vector<ObjectId> childPins;
+        Coordinate x = 0;
+        Coordinate y = 0;
+        int side = -1;
+        std::string portKind;
+        std::string portName;
+    };
+    std::vector<Boundary> boundaries;
+    for (auto netIt = parent.nets.begin(); netIt != parent.nets.end();) {
+        auto &net = netIt->second;
+        std::vector<ObjectId> childPins;
+        std::vector<ObjectId> parentPins;
+        for (const auto pinId : net.pins)
+            (selectedPinIds.contains(pinId) ? childPins : parentPins).push_back(pinId);
+        if (childPins.empty()) {
+            ++netIt;
+            continue;
+        }
+        if (parentPins.empty()) {
+            Net moved = net;
+            moved.pins = std::move(childPins);
+            moved.labelAnchor.reset();
+            child.nets.emplace(moved.id, std::move(moved));
+            netIt = parent.nets.erase(netIt);
+            continue;
+        }
+        Boundary boundary;
+        boundary.parentNet = net.id;
+        boundary.name = net.name;
+        boundary.childPins = std::move(childPins);
+        boundary.x = net.x;
+        boundary.y = net.y;
+        net.pins = std::move(parentPins);
+        net.labelAnchor.reset();
+        boundaries.push_back(std::move(boundary));
+        ++netIt;
+    }
+
+    std::vector<FileSymbol> builtin;
+    if (!boundaries.empty())
+        builtin = builtinSymbols();
+    const auto uniqueInstanceName = [](const SchematicCell &cell, std::string base) {
+        if (base.empty())
+            base = "P";
+        const auto taken = [&](const std::string &candidate) {
+            const auto wanted = lower(candidate);
+            return std::any_of(cell.instances.begin(), cell.instances.end(),
+                               [&](const auto &entry) { return lower(entry.second.name) == wanted; });
+        };
+        if (!taken(base))
+            return base;
+        for (int suffix = 2;; ++suffix) {
+            auto candidate = base + " " + std::to_string(suffix);
+            if (!taken(candidate))
+                return candidate;
+        }
+    };
+    const auto portFile = [&](const std::string &kind) -> const FileSymbol & {
+        const auto wanted = lower(kind);
+        const auto found = std::find_if(builtin.begin(), builtin.end(),
+                                        [&](const FileSymbol &symbol) { return lower(symbol.name) == wanted; });
+        if (found == builtin.end())
+            throw ProjectError("schematic.wrap.port", "Built-in port symbol is missing: " + kind);
+        return *found;
+    };
+
+    for (auto &boundary : boundaries) {
+        double averageX = 0.0;
+        int count = 0;
+        for (const auto pinId : boundary.childPins) {
+            if (const auto position = pinPositions.find(pinId); position != pinPositions.end()) {
+                averageX += static_cast<double>(position->second.x);
+                ++count;
+            }
+        }
+        if (count > 0)
+            averageX /= static_cast<double>(count);
+        else
+            averageX = static_cast<double>(centerX);
+        boundary.side = averageX > static_cast<double>(centerX) + 1.0   ? 1
+                        : averageX < static_cast<double>(centerX) - 1.0 ? -1
+                                                                        : 0;
+        boundary.portKind = boundary.side > 0 ? "Output" : boundary.side < 0 ? "Input" : "Pin";
+    }
+
+    std::vector<std::size_t> leftBoundaries;
+    std::vector<std::size_t> rightBoundaries;
+    for (std::size_t index = 0; index < boundaries.size(); ++index)
+        (boundaries[index].side > 0 ? rightBoundaries : leftBoundaries).push_back(index);
+
+    std::vector<ObjectId> portInstances(boundaries.size(), 0);
+    constexpr Coordinate portSpacing = 80;
+    const auto placePorts = [&](const std::vector<std::size_t> &indices, Coordinate x) {
+        const auto count = static_cast<Coordinate>(indices.size());
+        for (Coordinate index = 0; index < count; ++index) {
+            const auto boundaryIndex = indices[static_cast<std::size_t>(index)];
+            auto &boundary = boundaries[boundaryIndex];
+            const auto y =
+                centerY + static_cast<Coordinate>(std::lround((index - static_cast<double>(count - 1) * 0.5) *
+                                                              static_cast<double>(portSpacing)));
+            const auto &file = portFile(boundary.portKind);
+            Symbol portSymbol;
+            portSymbol.id = project.nextId();
+            portSymbol.name = uniqueSchematicSymbolName(child, file.name);
+            portSymbol.artwork = file.svg;
+            portSymbol.label = file.label;
+            for (auto pin : file.pins) {
+                pin.id = project.nextId();
+                portSymbol.pins.push_back(std::move(pin));
+            }
+            const auto symbolId = portSymbol.id;
+            child.symbols.emplace(symbolId, std::move(portSymbol));
+            const auto portName = uniqueInstanceName(child, boundary.name);
+            const auto portInstanceId = project.nextId();
+            child.instances.emplace(portInstanceId, SchematicInstance{portInstanceId, symbolId, portName, x, y});
+            const auto &placedPort = child.symbols.at(symbolId);
+            if (placedPort.pins.empty())
+                throw ProjectError("schematic.wrap.port", "Built-in port symbol has no pin: " + boundary.portKind);
+            boundary.childPins.push_back(placedPort.pins.front().id);
+            boundary.portName = portName;
+            const auto netId = project.nextId();
+            Net childNet{netId, boundary.name.empty() ? "N" + std::to_string(netId) : boundary.name, boundary.childPins,
+                         x, y};
+            child.nets.emplace(netId, std::move(childNet));
+            portInstances[boundaryIndex] = portInstanceId;
+        }
+    };
+    placePorts(leftBoundaries, minX - 300);
+    placePorts(rightBoundaries, maxX + 300);
+
+    const auto blockSymbolId = addHierarchicalSymbol(project, parentCellId, childCellId, child.name);
+    const auto blockInstanceName = uniqueInstanceName(parent, child.name);
+    const auto blockInstanceId =
+        addSchematicInstance(project, parentCellId, blockSymbolId, blockInstanceName, centerX, centerY);
+    const auto &blockInstance = parent.instances.at(blockInstanceId);
+    const auto &blockSymbol = parent.symbols.at(blockInstance.symbol);
+    std::map<std::string, ObjectId> blockPins;
+    for (const auto &pin : blockSymbol.pins)
+        blockPins.emplace(lower(pin.name), pin.id);
+    for (const auto &boundary : boundaries) {
+        const auto pin = blockPins.find(lower(boundary.portName));
+        if (pin == blockPins.end())
+            throw ProjectError("schematic.wrap.pin", "Generated block symbol is missing a port pin");
+        const auto parentNet = parent.nets.find(boundary.parentNet);
+        if (parentNet == parent.nets.end())
+            throw ProjectError("schematic.wrap.net", "Wrapped boundary net is missing from the parent");
+        parentNet->second.pins.push_back(pin->second);
+    }
+
+    return SchematicWrapResult{childCellId, blockInstance.symbol, blockInstanceId, std::move(portInstances)};
+}
+
 std::size_t repairHierarchicalSymbolArtwork(Project &project) {
     std::size_t repaired = 0;
     for (auto &[_, parent] : project.schematicCells) {
