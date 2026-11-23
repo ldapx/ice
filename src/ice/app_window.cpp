@@ -13917,6 +13917,7 @@ class DocumentWindow : public QMainWindow {
                     [this](const std::string &text) { return createTemporaryHdlBlock(text); });
                 page->setRenameHdlBlockCallback(
                     [this](ice::ObjectId id, const std::string &name) { return renameHdlBlock(id, name); });
+                page->setHdlDefaultBlockNameCallback([this] { return nextHdlBlockDefaultName(); });
             }
             if (stage == ice::ImplementationStage::synthesis) {
                 page->setElaborateDesignCallback(

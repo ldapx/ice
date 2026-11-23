@@ -162,6 +162,11 @@ class ImplementationPage : public QWidget {
     void setRenameHdlBlockCallback(std::function<bool(ice::ObjectId, const std::string &)> callback) {
         renameHdlBlockCallback_ = std::move(callback);
     }
+    // Name the scratch editor will give its block, so its tab label already
+    // matches the block created on the first keystroke.
+    void setHdlDefaultBlockNameCallback(std::function<QString()> callback) {
+        hdlDefaultBlockNameCallback_ = std::move(callback);
+    }
     ice::ObjectId activeHdlCellId() const noexcept { return activeHdlCellId_; }
     // Flushes pending edits and, when the open block is still the unnamed
     // scratch block, asks the user for a name. Returns false when there is
@@ -335,6 +340,7 @@ class ImplementationPage : public QWidget {
     std::function<void(ice::ObjectId)> deleteHdlBlockCallback_;
     std::function<ice::ObjectId(const std::string &)> createTemporaryHdlBlockCallback_;
     std::function<bool(ice::ObjectId, const std::string &)> renameHdlBlockCallback_;
+    std::function<QString()> hdlDefaultBlockNameCallback_;
     std::function<void(ice::ObjectId, const std::string &)> elaborateDesignCallback_;
     std::function<void(ice::ObjectId, const std::string &)> synthesizeRunCallback_;
     std::function<void(ice::ObjectId)> exportVerilogCallback_;

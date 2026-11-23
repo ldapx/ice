@@ -5024,7 +5024,10 @@ void ImplementationPage::ensureHdlScratchEditor() {
         promoteHdlScratchEditor(id);
         controller_->refresh();
     });
-    const auto index = middleTabs_->addTab(editor, QStringLiteral("untitled.sv"));
+    auto label = hdlDefaultBlockNameCallback_ ? hdlDefaultBlockNameCallback_() : QString();
+    if (label.isEmpty())
+        label = QStringLiteral("untitled");
+    const auto index = middleTabs_->addTab(editor, label + QStringLiteral(".sv"));
     middleTabs_->tabBar()->setTabData(index, 0);
     middleTabs_->setTabToolTip(index, QStringLiteral("Type SystemVerilog to create a new HDL block."));
     middleTabs_->setCurrentIndex(index);
