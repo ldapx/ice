@@ -154,6 +154,20 @@ class ImplementationPage : public QWidget {
     void setDeleteHdlBlockCallback(std::function<void(ice::ObjectId)> callback) {
         deleteHdlBlockCallback_ = std::move(callback);
     }
+    void setImportHdlFileCallback(std::function<void()> callback) { importHdlFileCallback_ = std::move(callback); }
+    // Creates the project block backing the scratch editor as soon as the user
+    // types into it, and returns the new cell id (0 on failure).
+    void setCreateTemporaryHdlBlockCallback(std::function<ice::ObjectId(const std::string &)> callback) {
+        createTemporaryHdlBlockCallback_ = std::move(callback);
+    }
+    void setRenameHdlBlockCallback(std::function<bool(ice::ObjectId, const std::string &)> callback) {
+        renameHdlBlockCallback_ = std::move(callback);
+    }
+    ice::ObjectId activeHdlCellId() const noexcept { return activeHdlCellId_; }
+    // Flushes pending edits and, when the open block is still the unnamed
+    // scratch block, asks the user for a name. Returns false when there is
+    // nothing to save or the prompt was cancelled.
+    bool prepareHdlFileSave(ice::ObjectId &cellId);
     void setElaborateDesignCallback(std::function<void(ice::ObjectId, const std::string &)> callback) {
         elaborateDesignCallback_ = std::move(callback);
     }
@@ -195,6 +209,9 @@ class ImplementationPage : public QWidget {
     void applyHdlFilter(const QString &text);
     void openHdlFile(ice::ObjectId id);
     void closeHdlFile(ice::ObjectId id);
+    void ensureHdlScratchEditor();
+    void promoteHdlScratchEditor(ice::ObjectId id);
+    void closeHdlScratchEditor();
     void flushHdlEdit();
     TextDocumentEditor *hdlEditorFor(ice::ObjectId id) const;
     void refreshRunsTable();
@@ -251,6 +268,7 @@ class ImplementationPage : public QWidget {
     QListWidget *hdlFileList_ = nullptr;
     QLineEdit *hdlSearch_ = nullptr;
     QPushButton *newHdlButton_ = nullptr;
+    QPushButton *importHdlButton_ = nullptr;
     QPushButton *deleteHdlButton_ = nullptr;
     QPushButton *elaborateButton_ = nullptr;
     QTabWidget *runsTabs_ = nullptr;
@@ -260,10 +278,15 @@ class ImplementationPage : public QWidget {
     QPushButton *showGraphButton_ = nullptr;
     QPushButton *exportVerilogButton_ = nullptr;
     TextDocumentEditor *hdlEditor_ = nullptr;
+    TextDocumentEditor *hdlScratchEditor_ = nullptr;
     std::map<ice::ObjectId, TextDocumentEditor *> hdlEditors_;
     QTimer *hdlEditTimer_ = nullptr;
     ice::ObjectId activeHdlCellId_ = 0;
     ice::ObjectId hdlEditCellId_ = 0;
+    // Block created from the scratch editor; its first save asks for a name.
+    ice::ObjectId hdlTempCellId_ = 0;
+    bool hdlScratchCreating_ = false;
+    bool hdlScratchDismissed_ = false;
     ice::ObjectId lastRunTreeActiveRunId_ = 0;
     bool loadingHdlEditor_ = false;
     bool hdlTabsInitialized_ = false;
@@ -312,6 +335,9 @@ class ImplementationPage : public QWidget {
     QWidget *middlePlaceholder_ = nullptr;
     std::function<void()> createHdlBlockCallback_;
     std::function<void(ice::ObjectId)> deleteHdlBlockCallback_;
+    std::function<void()> importHdlFileCallback_;
+    std::function<ice::ObjectId(const std::string &)> createTemporaryHdlBlockCallback_;
+    std::function<bool(ice::ObjectId, const std::string &)> renameHdlBlockCallback_;
     std::function<void(ice::ObjectId, const std::string &)> elaborateDesignCallback_;
     std::function<void(ice::ObjectId, const std::string &)> synthesizeRunCallback_;
     std::function<void(ice::ObjectId)> exportVerilogCallback_;

@@ -2956,26 +2956,38 @@ void ImplementationPage::buildUi() {
         hdlSearch_->setClearButtonEnabled(true);
         hdlSearch_->setAccessibleName(QStringLiteral("Search HDL files"));
         searchRow->addWidget(hdlSearch_, 1);
-        if (hdlMode()) {
-            newHdlButton_ = new QPushButton;
-            newHdlButton_->setFixedWidth(28);
-            setLucideIcon(newHdlButton_, QStringLiteral("plus"), 16);
-            newHdlButton_->setToolTip(QStringLiteral("New HDL block"));
-            newHdlButton_->setAccessibleName(QStringLiteral("New HDL block"));
-            searchRow->addWidget(newHdlButton_);
-            deleteHdlButton_ = new QPushButton;
-            deleteHdlButton_->setFixedWidth(28);
-            setLucideIcon(deleteHdlButton_, QStringLiteral("trash"), 16);
-            deleteHdlButton_->setToolTip(QStringLiteral("Delete selected HDL file"));
-            deleteHdlButton_->setAccessibleName(QStringLiteral("Delete selected HDL file"));
-            deleteHdlButton_->setEnabled(false);
-            searchRow->addWidget(deleteHdlButton_);
-        } else if (synthesisMode()) {
+        if (synthesisMode()) {
             elaborateButton_ = new QPushButton(QStringLiteral("Elaborate design"));
             elaborateButton_->setToolTip(QStringLiteral("Create an HDL run and elaborate the selected design"));
             searchRow->addWidget(elaborateButton_);
         }
         explorerLayout->addLayout(searchRow);
+        if (hdlMode()) {
+            // File actions sit on their own row so the search field keeps the
+            // full width of the Explorer panel.
+            auto *actionRow = new QHBoxLayout;
+            actionRow->setSpacing(8);
+            const auto addActionButton = [actionRow](const QString &icon, const QString &tooltip) {
+                auto *button = new QPushButton;
+                button->setFixedWidth(28);
+                setLucideIcon(button, icon, 16);
+                button->setToolTip(tooltip);
+                button->setAccessibleName(tooltip);
+                actionRow->addWidget(button);
+                return button;
+            };
+            // Spread the actions across the panel so they do not bunch up at
+            // the left edge.
+            actionRow->addStretch(1);
+            newHdlButton_ = addActionButton(QStringLiteral("plus"), QStringLiteral("New HDL block"));
+            actionRow->addStretch(1);
+            importHdlButton_ = addActionButton(QStringLiteral("download"), QStringLiteral("Import HDL file"));
+            actionRow->addStretch(1);
+            deleteHdlButton_ = addActionButton(QStringLiteral("trash"), QStringLiteral("Delete selected HDL file"));
+            deleteHdlButton_->setEnabled(false);
+            actionRow->addStretch(1);
+            explorerLayout->addLayout(actionRow);
+        }
         hdlFileList_ = new QListWidget;
         hdlFileList_->setAlternatingRowColors(true);
         if (synthesisMode()) {
@@ -3166,8 +3178,14 @@ void ImplementationPage::buildUi() {
             if (!middleTabs_ || index < 0)
                 return;
             const auto id = static_cast<ice::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong());
-            if (id != 0)
+            if (id != 0) {
                 closeHdlFile(id);
+            } else {
+                // Dismissing the empty workspace leaves it blank until the
+                // project changes, matching the previous behaviour.
+                hdlScratchDismissed_ = true;
+                closeHdlScratchEditor();
+            }
         });
     } else if (synthesisMode()) {
         middleTabs_->setTabsClosable(true);
@@ -3716,6 +3734,10 @@ void ImplementationPage::buildUi() {
         QObject::connect(newHdlButton_, &QPushButton::clicked, this, [this] {
             if (createHdlBlockCallback_)
                 createHdlBlockCallback_();
+        });
+        QObject::connect(importHdlButton_, &QPushButton::clicked, this, [this] {
+            if (importHdlFileCallback_)
+                importHdlFileCallback_();
         });
         QObject::connect(deleteHdlButton_, &QPushButton::clicked, this, [this] {
             auto *item = hdlFileList_ ? hdlFileList_->currentItem() : nullptr;
@@ -4765,6 +4787,10 @@ void ImplementationPage::refreshExplorer() {
         hdlProjectKey_ = projectKey;
         hdlTabsInitialized_ = false;
         hdlEditCellId_ = 0;
+        hdlTempCellId_ = 0;
+        hdlScratchCreating_ = false;
+        hdlScratchDismissed_ = false;
+        closeHdlScratchEditor();
         if (hdlEditTimer_)
             hdlEditTimer_->stop();
         for (auto &[id, editor] : hdlEditors_) {
@@ -4795,10 +4821,26 @@ void ImplementationPage::refreshExplorer() {
     std::sort(entries.begin(), entries.end(),
               [](const Entry &left, const Entry &right) { return left.name < right.name; });
 
+    // With no HDL files the workspace still gets a text editor, so new RTL can
+    // be typed straight away. Its backing block is created on the first
+    // non-blank edit; an untouched editor never touches the project.
+    if (entries.empty()) {
+        if (!hdlScratchEditor_ && !hdlScratchDismissed_)
+            ensureHdlScratchEditor();
+    } else {
+        // A real HDL file is available again, so a dismissed scratch editor
+        // should come back if the project later runs out of files.
+        hdlScratchDismissed_ = false;
+        if (hdlScratchEditor_ && hdlScratchEditor_->text().trimmed().isEmpty())
+            closeHdlScratchEditor();
+    }
+
     for (auto it = hdlEditors_.begin(); it != hdlEditors_.end();) {
         const auto cell = project->schematicCells.find(it->first);
         if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic) {
             const auto id = it->first;
+            if (hdlTempCellId_ == id)
+                hdlTempCellId_ = 0;
             const auto *editor = it->second;
             ++it;
             for (int index = 0; index < middleTabs_->count(); ++index) {
@@ -4846,6 +4888,8 @@ void ImplementationPage::refreshExplorer() {
         }
     }
     hdlEditor_ = hdlEditorFor(activeHdlCellId_);
+    if (!hdlEditor_ && activeHdlCellId_ == 0)
+        hdlEditor_ = hdlScratchEditor_;
     for (int index = 0; index < middleTabs_->count(); ++index) {
         if (static_cast<ice::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == activeHdlCellId_) {
             middleTabs_->setCurrentIndex(index);
@@ -4975,6 +5019,106 @@ void ImplementationPage::closeHdlFile(ice::ObjectId id) {
         }
     }
     refreshProperties();
+}
+
+void ImplementationPage::ensureHdlScratchEditor() {
+    if (!hdlMode() || !middleTabs_ || hdlScratchEditor_)
+        return;
+    auto *editor = new TextDocumentEditor(middleTabs_);
+    editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+    editor->setOnTextEdited([this](const QString &text) {
+        if (loadingHdlEditor_ || hdlScratchCreating_ || !hdlScratchEditor_ || !createTemporaryHdlBlockCallback_)
+            return;
+        // An empty editor is not a file: only actual source creates a block.
+        if (text.trimmed().isEmpty())
+            return;
+        hdlScratchCreating_ = true;
+        const auto id = createTemporaryHdlBlockCallback_(text.toStdString());
+        hdlScratchCreating_ = false;
+        if (id == 0)
+            return;
+        promoteHdlScratchEditor(id);
+        controller_->refresh();
+    });
+    const auto index = middleTabs_->addTab(editor, QStringLiteral("untitled.sv"));
+    middleTabs_->tabBar()->setTabData(index, 0);
+    middleTabs_->setTabToolTip(index, QStringLiteral("Type SystemVerilog to create a new HDL block."));
+    middleTabs_->setCurrentIndex(index);
+    hdlScratchEditor_ = editor;
+    hdlEditor_ = editor;
+}
+
+void ImplementationPage::promoteHdlScratchEditor(ice::ObjectId id) {
+    const auto *project = controller_->project();
+    if (!project || !hdlScratchEditor_)
+        return;
+    const auto cell = project->schematicCells.find(id);
+    if (cell == project->schematicCells.end())
+        return;
+    auto *editor = hdlScratchEditor_;
+    hdlScratchEditor_ = nullptr;
+    // Remember the scratch block so its first save can ask for a real name.
+    hdlTempCellId_ = id;
+    hdlEditors_[id] = editor;
+    hdlEditor_ = editor;
+    activeHdlCellId_ = id;
+    editor->setOnTextEdited([this, id](const QString &) {
+        if (!loadingHdlEditor_ && hdlEditTimer_) {
+            hdlEditCellId_ = id;
+            hdlEditTimer_->start();
+        }
+    });
+    for (int index = 0; index < middleTabs_->count(); ++index) {
+        if (middleTabs_->widget(index) != editor)
+            continue;
+        middleTabs_->tabBar()->setTabData(index, static_cast<qulonglong>(id));
+        middleTabs_->setTabText(index, QString::fromStdString(cell->second.name) + QStringLiteral(".sv"));
+        break;
+    }
+}
+
+void ImplementationPage::closeHdlScratchEditor() {
+    if (!hdlScratchEditor_)
+        return;
+    auto *editor = hdlScratchEditor_;
+    hdlScratchEditor_ = nullptr;
+    if (middleTabs_) {
+        for (int index = 0; index < middleTabs_->count(); ++index) {
+            if (middleTabs_->widget(index) != editor)
+                continue;
+            middleTabs_->removeTab(index);
+            break;
+        }
+    }
+    if (hdlEditor_ == editor)
+        hdlEditor_ = nullptr;
+    delete editor;
+}
+
+bool ImplementationPage::prepareHdlFileSave(ice::ObjectId &cellId) {
+    cellId = 0;
+    flushHdlEdit();
+    const auto *project = controller_->project();
+    if (activeHdlCellId_ == 0 || !project)
+        return false;
+    const auto cell = project->schematicCells.find(activeHdlCellId_);
+    if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+        return false;
+    if (activeHdlCellId_ == hdlTempCellId_) {
+        bool accepted = false;
+        const auto name = QInputDialog::getText(
+            this, QStringLiteral("Save HDL Block"),
+            QStringLiteral("This block was created as a temporary file. Choose a name to save it:"),
+            QLineEdit::Normal, QString::fromStdString(cell->second.name), &accepted);
+        const auto trimmed = name.trimmed();
+        if (!accepted || trimmed.isEmpty() || !renameHdlBlockCallback_)
+            return false;
+        if (!renameHdlBlockCallback_(activeHdlCellId_, trimmed.toStdString()))
+            return false;
+        hdlTempCellId_ = 0;
+    }
+    cellId = activeHdlCellId_;
+    return true;
 }
 
 void ImplementationPage::flushHdlEdit() {
