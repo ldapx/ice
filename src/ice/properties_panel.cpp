@@ -28,6 +28,8 @@ namespace {
 // Original parameter name stored on the name cell so a rejected rename can be
 // restored without rebuilding the table.
 constexpr int kOriginalParameterNameRole = Qt::UserRole + 1;
+// Identifies which path-point field an editable Properties cell belongs to.
+constexpr int kPathPointFieldRole = Qt::UserRole + 2;
 } // namespace
 
 PropertiesPanel::PropertiesPanel(bool showDisplay, QWidget *parent) : QWidget(parent) {
@@ -205,6 +207,14 @@ void PropertiesPanel::setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callbac
     onLayoutShapeSizeChanged_ = std::move(callback);
 }
 
+void PropertiesPanel::setOnLayoutPathPointChanged(LayoutPathPointChanged callback) {
+    onLayoutPathPointChanged_ = std::move(callback);
+}
+
+void PropertiesPanel::setOnLayoutPathSegmentChanged(LayoutPathSegmentChanged callback) {
+    onLayoutPathSegmentChanged_ = std::move(callback);
+}
+
 void PropertiesPanel::setOnSymbolIconEditRequested(SymbolIconEditRequested callback) {
     onSymbolIconEditRequested_ = std::move(callback);
     updateParameterButtons();
@@ -223,6 +233,7 @@ void PropertiesPanel::clearSelection() {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -248,6 +259,7 @@ void PropertiesPanel::setInstance(const ice::SchematicInstance &instance, const 
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -270,6 +282,7 @@ void PropertiesPanel::setSchematic(const ice::SchematicCell &cell, const QString
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -299,6 +312,7 @@ void PropertiesPanel::setLayoutCell(const ice::LayoutCell &cell, const ice::Layo
     layoutCellId_ = cell.id;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -320,6 +334,7 @@ void PropertiesPanel::setLayoutDevice(const ice::LayoutDeviceCell *cell) {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -352,6 +367,7 @@ void PropertiesPanel::setPathTool(const std::string &layerName) {
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = true;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -383,6 +399,7 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = true;
     portMode_ = false;
     shapeIsRectangle_ = !shape.isPath() && !shape.isText() && shape.polygon.empty();
@@ -431,14 +448,141 @@ void PropertiesPanel::setLayoutShape(const ice::Shape &shape, const std::string 
     updateParameterButtons();
 }
 
-void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName,
-                                    const std::string &netName, const std::vector<LayoutPortLayer> &layers) {
+void PropertiesPanel::setLayoutPathPoints(const ice::Shape &shape, const std::vector<int> &pointIndices,
+                                          const std::string &layerName, const std::vector<LayoutPortLayer> &layers,
+                                          const ice::LayoutPreviewModel &model) {
+    std::vector<int> points;
+    for (const auto index : pointIndices)
+        if (index >= 0 && index < static_cast<int>(shape.centerline.size()))
+            points.push_back(index);
+    if (points.empty())
+        return;
     setEmptyState(false);
     instanceId_ = 0;
     cellId_ = 0;
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = true;
+    shapeMode_ = false;
+    portMode_ = false;
+    layoutShapeId_ = shape.id;
+    layoutPathPointIndices_ = points;
+    layoutPathPointIndex_ = points.front();
+    layoutPathSegmentIndex_ = -1;
+    layoutPathPointX_ = 0;
+    layoutPathPointY_ = 0;
+    layoutPathSegmentWidth_ = 0;
+    layoutPathSegmentLayer_ = 0;
+    layoutPathLayers_ = layers;
+    if (points.size() == 1) {
+        const auto pointIndex = points.front();
+        layoutPathPointX_ = shape.centerline[static_cast<std::size_t>(pointIndex)].x;
+        layoutPathPointY_ = shape.centerline[static_cast<std::size_t>(pointIndex)].y;
+        if (pointIndex + 1 < static_cast<int>(shape.centerline.size()))
+            layoutPathSegmentIndex_ = pointIndex;
+        else if (pointIndex > 0)
+            layoutPathSegmentIndex_ = pointIndex - 1;
+        if (layoutPathSegmentIndex_ >= 0) {
+            layoutPathSegmentWidth_ = shape.widthForSegment(static_cast<std::size_t>(layoutPathSegmentIndex_));
+            layoutPathSegmentLayer_ = shape.layerForSegment(static_cast<std::size_t>(layoutPathSegmentIndex_));
+        }
+    }
+    if (gridOptions_)
+        gridOptions_->setVisible(false);
+    setParametersVisible(true);
+    setTitle(points.size() == 1 ? QStringLiteral("Path point %1").arg(points.front())
+                                : QStringLiteral("Path points (%1)").arg(points.size()));
+    layoutDevicePreview_->setStyles(layoutPreviewStyles_, layoutPreviewDeviceStyles_);
+    layoutDevicePreview_->setModel(model);
+    previewStack_->setCurrentWidget(layoutDevicePreview_);
+    previewFrame_->setVisible(true);
+    QSignalBlocker blocker(parameters_);
+    parameters_->setRowCount(0);
+    const auto addReadOnlyRow = [&](const QString &name, const QString &value) {
+        const int row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        auto *valueItem = new QTableWidgetItem(value);
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        parameters_->setItem(row, 0, nameItem);
+        parameters_->setItem(row, 1, valueItem);
+    };
+    const auto addEditableRow = [&](const QString &name, const QString &value, const QString &field) {
+        const int row = parameters_->rowCount();
+        parameters_->insertRow(row);
+        auto *nameItem = new QTableWidgetItem(name);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        nameItem->setData(kPathPointFieldRole, field);
+        auto *valueItem = new QTableWidgetItem(value);
+        valueItem->setData(kPathPointFieldRole, field);
+        parameters_->setItem(row, 0, nameItem);
+        parameters_->setItem(row, 1, valueItem);
+    };
+    addReadOnlyRow(QStringLiteral("name"),
+                   QString::fromStdString(shape.name.empty() ? std::string{"Path"} : shape.name));
+    addReadOnlyRow(QStringLiteral("type"), QStringLiteral("Path point"));
+    addReadOnlyRow(QStringLiteral("layer"), QString::fromStdString(layerName));
+    if (points.size() != 1) {
+        QStringList indices;
+        for (const auto index : points)
+            indices.push_back(QString::number(index));
+        addReadOnlyRow(QStringLiteral("points"), indices.join(QStringLiteral(", ")));
+        updateParameterButtons();
+        return;
+    }
+    addReadOnlyRow(QStringLiteral("point"), QString::number(points.front()));
+    addEditableRow(QStringLiteral("x (nm)"), QString::number(layoutPathPointX_), QStringLiteral("x"));
+    addEditableRow(QStringLiteral("y (nm)"), QString::number(layoutPathPointY_), QStringLiteral("y"));
+    if (layoutPathSegmentIndex_ >= 0) {
+        addEditableRow(QStringLiteral("segment width (nm)"), QString::number(layoutPathSegmentWidth_),
+                       QStringLiteral("segment-width"));
+        if (!layers.empty()) {
+            const int row = parameters_->rowCount();
+            parameters_->insertRow(row);
+            auto *nameItem = new QTableWidgetItem(QStringLiteral("segment layer"));
+            nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+            parameters_->setItem(row, 0, nameItem);
+            auto *combo = new QComboBox;
+            for (const auto &[layerId, name] : layers)
+                combo->addItem(QString::fromStdString(name), QVariant::fromValue<qulonglong>(layerId));
+            int index = combo->findData(QVariant::fromValue<qulonglong>(layoutPathSegmentLayer_));
+            if (index < 0 && layoutPathSegmentLayer_ != 0) {
+                combo->addItem(QString::number(layoutPathSegmentLayer_),
+                               QVariant::fromValue<qulonglong>(layoutPathSegmentLayer_));
+                index = combo->count() - 1;
+            }
+            if (index >= 0)
+                combo->setCurrentIndex(index);
+            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, combo](int index) {
+                if (index < 0)
+                    return;
+                const auto layer = static_cast<ice::ObjectId>(combo->itemData(index).toULongLong());
+                if (layer == layoutPathSegmentLayer_)
+                    return;
+                layoutPathSegmentLayer_ = layer;
+                if (onLayoutPathSegmentChanged_)
+                    onLayoutPathSegmentChanged_(layoutShapeId_, layoutPathSegmentIndex_, layoutPathSegmentWidth_,
+                                                layoutPathSegmentLayer_);
+            });
+            parameters_->setCellWidget(row, 1, combo);
+        } else if (layoutPathSegmentLayer_ != 0) {
+            addReadOnlyRow(QStringLiteral("segment layer"), QString::number(layoutPathSegmentLayer_));
+        }
+    }
+    updateParameterButtons();
+}
+
+void PropertiesPanel::setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName,
+                                    const std::vector<LayoutPortLayer> &layers) {
+    setEmptyState(false);
+    instanceId_ = 0;
+    cellId_ = 0;
+    layoutCellId_ = 0;
+    layoutDeviceName_.clear();
+    pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     portMode_ = true;
@@ -517,6 +661,7 @@ void PropertiesPanel::setLayoutOverview(const ice::LayoutCell &cell, const ice::
     layoutCellId_ = 0;
     layoutDeviceName_.clear();
     pathMode_ = false;
+    pathPointMode_ = false;
     shapeMode_ = false;
     portMode_ = false;
     layoutShapeId_ = 0;
@@ -628,6 +773,52 @@ void PropertiesPanel::handleParameterEdit(QTableWidgetItem *item) {
     const auto *name = parameters_->item(item->row(), 0);
     if (!name)
         return;
+    if (pathPointMode_) {
+        const auto field = name->data(kPathPointFieldRole).toString();
+        bool accepted = false;
+        const auto value = item->text().trimmed().toInt(&accepted);
+        if (field == QStringLiteral("x") || field == QStringLiteral("y")) {
+            const bool xField = field == QStringLiteral("x");
+            const auto current = xField ? layoutPathPointX_ : layoutPathPointY_;
+            if (!accepted) {
+                QSignalBlocker blocker(parameters_);
+                item->setText(QString::number(current));
+                return;
+            }
+            const auto clamped = std::clamp(value, -1000000000, 1000000000);
+            if (clamped != value) {
+                QSignalBlocker blocker(parameters_);
+                item->setText(QString::number(clamped));
+            }
+            if (xField)
+                layoutPathPointX_ = clamped;
+            else
+                layoutPathPointY_ = clamped;
+            if (onLayoutPathPointChanged_)
+                onLayoutPathPointChanged_(layoutShapeId_, layoutPathPointIndex_, layoutPathPointX_, layoutPathPointY_);
+            return;
+        }
+        if (field == QStringLiteral("segment-width")) {
+            if (!accepted || value <= 0) {
+                QSignalBlocker blocker(parameters_);
+                item->setText(QString::number(layoutPathSegmentWidth_));
+                return;
+            }
+            const auto clamped = std::clamp(value, 1, 1000000000);
+            if (clamped != value) {
+                QSignalBlocker blocker(parameters_);
+                item->setText(QString::number(clamped));
+            }
+            if (clamped == layoutPathSegmentWidth_)
+                return;
+            layoutPathSegmentWidth_ = clamped;
+            if (onLayoutPathSegmentChanged_)
+                onLayoutPathSegmentChanged_(layoutShapeId_, layoutPathSegmentIndex_, layoutPathSegmentWidth_,
+                                            layoutPathSegmentLayer_);
+            return;
+        }
+        return;
+    }
     if (portMode_) {
         const auto field = name->text();
         const auto value = item->text().trimmed();

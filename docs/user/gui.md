@@ -510,7 +510,10 @@ grid visibility and snap toggles. The layout cell
 parameter table is hidden while nothing is selected. Selecting a rectangle
 shows its name, type, layer, and editable width and height in database units;
 selected polygons, paths, and texts show read-only name, type, and layer
-information.
+information. Selecting a single path point shows its exact X and Y coordinates
+plus the outgoing segment width and layer (the incoming segment for the last
+point) as editable fields in **Properties**. Multiple selected points show a
+read-only summary.
 
 The **+** button in the Layout **Hierarchy** offers **Static Layout** and
 **Procedural Layout**. Procedural layouts use a notebook-text icon, open a
@@ -632,12 +635,16 @@ layers are added or removed.
 The layout toolbar separates **Select** from **Move**. **Select** supports
 rubber-band selection and handle editing: drag path points, polygon vertices,
 and rectangle corner or edge handles, but it does not move whole objects.
-Click a path point to select it; the handle inverts its colors. Press **Delete**
-to remove the selected path point, or right-click it for the same action. A
-path always keeps at least two points. Click the path body to clear the point
-selection, then **Delete** removes the whole path.
+Click a path point to select it; the handle inverts its colors. Hold **Ctrl**
+while clicking to add or remove points from the selection, then drag any
+selected point to move the whole group. Press **Delete** to remove the selected
+path points, or right-click one for the same action. A path always keeps at
+least two points. Click the path body to clear the point selection, then
+**Delete** removes the whole path.
 **Move** drags rectangles, polygons, paths, texts, planned devices, and placed
-instances; selection handles are hidden while Move is active.
+instances; selection handles are hidden while Move is active. Selection,
+selected path points, and the current zoom/pan are preserved across edits and
+project refreshes.
 
 In **Select**, click an already-selected rectangle or polygon again to trace and
 highlight its net in the layout. Tracing follows touching conductive shapes and
@@ -729,6 +736,14 @@ filled polygon geometry. Segment outlines and point vias are unioned per layer,
 so a path that changes layers produces polygons on each layer it used, including
 squares on its via layers. Flattening an automatically routed path detaches it
 from its planned connection. Use undo to restore the path.
+
+Selected shapes can also be copied with **Duplicate** (Ctrl+D) or repeated with
+**Create Array** from the layout tool column or the figure context menu. Arrays
+accept row/column counts and pitches. Paths retain their centerline,
+per-segment layers/widths, and vias when copied or duplicated. Right-click a
+multi-shape selection and open the **Arrange** submenu to align two or more
+shapes left, right, top, bottom, or center, or distribute three or more shapes
+evenly.
 
 The **Ruler** tool measures between two clicked points. The ruler line keeps a
 constant screen width as you zoom, and shows minor and major tick marks with
@@ -893,6 +908,7 @@ Common defaults:
 - **Schematic place device**: R resistor, X NMOS, I input, O output, B pin, C capacitor, D diode, G ground, L inductor, S sine voltage source; Shift+wheel scrolls the device library while placing
 - **Schematic comment**: Shift+C
 - **Layout rotate / flips**: Shift+R / H / J
+- **Layout duplicate**: Ctrl+D
 - **Layout rectangle / polygon / path / comment (text label) / text polygon / port / ruler**: R / G / W / Shift+C / Shift+T / N / L
 - **Layout boolean union / intersection / difference / XOR**: U / I / D / X
 

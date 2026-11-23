@@ -44,6 +44,10 @@ class PropertiesPanel : public QWidget {
     using LayoutPortChanged = std::function<void(const ice::Port &port, const std::string &netName)>;
     using GridSpacingChanged = std::function<void(int spacing)>;
     using LayoutShapeSizeChanged = std::function<void(ice::ObjectId shapeId, int width, int height)>;
+    using LayoutPathPointChanged = std::function<void(ice::ObjectId shapeId, int pointIndex, int x, int y)>;
+    using LayoutPathSegmentChanged =
+        std::function<void(ice::ObjectId shapeId, int segmentIndex, int width, ice::ObjectId layer)>;
+    using LayoutPortLayer = std::pair<ice::ObjectId, std::string>;
     using SymbolIconEditRequested = std::function<void(ice::ObjectId instanceId)>;
 
     explicit PropertiesPanel(bool showDisplay = true, QWidget *parent = nullptr);
@@ -59,6 +63,8 @@ class PropertiesPanel : public QWidget {
     void setOnLayoutPortChanged(LayoutPortChanged callback);
     void setOnGridSpacingChanged(GridSpacingChanged callback);
     void setOnLayoutShapeSizeChanged(LayoutShapeSizeChanged callback);
+    void setOnLayoutPathPointChanged(LayoutPathPointChanged callback);
+    void setOnLayoutPathSegmentChanged(LayoutPathSegmentChanged callback);
     void setOnSymbolIconEditRequested(SymbolIconEditRequested callback);
 
     void refreshAppearance();
@@ -80,7 +86,12 @@ class PropertiesPanel : public QWidget {
     // text polygon), so the preview never shows the rest of the cell.
     void setLayoutShape(const ice::Shape &shape, const std::string &layerName, const std::string &displayName,
                         const std::string &typeName, const ice::LayoutPreviewModel &model);
-    using LayoutPortLayer = std::pair<ice::ObjectId, std::string>;
+    // Shows numeric editing for one selected path point or a read-only summary
+    // for a multi-point selection. The outgoing segment (or the incoming one
+    // for the last point) is exposed for width and layer changes.
+    void setLayoutPathPoints(const ice::Shape &shape, const std::vector<int> &pointIndices,
+                             const std::string &layerName, const std::vector<LayoutPortLayer> &layers,
+                             const ice::LayoutPreviewModel &model);
     void setLayoutPort(const ice::Port &port, const std::string &layerName, const std::string &netName,
                        const std::vector<LayoutPortLayer> &layers = {});
     void setLayoutOverview(const ice::LayoutCell &cell, const ice::LayoutPreviewModel &model, int spacing);
@@ -119,9 +130,18 @@ class PropertiesPanel : public QWidget {
     bool pathMode_ = false;
     bool shapeMode_ = false;
     bool shapeIsRectangle_ = false;
+    bool pathPointMode_ = false;
     ice::ObjectId layoutShapeId_ = 0;
     int layoutShapeWidth_ = 0;
     int layoutShapeHeight_ = 0;
+    int layoutPathPointIndex_ = -1;
+    int layoutPathSegmentIndex_ = -1;
+    int layoutPathPointX_ = 0;
+    int layoutPathPointY_ = 0;
+    int layoutPathSegmentWidth_ = 0;
+    ice::ObjectId layoutPathSegmentLayer_ = 0;
+    std::vector<int> layoutPathPointIndices_;
+    std::vector<LayoutPortLayer> layoutPathLayers_;
     std::string pathLayerName_;
     bool portMode_ = false;
     ice::Port layoutPort_;
@@ -141,6 +161,8 @@ class PropertiesPanel : public QWidget {
     LayoutPortChanged onLayoutPortChanged_;
     GridSpacingChanged onGridSpacingChanged_;
     LayoutShapeSizeChanged onLayoutShapeSizeChanged_;
+    LayoutPathPointChanged onLayoutPathPointChanged_;
+    LayoutPathSegmentChanged onLayoutPathSegmentChanged_;
     SymbolIconEditRequested onSymbolIconEditRequested_;
     bool editButtonVisible_ = false;
     bool symbolIconEditable_ = false;

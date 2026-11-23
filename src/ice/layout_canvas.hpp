@@ -48,9 +48,11 @@ struct LayoutPathData {
 };
 using LayoutPathCreatedCallback = std::function<void(const LayoutPathData &path)>;
 using LayoutPathLayerChangedCallback = std::function<void(ice::ObjectId layer, const std::string &name)>;
-using LayoutPathPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
+using LayoutPathPointSelectionChangedCallback = std::function<void()>;
+using LayoutPathPointsMovedCallback =
+    std::function<void(ice::ObjectId id, const std::vector<int> &indices, const std::vector<QPointF> &positions)>;
 using LayoutPathPointInsertedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
-using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int index)>;
+using LayoutPathPointsDeletedCallback = std::function<void(ice::ObjectId id, const std::vector<int> &indices)>;
 using LayoutTextPlacedCallback = std::function<void(QPointF)>;
 using LayoutTextPolygonPlacedCallback = std::function<void(QPointF)>;
 using LayoutPortPlacedCallback = std::function<void(QPointF, QPointF)>;
@@ -60,11 +62,42 @@ using LayoutPlannedConnectionActivatedCallback = std::function<void(ice::ObjectI
 using LayoutPolygonCreatedCallback = std::function<void(const std::vector<QPointF> &points)>;
 using LayoutPolygonPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 
+// Selection and view state that survives a full scene rebuild. Figure ids are
+// stable project ids; instance ids are tracked separately because instance
+// groups are not scene-selected the same way as shapes and ports.
+struct LayoutSelectionState {
+    std::vector<ice::ObjectId> figureIds;
+    ice::ObjectId instance = 0;
+    ice::ObjectId pathShape = 0;
+    std::vector<int> pathPoints;
+    QPointF center;
+    qreal zoom = 1.0;
+};
+
 class LayoutCanvas : public QGraphicsView {
   public:
     enum class Tool { select, move, path, rectangle, polygon, port, placeDevice, ruler, text, textPolygon };
     // Entries of the right-click menu shown on a selected layout figure.
-    enum class FigureContextAction { traceNet, rotate, flip, flattenPath, copy, cut, paste, deleteShape };
+    enum class FigureContextAction {
+        traceNet,
+        rotate,
+        flip,
+        flattenPath,
+        duplicate,
+        createArray,
+        alignLeft,
+        alignRight,
+        alignTop,
+        alignBottom,
+        alignCenterX,
+        alignCenterY,
+        distributeX,
+        distributeY,
+        copy,
+        cut,
+        paste,
+        deleteShape
+    };
 
     explicit LayoutCanvas(QWidget *parent = nullptr);
     ~LayoutCanvas() override;
@@ -85,6 +118,8 @@ class LayoutCanvas : public QGraphicsView {
     virtual void setInstanceActivatedCallback(std::function<void(ice::ObjectId)> callback) = 0;
     virtual void setInstanceSelectionCallback(std::function<void(ice::ObjectId)> callback) = 0;
     virtual ice::ObjectId selectedLayoutInstance() const = 0;
+    virtual LayoutSelectionState selectionState() const = 0;
+    virtual void restoreSelectionState(const LayoutSelectionState &state, bool restoreView) = 0;
     virtual void setToolEscapeCallback(std::function<void()> callback) = 0;
     virtual void deleteSelectedShapes() = 0;
     // Drops any in-progress interaction (rectangle/port preview, polygon, ruler,
@@ -112,6 +147,7 @@ class LayoutCanvas : public QGraphicsView {
     virtual std::string pathLayerName() const = 0;
     virtual void setPathCreatedCallback(LayoutPathCreatedCallback callback) = 0;
     virtual void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) = 0;
+    virtual void setPathPointSelectionChangedCallback(LayoutPathPointSelectionChangedCallback callback) = 0;
     virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
     virtual void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) = 0;
     virtual void setPortPlacedCallback(LayoutPortPlacedCallback callback) = 0;
@@ -159,9 +195,9 @@ QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF>
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
                                     bool pointEditable, bool endpointHandlesOnly,
-                                    LayoutPathPointMovedCallback pointMoved,
+                                    LayoutPathPointsMovedCallback pointsMoved,
                                     LayoutPathPointInsertedCallback pointInserted,
-                                    LayoutPathPointDeletedCallback pointDeleted);
+                                    LayoutPathPointsDeletedCallback pointsDeleted);
 
 // Creates the selectable/movable canvas box used for a planned device. The
 // rectangle is given in scene coordinates and the item is positioned at its

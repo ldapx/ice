@@ -236,13 +236,14 @@ class LayoutPathItem : public QGraphicsItem {
     LayoutPathItem(ice::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<qreal> segmentWidths,
                    std::vector<bool> segmentVisible, std::vector<QColor> segmentColors,
                    std::vector<std::vector<QColor>> pointViaColors, bool readOnly, bool pointEditable,
-                   bool endpointHandlesOnly, LayoutPathPointMovedCallback pointMoved,
-                   LayoutPathPointInsertedCallback pointInserted, LayoutPathPointDeletedCallback pointDeleted)
+                   bool endpointHandlesOnly, LayoutPathPointsMovedCallback pointsMoved,
+                   LayoutPathPointInsertedCallback pointInserted, LayoutPathPointsDeletedCallback pointsDeleted)
         : id_(id), points_(std::move(points)), width_(std::max<qreal>(1.0, width)),
           segmentWidths_(std::move(segmentWidths)), segmentVisible_(std::move(segmentVisible)),
           segmentColors_(std::move(segmentColors)), pointViaColors_(std::move(pointViaColors)), readOnly_(readOnly),
-          pointEditable_(pointEditable), endpointHandlesOnly_(endpointHandlesOnly), pointMoved_(std::move(pointMoved)),
-          pointInserted_(std::move(pointInserted)), pointDeleted_(std::move(pointDeleted)) {
+          pointEditable_(pointEditable), endpointHandlesOnly_(endpointHandlesOnly),
+          pointsMoved_(std::move(pointsMoved)), pointInserted_(std::move(pointInserted)),
+          pointsDeleted_(std::move(pointsDeleted)) {
         for (const auto segmentWidth : segmentWidths_)
             width_ = std::max(width_, segmentWidth);
         setData(0, QVariant::fromValue<qulonglong>(id_));
@@ -341,8 +342,8 @@ class LayoutPathItem : public QGraphicsItem {
             if (!handleEditable(index))
                 continue;
             // Invert the handle colors while the point itself is selected so
-            // Delete clearly targets that point instead of the whole path.
-            const bool selected = index == selectedHandle_;
+            // Delete clearly targets the selected points instead of the path.
+            const bool selected = selectedHandles_.contains(index);
             painter->setPen(selected ? selectedPen : handlePen);
             painter->setBrush(selected ? selectedBrush : handleBrush);
             painter->drawRect(handleRect(index));
@@ -360,20 +361,25 @@ class LayoutPathItem : public QGraphicsItem {
                             scene()->clearSelection();
                         setSelected(true);
                     }
-                    selectHandle(handle);
-                    draggingHandle_ = handle;
-                    handleDragStart_ = points_[static_cast<std::size_t>(handle)];
+                    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
+                    selectHandle(handle, additive);
+                    if (!additive)
+                        beginHandleDrag(handle);
                     event->accept();
                     return;
                 }
             } else if (event->button() == Qt::RightButton && isSelected() && pointEditingEnabled_ &&
                        !endpointHandlesOnly_) {
                 const int handle = nearestHandle(event->pos());
-                if (handle >= 0 && points_.size() > 2 && pointDeleted_) {
+                if (handle >= 0 && points_.size() > 2 && pointsDeleted_) {
+                    if (!selectedHandles_.contains(handle))
+                        selectHandle(handle, false);
+                    const auto count = selectedHandles_.size();
                     QMenu menu;
-                    auto *remove = menu.addAction(QStringLiteral("Delete path point"));
+                    auto *remove = menu.addAction(count > 1 ? QStringLiteral("Delete %1 path points").arg(count)
+                                                            : QStringLiteral("Delete path point"));
                     if (menu.exec(event->screenPos()) == remove) {
-                        pointDeleted_(id_, handle);
+                        deleteSelectedHandles();
                         event->accept();
                         return;
                     }
@@ -384,10 +390,8 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     void mouseMoveEvent(QGraphicsSceneMouseEvent *event) override {
-        if (draggingHandle_ >= 0 && draggingHandle_ < static_cast<int>(points_.size())) {
-            prepareGeometryChange();
-            points_[static_cast<std::size_t>(draggingHandle_)] = mapFromScene(event->scenePos());
-            update();
+        if (!draggingHandles_.empty()) {
+            dragHandleToScenePosition(event->scenePos());
             event->accept();
             return;
         }
@@ -395,11 +399,8 @@ class LayoutPathItem : public QGraphicsItem {
     }
 
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override {
-        if (draggingHandle_ >= 0) {
-            const int index = draggingHandle_;
-            draggingHandle_ = -1;
-            if (pointMoved_ && index < static_cast<int>(points_.size()))
-                pointMoved_(id_, index, mapToScene(points_[static_cast<std::size_t>(index)]));
+        if (!draggingHandles_.empty()) {
+            endHandleDrag();
             event->accept();
             return;
         }
@@ -415,6 +416,10 @@ class LayoutPathItem : public QGraphicsItem {
                 const auto point = event->scenePos();
                 prepareGeometryChange();
                 points_.insert(points_.begin() + segment, mapFromScene(point));
+                std::set<int> shifted;
+                for (const auto selected : selectedHandles_)
+                    shifted.insert(selected >= segment ? selected + 1 : selected);
+                selectedHandles_ = std::move(shifted);
                 update();
                 pointInserted_(id_, segment, point);
                 event->accept();
@@ -426,32 +431,66 @@ class LayoutPathItem : public QGraphicsItem {
 
     ice::ObjectId pathId() const { return id_; }
 
-    int selectedHandle() const { return pointEditingEnabled_ ? selectedHandle_ : -1; }
+    const std::set<int> &selectedHandles() const { return selectedHandles_; }
+    bool hasSelectedHandles() const { return pointEditingEnabled_ && !selectedHandles_.empty(); }
+    bool isHandleSelected(int index) const { return selectedHandles_.contains(index); }
 
-    void selectHandle(int index) {
+    void selectHandle(int index, bool additive = false) {
         if (!pointEditingEnabled_ || !handleEditable(index))
             return;
-        if (selectedHandle_ == index)
-            return;
-        selectedHandle_ = index;
+        if (additive && !endpointHandlesOnly_) {
+            if (!selectedHandles_.erase(index))
+                selectedHandles_.insert(index);
+        } else if (additive) {
+            // Routed paths expose two endpoint handles but their geometry is
+            // regenerated from the route; keep only the endpoint being edited.
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        } else if (!selectedHandles_.contains(index)) {
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        }
+        update();
+    }
+
+    void setSelectedHandles(const std::vector<int> &indices) {
+        selectedHandles_.clear();
+        if (pointEditingEnabled_) {
+            for (const auto index : indices) {
+                if (!handleEditable(index))
+                    continue;
+                if (endpointHandlesOnly_) {
+                    selectedHandles_.clear();
+                    selectedHandles_.insert(index);
+                    break;
+                }
+                selectedHandles_.insert(index);
+            }
+        }
         update();
     }
 
     void clearHandleSelection() {
-        if (selectedHandle_ < 0)
+        if (selectedHandles_.empty())
             return;
-        selectedHandle_ = -1;
+        selectedHandles_.clear();
         update();
     }
 
-    bool deleteSelectedHandle() {
-        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || selectedHandle_ < 0 || !pointDeleted_ ||
-            points_.size() <= 2 || !handleEditable(selectedHandle_))
+    bool deleteSelectedHandles() {
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || selectedHandles_.empty() || !pointsDeleted_ ||
+            points_.size() <= 2 || points_.size() < selectedHandles_.size() + 2)
             return false;
-        const int index = selectedHandle_;
-        selectedHandle_ = -1;
+        std::vector<int> indices;
+        indices.reserve(selectedHandles_.size());
+        for (const auto index : selectedHandles_) {
+            if (!handleEditable(index))
+                return false;
+            indices.push_back(index);
+        }
+        selectedHandles_.clear();
         update();
-        pointDeleted_(id_, index);
+        pointsDeleted_(id_, indices);
         return true;
     }
 
@@ -482,36 +521,66 @@ class LayoutPathItem : public QGraphicsItem {
     void beginHandleDrag(int index) {
         if (!pointEditingEnabled_ || !handleEditable(index))
             return;
-        draggingHandle_ = index;
-        handleDragStart_ = points_[static_cast<std::size_t>(index)];
+        if (!selectedHandles_.contains(index)) {
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        }
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
+        for (const auto selected : selectedHandles_) {
+            if (!handleEditable(selected))
+                continue;
+            draggingHandles_.insert(selected);
+            handleDragStarts_.emplace(selected, points_[static_cast<std::size_t>(selected)]);
+        }
+        if (!draggingHandles_.contains(index)) {
+            draggingHandles_.clear();
+            handleDragStarts_.clear();
+            return;
+        }
+        handleDragAnchor_ = points_[static_cast<std::size_t>(index)];
+        update();
     }
 
     void dragHandleToScenePosition(const QPointF &scenePos) {
-        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || draggingHandle_ < 0 ||
-            draggingHandle_ >= static_cast<int>(points_.size()))
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || draggingHandles_.empty())
             return;
+        const auto delta = mapFromScene(scenePos) - handleDragAnchor_;
         prepareGeometryChange();
-        points_[static_cast<std::size_t>(draggingHandle_)] = mapFromScene(scenePos);
+        for (const auto &[index, start] : handleDragStarts_)
+            points_[static_cast<std::size_t>(index)] = start + delta;
         update();
     }
 
     bool endHandleDrag() {
-        if (draggingHandle_ < 0 || draggingHandle_ >= static_cast<int>(points_.size()))
+        if (draggingHandles_.empty())
             return false;
-        const int index = draggingHandle_;
-        draggingHandle_ = -1;
-        const bool moved = points_[static_cast<std::size_t>(index)] != handleDragStart_;
-        if (moved && pointMoved_)
-            pointMoved_(id_, index, mapToScene(points_[static_cast<std::size_t>(index)]));
-        return moved;
+        std::vector<int> indices;
+        std::vector<QPointF> positions;
+        for (const auto &[index, start] : handleDragStarts_) {
+            const auto &current = points_[static_cast<std::size_t>(index)];
+            if (current == start)
+                continue;
+            indices.push_back(index);
+            positions.push_back(mapToScene(current));
+        }
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
+        if (indices.empty())
+            return false;
+        if (pointsMoved_)
+            pointsMoved_(id_, indices, positions);
+        return true;
     }
 
     void cancelHandleDrag() {
-        if (draggingHandle_ >= 0 && draggingHandle_ < static_cast<int>(points_.size())) {
+        if (!handleDragStarts_.empty()) {
             prepareGeometryChange();
-            points_[static_cast<std::size_t>(draggingHandle_)] = handleDragStart_;
+            for (const auto &[index, start] : handleDragStarts_)
+                points_[static_cast<std::size_t>(index)] = start;
         }
-        draggingHandle_ = -1;
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
         update();
     }
 
@@ -682,12 +751,13 @@ class LayoutPathItem : public QGraphicsItem {
     bool pointEditable_ = true;
     bool endpointHandlesOnly_ = false;
     bool pointEditingEnabled_ = true;
-    int selectedHandle_ = -1;
-    int draggingHandle_ = -1;
-    QPointF handleDragStart_;
-    LayoutPathPointMovedCallback pointMoved_;
+    std::set<int> selectedHandles_;
+    std::set<int> draggingHandles_;
+    std::map<int, QPointF> handleDragStarts_;
+    QPointF handleDragAnchor_;
+    LayoutPathPointsMovedCallback pointsMoved_;
     LayoutPathPointInsertedCallback pointInserted_;
-    LayoutPathPointDeletedCallback pointDeleted_;
+    LayoutPathPointsDeletedCallback pointsDeleted_;
 };
 
 class LayoutResizeHandleItem : public QGraphicsItem {
@@ -1137,6 +1207,68 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void restoreLayoutInstanceSelection() override { applyLayoutInstanceSelection(); }
 
+    LayoutSelectionState selectionState() const override {
+        LayoutSelectionState state;
+        state.instance = selectedLayoutInstance_;
+        state.center = centerScene_;
+        state.zoom = zoom_;
+        if (!scene())
+            return state;
+        for (auto *item : scene()->items()) {
+            if (!item->isSelected())
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item); path && path->hasSelectedHandles()) {
+                state.pathShape = path->pathId();
+                state.pathPoints.assign(path->selectedHandles().begin(), path->selectedHandles().end());
+            }
+            if (!item->data(0).isValid())
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id != 0 && std::find(state.figureIds.begin(), state.figureIds.end(), id) == state.figureIds.end())
+                state.figureIds.push_back(id);
+        }
+        return state;
+    }
+
+    void restoreSelectionState(const LayoutSelectionState &state, bool restoreView) override {
+        if (!scene())
+            return;
+        {
+            QSignalBlocker blocker(scene());
+            scene()->clearSelection();
+            const std::set<ice::ObjectId> figures(state.figureIds.begin(), state.figureIds.end());
+            for (auto *item : scene()->items()) {
+                if (!item->data(0).isValid() || !(item->flags() & QGraphicsItem::ItemIsSelectable))
+                    continue;
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                    item->data(1).toString() == QStringLiteral("layout-instance"))
+                    continue;
+                const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+                if (figures.contains(id))
+                    item->setSelected(true);
+            }
+            selectedLayoutInstance_ = state.instance;
+            applyLayoutInstanceSelection();
+            if (state.pathShape != 0) {
+                if (auto *path = findPathItem(state.pathShape)) {
+                    path->setSelected(true);
+                    path->setSelectedHandles(state.pathPoints);
+                }
+            }
+        }
+        if (restoreView && state.zoom > 0.0) {
+            zoom_ = std::clamp(state.zoom, qreal(1.0e-6), qreal(1.0e6));
+            centerScene_ = state.center;
+            applyNavigationTransform();
+        }
+        viewport()->update();
+    }
+
     // Mirrors a hierarchy selection onto the canvas. Instance ids are unique
     // across the project, so the scene only needs the id to find its group.
     void selectLayoutInstance(ice::ObjectId instanceId) override {
@@ -1314,10 +1446,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
         bool pointSelected = false;
         for (auto *item : scene()->selectedItems()) {
             auto *path = dynamic_cast<LayoutPathItem *>(item);
-            if (!path || path->selectedHandle() < 0)
+            if (!path || !path->hasSelectedHandles())
                 continue;
             pointSelected = true;
-            if (path->deleteSelectedHandle())
+            if (path->deleteSelectedHandles())
                 return;
         }
         if (pointSelected) {
@@ -1468,6 +1600,10 @@ class LayoutCanvasImpl : public LayoutCanvas {
 
     void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) override {
         pathLayerChanged_ = std::move(callback);
+    }
+
+    void setPathPointSelectionChangedCallback(LayoutPathPointSelectionChangedCallback callback) override {
+        pathPointSelectionChanged_ = std::move(callback);
     }
 
     void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
@@ -1864,14 +2000,25 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return nullptr;
     }
 
-    void clearPathHandleSelections(LayoutPathItem *except = nullptr) {
+    void notifyPathPointSelectionChanged() {
+        if (pathPointSelectionChanged_)
+            pathPointSelectionChanged_();
+    }
+
+    bool clearPathHandleSelections(LayoutPathItem *except = nullptr) {
         if (!scene())
-            return;
+            return false;
+        bool changed = false;
         for (auto *item : scene()->items()) {
             auto *path = dynamic_cast<LayoutPathItem *>(item);
-            if (path && path != except)
+            if (path && path != except && path->hasSelectedHandles()) {
                 path->clearHandleSelection();
+                changed = true;
+            }
         }
+        if (changed)
+            notifyPathPointSelectionChanged();
+        return changed;
     }
 
     void cancelManualPathDrag() {
@@ -1964,12 +2111,18 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     draggingInstance_ = nullptr;
                     movingItem_ = nullptr;
                     clearPathHandleSelections(bestPath);
+                    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
                     if (!bestPath->isSelected()) {
-                        if (!(event->modifiers() & Qt::ControlModifier))
+                        if (!additive)
                             scene()->clearSelection();
                         bestPath->setSelected(true);
                     }
-                    bestPath->selectHandle(bestHandle);
+                    bestPath->selectHandle(bestHandle, additive);
+                    notifyPathPointSelectionChanged();
+                    if (additive) {
+                        event->accept();
+                        return;
+                    }
                     bestPath->beginHandleDrag(bestHandle);
                     manualPathDragId_ = bestPath->pathId();
                     manualPathDragHandle_ = bestHandle;
@@ -2262,7 +2415,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
         cursorScenePosition_ = mapToScene(event->pos());
         if (manualPathDragHandle_ >= 0) {
             if (auto *path = findPathItem(manualPathDragId_)) {
-                path->dragHandleToScenePosition(cursorScenePosition_);
+                path->dragHandleToScenePosition(snapPosition(cursorScenePosition_));
             } else {
                 manualPathDragId_ = 0;
                 manualPathDragHandle_ = -1;
@@ -2666,12 +2819,34 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     if (!figure->isSelected())
                         selectLayoutFigure(figure);
                     QMenu menu(this);
-                    auto *traceAction = menu.addAction(QStringLiteral("Traced net"));
+                    menu.addAction(QStringLiteral("Traced net"));
                     auto *rotateAction = menu.addAction(QStringLiteral("Rotate"));
                     auto *flipAction = menu.addAction(QStringLiteral("Flip"));
                     QAction *flattenAction = nullptr;
                     if (dynamic_cast<LayoutPathItem *>(figure))
                         flattenAction = menu.addAction(QStringLiteral("Flatten to Polygon"));
+                    auto *duplicateAction = menu.addAction(QStringLiteral("Duplicate"));
+                    auto *arrayAction = menu.addAction(QStringLiteral("Create Array..."));
+                    auto *arrangeMenu = menu.addMenu(QStringLiteral("Arrange"));
+                    auto *alignLeftAction = arrangeMenu->addAction(QStringLiteral("Align Left"));
+                    auto *alignRightAction = arrangeMenu->addAction(QStringLiteral("Align Right"));
+                    auto *alignTopAction = arrangeMenu->addAction(QStringLiteral("Align Top"));
+                    auto *alignBottomAction = arrangeMenu->addAction(QStringLiteral("Align Bottom"));
+                    auto *alignCenterXAction = arrangeMenu->addAction(QStringLiteral("Center Horizontally"));
+                    auto *alignCenterYAction = arrangeMenu->addAction(QStringLiteral("Center Vertically"));
+                    arrangeMenu->addSeparator();
+                    auto *distributeXAction = arrangeMenu->addAction(QStringLiteral("Distribute Horizontally"));
+                    auto *distributeYAction = arrangeMenu->addAction(QStringLiteral("Distribute Vertically"));
+                    const auto figureCount = selectedFigureCount();
+                    arrangeMenu->setEnabled(figureCount >= 2);
+                    alignLeftAction->setEnabled(figureCount >= 2);
+                    alignRightAction->setEnabled(figureCount >= 2);
+                    alignTopAction->setEnabled(figureCount >= 2);
+                    alignBottomAction->setEnabled(figureCount >= 2);
+                    alignCenterXAction->setEnabled(figureCount >= 2);
+                    alignCenterYAction->setEnabled(figureCount >= 2);
+                    distributeXAction->setEnabled(figureCount >= 3);
+                    distributeYAction->setEnabled(figureCount >= 3);
                     menu.addSeparator();
                     auto *copyAction = menu.addAction(QStringLiteral("Copy"));
                     auto *cutAction = menu.addAction(QStringLiteral("Cut"));
@@ -2690,6 +2865,26 @@ class LayoutCanvasImpl : public LayoutCanvas {
                         action = FigureContextAction::flip;
                     else if (flattenAction && chosen == flattenAction)
                         action = FigureContextAction::flattenPath;
+                    else if (chosen == duplicateAction)
+                        action = FigureContextAction::duplicate;
+                    else if (chosen == arrayAction)
+                        action = FigureContextAction::createArray;
+                    else if (chosen == alignLeftAction)
+                        action = FigureContextAction::alignLeft;
+                    else if (chosen == alignRightAction)
+                        action = FigureContextAction::alignRight;
+                    else if (chosen == alignTopAction)
+                        action = FigureContextAction::alignTop;
+                    else if (chosen == alignBottomAction)
+                        action = FigureContextAction::alignBottom;
+                    else if (chosen == alignCenterXAction)
+                        action = FigureContextAction::alignCenterX;
+                    else if (chosen == alignCenterYAction)
+                        action = FigureContextAction::alignCenterY;
+                    else if (chosen == distributeXAction)
+                        action = FigureContextAction::distributeX;
+                    else if (chosen == distributeYAction)
+                        action = FigureContextAction::distributeY;
                     else if (chosen == copyAction)
                         action = FigureContextAction::copy;
                     else if (chosen == cutAction)
@@ -3079,6 +3274,24 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return hit;
     }
 
+    int selectedFigureCount() const {
+        if (!scene())
+            return 0;
+        std::set<ice::ObjectId> ids;
+        for (auto *item : scene()->selectedItems()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance") || !item->data(2).toString().isEmpty())
+                continue;
+            if (item->data(0).isValid()) {
+                const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+                if (id != 0)
+                    ids.insert(id);
+            }
+        }
+        return static_cast<int>(ids.size());
+    }
+
     QPointF pathPreviewEndPoint(const QPoint &position, bool orthogonal) const {
         if (auto *port = pathPortItemAt(position))
             return port->sceneBoundingRect().center();
@@ -3438,6 +3651,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
     std::vector<int> pathSegmentLayerIndices_;
     LayoutPathCreatedCallback pathCreated_;
     LayoutPathLayerChangedCallback pathLayerChanged_;
+    LayoutPathPointSelectionChangedCallback pathPointSelectionChanged_;
     LayoutTextPlacedCallback textPlaced_;
     LayoutTextPolygonPlacedCallback textPolygonPlaced_;
     LayoutPortPlacedCallback portPlaced_;
@@ -3549,12 +3763,12 @@ QGraphicsItem *createLayoutPathItem(ice::ObjectId id, const std::vector<QPointF>
                                     const std::vector<QColor> &segmentColors,
                                     const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
                                     bool pointEditable, bool endpointHandlesOnly,
-                                    LayoutPathPointMovedCallback pointMoved,
+                                    LayoutPathPointsMovedCallback pointsMoved,
                                     LayoutPathPointInsertedCallback pointInserted,
-                                    LayoutPathPointDeletedCallback pointDeleted) {
+                                    LayoutPathPointsDeletedCallback pointsDeleted) {
     return new LayoutPathItem(id, points, width, segmentWidths, segmentVisible, segmentColors, pointViaColors, readOnly,
-                              pointEditable, endpointHandlesOnly, std::move(pointMoved), std::move(pointInserted),
-                              std::move(pointDeleted));
+                              pointEditable, endpointHandlesOnly, std::move(pointsMoved), std::move(pointInserted),
+                              std::move(pointsDeleted));
 }
 
 LayoutCanvas *createLayoutCanvas(QWidget *parent) { return new LayoutCanvasImpl(parent); }

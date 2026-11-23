@@ -107,6 +107,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStringList>
@@ -1421,6 +1422,8 @@ class DocumentWindow : public QMainWindow {
         refreshSimulationSchematics();
         refreshEmbeddedPanels();
         refreshSchematic();
+        if (layoutCanvas_)
+            layoutCanvas_->clearScene();
         refreshLayout();
         setWindowTitle(QStringLiteral("ICE - %1").arg(QString::fromStdString(project_->project().name)));
         statusBar_->setProjectName(QString::fromStdString(project_->project().name));
@@ -4365,6 +4368,64 @@ class DocumentWindow : public QMainWindow {
         layoutCanvas_->setPathConfig(config);
     }
 
+    static void translateLayoutPath(ice::Shape &shape, ice::Coordinate dx, ice::Coordinate dy) {
+        if (!shape.isPath())
+            return;
+        for (auto &point : shape.centerline) {
+            point.x += dx;
+            point.y += dy;
+        }
+        for (auto &point : shape.polygon) {
+            point.x += dx;
+            point.y += dy;
+        }
+        shape.rectangle.x += dx;
+        shape.rectangle.y += dy;
+    }
+
+    static void rotateLayoutPath(ice::Shape &shape, double centerX, double centerY) {
+        if (!shape.isPath())
+            return;
+        for (auto &point : shape.centerline) {
+            const auto x = static_cast<double>(point.x) - centerX;
+            const auto y = static_cast<double>(point.y) - centerY;
+            point.x = static_cast<ice::Coordinate>(std::lround(centerX - y));
+            point.y = static_cast<ice::Coordinate>(std::lround(centerY + x));
+        }
+        rebuildLayoutPathGeometry(shape);
+    }
+
+    static void flipLayoutPathX(ice::Shape &shape, double centerX) {
+        if (!shape.isPath())
+            return;
+        for (auto &point : shape.centerline)
+            point.x = static_cast<ice::Coordinate>(std::lround(2.0 * centerX - point.x));
+        rebuildLayoutPathGeometry(shape);
+    }
+
+    static void translateLayoutShape(ice::Shape &shape, ice::Coordinate dx, ice::Coordinate dy) {
+        if (shape.isPath()) {
+            translateLayoutPath(shape, dx, dy);
+            return;
+        }
+        for (auto &point : shape.polygon) {
+            point.x += dx;
+            point.y += dy;
+        }
+        shape.rectangle.x += dx;
+        shape.rectangle.y += dy;
+    }
+
+    static std::string layoutShapeTypeName(const ice::Shape &shape) {
+        if (shape.isPath())
+            return "Path";
+        if (shape.isText())
+            return "Text";
+        if (!shape.polygon.empty())
+            return "Polygon";
+        return "Rectangle";
+    }
+
     static void rebuildLayoutPathGeometry(ice::Shape &shape) {
         if (!shape.isPath() || shape.centerline.size() < 2)
             return;
@@ -4458,6 +4519,93 @@ class DocumentWindow : public QMainWindow {
                 rebuildLayoutPathGeometry(shape);
             }
         }
+    }
+
+    void moveLayoutPathPoints(ice::ObjectId shapeId, const std::vector<int> &indices,
+                              const std::vector<QPointF> &positions) {
+        if (!project_ || activeLayoutId_ == 0 || indices.empty() || indices.size() != positions.size())
+            return;
+        if (indices.size() == 1) {
+            moveLayoutPathPoint(shapeId, indices.front(), positions.front());
+            return;
+        }
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto shapeIt = cellIt->second.shapes.find(shapeId);
+        if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.routedConnection != 0)
+            return;
+
+        std::map<int, QPointF> updates;
+        for (std::size_t entry = 0; entry < indices.size(); ++entry)
+            updates[indices[entry]] = positions[entry];
+        try {
+            project_->execute("move layout path points", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto shape = cell->second.shapes.find(shapeId);
+                if (shape == cell->second.shapes.end() || !shape->second.isPath())
+                    return;
+                auto &path = shape->second;
+                for (const auto &[index, position] : updates) {
+                    if (index < 0 || index >= static_cast<int>(path.centerline.size()))
+                        continue;
+                    path.centerline[static_cast<std::size_t>(index)] = {
+                        static_cast<ice::Coordinate>(std::lround(position.x())),
+                        static_cast<ice::Coordinate>(std::lround(-position.y()))};
+                }
+                rebuildLayoutPathGeometry(path);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Move path points: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
+        refreshProject();
+    }
+
+    void updateLayoutPathSegment(ice::ObjectId shapeId, int segmentIndex, int width, ice::ObjectId layer) {
+        if (!project_ || activeLayoutId_ == 0 || width <= 0 || layer == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
+            !project_->project().layers.contains(layer) ||
+            !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layer)))
+            return;
+        try {
+            project_->execute("change layout path segment", [&](ice::Project &project) {
+                const auto cell = project.layoutCells.find(activeLayoutId_);
+                if (cell == project.layoutCells.end() || cell->second.library)
+                    return;
+                const auto shape = cell->second.shapes.find(shapeId);
+                if (shape == cell->second.shapes.end() || !shape->second.isPath() ||
+                    shape->second.centerline.size() < 2)
+                    return;
+                auto &path = shape->second;
+                const auto segmentCount = path.centerline.size() - 1;
+                if (segmentIndex < 0 || segmentIndex >= static_cast<int>(segmentCount))
+                    return;
+                if (path.segmentLayers.empty())
+                    path.segmentLayers.assign(segmentCount, path.layer);
+                if (path.segmentWidths.empty())
+                    path.segmentWidths.assign(segmentCount, std::max<ice::Coordinate>(1, path.width));
+                if (static_cast<std::size_t>(segmentIndex) >= path.segmentLayers.size() ||
+                    static_cast<std::size_t>(segmentIndex) >= path.segmentWidths.size())
+                    return;
+                path.segmentLayers[static_cast<std::size_t>(segmentIndex)] = layer;
+                path.segmentWidths[static_cast<std::size_t>(segmentIndex)] = width;
+                if (segmentIndex == 0)
+                    path.layer = layer;
+                path.width = *std::max_element(path.segmentWidths.begin(), path.segmentWidths.end());
+                rebuildLayoutPathGeometry(path);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Change path segment: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        refreshProject();
     }
 
     void moveLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
@@ -4567,42 +4715,62 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
-    void deleteLayoutPathPoint(ice::ObjectId shapeId, int index) {
-        if (!project_ || activeLayoutId_ == 0)
+    void deleteLayoutPathPoints(ice::ObjectId shapeId, const std::vector<int> &indices) {
+        if (!project_ || activeLayoutId_ == 0 || indices.empty())
             return;
+        std::set<int> unique;
+        for (const auto index : indices) {
+            if (index < 0)
+                return;
+            unique.insert(index);
+        }
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
+            return;
+        const auto shapeIt = cellIt->second.shapes.find(shapeId);
+        if (shapeIt == cellIt->second.shapes.end() || !shapeIt->second.isPath())
+            return;
+        const auto pointCount = static_cast<int>(shapeIt->second.centerline.size());
+        if (pointCount - static_cast<int>(unique.size()) < 2)
+            return;
+        for (const auto index : unique)
+            if (index >= pointCount)
+                return;
+
         try {
-            project_->execute("delete layout path point", [&](ice::Project &project) {
+            project_->execute("delete layout path points", [&](ice::Project &project) {
                 const auto cell = project.layoutCells.find(activeLayoutId_);
                 if (cell == project.layoutCells.end() || cell->second.library)
                     return;
                 const auto shape = cell->second.shapes.find(shapeId);
-                if (shape == cell->second.shapes.end() || !shape->second.isPath() ||
-                    shape->second.centerline.size() <= 2)
-                    return;
-                if (index < 0 || index >= static_cast<int>(shape->second.centerline.size()))
+                if (shape == cell->second.shapes.end() || !shape->second.isPath())
                     return;
                 auto &path = shape->second;
                 if (path.segmentLayers.empty() && path.centerline.size() > 1)
                     path.segmentLayers.assign(path.centerline.size() - 1, path.layer);
                 if (path.segmentWidths.empty() && path.centerline.size() > 1)
                     path.segmentWidths.assign(path.centerline.size() - 1, path.width);
-                if (!path.segmentLayers.empty()) {
-                    const auto removeIndex =
-                        std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentLayers.size() - 1);
-                    path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
+                // Delete from the end so the remaining indices stay valid.
+                for (auto it = unique.rbegin(); it != unique.rend(); ++it) {
+                    const auto index = static_cast<std::size_t>(*it);
+                    if (path.centerline.size() <= 2 || index >= path.centerline.size())
+                        break;
+                    if (!path.segmentLayers.empty()) {
+                        const auto removeIndex = std::min(index, path.segmentLayers.size() - 1);
+                        path.segmentLayers.erase(path.segmentLayers.begin() + removeIndex);
+                    }
+                    if (!path.segmentWidths.empty()) {
+                        const auto removeIndex = std::min(index, path.segmentWidths.size() - 1);
+                        path.segmentWidths.erase(path.segmentWidths.begin() + removeIndex);
+                    }
+                    if (index < path.pointVias.size())
+                        path.pointVias.erase(path.pointVias.begin() + index);
+                    path.centerline.erase(path.centerline.begin() + index);
                 }
-                if (!path.segmentWidths.empty()) {
-                    const auto removeIndex =
-                        std::min<std::size_t>(static_cast<std::size_t>(index), path.segmentWidths.size() - 1);
-                    path.segmentWidths.erase(path.segmentWidths.begin() + removeIndex);
-                }
-                if (index < static_cast<int>(path.pointVias.size()))
-                    path.pointVias.erase(path.pointVias.begin() + index);
-                path.centerline.erase(path.centerline.begin() + index);
                 rebuildLayoutPathGeometry(path);
             });
         } catch (const ice::ProjectError &error) {
-            statusBar()->showMessage(QStringLiteral("Delete path point: %1").arg(QString::fromStdString(error.what())),
+            statusBar()->showMessage(QStringLiteral("Delete path points: %1").arg(QString::fromStdString(error.what())),
                                      5000);
             return;
         }
@@ -6073,6 +6241,8 @@ class DocumentWindow : public QMainWindow {
         if (!layoutCanvas_ || !project_)
             return;
         updateFileTabDirtyIndicators();
+        const auto previousLayoutId = activeLayoutId_;
+        const auto selectionState = layoutCanvas_->selectionState();
         layoutCanvas_->clearScene();
         const auto &project = project_->project();
         layoutCanvas_->setGridSpacing(static_cast<qreal>(project.grid));
@@ -6318,17 +6488,20 @@ class DocumentWindow : public QMainWindow {
                 item = createLayoutPathItem(
                     id, points, shape.width, segmentWidths, segmentVisible, segmentColors, pointViaColors, readOnly,
                     true, shape.routedConnection != 0,
-                    [this](ice::ObjectId pathId, int index, QPointF position) {
-                        QTimer::singleShot(
-                            0, this, [this, pathId, index, position] { moveLayoutPathPoint(pathId, index, position); });
+                    [this](ice::ObjectId pathId, const std::vector<int> &indices,
+                           const std::vector<QPointF> &positions) {
+                        QTimer::singleShot(0, this, [this, pathId, indices, positions] {
+                            moveLayoutPathPoints(pathId, indices, positions);
+                        });
                     },
                     [this](ice::ObjectId pathId, int index, QPointF position) {
                         QTimer::singleShot(0, this, [this, pathId, index, position] {
                             insertLayoutPathPoint(pathId, index, position);
                         });
                     },
-                    [this](ice::ObjectId pathId, int index) {
-                        QTimer::singleShot(0, this, [this, pathId, index] { deleteLayoutPathPoint(pathId, index); });
+                    [this](ice::ObjectId pathId, const std::vector<int> &indices) {
+                        QTimer::singleShot(0, this,
+                                           [this, pathId, indices] { deleteLayoutPathPoints(pathId, indices); });
                     });
                 layoutCanvas_->scene()->addItem(item);
             } else if (shape.polygon.size() >= 3) {
@@ -6547,8 +6720,9 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->scene()->addItem(createLayoutPlannedDeviceItem(deviceId, QString::fromStdString(device.name),
                                                                           plannedRect(device), readOnly));
         }
-        layoutCanvas_->restoreLayoutInstanceSelection();
         layoutCanvas_->refreshInteractionState();
+        layoutCanvas_->restoreSelectionState(selectionState,
+                                             layoutViewInitialized_ && activeLayoutId_ == previousLayoutId);
         if (!layoutViewInitialized_) {
             layoutCanvas_->fitToContent();
             layoutViewInitialized_ = true;
@@ -6711,6 +6885,22 @@ class DocumentWindow : public QMainWindow {
         case LayoutCanvas::FigureContextAction::flattenPath:
             flattenLayoutPath(id);
             return;
+        case LayoutCanvas::FigureContextAction::duplicate:
+            duplicateSelectedLayoutShapes();
+            return;
+        case LayoutCanvas::FigureContextAction::createArray:
+            createLayoutArray();
+            return;
+        case LayoutCanvas::FigureContextAction::alignLeft:
+        case LayoutCanvas::FigureContextAction::alignRight:
+        case LayoutCanvas::FigureContextAction::alignTop:
+        case LayoutCanvas::FigureContextAction::alignBottom:
+        case LayoutCanvas::FigureContextAction::alignCenterX:
+        case LayoutCanvas::FigureContextAction::alignCenterY:
+        case LayoutCanvas::FigureContextAction::distributeX:
+        case LayoutCanvas::FigureContextAction::distributeY:
+            arrangeSelectedLayoutShapes(action);
+            return;
         case LayoutCanvas::FigureContextAction::copy:
             copySelectedLayoutShapes();
             return;
@@ -6728,6 +6918,26 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
+    std::vector<ice::ObjectId> selectedLayoutShapeIds(const ice::LayoutCell &cell) const {
+        std::set<ice::ObjectId> ids;
+        if (!layoutCanvas_)
+            return {};
+        for (auto *item : layoutCanvas_->scene()->selectedItems()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            const auto id = static_cast<ice::ObjectId>(item->data(0).toULongLong());
+            if (id == 0)
+                continue;
+            const auto shape = cell.shapes.find(id);
+            if (shape == cell.shapes.end() || shape->second.textGroup != 0)
+                continue;
+            ids.insert(id);
+        }
+        return {ids.begin(), ids.end()};
+    }
+
     bool copySelectedLayoutShapes() {
         if (!project_ || !layoutCanvas_)
             return false;
@@ -6736,7 +6946,6 @@ class DocumentWindow : public QMainWindow {
         if (cellIt == project.layoutCells.end() || cellIt->second.library)
             return false;
         layoutShapeClipboard_.clear();
-        int skippedPaths = 0;
         for (auto *item : layoutCanvas_->scene()->selectedItems()) {
             if (item->data(3).toString() == QStringLiteral("resize-handle") ||
                 item->data(1).toString() == QStringLiteral("layout-instance"))
@@ -6747,23 +6956,15 @@ class DocumentWindow : public QMainWindow {
             const auto shapeIt = cellIt->second.shapes.find(id);
             if (shapeIt == cellIt->second.shapes.end())
                 continue;
-            if (shapeIt->second.isPath()) {
-                ++skippedPaths;
-                continue;
-            }
             if (std::none_of(layoutShapeClipboard_.begin(), layoutShapeClipboard_.end(),
                              [id](const ice::Shape &copied) { return copied.id == id; }))
                 layoutShapeClipboard_.push_back(shapeIt->second);
         }
         if (layoutShapeClipboard_.empty()) {
-            statusBar()->showMessage(skippedPaths > 0 ? QStringLiteral("Copying paths is not supported yet")
-                                                      : QStringLiteral("Select a layout figure first"));
+            statusBar()->showMessage(QStringLiteral("Select a layout figure first"));
             return false;
         }
-        auto message = QStringLiteral("Copied %1 shape(s)").arg(layoutShapeClipboard_.size());
-        if (skippedPaths > 0)
-            message += QStringLiteral(" (paths are not copied yet)");
-        statusBar()->showMessage(message);
+        statusBar()->showMessage(QStringLiteral("Copied %1 shape(s)").arg(layoutShapeClipboard_.size()));
         return true;
     }
 
@@ -6826,8 +7027,16 @@ class DocumentWindow : public QMainWindow {
         }
         try {
             project_->execute("paste layout shapes", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(cellId);
                 for (const auto &shape : layoutShapeClipboard_) {
-                    if (!shape.polygon.empty()) {
+                    if (shape.isPath()) {
+                        auto path = shape;
+                        path.id = project.nextId();
+                        path.routedConnection = 0;
+                        path.name = ice::nextShapeName(cell, "Path");
+                        translateLayoutPath(path, dx, dy);
+                        cell.shapes.emplace(path.id, std::move(path));
+                    } else if (!shape.polygon.empty()) {
                         auto points = shape.polygon;
                         for (auto &point : points) {
                             point.x += dx;
@@ -6852,6 +7061,293 @@ class DocumentWindow : public QMainWindow {
         }
         refreshProject();
         statusBar()->showMessage(QStringLiteral("Pasted %1 shape(s)").arg(layoutShapeClipboard_.size()));
+    }
+
+    void duplicateSelectedLayoutShapes() {
+        if (!project_ || !layoutCanvas_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
+            return;
+        const auto ids = selectedLayoutShapeIds(cellIt->second);
+        if (ids.empty()) {
+            statusBar()->showMessage(QStringLiteral("Select at least one layout shape to duplicate"));
+            return;
+        }
+
+        ice::Rect bounds;
+        bool hasBounds = false;
+        for (const auto id : ids) {
+            const auto shape = cellIt->second.shapes.find(id);
+            if (shape == cellIt->second.shapes.end() || !shape->second.rectangle.valid())
+                continue;
+            if (!hasBounds) {
+                bounds = shape->second.rectangle;
+                hasBounds = true;
+            } else {
+                const auto right =
+                    std::max(bounds.x + bounds.width, shape->second.rectangle.x + shape->second.rectangle.width);
+                const auto top =
+                    std::max(bounds.y + bounds.height, shape->second.rectangle.y + shape->second.rectangle.height);
+                bounds.x = std::min(bounds.x, shape->second.rectangle.x);
+                bounds.y = std::min(bounds.y, shape->second.rectangle.y);
+                bounds.width = right - bounds.x;
+                bounds.height = top - bounds.y;
+            }
+        }
+        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
+        const auto dx = hasBounds ? std::max<ice::Coordinate>(grid, bounds.width + grid) : grid * 10;
+        const auto dy = ice::Coordinate{0};
+
+        std::vector<ice::ObjectId> created;
+        try {
+            project_->execute("duplicate layout shapes", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                std::vector<ice::Shape> sources;
+                sources.reserve(ids.size());
+                for (const auto id : ids)
+                    if (const auto shape = cell.shapes.find(id); shape != cell.shapes.end())
+                        sources.push_back(shape->second);
+                for (const auto &source : sources) {
+                    auto clone = source;
+                    clone.id = project.nextId();
+                    clone.name = ice::nextShapeName(cell, layoutShapeTypeName(clone));
+                    clone.routedConnection = 0;
+                    clone.textGroup = 0;
+                    translateLayoutShape(clone, dx, dy);
+                    created.push_back(clone.id);
+                    cell.shapes.emplace(clone.id, std::move(clone));
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Duplicate failed: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Duplicated layout shapes");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Duplicated %1 shape(s)").arg(created.size()));
+        QTimer::singleShot(0, this, [this, created] { selectLayoutShapeItems(created); });
+    }
+
+    void createLayoutArray() {
+        if (!project_ || !layoutCanvas_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
+            return;
+        const auto ids = selectedLayoutShapeIds(cellIt->second);
+        if (ids.empty()) {
+            statusBar()->showMessage(QStringLiteral("Select at least one layout shape to array"));
+            return;
+        }
+
+        ice::Rect bounds;
+        bool hasBounds = false;
+        for (const auto id : ids) {
+            const auto shape = cellIt->second.shapes.find(id);
+            if (shape == cellIt->second.shapes.end() || !shape->second.rectangle.valid())
+                continue;
+            if (!hasBounds) {
+                bounds = shape->second.rectangle;
+                hasBounds = true;
+            } else {
+                const auto right =
+                    std::max(bounds.x + bounds.width, shape->second.rectangle.x + shape->second.rectangle.width);
+                const auto top =
+                    std::max(bounds.y + bounds.height, shape->second.rectangle.y + shape->second.rectangle.height);
+                bounds.x = std::min(bounds.x, shape->second.rectangle.x);
+                bounds.y = std::min(bounds.y, shape->second.rectangle.y);
+                bounds.width = right - bounds.x;
+                bounds.height = top - bounds.y;
+            }
+        }
+        const auto grid = std::max<ice::Coordinate>(1, project_->project().grid);
+        const auto defaultPitchX = hasBounds ? std::max<ice::Coordinate>(grid, bounds.width + grid) : grid * 10;
+        const auto defaultPitchY = hasBounds ? std::max<ice::Coordinate>(grid, bounds.height + grid) : grid * 10;
+
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("Create Array"));
+        auto *form = new QFormLayout(&dialog);
+        auto *rows = new QSpinBox(&dialog);
+        rows->setRange(1, 100);
+        rows->setValue(2);
+        auto *columns = new QSpinBox(&dialog);
+        columns->setRange(1, 100);
+        columns->setValue(2);
+        auto *pitchX = new QSpinBox(&dialog);
+        pitchX->setRange(1, 1000000000);
+        pitchX->setSingleStep(static_cast<int>(std::clamp<ice::Coordinate>(grid, 1, 1000000)));
+        pitchX->setValue(static_cast<int>(std::clamp<ice::Coordinate>(defaultPitchX, 1, 1000000000)));
+        auto *pitchY = new QSpinBox(&dialog);
+        pitchY->setRange(1, 1000000000);
+        pitchY->setSingleStep(static_cast<int>(std::clamp<ice::Coordinate>(grid, 1, 1000000)));
+        pitchY->setValue(static_cast<int>(std::clamp<ice::Coordinate>(defaultPitchY, 1, 1000000000)));
+        form->addRow(QStringLiteral("Rows"), rows);
+        form->addRow(QStringLiteral("Columns"), columns);
+        form->addRow(QStringLiteral("X pitch (nm)"), pitchX);
+        form->addRow(QStringLiteral("Y pitch (nm)"), pitchY);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        std::vector<ice::Shape> sources;
+        sources.reserve(ids.size());
+        for (const auto id : ids)
+            if (const auto shape = cellIt->second.shapes.find(id); shape != cellIt->second.shapes.end())
+                sources.push_back(shape->second);
+        const auto copyCount = static_cast<std::size_t>(rows->value() * columns->value() - 1) * sources.size();
+        if (copyCount > 1000) {
+            QMessageBox::warning(this, QStringLiteral("Create Array"),
+                                 QStringLiteral("Limit the array to 1000 copies at a time."));
+            return;
+        }
+
+        std::vector<ice::ObjectId> created;
+        try {
+            project_->execute("create layout array", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                for (int row = 0; row < rows->value(); ++row) {
+                    for (int column = 0; column < columns->value(); ++column) {
+                        if (row == 0 && column == 0)
+                            continue;
+                        const auto dx = static_cast<ice::Coordinate>(column) * pitchX->value();
+                        const auto dy = static_cast<ice::Coordinate>(row) * pitchY->value();
+                        for (const auto &source : sources) {
+                            auto clone = source;
+                            clone.id = project.nextId();
+                            clone.name = ice::nextShapeName(cell, layoutShapeTypeName(clone));
+                            clone.routedConnection = 0;
+                            clone.textGroup = 0;
+                            translateLayoutShape(clone, dx, dy);
+                            created.push_back(clone.id);
+                            cell.shapes.emplace(clone.id, std::move(clone));
+                        }
+                    }
+                }
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Create array failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Created layout array");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Created an array with %1 new shape(s)").arg(created.size()));
+        QTimer::singleShot(0, this, [this, created] { selectLayoutShapeItems(created); });
+    }
+
+    void arrangeSelectedLayoutShapes(LayoutCanvas::FigureContextAction action) {
+        if (!project_ || !layoutCanvas_ || activeLayoutId_ == 0)
+            return;
+        const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library || cellIt->second.readOnly)
+            return;
+        struct Entry {
+            ice::ObjectId id = 0;
+            ice::Rect rect;
+        };
+        std::vector<Entry> entries;
+        for (const auto id : selectedLayoutShapeIds(cellIt->second)) {
+            const auto shape = cellIt->second.shapes.find(id);
+            if (shape == cellIt->second.shapes.end() || shape->second.routedConnection != 0 ||
+                !shape->second.rectangle.valid())
+                continue;
+            entries.push_back({id, shape->second.rectangle});
+        }
+        const bool distribute = action == LayoutCanvas::FigureContextAction::distributeX ||
+                                action == LayoutCanvas::FigureContextAction::distributeY;
+        if ((!distribute && entries.size() < 2) || (distribute && entries.size() < 3)) {
+            statusBar()->showMessage(distribute ? QStringLiteral("Select at least three shapes to distribute")
+                                                : QStringLiteral("Select at least two shapes to align"));
+            return;
+        }
+
+        ice::Coordinate minX = entries.front().rect.x;
+        ice::Coordinate minY = entries.front().rect.y;
+        ice::Coordinate maxX = entries.front().rect.x + entries.front().rect.width;
+        ice::Coordinate maxY = entries.front().rect.y + entries.front().rect.height;
+        for (const auto &entry : entries) {
+            minX = std::min(minX, entry.rect.x);
+            minY = std::min(minY, entry.rect.y);
+            maxX = std::max(maxX, entry.rect.x + entry.rect.width);
+            maxY = std::max(maxY, entry.rect.y + entry.rect.height);
+        }
+
+        std::map<ice::ObjectId, ice::LayoutPoint> offsets;
+        if (!distribute) {
+            for (const auto &entry : entries) {
+                ice::Coordinate dx = 0;
+                ice::Coordinate dy = 0;
+                switch (action) {
+                case LayoutCanvas::FigureContextAction::alignLeft:
+                    dx = minX - entry.rect.x;
+                    break;
+                case LayoutCanvas::FigureContextAction::alignRight:
+                    dx = maxX - (entry.rect.x + entry.rect.width);
+                    break;
+                case LayoutCanvas::FigureContextAction::alignTop:
+                    dy = maxY - (entry.rect.y + entry.rect.height);
+                    break;
+                case LayoutCanvas::FigureContextAction::alignBottom:
+                    dy = minY - entry.rect.y;
+                    break;
+                case LayoutCanvas::FigureContextAction::alignCenterX:
+                    dx = (minX + maxX) / 2 - (entry.rect.x + entry.rect.width / 2);
+                    break;
+                case LayoutCanvas::FigureContextAction::alignCenterY:
+                    dy = (minY + maxY) / 2 - (entry.rect.y + entry.rect.height / 2);
+                    break;
+                default:
+                    return;
+                }
+                offsets.emplace(entry.id, ice::LayoutPoint{dx, dy});
+            }
+        } else {
+            const bool horizontal = action == LayoutCanvas::FigureContextAction::distributeX;
+            std::sort(entries.begin(), entries.end(), [horizontal](const Entry &left, const Entry &right) {
+                const auto leftCenter =
+                    horizontal ? left.rect.x + left.rect.width / 2 : left.rect.y + left.rect.height / 2;
+                const auto rightCenter =
+                    horizontal ? right.rect.x + right.rect.width / 2 : right.rect.y + right.rect.height / 2;
+                return leftCenter < rightCenter;
+            });
+            const auto first = horizontal ? entries.front().rect.x + entries.front().rect.width / 2
+                                          : entries.front().rect.y + entries.front().rect.height / 2;
+            const auto last = horizontal ? entries.back().rect.x + entries.back().rect.width / 2
+                                         : entries.back().rect.y + entries.back().rect.height / 2;
+            for (std::size_t index = 0; index < entries.size(); ++index) {
+                const auto center = horizontal ? entries[index].rect.x + entries[index].rect.width / 2
+                                               : entries[index].rect.y + entries[index].rect.height / 2;
+                const auto target =
+                    first + static_cast<ice::Coordinate>(std::llround(static_cast<double>(last - first) * index /
+                                                                      static_cast<double>(entries.size() - 1)));
+                offsets.emplace(entries[index].id, horizontal ? ice::LayoutPoint{target - center, 0}
+                                                              : ice::LayoutPoint{0, target - center});
+            }
+        }
+
+        try {
+            project_->execute("arrange layout shapes", [&](ice::Project &project) {
+                auto &cell = project.layoutCells.at(activeLayoutId_);
+                for (const auto &[id, offset] : offsets) {
+                    const auto shape = cell.shapes.find(id);
+                    if (shape == cell.shapes.end())
+                        continue;
+                    translateLayoutShape(shape->second, offset.x, offset.y);
+                }
+                updateRoutedConnectionPaths(project);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Arrange failed: %1").arg(QString::fromStdString(error.what())),
+                                     5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Arranged layout shapes");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Arranged %1 shape(s)").arg(entries.size()));
     }
 
     void flipSelectedLayoutFigures() {
@@ -6881,7 +7377,7 @@ class DocumentWindow : public QMainWindow {
         bool hasCenter = false;
         for (const auto id : ids) {
             const auto shapeIt = cellIt->second.shapes.find(id);
-            if (shapeIt == cellIt->second.shapes.end() || shapeIt->second.isPath())
+            if (shapeIt == cellIt->second.shapes.end())
                 continue;
             const auto &shape = shapeIt->second;
             double left = shape.rectangle.x;
@@ -6903,7 +7399,7 @@ class DocumentWindow : public QMainWindow {
             }
         }
         if (!hasCenter) {
-            statusBar()->showMessage(QStringLiteral("Flip works on rectangles, polygons and text"));
+            statusBar()->showMessage(QStringLiteral("Flip works on rectangles, polygons, paths and text"));
             return;
         }
         const auto centerX = (minX + maxX) * 0.5;
@@ -6914,8 +7410,10 @@ class DocumentWindow : public QMainWindow {
                 if (shapeIt == cell.shapes.end())
                     continue;
                 auto &shape = shapeIt->second;
-                if (shape.isPath())
+                if (shape.isPath()) {
+                    flipLayoutPathX(shape, centerX);
                     continue;
+                }
                 if (!shape.polygon.empty()) {
                     for (auto &point : shape.polygon)
                         point.x = static_cast<ice::Coordinate>(std::lround(2.0 * centerX - point.x));
@@ -6972,7 +7470,9 @@ class DocumentWindow : public QMainWindow {
                     }
                     const auto centerX = (minX + maxX) * 0.5;
                     const auto centerY = (minY + maxY) * 0.5;
-                    if (shape.isText()) {
+                    if (shape.isPath()) {
+                        rotateLayoutPath(shape, centerX, centerY);
+                    } else if (shape.isText()) {
                         // Layout text stays horizontal; rotate its anchor with
                         // the selected group without swapping its font size.
                         const auto textCenterX = shape.rectangle.x + shape.rectangle.width * 0.5;
@@ -7178,6 +7678,20 @@ class DocumentWindow : public QMainWindow {
                         if (const auto layerIt = project_->project().layers.find(shape.layer);
                             layerIt != project_->project().layers.end())
                             layerName = QString::fromStdString(layerIt->second.name);
+                        if (shape.isPath()) {
+                            const auto selection = layoutCanvas_->selectionState();
+                            if (selection.pathShape == selectedShapeId && !selection.pathPoints.empty()) {
+                                std::vector<PropertiesPanel::LayoutPortLayer> pathLayers;
+                                for (const auto &layerRef : layoutLayers(project_->project(), activeLayoutId_))
+                                    pathLayers.emplace_back(layerRef.get().id, layerRef.get().name);
+                                layoutPropertiesPanel_->setLayoutPathPoints(
+                                    shape, selection.pathPoints, layerName.toStdString(), pathLayers,
+                                    shapePreviewModelFor(activeIt->second, shape));
+                                if (bringToFront && layoutRightTabs_)
+                                    layoutRightTabs_->setCurrentWidget(layoutPropertiesPanel_);
+                                return;
+                            }
+                        }
                         layoutPropertiesPanel_->setLayoutShape(shape, layerName.toStdString(),
                                                                displayName.toStdString(), typeName.toStdString(),
                                                                shapePreviewModelFor(activeIt->second, shape));
@@ -13143,6 +13657,14 @@ class DocumentWindow : public QMainWindow {
         });
         layoutPropertiesPanel_->setOnLayoutShapeSizeChanged(
             [this](ice::ObjectId shapeId, int width, int height) { resizeLayoutRectangle(shapeId, width, height); });
+        layoutPropertiesPanel_->setOnLayoutPathPointChanged(
+            [this](ice::ObjectId shapeId, int pointIndex, int x, int y) {
+                moveLayoutPathPoints(shapeId, {pointIndex}, {QPointF(static_cast<qreal>(x), static_cast<qreal>(-y))});
+            });
+        layoutPropertiesPanel_->setOnLayoutPathSegmentChanged(
+            [this](ice::ObjectId shapeId, int segmentIndex, int width, ice::ObjectId layer) {
+                updateLayoutPathSegment(shapeId, segmentIndex, width, layer);
+            });
         layoutRightTabs->addTab(layoutPropertiesPanel_, QStringLiteral("Properties"));
         layersPanel_ = new LayersPanel;
         layersPanel_->setOnCreateLayer([this] { createLayer(); });
@@ -14468,6 +14990,7 @@ class DocumentWindow : public QMainWindow {
                 if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
                     layoutPropertiesPanel_->setPathTool(name);
             });
+            layoutCanvas_->setPathPointSelectionChangedCallback([this] { refreshLayoutProperties(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
             layoutCanvas_->setTextPolygonPlacedCallback([this](QPointF position) { addLayoutTextPolygon(position); });
             layoutCanvas_->setPortPlacedCallback(
@@ -15208,6 +15731,18 @@ class DocumentWindow : public QMainWindow {
         connect(xorTool, &QAction::triggered, this, [this] { applyLayoutBoolean(ice::BooleanOperation::xor_); });
         addShortcut(xorTool, QStringLiteral("layout.xor"), QKeySequence(QStringLiteral("X")));
         refreshLayoutBooleanActions();
+
+        toolbar->addSeparator();
+        auto *duplicateTool = addTool(QStringLiteral("copy"), QStringLiteral("Duplicate"));
+        duplicateTool->setToolTip(QStringLiteral("Duplicate selected layout shapes (Ctrl+D)"));
+        duplicateTool->setStatusTip(duplicateTool->toolTip());
+        addShortcut(duplicateTool, QStringLiteral("layout.duplicate"), QKeySequence(QStringLiteral("Ctrl+D")));
+        connect(duplicateTool, &QAction::triggered, this, [this] { duplicateSelectedLayoutShapes(); });
+
+        auto *arrayTool = addTool(QStringLiteral("grid-3x3"), QStringLiteral("Create Array"));
+        arrayTool->setToolTip(QStringLiteral("Create a rectangular array from the selected layout shapes"));
+        arrayTool->setStatusTip(arrayTool->toolTip());
+        connect(arrayTool, &QAction::triggered, this, [this] { createLayoutArray(); });
 
         toolbar->addSeparator();
         auto *deleteTool = addTool(QStringLiteral("trash"), QStringLiteral("Delete"));
