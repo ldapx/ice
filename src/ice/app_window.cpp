@@ -1355,8 +1355,6 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
-        activeLayoutPathId_ = 0;
-        activeLayoutPathCellId_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -2472,8 +2470,6 @@ class DocumentWindow : public QMainWindow {
         activeSchematicId_ = 0;
         activeLayoutId_ = 0;
         activeProceduralLayoutId_ = 0;
-        activeLayoutPathId_ = 0;
-        activeLayoutPathCellId_ = 0;
         activeSimulationId_ = 0;
         activeReportId_ = 0;
         drcLayoutId_ = 0;
@@ -4403,8 +4399,6 @@ class DocumentWindow : public QMainWindow {
         }
     }
 
-    void finishActiveLayoutPath() { activeLayoutPathId_ = 0; }
-
     void moveLayoutPathPoint(ice::ObjectId shapeId, int index, QPointF position) {
         if (!project_ || activeLayoutId_ == 0)
             return;
@@ -4554,75 +4548,50 @@ class DocumentWindow : public QMainWindow {
         refreshProject();
     }
 
-    void addLayoutPathSegment(QPointF start, QPointF end, int width, ice::ObjectId layerId,
-                              const std::vector<ice::ObjectId> &viaLayers) {
-        if (!project_ || width <= 0)
+    void addLayoutPath(const LayoutPathData &input) {
+        if (!project_ || input.points.size() < 2 || input.widths.size() != input.points.size() - 1 ||
+            input.segmentLayers.size() != input.widths.size())
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
-        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library ||
-            !project_->project().layers.contains(layerId) ||
-            !layerAvailableForLayout(project_->project(), activeLayoutId_, project_->project().layers.at(layerId)))
+        if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
             return;
+        for (const auto layerId : input.segmentLayers) {
+            if (!project_->project().layers.contains(layerId) ||
+                !layerAvailableForLayout(project_->project(), activeLayoutId_,
+                                         project_->project().layers.at(layerId)))
+                return;
+        }
+        for (const auto width : input.widths) {
+            if (width <= 0)
+                return;
+        }
+
         const auto toModelPoint = [](QPointF point) {
             return ice::LayoutPoint{static_cast<ice::Coordinate>(std::lround(point.x())),
                                     static_cast<ice::Coordinate>(std::lround(-point.y()))};
         };
-        const auto startPoint = toModelPoint(start);
-        const auto endPoint = toModelPoint(end);
         try {
             project_->execute("draw layout path", [&](ice::Project &project) {
                 auto &cell = project.layoutCells.at(activeLayoutId_);
-                auto shape = activeLayoutPathId_ == 0 ? cell.shapes.end() : cell.shapes.find(activeLayoutPathId_);
-                const bool append = shape != cell.shapes.end() && shape->second.isPath();
-                if (!append) {
-                    const auto shapeId = project.nextId();
-                    ice::Shape path{shapeId, layerId, std::nullopt, {}, {}};
-                    path.name = ice::nextShapeName(cell, "Path");
-                    path.centerline = {startPoint, endPoint};
-                    path.segmentLayers = {layerId};
-                    path.segmentWidths = {width};
-                    path.pointVias = {{}, {}};
-                    for (const auto viaLayer : viaLayers) {
+                const auto shapeId = project.nextId();
+                ice::Shape path{shapeId, input.segmentLayers.front(), std::nullopt, {}, {}};
+                path.name = ice::nextShapeName(cell, "Path");
+                path.centerline.reserve(input.points.size());
+                for (const auto &point : input.points)
+                    path.centerline.push_back(toModelPoint(point));
+                path.segmentLayers = input.segmentLayers;
+                path.segmentWidths.assign(input.widths.begin(), input.widths.end());
+                path.pointVias.resize(input.points.size());
+                for (std::size_t index = 0; index < input.pointVias.size() && index < path.pointVias.size(); ++index) {
+                    for (const auto viaLayer : input.pointVias[index]) {
                         if (viaLayer != 0 && project.layers.contains(viaLayer) &&
                             layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
-                            path.pointVias.front().push_back(viaLayer);
+                            path.pointVias[index].push_back(viaLayer);
                     }
-                    path.width = width;
-                    rebuildLayoutPathGeometry(path);
-                    cell.shapes.emplace(shapeId, std::move(path));
-                    activeLayoutPathId_ = shapeId;
-                    activeLayoutPathCellId_ = activeLayoutId_;
-                } else {
-                    activeLayoutPathCellId_ = activeLayoutId_;
-                    auto &path = shape->second;
-                    if (path.segmentLayers.empty())
-                        path.segmentLayers.assign(path.centerline.size() > 0 ? path.centerline.size() - 1 : 0,
-                                                  path.layer);
-                    if (path.segmentWidths.empty() && path.centerline.size() > 1)
-                        path.segmentWidths.assign(path.centerline.size() - 1, path.width);
-                    if (path.pointVias.size() != path.centerline.size())
-                        path.pointVias.resize(path.centerline.size());
-                    for (const auto viaLayer : viaLayers) {
-                        if (viaLayer == 0 || !project.layers.contains(viaLayer) ||
-                            !layerAvailableForLayout(project, activeLayoutId_, project.layers.at(viaLayer)))
-                            continue;
-                        auto &vias = path.pointVias.back();
-                        if (std::find(vias.begin(), vias.end(), viaLayer) == vias.end())
-                            vias.push_back(viaLayer);
-                    }
-                    if (path.centerline.empty() || path.centerline.back().x != endPoint.x ||
-                        path.centerline.back().y != endPoint.y) {
-                        path.centerline.push_back(endPoint);
-                        path.segmentLayers.push_back(layerId);
-                        path.segmentWidths.push_back(width);
-                        path.pointVias.emplace_back();
-                    }
-                    // Each segment keeps its own layer minimum; `width` remains
-                    // the nominal maximum used by bounds and via size.
-                    if (width > path.width)
-                        path.width = width;
-                    rebuildLayoutPathGeometry(path);
                 }
+                path.width = *std::max_element(input.widths.begin(), input.widths.end());
+                rebuildLayoutPathGeometry(path);
+                cell.shapes.emplace(shapeId, std::move(path));
             });
         } catch (const ice::ProjectError &error) {
             QMessageBox::critical(this, QStringLiteral("Draw Path"), QString::fromStdString(error.what()));
@@ -6051,10 +6020,6 @@ class DocumentWindow : public QMainWindow {
             }
             cellIt = editable;
             activeLayoutId_ = cellIt->first;
-        }
-        if (activeLayoutPathCellId_ != activeLayoutId_) {
-            finishActiveLayoutPath();
-            activeLayoutPathCellId_ = activeLayoutId_;
         }
         if (layoutDevicesPanel_) {
             layoutDevicesPanel_->setPdk(cellIt->second.pdk);
@@ -14378,10 +14343,8 @@ class DocumentWindow : public QMainWindow {
             layoutCanvas_->setSnapToGrid(layoutSnapToGrid_);
             connect(layoutCanvas_->scene(), &QGraphicsScene::selectionChanged, this,
                     [this] { refreshLayoutProperties(); });
-            layoutCanvas_->setPathSegmentCallback([this](QPointF start, QPointF end, int width, ice::ObjectId layer,
-                                                         const std::vector<ice::ObjectId> &viaLayers) {
-                addLayoutPathSegment(start, end, width, layer, viaLayers);
-            });
+            layoutCanvas_->setPathCreatedCallback(
+                [this](const LayoutPathData &path) { addLayoutPath(path); });
             layoutCanvas_->setPathLayerChangedCallback([this](ice::ObjectId, const std::string &name) {
                 const auto width = layoutCanvas_ ? std::max(1, layoutCanvas_->pathWidth()) : 200;
                 statusBar()->showMessage(
@@ -14389,7 +14352,6 @@ class DocumentWindow : public QMainWindow {
                 if (layoutPropertiesPanel_ && layoutCanvas_ && layoutCanvas_->currentTool() == LayoutCanvas::Tool::path)
                     layoutPropertiesPanel_->setPathTool(name);
             });
-            layoutCanvas_->setPathFinishedCallback([this] { finishActiveLayoutPath(); });
             layoutCanvas_->setTextPlacedCallback([this](QPointF position) { addLayoutText(position); });
             layoutCanvas_->setTextPolygonPlacedCallback([this](QPointF position) { addLayoutTextPolygon(position); });
             layoutCanvas_->setPortPlacedCallback(
@@ -15190,8 +15152,6 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId activeLayoutId_ = 0;
     ice::ObjectId activeLayoutLayerId_ = 0;
     ice::ObjectId activeProceduralLayoutId_ = 0;
-    ice::ObjectId activeLayoutPathId_ = 0;
-    ice::ObjectId activeLayoutPathCellId_ = 0;
     // Shapes captured by the layout figure context menu's Copy/Cut entries.
     std::vector<ice::Shape> layoutShapeClipboard_;
     std::set<ice::ObjectId> openSchematicTabs_;

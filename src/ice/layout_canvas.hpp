@@ -37,13 +37,20 @@ struct LayoutPathConfig {
     ice::ObjectId cell = 0;
 };
 
-using LayoutPathSegmentCallback = std::function<void(QPointF start, QPointF end, int width, ice::ObjectId layer,
-                                                     const std::vector<ice::ObjectId> &viaLayers)>;
+// Complete path produced by the path tool. Widths, segment layers, and point
+// vias are indexed like a layout path: one width/layer per segment and one via
+// list per point.
+struct LayoutPathData {
+    std::vector<QPointF> points;
+    std::vector<int> widths;
+    std::vector<ice::ObjectId> segmentLayers;
+    std::vector<std::vector<ice::ObjectId>> pointVias;
+};
+using LayoutPathCreatedCallback = std::function<void(const LayoutPathData &path)>;
 using LayoutPathLayerChangedCallback = std::function<void(ice::ObjectId layer, const std::string &name)>;
 using LayoutPathPointMovedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 using LayoutPathPointInsertedCallback = std::function<void(ice::ObjectId id, int index, QPointF position)>;
 using LayoutPathPointDeletedCallback = std::function<void(ice::ObjectId id, int index)>;
-using LayoutPathFinishedCallback = std::function<void()>;
 using LayoutTextPlacedCallback = std::function<void(QPointF)>;
 using LayoutTextPolygonPlacedCallback = std::function<void(QPointF)>;
 using LayoutPortPlacedCallback = std::function<void(QPointF, QPointF)>;
@@ -103,9 +110,8 @@ class LayoutCanvas : public QGraphicsView {
     virtual int pathWidth() const = 0;
     virtual bool pathAvailable() const = 0;
     virtual std::string pathLayerName() const = 0;
-    virtual void setPathSegmentCallback(LayoutPathSegmentCallback callback) = 0;
+    virtual void setPathCreatedCallback(LayoutPathCreatedCallback callback) = 0;
     virtual void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) = 0;
-    virtual void setPathFinishedCallback(LayoutPathFinishedCallback callback) = 0;
     virtual void setTextPlacedCallback(LayoutTextPlacedCallback callback) = 0;
     virtual void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) = 0;
     virtual void setPortPlacedCallback(LayoutPortPlacedCallback callback) = 0;
@@ -133,10 +139,6 @@ class LayoutCanvas : public QGraphicsView {
     virtual void clearLayoutNetHighlight() = 0;
     virtual void refreshInteractionState() = 0;
 };
-
-// Builds the rounded-rectangle polygon for one path segment. Points are in
-// scene coordinates (positive Y downwards).
-QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width);
 
 // Builds the outline of an open polyline using KLayout-style corner joins.
 // The miter is used only while both offset-line intersections stay within

@@ -103,25 +103,6 @@ QGraphicsItem *createLayoutPreviewItem(const ice::LayoutPreviewModel *model,
 LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}
 LayoutCanvas::~LayoutCanvas() = default;
 
-QPolygonF layoutPathPolygon(QPointF start, QPointF end, qreal width) {
-    const qreal dx = end.x() - start.x();
-    const qreal dy = end.y() - start.y();
-    const qreal length = std::hypot(dx, dy);
-    if (length < 1.0e-9 || width <= 0.0)
-        return {};
-    const qreal ux = dx / length;
-    const qreal uy = dy / length;
-    const qreal nx = -uy;
-    const qreal ny = ux;
-    const qreal half = width * 0.5;
-    const QPointF before(start.x() - ux * half, start.y() - uy * half);
-    const QPointF after(end.x() + ux * half, end.y() + uy * half);
-    QPolygonF polygon;
-    polygon << before + QPointF(nx * half, ny * half) << after + QPointF(nx * half, ny * half)
-            << after - QPointF(nx * half, ny * half) << before - QPointF(nx * half, ny * half);
-    return polygon;
-}
-
 namespace {
 QPointF constrainedPathPoint(QPointF anchor, QPointF point, bool orthogonal) {
     if (!orthogonal)
@@ -1352,9 +1333,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 finishPath();
             pathAnchor_ = {};
             pathEnd_ = {};
-            pathHasCommitted_ = false;
-            pathAnchorLayerIndex_ = 0;
+            pathPoints_.clear();
+            pathSegmentWidths_.clear();
+            pathSegmentLayerIndices_.clear();
             pathLayerIndex_ = 0;
+            pathStartLayerIndex_ = 0;
         }
         pathConfig_ = config;
         pathCell_ = config.cell;
@@ -1362,8 +1345,6 @@ class LayoutCanvasImpl : public LayoutCanvas {
             pathLayerIndex_ = 0;
         else
             pathLayerIndex_ = std::clamp(pathLayerIndex_, 0, static_cast<int>(pathConfig_.layers.size()) - 1);
-        if (pathAnchorLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
-            pathAnchorLayerIndex_ = pathLayerIndex_;
         const auto minimum = currentPathMinimumWidth();
         if (config.width > 0)
             pathWidth_ = std::max(config.width, minimum);
@@ -1394,15 +1375,13 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return pathConfig_.layers[pathLayerIndex_].name;
     }
 
-    void setPathSegmentCallback(LayoutPathSegmentCallback callback) override {
-        pathSegmentCreated_ = std::move(callback);
+    void setPathCreatedCallback(LayoutPathCreatedCallback callback) override {
+        pathCreated_ = std::move(callback);
     }
 
     void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) override {
         pathLayerChanged_ = std::move(callback);
     }
-
-    void setPathFinishedCallback(LayoutPathFinishedCallback callback) override { pathFinished_ = std::move(callback); }
 
     void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
     void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) override {
@@ -1510,40 +1489,115 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void drawPathPreview(QPainter &painter, const QRectF &rect) {
-        const auto polygon = layoutPathPolygon(pathAnchor_, pathEnd_, pathWidth_);
+        // Preview the whole in-progress path, not just the pending segment.
+        // Each segment is filled with its own layer color, while one outline
+        // covers the complete path so joins and end caps match the final shape.
+        std::vector<QPointF> points = pathPoints_;
+        std::vector<qreal> widths;
+        widths.reserve(pathSegmentWidths_.size() + 1);
+        for (const auto width : pathSegmentWidths_)
+            widths.push_back(static_cast<qreal>(width));
+        std::vector<int> layerIndices = pathSegmentLayerIndices_;
+        if (!points.empty() && QLineF(points.back(), pathEnd_).length() > 1.0e-9) {
+            points.push_back(pathEnd_);
+            widths.push_back(static_cast<qreal>(pathWidth_));
+            layerIndices.push_back(pathLayerIndex_);
+        }
+        if (points.size() < 2 || widths.size() != points.size() - 1 || layerIndices.size() != widths.size())
+            return;
+        const auto polygon = layoutPathOutline(points, widths);
         if (polygon.isEmpty())
             return;
+
         painter.save();
         painter.setClipRect(rect);
         painter.setRenderHint(QPainter::Antialiasing);
-        QColor color = ice::uiColor(ice::UiColor::Accent4);
-        if (pathLayerIndex_ >= 0 && pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size())) {
-            const auto style = layerStyles_.find(pathConfig_.layers[pathLayerIndex_].layer);
-            if (style != layerStyles_.end())
-                color = style->second.color;
+
+        const auto layerColor = [&](int index) {
+            if (index >= 0 && index < static_cast<int>(pathConfig_.layers.size())) {
+                const auto style = layerStyles_.find(pathConfig_.layers[static_cast<std::size_t>(index)].layer);
+                if (style != layerStyles_.end())
+                    return style->second.color;
+            }
+            return ice::uiColor(ice::UiColor::Accent4);
+        };
+
+        const auto segmentPolygon = [&](std::size_t index) {
+            const auto &start = points[index];
+            const auto &end = points[index + 1];
+            QPointF startLeft;
+            QPointF startRight;
+            QPointF endLeft;
+            QPointF endRight;
+            if (index == 0) {
+                const auto direction = pathUnit(end - start);
+                const auto half = widths[index] * 0.5;
+                const QPointF normal(-direction.y() * half, direction.x() * half);
+                startLeft = start + normal;
+                startRight = start - normal;
+            } else {
+                std::vector<QPointF> left;
+                std::vector<QPointF> right;
+                appendPathJoin(left, points[index - 1], start, end, widths[index - 1] * 0.5,
+                               widths[index] * 0.5, 1.0);
+                appendPathJoin(right, points[index - 1], start, end, widths[index - 1] * 0.5,
+                               widths[index] * 0.5, -1.0);
+                startLeft = left.back();
+                startRight = right.back();
+            }
+            if (index + 1 == points.size() - 1) {
+                const auto direction = pathUnit(end - start);
+                const auto half = widths[index] * 0.5;
+                const QPointF normal(-direction.y() * half, direction.x() * half);
+                endLeft = end + normal;
+                endRight = end - normal;
+            } else {
+                std::vector<QPointF> left;
+                std::vector<QPointF> right;
+                appendPathJoin(left, start, end, points[index + 2], widths[index] * 0.5,
+                               widths[index + 1] * 0.5, 1.0);
+                appendPathJoin(right, start, end, points[index + 2], widths[index] * 0.5,
+                               widths[index + 1] * 0.5, -1.0);
+                endLeft = left.back();
+                endRight = right.back();
+            }
+            QPolygonF segment;
+            segment << startLeft << endLeft << endRight << startRight;
+            return segment;
+        };
+
+        painter.setPen(Qt::NoPen);
+        for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+            QColor fill = layerColor(layerIndices[index]);
+            fill.setAlpha(60);
+            painter.setBrush(fill);
+            painter.drawPolygon(segmentPolygon(index));
         }
-        QPen outline(color);
+
+        QColor outlineColor = ice::uiColor(ice::UiColor::Accent4);
+        QPen outline(outlineColor);
         outline.setCosmetic(true);
         outline.setWidthF(1.4);
         outline.setStyle(Qt::DashLine);
-        QColor fill = color;
-        fill.setAlpha(60);
         painter.setPen(outline);
-        painter.setBrush(fill);
+        painter.setBrush(Qt::NoBrush);
         painter.drawPolygon(polygon);
-        QPen centerline(color);
+
+        QPen centerline(outlineColor);
         centerline.setCosmetic(true);
         centerline.setWidthF(1.0);
         centerline.setStyle(Qt::DotLine);
         painter.setPen(centerline);
         painter.setBrush(Qt::NoBrush);
-        painter.drawLine(pathAnchor_, pathEnd_);
+        QPolygonF centerPolyline;
+        for (const auto &point : points)
+            centerPolyline << point;
+        painter.drawPolyline(centerPolyline);
 
-        const auto viaLayers = pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_);
-        if (pathHasCommitted_ && pathAnchorLayerIndex_ != pathLayerIndex_ && pathLayerIndex_ >= 0 &&
-            pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size())) {
-            const qreal half = pathWidth_ * 0.5;
-            const QRectF viaRect(pathAnchor_.x() - half, pathAnchor_.y() - half, pathWidth_, pathWidth_);
+        const qreal viaHalf = pathWidth_ * 0.5;
+        const auto drawViaAt = [&](const QPointF &center, const std::vector<ice::ObjectId> &viaLayers,
+                                   ice::ObjectId fallbackLayer) {
+            const QRectF viaRect(center.x() - viaHalf, center.y() - viaHalf, pathWidth_, pathWidth_);
             const auto drawVia = [&](ice::ObjectId layerId) {
                 QColor viaColor = ice::uiColor(ice::UiColor::Accent3);
                 const auto style = layerStyles_.find(layerId);
@@ -1556,10 +1610,31 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 painter.drawRect(viaRect);
             };
             if (viaLayers.empty())
-                drawVia(pathConfig_.layers[pathLayerIndex_].layer);
+                drawVia(fallbackLayer);
             else
                 for (const auto layerId : viaLayers)
                     drawVia(layerId);
+        };
+
+        if (!layerIndices.empty() && pathStartLayerIndex_ != layerIndices.front() &&
+            pathStartLayerIndex_ >= 0 && pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+            drawViaAt(points.front(), pathViasBetween(pathStartLayerIndex_, layerIndices.front()),
+                      pathConfig_.layers[layerIndices.front()].layer);
+        for (std::size_t index = 1; index < layerIndices.size(); ++index) {
+            if (layerIndices[index - 1] == layerIndices[index])
+                continue;
+            drawViaAt(points[index], pathViasBetween(layerIndices[index - 1], layerIndices[index]),
+                      pathConfig_.layers[layerIndices[index]].layer);
+        }
+        // A layer switch after the latest click has no pending segment yet.
+        // Show its via immediately so the pending layer transition is visible.
+        if (!pathPoints_.empty() && QLineF(pathPoints_.back(), pathEnd_).length() <= 1.0e-9) {
+            const auto previous = pathSegmentLayerIndices_.empty() ? pathStartLayerIndex_
+                                                                   : pathSegmentLayerIndices_.back();
+            if (previous != pathLayerIndex_ && pathLayerIndex_ >= 0 &&
+                pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+                drawViaAt(pathPoints_.back(), pathViasBetween(previous, pathLayerIndex_),
+                          pathConfig_.layers[pathLayerIndex_].layer);
         }
         painter.restore();
     }
@@ -1906,8 +1981,11 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     pathActive_ = true;
                     pathAnchor_ = point;
                     pathEnd_ = point;
-                    pathAnchorLayerIndex_ = pathLayerIndex_;
-                    pathHasCommitted_ = false;
+                    pathPoints_.clear();
+                    pathPoints_.push_back(point);
+                    pathSegmentWidths_.clear();
+                    pathSegmentLayerIndices_.clear();
+                    pathStartLayerIndex_ = pathLayerIndex_;
                 } else {
                     pathEnd_ = constrainedPathPoint(pathAnchor_, point, event->modifiers().testFlag(Qt::ShiftModifier));
                 }
@@ -2337,7 +2415,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
             pathDragging_ = false;
             pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(event->pos())),
                                             event->modifiers().testFlag(Qt::ShiftModifier));
-            commitPathSegment();
+            if (QLineF(pathAnchor_, pathEnd_).length() >= 0.5 && !pathConfig_.layers.empty()) {
+                pathPoints_.push_back(pathEnd_);
+                pathSegmentWidths_.push_back(pathWidth_);
+                pathSegmentLayerIndices_.push_back(pathLayerIndex_);
+                pathAnchor_ = pathEnd_;
+            }
             viewport()->update();
             event->accept();
             return;
@@ -2527,6 +2610,25 @@ class LayoutCanvasImpl : public LayoutCanvas {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        if (tool_ == Tool::path && pathActive_) {
+            if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+                commitPath();
+                event->accept();
+                return;
+            }
+            if (event->key() == Qt::Key_Backspace && pathPoints_.size() > 1) {
+                pathPoints_.pop_back();
+                if (!pathSegmentWidths_.empty())
+                    pathSegmentWidths_.pop_back();
+                if (!pathSegmentLayerIndices_.empty())
+                    pathSegmentLayerIndices_.pop_back();
+                pathAnchor_ = pathPoints_.back();
+                pathEnd_ = pathAnchor_;
+                viewport()->update();
+                event->accept();
+                return;
+            }
+        }
         if (event->key() == Qt::Key_Escape &&
             (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
              tool_ == Tool::polygon || tool_ == Tool::port || tool_ == Tool::ruler || tool_ == Tool::text ||
@@ -2926,36 +3028,56 @@ class LayoutCanvasImpl : public LayoutCanvas {
         return vias;
     }
 
-    void commitPathSegment() {
+    void commitPath() {
         if (!pathActive_ || pathConfig_.layers.empty())
             return;
-        if (QLineF(pathAnchor_, pathEnd_).length() < 0.5)
+
+        auto points = pathPoints_;
+        auto widths = pathSegmentWidths_;
+        auto layers = pathSegmentLayerIndices_;
+        if (!points.empty() && QLineF(points.back(), pathEnd_).length() >= 0.5) {
+            points.push_back(pathEnd_);
+            widths.push_back(pathWidth_);
+            layers.push_back(pathLayerIndex_);
+        }
+        if (points.size() < 2 || widths.size() != points.size() - 1 || layers.size() != widths.size()) {
+            finishPath();
             return;
-        const auto layerId = pathConfig_.layers[pathLayerIndex_].layer;
-        const auto vias =
-            pathHasCommitted_ ? pathViasBetween(pathAnchorLayerIndex_, pathLayerIndex_) : std::vector<ice::ObjectId>{};
-        // Advance the rubber-band anchor before notifying the application.
-        // The callback refreshes the project and may re-enter setPathConfig();
-        // updating the anchor afterwards would restore the previous point and
-        // make the next preview start from the wrong end of the segment.
-        const auto start = pathAnchor_;
-        const auto end = pathEnd_;
-        pathAnchor_ = end;
-        pathAnchorLayerIndex_ = pathLayerIndex_;
-        pathHasCommitted_ = true;
-        if (pathSegmentCreated_)
-            pathSegmentCreated_(start, end, pathWidth_, layerId, vias);
+        }
+
+        LayoutPathData data;
+        data.points = std::move(points);
+        data.widths = std::move(widths);
+        data.segmentLayers.reserve(layers.size());
+        for (const auto layerIndex : layers) {
+            if (layerIndex < 0 || layerIndex >= static_cast<int>(pathConfig_.layers.size()))
+                return;
+            data.segmentLayers.push_back(pathConfig_.layers[static_cast<std::size_t>(layerIndex)].layer);
+        }
+        data.pointVias.resize(data.points.size());
+        if (!layers.empty() && pathStartLayerIndex_ != layers.front() && pathStartLayerIndex_ >= 0 &&
+            pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+            data.pointVias.front() = pathViasBetween(pathStartLayerIndex_, layers.front());
+        for (std::size_t index = 1; index < layers.size(); ++index) {
+            if (layers[index - 1] != layers[index])
+                data.pointVias[index] = pathViasBetween(layers[index - 1], layers[index]);
+        }
+
+        const auto path = std::move(data);
+        finishPath();
+        if (pathCreated_)
+            pathCreated_(path);
     }
 
     void finishPath() {
-        const bool hadCommitted = pathHasCommitted_;
         pathActive_ = false;
         pathDragging_ = false;
-        pathHasCommitted_ = false;
+        pathPoints_.clear();
+        pathSegmentWidths_.clear();
+        pathSegmentLayerIndices_.clear();
+        pathStartLayerIndex_ = 0;
         pathEnd_ = pathAnchor_;
         viewport()->update();
-        if (hadCommitted && pathFinished_)
-            pathFinished_();
     }
 
     void finishPolygon() {
@@ -3160,15 +3282,16 @@ class LayoutCanvasImpl : public LayoutCanvas {
     ice::ObjectId pathCell_ = 0;
     int pathWidth_ = 200;
     int pathLayerIndex_ = 0;
-    int pathAnchorLayerIndex_ = 0;
+    int pathStartLayerIndex_ = 0;
     bool pathActive_ = false;
     bool pathDragging_ = false;
-    bool pathHasCommitted_ = false;
     QPointF pathAnchor_;
     QPointF pathEnd_;
-    LayoutPathSegmentCallback pathSegmentCreated_;
+    std::vector<QPointF> pathPoints_;
+    std::vector<int> pathSegmentWidths_;
+    std::vector<int> pathSegmentLayerIndices_;
+    LayoutPathCreatedCallback pathCreated_;
     LayoutPathLayerChangedCallback pathLayerChanged_;
-    LayoutPathFinishedCallback pathFinished_;
     LayoutTextPlacedCallback textPlaced_;
     LayoutTextPolygonPlacedCallback textPolygonPlaced_;
     LayoutPortPlacedCallback portPlaced_;

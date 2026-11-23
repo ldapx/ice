@@ -657,13 +657,16 @@ each vertex; Shift constrains the current edge to horizontal or vertical.
 Double-click, Escape, or Space closes the polygon and leaves the tool. Select a
 polygon to show square vertex handles; drag a handle to move that vertex.
 
-The layout toolbar also provides a **Draw Path** tool for routing. Click to set
-the path start and click again to commit each segment. Escape or Space finishes
-the current path and leaves the tool. Holding Shift
+The layout toolbar also provides a **Draw Path** tool for routing. Clicks add
+bend points to one preview path without placing geometry. Press **Enter** to
+commit the whole path as one shape; **Backspace** removes the last point,
+**Escape** cancels the preview, and **Space** switches to Select. Holding Shift
 constrains the active segment to horizontal or vertical so all turns are right
 angles. While the Path tool is active, **Properties** shows the current path
-layer. Each segment is drawn at its layer's PDK minimum width, and the width is
-not user-editable. Path points follow the layout grid snap setting. After the
+layer. Each preview segment keeps the color of the layer it was drawn on, and
+layer transitions show their via stack in the preview. Each segment is drawn at
+its layer's PDK minimum width, and the width is not user-editable. Path points
+follow the layout grid snap setting. After the
 first path click, scroll the wheel to move the
 next segment up or down one metal
 layer; ICE inserts the corresponding via at the connection point automatically.
