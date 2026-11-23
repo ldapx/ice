@@ -2925,15 +2925,7 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId createTemporaryHdlBlock(const std::string &text) {
         if (!project_ || QString::fromStdString(text).trimmed().isEmpty())
             return 0;
-        const auto baseName = nextSchematicDefaultName() + QStringLiteral(" Block");
-        const auto nameTaken = [this](const QString &candidate) {
-            return std::any_of(project_->project().schematicCells.begin(),
-                               project_->project().schematicCells.end(),
-                               [&](const auto &entry) { return entry.second.name == candidate.toStdString(); });
-        };
-        auto name = baseName;
-        for (int suffix = 2; nameTaken(name); ++suffix)
-            name = baseName + QString::number(suffix);
+        const auto name = nextHdlBlockDefaultName();
         ice::ObjectId created = 0;
         try {
             project_->execute("create temporary SystemVerilog block", [&](ice::Project &project) {
@@ -2978,58 +2970,6 @@ class DocumentWindow : public QMainWindow {
         return true;
     }
 
-    void importHdlFile() {
-        if (!project_) {
-            QMessageBox::information(this, QStringLiteral("Import HDL File"),
-                                     QStringLiteral("Create or open a project first."));
-            return;
-        }
-        const auto path = QFileDialog::getOpenFileName(
-            this, QStringLiteral("Import HDL File"), {},
-            QStringLiteral("SystemVerilog files (*.sv *.v *.svh *.vh);;All files (*)"));
-        if (path.isEmpty())
-            return;
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QMessageBox::warning(this, QStringLiteral("Import HDL File"),
-                                 QStringLiteral("Unable to read:\n%1").arg(path));
-            return;
-        }
-        const auto text = QString::fromUtf8(file.readAll());
-        file.close();
-        if (text.trimmed().isEmpty()) {
-            QMessageBox::information(this, QStringLiteral("Import HDL File"),
-                                     QStringLiteral("%1 is empty.").arg(QFileInfo(path).fileName()));
-            return;
-        }
-        QStringList names;
-        for (const auto &entry : project_->project().schematicCells)
-            names.push_back(QString::fromStdString(entry.second.name));
-        auto base = QFileInfo(path).completeBaseName().trimmed();
-        if (base.isEmpty())
-            base = nextSchematicDefaultName();
-        auto name = base;
-        for (int suffix = 2; names.contains(name, Qt::CaseInsensitive); ++suffix)
-            name = base + QString::number(suffix);
-        ice::ObjectId created = 0;
-        try {
-            project_->execute("import SystemVerilog file", [&](ice::Project &project) {
-                ice::applyPdkDefaultGrid(project, ice::genericPdkId);
-                created = ice::createSystemVerilogCell(project, name.toStdString(), ice::genericPdkId,
-                                                       text.toStdString());
-            });
-            project_->setLastHistoryLabel("Imported SystemVerilog file " + name.toStdString());
-        } catch (const ice::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Import HDL File"), QString::fromStdString(error.what()));
-            return;
-        }
-        refreshProject();
-        openHdlSchematic(created);
-        statusBar()->showMessage(QStringLiteral("Imported %1 as %2.sv")
-                                     .arg(QFileInfo(path).fileName(), name),
-                                 8000);
-    }
-
     ice::ObjectId createSystemVerilogBlock(bool openInSchematicTab = true) {
         if (!project_) {
             QMessageBox::information(this, QStringLiteral("Create SystemVerilog Block"),
@@ -3039,7 +2979,7 @@ class DocumentWindow : public QMainWindow {
         bool accepted = false;
         const auto name =
             QInputDialog::getText(this, QStringLiteral("Create SystemVerilog Block"), QStringLiteral("Block name:"),
-                                  QLineEdit::Normal, nextSchematicDefaultName() + QStringLiteral(" Block"), &accepted);
+                                  QLineEdit::Normal, nextHdlBlockDefaultName(), &accepted);
         if (!accepted || name.trimmed().isEmpty())
             return 0;
         return createSystemVerilogCell(name, ice::genericPdkId, false, openInSchematicTab);
@@ -12797,6 +12737,22 @@ class DocumentWindow : public QMainWindow {
         return nextDefaultCellName(QStringLiteral("Schematic"), names);
     }
 
+    // First free "SchematicNN Block" name for a new HDL block. The scratch
+    // editor's temporary block uses the same sequence, so the create dialog
+    // never suggests a name the project already uses.
+    QString nextHdlBlockDefaultName() const {
+        QStringList names;
+        if (project_) {
+            for (const auto &entry : project_->project().schematicCells)
+                names.push_back(QString::fromStdString(entry.second.name));
+        }
+        for (int index = 1;; ++index) {
+            const auto candidate = QStringLiteral("Schematic%1 Block").arg(index, 2, 10, QChar('0'));
+            if (!names.contains(candidate))
+                return candidate;
+        }
+    }
+
     QString nextLayoutDefaultName() const {
         QStringList names;
         if (project_) {
@@ -13957,7 +13913,6 @@ class DocumentWindow : public QMainWindow {
                         page->selectHdlCell(id);
                 });
                 page->setDeleteHdlBlockCallback([this](ice::ObjectId id) { removeSchematic(id); });
-                page->setImportHdlFileCallback([this] { importHdlFile(); });
                 page->setCreateTemporaryHdlBlockCallback(
                     [this](const std::string &text) { return createTemporaryHdlBlock(text); });
                 page->setRenameHdlBlockCallback(

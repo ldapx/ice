@@ -2956,38 +2956,26 @@ void ImplementationPage::buildUi() {
         hdlSearch_->setClearButtonEnabled(true);
         hdlSearch_->setAccessibleName(QStringLiteral("Search HDL files"));
         searchRow->addWidget(hdlSearch_, 1);
-        if (synthesisMode()) {
+        if (hdlMode()) {
+            newHdlButton_ = new QPushButton;
+            newHdlButton_->setFixedWidth(28);
+            setLucideIcon(newHdlButton_, QStringLiteral("plus"), 16);
+            newHdlButton_->setToolTip(QStringLiteral("New HDL block"));
+            newHdlButton_->setAccessibleName(QStringLiteral("New HDL block"));
+            searchRow->addWidget(newHdlButton_);
+            deleteHdlButton_ = new QPushButton;
+            deleteHdlButton_->setFixedWidth(28);
+            setLucideIcon(deleteHdlButton_, QStringLiteral("trash"), 16);
+            deleteHdlButton_->setToolTip(QStringLiteral("Delete selected HDL file"));
+            deleteHdlButton_->setAccessibleName(QStringLiteral("Delete selected HDL file"));
+            deleteHdlButton_->setEnabled(false);
+            searchRow->addWidget(deleteHdlButton_);
+        } else if (synthesisMode()) {
             elaborateButton_ = new QPushButton(QStringLiteral("Elaborate design"));
             elaborateButton_->setToolTip(QStringLiteral("Create an HDL run and elaborate the selected design"));
             searchRow->addWidget(elaborateButton_);
         }
         explorerLayout->addLayout(searchRow);
-        if (hdlMode()) {
-            // File actions sit on their own row so the search field keeps the
-            // full width of the Explorer panel.
-            auto *actionRow = new QHBoxLayout;
-            actionRow->setSpacing(8);
-            const auto addActionButton = [actionRow](const QString &icon, const QString &tooltip) {
-                auto *button = new QPushButton;
-                button->setFixedWidth(28);
-                setLucideIcon(button, icon, 16);
-                button->setToolTip(tooltip);
-                button->setAccessibleName(tooltip);
-                actionRow->addWidget(button);
-                return button;
-            };
-            // Spread the actions across the panel so they do not bunch up at
-            // the left edge.
-            actionRow->addStretch(1);
-            newHdlButton_ = addActionButton(QStringLiteral("plus"), QStringLiteral("New HDL block"));
-            actionRow->addStretch(1);
-            importHdlButton_ = addActionButton(QStringLiteral("download"), QStringLiteral("Import HDL file"));
-            actionRow->addStretch(1);
-            deleteHdlButton_ = addActionButton(QStringLiteral("trash"), QStringLiteral("Delete selected HDL file"));
-            deleteHdlButton_->setEnabled(false);
-            actionRow->addStretch(1);
-            explorerLayout->addLayout(actionRow);
-        }
         hdlFileList_ = new QListWidget;
         hdlFileList_->setAlternatingRowColors(true);
         if (synthesisMode()) {
@@ -3734,10 +3722,6 @@ void ImplementationPage::buildUi() {
         QObject::connect(newHdlButton_, &QPushButton::clicked, this, [this] {
             if (createHdlBlockCallback_)
                 createHdlBlockCallback_();
-        });
-        QObject::connect(importHdlButton_, &QPushButton::clicked, this, [this] {
-            if (importHdlFileCallback_)
-                importHdlFileCallback_();
         });
         QObject::connect(deleteHdlButton_, &QPushButton::clicked, this, [this] {
             auto *item = hdlFileList_ ? hdlFileList_->currentItem() : nullptr;

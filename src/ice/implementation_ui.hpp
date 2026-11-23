@@ -154,7 +154,6 @@ class ImplementationPage : public QWidget {
     void setDeleteHdlBlockCallback(std::function<void(ice::ObjectId)> callback) {
         deleteHdlBlockCallback_ = std::move(callback);
     }
-    void setImportHdlFileCallback(std::function<void()> callback) { importHdlFileCallback_ = std::move(callback); }
     // Creates the project block backing the scratch editor as soon as the user
     // types into it, and returns the new cell id (0 on failure).
     void setCreateTemporaryHdlBlockCallback(std::function<ice::ObjectId(const std::string &)> callback) {
@@ -268,7 +267,6 @@ class ImplementationPage : public QWidget {
     QListWidget *hdlFileList_ = nullptr;
     QLineEdit *hdlSearch_ = nullptr;
     QPushButton *newHdlButton_ = nullptr;
-    QPushButton *importHdlButton_ = nullptr;
     QPushButton *deleteHdlButton_ = nullptr;
     QPushButton *elaborateButton_ = nullptr;
     QTabWidget *runsTabs_ = nullptr;
@@ -335,7 +333,6 @@ class ImplementationPage : public QWidget {
     QWidget *middlePlaceholder_ = nullptr;
     std::function<void()> createHdlBlockCallback_;
     std::function<void(ice::ObjectId)> deleteHdlBlockCallback_;
-    std::function<void()> importHdlFileCallback_;
     std::function<ice::ObjectId(const std::string &)> createTemporaryHdlBlockCallback_;
     std::function<bool(ice::ObjectId, const std::string &)> renameHdlBlockCallback_;
     std::function<void(ice::ObjectId, const std::string &)> elaborateDesignCallback_;
