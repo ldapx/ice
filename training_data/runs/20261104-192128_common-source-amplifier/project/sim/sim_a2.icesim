@@ -1,0 +1,31 @@
+{
+  "format": "ice-simulation",
+  "schema_version": 1,
+  "simulation": {
+    "id": 5,
+    "name": "sim_a2",
+    "schematic": 4,
+    "simulator": "ngspice",
+    "analysis": "transient",
+    "stop": 0.005,
+    "step": 1e-06,
+    "use_initial_conditions": false,
+    "directives": "",
+    "signals": "v(in),v(out),v(gate),v(drain),v(source),v(bias)",
+    "graphs": [
+      {
+        "id": 6,
+        "name": "Graph 1",
+        "x_axis": "time",
+        "y_signals": [
+          "v(in)",
+          "v(out)",
+          "v(gate)",
+          "v(drain)",
+          "v(source)",
+          "v(bias)"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+specification,metric,target,measured,unit,status
+"Midband gain","gain_db",">= 20","25.0266","dB","pass"
+"Output swing","peak_to_peak",">= 100m","0.166424","V","pass"
+"DC drain voltage","steady_state","~ 0.8","0.924939","V","fail"

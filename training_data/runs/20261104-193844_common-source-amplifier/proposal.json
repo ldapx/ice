@@ -1,0 +1,54 @@
+{
+  "circuit": "Common-source amplifier",
+  "topology_summary": "Single-stage common-source NMOS amplifier with voltage-divider gate bias, resistive drain load, and source degeneration resistor bypassed by a large capacitor for AC gain. Designed for 1.8 V supply, ~200 \u00b5A bias current, targeting ~26 dB midband voltage gain.",
+  "design_notes": "Generic level-1 NMOS model (Vth=0.5 V, kp=100 \u00b5A/V\u00b2) with W/L=20. Gate bias set to 0.72 V via 1.5 M\u03a9/1 M\u03a9 divider. Drain resistor 5 k\u03a9, source resistor 1 k\u03a9 bypassed by 10 \u00b5F. Input/output coupling caps 1 \u00b5F. Input signal 10 mVpk 1 kHz sine. Simulation runs 5 ms to capture steady-state gain.",
+  "netlist": "* Common-source amplifier\n.model nmos nmos(level=1 vto=0.5 kp=100u lambda=0.02 gamma=0.5 phi=0.6)\n\nVDD vdd 0 1.8\n\n* Gate bias divider\nRG1 vdd gate 1.5M\nRG2 gate 0 1M\n\n* Input coupling\nVIN in 0 SIN(0 10m 1k)\nCIN in gate 1u\n\n* MOSFET\nM1 drain gate source 0 nmos w=20u l=1u\n\n* Drain load\nRD vdd drain 5k\n\n* Source degeneration with AC bypass\nRS source 0 1k\nCS source 0 10u\n\n* Output coupling\nCOUT drain out 1u\nRL out 0 100k\n\n* Initial condition to help convergence\n.ic v(gate)=0.72 v(source)=0.2 v(drain)=0.8\n",
+  "analysis": {
+    "stop": "5m",
+    "step": "1u"
+  },
+  "signals": [
+    "v(out)",
+    "v(in)",
+    "v(drain)",
+    "v(source)"
+  ],
+  "specifications": [
+    {
+      "name": "Midband voltage gain",
+      "metric": "gain_db",
+      "trace": "v(out)",
+      "reference": "v(in)",
+      "voltage": null,
+      "target": ">= 26",
+      "unit": "dB"
+    },
+    {
+      "name": "Output swing (peak)",
+      "metric": "peak_to_peak",
+      "trace": "v(out)",
+      "reference": null,
+      "voltage": null,
+      "target": ">= 1.0",
+      "unit": "V"
+    },
+    {
+      "name": "DC drain voltage",
+      "metric": "steady_state",
+      "trace": "v(drain)",
+      "reference": null,
+      "voltage": null,
+      "target": "~ 0.8",
+      "unit": "V"
+    },
+    {
+      "name": "DC source voltage",
+      "metric": "steady_state",
+      "trace": "v(source)",
+      "reference": null,
+      "voltage": null,
+      "target": "~ 0.2",
+      "unit": "V"
+    }
+  ]
+}

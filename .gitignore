@@ -23,6 +23,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local secrets
+training_data/.env
+
 # Tooling output
 compile_commands.json
 makefile

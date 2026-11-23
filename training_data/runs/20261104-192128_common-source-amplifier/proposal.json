@@ -1,0 +1,56 @@
+{
+  "circuit": "Common-source amplifier",
+  "topology_summary": "Single-stage NMOS common-source amplifier with PMOS current-mirror active load. NMOS biased via voltage divider (R1=33k, R2=100k) and source resistor RS=1k bypassed by 10uF. PMOS mirror reference set by Rref=2k from bias node to ground. Output AC-coupled through 1uF to 1Meg load. Generic NMOS (Kp=1mA/V\u00b2, Vth=0.5V) and PMOS (Kp=0.5mA/V\u00b2, Vth=-0.5V) models. Bias current ~208uA, giving gm=0.65mS and output impedance ~120k for ~38dB gain.",
+  "design_notes": "Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; ICE runs transient.",
+  "netlist": "* Common-source amplifier with PMOS active load\nVDD vdd 0 1.8\nVin in 0 SIN(0 10m 1k)\n\n* NMOS bias divider\nR1 vdd gate 33k\nR2 gate 0 100k\n\n* NMOS source degeneration with AC bypass\nRS source 0 1k\nCS source 0 10u\n\n* Input coupling capacitor\nCin in gate 1u\n\n* PMOS current mirror load\nRref bias 0 2k\nM2 bias bias vdd vdd pmos\nM3 drain bias vdd vdd pmos\n\n* NMOS amplifier\nM1 drain gate source 0 nmos\n\n* Output coupling and high-impedance load\nCout drain out 1u\nRL out 0 1Meg\n\n.model nmos nmos(level=1 vto=0.5 kp=1m lambda=0.02 gamma=0.5 phi=0.7)\n.model pmos pmos(level=1 vto=-0.5 kp=0.5m lambda=0.02 gamma=0.5 phi=0.7)\n\n.ic v(gate)=1.35 v(source)=0.2 v(drain)=0.9 v(bias)=0.4\n",
+  "analysis": {
+    "stop": "5m",
+    "step": "1u"
+  },
+  "signals": [
+    "v(in)",
+    "v(out)",
+    "v(gate)",
+    "v(drain)",
+    "v(source)",
+    "v(bias)"
+  ],
+  "specifications": [
+    {
+      "name": "Midband voltage gain",
+      "metric": "gain_db",
+      "trace": "v(out)",
+      "reference": "v(in)",
+      "voltage": null,
+      "target": ">= 30",
+      "unit": "dB"
+    },
+    {
+      "name": "Output peak-to-peak swing",
+      "metric": "peak_to_peak",
+      "trace": "v(out)",
+      "reference": null,
+      "voltage": null,
+      "target": ">= 1.0",
+      "unit": "V"
+    },
+    {
+      "name": "DC drain voltage",
+      "metric": "steady_state",
+      "trace": "v(drain)",
+      "reference": null,
+      "voltage": null,
+      "target": "~ 0.9",
+      "unit": "V"
+    },
+    {
+      "name": "DC gate voltage",
+      "metric": "steady_state",
+      "trace": "v(gate)",
+      "reference": null,
+      "voltage": null,
+      "target": "~ 1.35",
+      "unit": "V"
+    }
+  ]
+}

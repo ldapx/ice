@@ -1,0 +1,46 @@
+{
+  "circuit": "Common-source amplifier",
+  "topology_summary": "Single-stage common-source NMOS amplifier with voltage-divider bias (1M/1M), 10k drain resistor, 1k source resistor with 10uF AC bypass capacitor, and 1uF input/output coupling capacitors. Designed for 1.8V supply, ~100uA bias current, targeting ~26dB midband gain at 1kHz.",
+  "design_notes": "Generic level-1 NMOS model (Vth=0.5V, kp=100uA/V^2). Gate biased at 0.9V via equal 1M resistors giving ~0.8V VGS and ~0.1V source voltage. Source bypass capacitor ensures full gm*RD gain at signal frequency. Input amplitude kept small (10mV) for linear operation. Simulation runs 5 cycles at 1kHz to allow gain measurement.",
+  "netlist": "* Common-source amplifier\nVDD vdd 0 1.8\nVin in 0 SIN(0 10m 1k)\n\n* Bias network\nRG1 vdd gate 1M\nRG2 gate 0 1M\n\n* Input coupling\nCin in gate 1u\n\n* MOSFET\nM1 drain gate source 0 nmos W=22.2u L=1u\n\n* Load and source degeneration\nRD vdd drain 10k\nRS source 0 1k\nCS source 0 10u\n\n* Output coupling\nCout drain out 1u\nRL out 0 100k\n\n.model nmos nmos(level=1 vto=0.5 kp=100u lambda=0.02 gamma=0.5 phi=0.6)\n\n.ic v(gate)=0.9 v(source)=0.1 v(drain)=0.8\n",
+  "analysis": {
+    "stop": "5m",
+    "step": "1u"
+  },
+  "signals": [
+    "v(in)",
+    "v(out)",
+    "v(gate)",
+    "v(source)",
+    "v(drain)"
+  ],
+  "specifications": [
+    {
+      "name": "Midband gain",
+      "metric": "gain_db",
+      "trace": "v(out)",
+      "reference": "v(in)",
+      "voltage": null,
+      "target": ">= 20",
+      "unit": "dB"
+    },
+    {
+      "name": "Output swing",
+      "metric": "peak_to_peak",
+      "trace": "v(out)",
+      "reference": null,
+      "voltage": null,
+      "target": ">= 100m",
+      "unit": "V"
+    },
+    {
+      "name": "DC drain voltage",
+      "metric": "steady_state",
+      "trace": "v(drain)",
+      "reference": null,
+      "voltage": null,
+      "target": "~ 0.8",
+      "unit": "V"
+    }
+  ]
+}

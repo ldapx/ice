@@ -1,0 +1,15 @@
+{
+  "format": "ice-schematic",
+  "schema_version": 1,
+  "cell": {
+    "id": 1,
+    "name": "design_a1",
+    "pdk": "generic",
+    "parameters": [],
+    "symbols": [],
+    "instances": [],
+    "nets": [],
+    "text_schematic": true,
+    "spice_text": "* Common-source amplifier\nVDD vdd 0 1.8\nVin in 0 SIN(0 5m 1k)\n\n* Bias network\nR1 vdd gate 1.2Meg\nR2 gate 0 300k\n\n* Drain load\nRD vdd drain 47k\n\n* Source degeneration with AC bypass\nRS source 0 1k\nCs source 0 1u\n\n* MOSFET\nM1 drain gate source 0 nmos W=20u L=1u\n\n* Coupling capacitors\nCin in gate 10n\nCout drain out 10n\n\n* Load resistor (100 kΩ to ground)\nRL out 0 100k\n\n.model nmos nmos(level=1 vto=0.5 kp=100u lambda=0.02 gamma=0.5 phi=0.7)\n\n.ic v(gate)=0.9 v(source)=0.4 v(drain)=1.2\n"
+  }
+}
