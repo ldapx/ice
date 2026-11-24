@@ -188,6 +188,23 @@ std::vector<Diagnostic> Project::validate() const {
             result.push_back({Diagnostic::Severity::error, "project.packages.duplicate",
                               "Package dependency is listed more than once: " + dependency, std::nullopt});
     }
+    std::unordered_set<std::string> trustedNames;
+    for (const auto &package : trustedPackages) {
+        if (package.empty()) {
+            result.push_back({Diagnostic::Severity::error, "project.trust.name",
+                              "Trusted package names must not be empty", std::nullopt});
+            continue;
+        }
+        if (package.find_first_of("/\\") != std::string::npos) {
+            result.push_back({Diagnostic::Severity::error, "project.trust.name",
+                              "Trusted package names must not contain path separators: " + package,
+                              std::nullopt});
+            continue;
+        }
+        if (!trustedNames.insert(package).second)
+            result.push_back({Diagnostic::Severity::error, "project.trust.duplicate",
+                              "Package is trusted more than once: " + package, std::nullopt});
+    }
     for (const auto &[cellId, cell] : schematicCells) {
         if (cell.name.empty())
             result.push_back({Diagnostic::Severity::error, "schematic.name", "Schematic name is required", cellId});
@@ -508,6 +525,11 @@ std::vector<Diagnostic> Project::validate() const {
     return result;
 }
 
+bool Project::trustsPackage(const std::string &package) const {
+    return !package.empty() &&
+           std::find(trustedPackages.begin(), trustedPackages.end(), package) != trustedPackages.end();
+}
+
 static const char *pinDirectionName(PinDirection direction);
 static PinDirection parsePinDirection(const std::string &value);
 
@@ -532,6 +554,7 @@ std::string Project::serialize() const {
     j["grid"] = grid;
     j["units"] = {{"nanometers_per_unit", units.nanometers_per_unit}, {"denominator", units.denominator}};
     j["package_dependencies"] = packageDependencies;
+    j["trusted_packages"] = trustedPackages;
     j["schematic_cells"] = json::array();
     for (const auto &[id, cell] : schematicCells) {
         json c = {{"id", id},
@@ -1113,6 +1136,14 @@ Project Project::deserialize(const std::string &text) {
                 if (!name.empty() && std::find(p.packageDependencies.begin(), p.packageDependencies.end(), name) ==
                                          p.packageDependencies.end())
                     p.packageDependencies.push_back(name);
+            }
+        }
+        if (j.contains("trusted_packages")) {
+            for (const auto &package : j.at("trusted_packages")) {
+                const auto name = package.get<std::string>();
+                if (!name.empty() &&
+                    std::find(p.trustedPackages.begin(), p.trustedPackages.end(), name) == p.trustedPackages.end())
+                    p.trustedPackages.push_back(name);
             }
         }
         for (const auto &c : j.at("schematic_cells")) {

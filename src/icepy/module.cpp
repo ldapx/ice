@@ -1219,6 +1219,7 @@ NB_MODULE(icepy, module) {
         .def_rw("units", &Project::units)
         .def_prop_ro("schema_version", [](const Project &) { return Project::schemaVersion; })
         .def_prop_ro("package_dependencies", [](const Project &project) { return project.packageDependencies; })
+        .def_prop_ro("trusted_packages", [](const Project &project) { return project.trustedPackages; })
         .def_prop_ro("layers",
                      [](const Project &project) {
                          std::vector<Layer> layers;

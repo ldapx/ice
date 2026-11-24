@@ -670,6 +670,11 @@ class Project {
     DatabaseUnits units;
     Coordinate grid = 1;
     std::vector<std::string> packageDependencies;
+    // Package names this project explicitly trusts to execute package-owned
+    // code (for example PDK procedural-layout device generators). This is a
+    // project-local policy decision; it never overrides an explicit
+    // ICE_ALLOW_PACKAGE_CODE=0 kill switch.
+    std::vector<std::string> trustedPackages;
     std::map<ObjectId, SchematicCell> schematicCells;
     std::map<ObjectId, Layer> layers;
     std::map<ObjectId, LayoutCell> layoutCells;
@@ -684,6 +689,7 @@ class Project {
     ObjectId nextId();
     Coordinate snap(Coordinate value) const;
     std::vector<Diagnostic> validate() const;
+    bool trustsPackage(const std::string &package) const;
     std::string serialize() const;
     static Project deserialize(const std::string &text);
     // Saves/loads an ICE project directory. `path` may be the project root or

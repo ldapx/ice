@@ -2714,15 +2714,26 @@ TEST_CASE("schematics carry PDKs and projects carry package dependencies") {
     CHECK(project.schematicCells.at(generic).pdk == ice::genericPdkId);
     CHECK(project.schematicCells.at(packaged).pdk == "ihp.sg13g2");
     project.packageDependencies = {"ihp.sg13g2"};
+    project.trustedPackages = {"ihp.sg13g2"};
     CHECK(project.validate().empty());
+    CHECK(project.trustsPackage("ihp.sg13g2"));
+    CHECK(!project.trustsPackage("sky130"));
 
     const auto roundTrip = ice::Project::deserialize(project.serialize());
     CHECK(roundTrip.packageDependencies == std::vector<std::string>{"ihp.sg13g2"});
+    CHECK(roundTrip.trustedPackages == std::vector<std::string>{"ihp.sg13g2"});
+    CHECK(roundTrip.trustsPackage("ihp.sg13g2"));
     CHECK(roundTrip.schematicCells.at(generic).pdk == ice::genericPdkId);
     CHECK(roundTrip.schematicCells.at(packaged).pdk == "ihp.sg13g2");
 
     auto duplicated = project;
     duplicated.packageDependencies.push_back("ihp.sg13g2");
+    CHECK(!duplicated.validate().empty());
+    duplicated = project;
+    duplicated.trustedPackages.push_back("ihp.sg13g2");
+    CHECK(!duplicated.validate().empty());
+    duplicated = project;
+    duplicated.trustedPackages.push_back("../escape");
     CHECK(!duplicated.validate().empty());
     CHECK_THROWS_AS(ice::createSchematicCell(project, "empty_pdk", ""), ice::ProjectError);
     CHECK_THROWS_AS(ice::createSchematicCell(project, "bad_pdk", "../escape"), ice::ProjectError);

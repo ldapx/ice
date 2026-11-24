@@ -10,6 +10,7 @@ to stdout; diagnostics and logs go to stderr.
 ice-cli project-create <folder|project.icepro> [name]
 ice-cli project-info [folder|project.icepro]
 ice-cli project-validate <folder|project.icepro>
+ice-cli project-trust <folder|project.icepro> <pdk|package> [trusted|untrusted]
 ice-cli project-repair <folder|project.icepro>
 ice-cli doctor [project] [--probe]
 ice-cli pdk-info [pdk] [--probe]
@@ -23,6 +24,10 @@ the current directory and its parents for a single `project.icepro`.
 
 `ice-cli --version` prints the build fingerprint as JSON, including the git
 commit, build time, executable path, and feature flags.
+
+`project-trust` stores the package name in `project.icepro` so procedural
+layouts in that project may execute the package's device generators without
+setting `ICE_ALLOW_PACKAGE_CODE`. Pass `untrusted` to remove the entry.
 
 Project metadata and sidecar writes are atomic and guarded by a project lock
 and revision check. A CLI process that loaded an older revision fails with

@@ -41,9 +41,29 @@ canonical `pdk_id`, and SHA-256 content hashes.
 
 Package code is untrusted by default. Procedural layouts refuse to execute a
 PDK package's device generator unless the package declares `[trust] trusted =
-true`, or the caller explicitly sets `ICE_ALLOW_PACKAGE_CODE=1` for that
-invocation. The trust flag is advisory metadata, not a signature; use the
-environment override only for packages you have reviewed.
+true`, the project trusts that package, or the caller explicitly sets
+`ICE_ALLOW_PACKAGE_CODE=1` for that invocation. The trust flag is advisory
+metadata, not a signature; use the environment override only for packages you
+have reviewed.
+
+A project can trust specific packages without changing global package metadata.
+The list is stored in `project.icepro` as `trusted_packages`:
+
+```sh
+ice-cli project-trust designs/my-project ihp-sg13g2
+ice-cli project-trust designs/my-project sky130
+ice-cli project-trust designs/my-project ihp-sg13g2 untrusted
+```
+
+The MCP equivalent is `project_set_package_trust`, and `project_create` accepts
+an optional `trusted_package`. A project trust entry applies only to that
+project and is matched against the installed package name or PDK id. An explicit
+`ICE_ALLOW_PACKAGE_CODE=0` still denies package code for every project; `=1`
+allows it for the current invocation.
+
+Project trust is part of the project file, so only open projects from sources
+you trust. It does not pin a package version; use the package index and lockfile
+when you need version/hash pinning.
 
 ## Build and verify a PDK
 

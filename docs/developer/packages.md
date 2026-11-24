@@ -15,10 +15,22 @@ content hashes. The content hash covers the package model files, so a PDK
 package version plus hash pins the simulation stack.
 
 Package code is untrusted by default. A package's `[trust] trusted = true`
-metadata is recorded for policy decisions and gates package device generators;
-an explicit `ICE_ALLOW_PACKAGE_CODE=1` overrides the check for one invocation.
-The flag is advisory metadata, not a cryptographic signature. Scripts and
-plugins must remain behind an explicit permission boundary.
+metadata is recorded for policy decisions and gates package device generators.
+A project can additionally trust individual package names in its
+`project.icepro`:
+
+```json
+"trusted_packages": ["ihp.sg13g2", "sky130"]
+```
+
+The procedural-layout check allows package code when the package manifest is
+trusted, or when the project trusts the package manifest name or PDK id. An
+explicit `ICE_ALLOW_PACKAGE_CODE=1` overrides the check for one invocation;
+`ICE_ALLOW_PACKAGE_CODE=0` remains a global kill switch that denies package code
+even for a trusting project. The trust flag is advisory metadata, not a
+cryptographic signature. Project trust is not version-pinned; use package
+versions and lockfile hashes for supply-chain pinning. Scripts and plugins must
+remain behind an explicit permission boundary.
 
 The example packages under `examples/packages` demonstrate a minimal PDK,
 library dependency, symbol metadata, and SVG artwork. The default index ships

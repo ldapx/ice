@@ -739,6 +739,13 @@ std::string projectNameForPath(const std::filesystem::path &path) {
     return name;
 }
 
+std::string resolvePackageName(const std::string &request) {
+    const auto pdks = ice::findPdks(request);
+    if (pdks.empty())
+        throw ice::ProjectError("project.trust.package", "Unknown ICE PDK package: " + request);
+    return pdks.front().packageName;
+}
+
 json diagnosticsJson(const ice::Project &project) {
     json result = json::array();
     for (const auto &diagnostic : project.validate()) {
@@ -763,6 +770,7 @@ json projectSummary(const ice::Project &project, const std::string &path) {
         {"units",
          {{"nanometers_per_unit", project.units.nanometers_per_unit}, {"denominator", project.units.denominator}}},
         {"package_dependencies", project.packageDependencies},
+        {"trusted_packages", project.trustedPackages},
         {"schematics", json::array()},
         {"layers", json::array()},
         {"layouts", json::array()},
@@ -1341,6 +1349,7 @@ void printHelp() {
               << "  project-create <folder|project.icepro> [name]\n"
               << "  project-info [folder|project.icepro]  (ICE_PROJECT or cwd search when omitted)\n"
               << "  project-validate <folder|project.icepro>\n"
+              << "  project-trust <folder|project.icepro> <pdk|package> [trusted|untrusted]\n"
               << "  project-repair <folder|project.icepro>\n"
               << "  doctor [project] [--probe]\n"
               << "  pdk-info [pdk] [--probe]\n"
@@ -1728,6 +1737,35 @@ int main(int argc, char **argv) {
                          {"info", report["info"]}}}});
             const auto errors = report["errors"].get<std::size_t>();
             return result.ok && errors == 0 ? 0 : 1;
+        }
+
+        if (command == "project-trust") {
+            expectArguments(args, 3, 4,
+                            "project-trust <folder|project.icepro> <pdk|package> [trusted|untrusted]");
+            auto project = ice::Project::load(args[1]);
+            const auto package = resolvePackageName(args[2]);
+            bool trusted = true;
+            if (args.size() == 4) {
+                if (args[3] == "untrusted" || args[3] == "false" || args[3] == "0")
+                    trusted = false;
+                else if (args[3] != "trusted" && args[3] != "true" && args[3] != "1")
+                    argumentError("Package trust must be 'trusted' or 'untrusted'");
+            }
+            if (trusted) {
+                if (std::find(project.trustedPackages.begin(), project.trustedPackages.end(), package) ==
+                    project.trustedPackages.end())
+                    project.trustedPackages.push_back(package);
+            } else {
+                project.trustedPackages.erase(
+                    std::remove(project.trustedPackages.begin(), project.trustedPackages.end(), package),
+                    project.trustedPackages.end());
+            }
+            project.save(args[1]);
+            printJson({{"path", (ice::projectRootDirectory(args[1]) / "project.icepro").string()},
+                       {"package", package},
+                       {"trusted", trusted},
+                       {"trusted_packages", project.trustedPackages}});
+            return 0;
         }
 
         if (command == "project-repair") {

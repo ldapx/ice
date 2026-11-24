@@ -168,6 +168,27 @@ bool optionalBoolean(const json &arguments, const char *name, bool fallback = fa
     return it->get<bool>();
 }
 
+std::string resolvePackageName(const std::string &request) {
+    const auto pdks = ice::findPdks(request);
+    if (pdks.empty())
+        throw ToolError("Unknown ICE PDK package: " + request);
+    return pdks.front().packageName;
+}
+
+void addTrustedPackage(ice::Project &project, const std::string &package) {
+    if (package.empty())
+        return;
+    if (std::find(project.trustedPackages.begin(), project.trustedPackages.end(), package) ==
+        project.trustedPackages.end())
+        project.trustedPackages.push_back(package);
+}
+
+void removeTrustedPackage(ice::Project &project, const std::string &package) {
+    project.trustedPackages.erase(
+        std::remove(project.trustedPackages.begin(), project.trustedPackages.end(), package),
+        project.trustedPackages.end());
+}
+
 double numberValue(const json &value, const char *name) {
     if (value.is_number_integer())
         return static_cast<double>(value.get<std::int64_t>());
@@ -792,7 +813,8 @@ json helpJson(const std::string &requestedTopic) {
                         "implementation_export_gds"})}}},
         {"project",
          {{"tools", json::array({"project_create", "project_open", "project_summary", "project_validate",
-                                 "project_repair", "project_reload", "project_undo", "project_redo"})},
+                                 "project_set_package_trust", "project_repair", "project_reload", "project_undo",
+                                 "project_redo"})},
           {"example", {{"tool", "project_open"}, {"arguments", json::object()}}}}},
         {"schematic",
          {{"tools", json::array({"schematic_create", "schematic_add_component", "schematic_list_symbols",
@@ -2156,6 +2178,7 @@ class IceMcpServer {
             {"dirty", session_->dirty()},
             {"history_position", session_->historyPosition()},
             {"package_dependencies", project.packageDependencies},
+            {"trusted_packages", project.trustedPackages},
             {"schematics", json::array()},
             {"layers", json::array()},
             {"layouts", json::array()},
@@ -2430,6 +2453,7 @@ class IceMcpServer {
             const auto path = std::filesystem::path(requiredString(arguments, "path"));
             const auto projectName = requiredString(arguments, "name");
             const bool overwrite = optionalBoolean(arguments, "overwrite", false);
+            const auto trustedPackage = optionalString(arguments, "trusted_package");
             std::error_code status;
             const auto projectFile = ice::projectRootDirectory(path) / "project.icepro";
             if (std::filesystem::exists(projectFile, status) && !status && !overwrite)
@@ -2440,6 +2464,8 @@ class IceMcpServer {
             ice::Project project;
             project.identity = "project-" + projectName;
             project.name = projectName;
+            if (!trustedPackage.empty())
+                addTrustedPackage(project, resolvePackageName(trustedPackage));
             project.save(path);
             session_ = std::make_unique<ice::ProjectSession>(std::move(project));
             projectPath_ = path;
@@ -2541,6 +2567,19 @@ class IceMcpServer {
 
         auto &session = requireSession();
 
+        if (name == "project_set_package_trust") {
+            const auto package = resolvePackageName(requiredString(arguments, "package"));
+            const bool trusted = optionalBoolean(arguments, "trusted", true);
+            session.execute("project-set-package-trust", [&](ice::Project &project) {
+                if (trusted)
+                    addTrustedPackage(project, package);
+                else
+                    removeTrustedPackage(project, package);
+            });
+            return {{"package", package},
+                    {"trusted", trusted},
+                    {"trusted_packages", session.project().trustedPackages}};
+        }
         if (name == "project_validate")
             return {{"valid", session.project().validate().empty()}, {"diagnostics", diagnostics()}};
         if (name == "project_undo") {
@@ -5199,7 +5238,18 @@ class IceMcpServer {
                             .with_string_param("path", "Project folder or project.icepro path")
                             .with_string_param("name", "Project name")
                             .with_boolean_param("overwrite", "Replace an existing project at the path", false)
+                            .with_string_param("trusted_package",
+                                               "Optional PDK package or PDK id to trust for project-local "
+                                               "procedural layout code",
+                                               false)
                             .build());
+        tools.push_back(
+            tool_builder("project_set_package_trust")
+                .with_description("Add or remove a project-local package trust entry. Trusted packages may execute "
+                                  "package-owned code such as procedural-layout device generators.")
+                .with_string_param("package", "PDK id, package name, or package path")
+                .with_boolean_param("trusted", "True to trust the package, false to remove it", true)
+                .build());
         tools.push_back(
             tool_builder("project_open")
                 .with_description("Open an ICE project; without path, searches cwd and parents for "

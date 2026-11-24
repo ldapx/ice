@@ -72,11 +72,12 @@ and ask the user to rebuild/restart ICE.
 | `ice_help` | Return workflow topics, common tools, and example payloads. |
 | `pdk_info` | Inspect ICE PDK packages, ngspice models, OSDI setup, sections, and optional transistor probe. |
 | `pdk_build` | Build an ICE PDK package's Verilog-A sources into the OSDI cache. |
-| `project_create` | Create and open a project file. Refuses to replace an existing project unless `overwrite=true`. |
+| `project_create` | Create and open a project file. Refuses to replace an existing project unless `overwrite=true`. Optional `trusted_package` records a project-local package trust entry. |
 | `project_open` | Open a project; without `path`, search cwd/parents for exactly one `project.icepro`. Optional `recover` quarantines malformed sidecar files; `discard=true` closes unsaved changes. |
 | `project_reload` | Reload the current project from disk; requires `discard=true` when local changes are pending. |
-| `project_summary` | List schematics, layouts, layers, simulations, and simulation scripts. |
+| `project_summary` | List schematics, layouts, layers, simulations, simulation scripts, and trusted packages. |
 | `project_validate` | Return validation diagnostics. |
+| `project_set_package_trust` | Add or remove a project-local package trust entry. Trusted packages may execute package-owned code such as procedural-layout device generators. |
 | `project_repair` | Recover a project and save it after quarantining invalid files. |
 | `project_undo` / `project_redo` | Move through project history. |
 | `ice_doctor` | Inspect Python, ngspice, PDK readiness, model libraries, and optional schematic/simulation model includes. |

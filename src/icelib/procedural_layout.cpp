@@ -1303,12 +1303,17 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
             pdkRoot = pdks.front().packageRoot;
             result.pdkVersion = pdks.front().packageVersion;
             try {
-                allowPackageCode = PackageManager::readManifest(pdkRoot).trusted;
+                const auto manifest = PackageManager::readManifest(pdkRoot);
+                allowPackageCode = manifest.trusted || project.trustsPackage(manifest.name) ||
+                                   project.trustsPackage(pdks.front().id) ||
+                                   project.trustsPackage(pdks.front().packageName);
             } catch (const std::exception &) {
                 allowPackageCode = false;
             }
         }
     }
+    // An explicit environment override is still the final authority, including
+    // the 0 kill switch for a project that has trusted packages.
     if (const char *configured = std::getenv("ICE_ALLOW_PACKAGE_CODE"); configured && *configured)
         allowPackageCode = std::string(configured) != "0";
     double nanometersPerUnit = 1.0;

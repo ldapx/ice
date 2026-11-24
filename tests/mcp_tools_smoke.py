@@ -125,6 +125,7 @@ def main() -> int:
                 "schematic_netlist",
                 "schematic_wrap",
                 "project_repair",
+                "project_set_package_trust",
                 "simulation_result",
                 "simulation_signals",
                 "simulation_measure",
@@ -203,6 +204,20 @@ def main() -> int:
             assert "pdk_build" in version.get("features", []), version
             assert "layout_pex" in version.get("features", []), version
             assert "pex_device_extraction" in version.get("features", []), version
+
+            pdks = mcp.tool("pdk_info").get("pdks", [])
+            if pdks:
+                pdk = pdks[0]
+                package = pdk["package"]
+                trusted = mcp.tool(
+                    "project_set_package_trust", package=pdk["id"], trusted=True
+                )
+                assert package in trusted["trusted_packages"], trusted
+                assert package in mcp.tool("project_summary")["trusted_packages"]
+                untrusted = mcp.tool(
+                    "project_set_package_trust", package=pdk["id"], trusted=False
+                )
+                assert package not in untrusted["trusted_packages"], untrusted
             assert "polygon_device_extraction" in version.get("features", []), version
             assert "systemverilog_cells" in version.get("features", []), version
             assert "digital_hdl" in version.get("features", []), version
@@ -340,7 +355,9 @@ def main() -> int:
                 schematic="bind_test",
                 schematic_device=str(bind_component["instance"]),
             )
-            assert len(mcp.tool("layout_device_links", cell="bind_layout")["links"]) == 1
+            assert (
+                len(mcp.tool("layout_device_links", cell="bind_layout")["links"]) == 1
+            )
             bind_report = mcp.tool(
                 "lvs_run",
                 layout="bind_layout",
@@ -354,7 +371,9 @@ def main() -> int:
             mcp.tool("layout_unlink_schematic", cell="bind_layout")
             assert mcp.tool("layout_info", cell="bind_layout")["schematic"] is None
             mcp.tool("layout_link_schematic", cell="bind_layout", schematic="bind_test")
-            assert mcp.tool("layout_info", cell="bind_layout")["schematic"] == "bind_test"
+            assert (
+                mcp.tool("layout_info", cell="bind_layout")["schematic"] == "bind_test"
+            )
 
             procedural = mcp.tool("layout_create_procedural", name="proc_test")
             assert procedural["generated"], procedural
