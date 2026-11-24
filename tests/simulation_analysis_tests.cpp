@@ -1,5 +1,6 @@
 #include "icelib/measure.hpp"
 #include "icelib/operations.hpp"
+#include "icelib/pdk.hpp"
 #include "icelib/simulation.hpp"
 
 #include <doctest/doctest.h>
@@ -72,6 +73,86 @@ TEST_CASE("ngspice adapter supports AC sweep analysis") {
         checkClose(out->values.front(), 1.0, 0.01);
 }
 
+TEST_CASE("ngspice adapter reloads a new circuit for repeated AC analyses") {
+    auto first = rcRequest("ac");
+    first.netlist = {"* first divider", "V1 in 0 DC 1 AC 1", "R1 in out 1k", "R2 out 0 1k"};
+    first.acVariation = "dec";
+    first.acPoints = 5;
+    first.acStart = 1.0;
+    first.acStop = 1e6;
+    first.probeSignals = {"out"};
+    const auto firstResult = ice::SimulationRunner().run(first, std::chrono::seconds(5));
+    REQUIRE(firstResult.state == ice::JobState::succeeded);
+    const auto *firstOut = traceNamed(firstResult, "out");
+    REQUIRE(firstOut != nullptr);
+    checkClose(firstOut->values.front(), 0.5, 0.02);
+
+    auto second = first;
+    second.netlist = {"* second divider", "V1 in 0 DC 1 AC 1", "R1 in out 1k", "R2 out 0 2k"};
+    const auto secondResult = ice::SimulationRunner().run(second, std::chrono::seconds(5));
+    REQUIRE(secondResult.state == ice::JobState::succeeded);
+    const auto *secondOut = traceNamed(secondResult, "out");
+    REQUIRE(secondOut != nullptr);
+    checkClose(secondOut->values.front(), 2.0 / 3.0, 0.02);
+}
+
+TEST_CASE("ngspice adapter does not reuse a circuit after a failed load") {
+    auto first = rcRequest("ac");
+    first.netlist = {"* valid divider", "V1 in 0 DC 1 AC 1", "R1 in out 1k", "R2 out 0 1k"};
+    first.acVariation = "dec";
+    first.acPoints = 5;
+    first.acStart = 1.0;
+    first.acStop = 1e6;
+    first.probeSignals = {"out"};
+    const auto firstResult = ice::SimulationRunner().run(first, std::chrono::seconds(5));
+    REQUIRE(firstResult.state == ice::JobState::succeeded);
+
+    auto broken = first;
+    broken.netlist = {"* invalid circuit", "V1 in 0 DC 1 AC 1", "R1 in out 1k",
+                      "X1 out 0 missing_subcircuit"};
+    const auto brokenResult = ice::SimulationRunner().run(broken, std::chrono::seconds(5));
+    CHECK(brokenResult.state == ice::JobState::failed);
+}
+
+TEST_CASE("ngspice adapter reloads OSDI circuits between runs") {
+    if (ice::findPdks("ihp-sg13g2").empty())
+        return;
+    ice::PdkSimulationSetup setup;
+    try {
+        setup = ice::pdkSimulationSetupFor("ihp-sg13g2");
+    } catch (const std::exception &) {
+        return;
+    }
+
+    auto divider = rcRequest("ac");
+    divider.netlist = setup.netlistLines;
+    divider.netlist.insert(divider.netlist.end(),
+                           {"* divider", "V1 in 0 DC 1 AC 1", "R1 in out 1k", "R2 out 0 1k"});
+    divider.initCommands = setup.initCommands;
+    divider.acVariation = "dec";
+    divider.acPoints = 5;
+    divider.acStart = 1.0;
+    divider.acStop = 1e6;
+    divider.probeSignals = {"out"};
+    const auto dividerResult = ice::SimulationRunner().run(divider, std::chrono::seconds(20));
+    REQUIRE(dividerResult.state == ice::JobState::succeeded);
+    const auto *dividerOut = traceNamed(dividerResult, "out");
+    REQUIRE(dividerOut != nullptr);
+    checkClose(dividerOut->values.front(), 0.5, 0.02);
+
+    auto mosfet = divider;
+    mosfet.netlist = setup.netlistLines;
+    mosfet.netlist.insert(
+        mosfet.netlist.end(),
+        {"* follower", "vdd vdd 0 1.2", "vin in 0 DC 0.7 AC 1",
+         "x1 vdd in out out sg13_lv_nmos w=40u l=0.5u", "rs out 0 2k"});
+    const auto mosfetResult = ice::SimulationRunner().run(mosfet, std::chrono::seconds(20));
+    REQUIRE(mosfetResult.state == ice::JobState::succeeded);
+    const auto *mosfetOut = traceNamed(mosfetResult, "out");
+    REQUIRE(mosfetOut != nullptr);
+    CHECK(std::abs(mosfetOut->values.front() - 0.5) > 0.05);
+}
+
 TEST_CASE("ngspice adapter supports operating point analysis") {
     auto request = rcRequest("op");
     request.probeSignals = {"out"};
@@ -95,6 +176,17 @@ TEST_CASE("ngspice adapter supports transfer-function analysis") {
     CHECK(result.scalars.contains("output_impedance"));
     if (const auto value = result.scalars.find("transfer_function"); value != result.scalars.end())
         checkClose(value->second, 1.0, 0.01);
+    if (const auto value = result.scalars.find("output_impedance"); value != result.scalars.end())
+        checkClose(value->second, 1000.0, 1.0);
+}
+
+TEST_CASE("transfer-function output impedance accepts a v(node) output expression") {
+    auto request = rcRequest("tf");
+    request.tfOutput = "v(out)";
+    request.tfSource = "V1";
+    const auto result = ice::SimulationRunner().run(request, std::chrono::seconds(5));
+    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.scalars.contains("output_impedance"));
     if (const auto value = result.scalars.find("output_impedance"); value != result.scalars.end())
         checkClose(value->second, 1000.0, 1.0);
 }

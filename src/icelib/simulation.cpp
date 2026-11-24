@@ -81,6 +81,11 @@ struct NgspiceLog {
     std::string text;
     std::mutex mutex;
 
+    void clear() {
+        std::lock_guard lock(mutex);
+        text.clear();
+    }
+
     void append(const char *message) {
         if (!message || !*message)
             return;
@@ -625,6 +630,14 @@ bool fetchComplexVector(const std::string &name, std::vector<double> &magnitude,
     return false;
 }
 
+std::string transferOutputNode(const std::string &expression) {
+    const auto text = trimCopy(expression);
+    const auto lowered = lowerCopy(text);
+    if (lowered.starts_with("v(") && text.ends_with(')') && text.size() > 3)
+        return trimCopy(text.substr(2, text.size() - 3));
+    return text;
+}
+
 std::string vectorExpressionForSignal(const std::string &signal) {
     std::string name = trimCopy(signal);
     const auto lowered = lowerCopy(name);
@@ -781,12 +794,33 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         circuit.push_back(line.data());
     circuit.push_back(nullptr);
 
-    NgspiceLog log;
-    if (ngSpice_Init(collectOutput, collectStatus, collectExit, nullptr, nullptr, nullptr, &log) != 0) {
-        result.state = JobState::failed;
-        result.error = "ngspice could not initialize";
-        appendFailureDetails(result.error, compactNgspiceLog(log));
-        return result;
+    // ngspice's shared library keeps callbacks, OSDI models, circuits, and
+    // plots in process-wide state. Initialize it once with a persistent
+    // callback log; then clear the previous circuit/plots before each run while
+    // keeping the loaded PDK models (ngSpice_Reset would unload the OSDI models
+    // and break the next MOSFET load).
+    static NgspiceLog ngspiceLog;
+    static bool ngspiceInitialized = false;
+    auto &log = ngspiceLog;
+    log.clear();
+    if (!ngspiceInitialized) {
+        if (ngSpice_Init(collectOutput, collectStatus, collectExit, nullptr, nullptr, nullptr, &log) != 0) {
+            result.state = JobState::failed;
+            result.error = "ngspice could not initialize";
+            appendFailureDetails(result.error, compactNgspiceLog(log));
+            return result;
+        }
+        ngspiceInitialized = true;
+    } else {
+        char destroy[] = "destroy all";
+        char remcirc[] = "remcirc";
+        ngSpice_Command(destroy);
+        // Remove accumulated circuits, stopping when ngspice reports that
+        // there is nothing left to remove.
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            if (ngSpice_Command(remcirc) != 0)
+                break;
+        }
     }
     for (const auto &command : request.initCommands) {
         std::vector<char> buffer(command.begin(), command.end());
@@ -908,7 +942,7 @@ SimulationResult NgspiceSimulator::run(const SimulationRequest &request, const C
         xAxis = "transfer function";
         xUnit = "";
         scalarAnalysis = true;
-        analysisOutput = output;
+        analysisOutput = transferOutputNode(output);
     }
 
     if (token.cancelled()) {
