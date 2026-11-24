@@ -374,6 +374,10 @@ struct LayoutCell {
     // Generated cells stay ordinary layout cells so they can be inspected,
     // exported, and used as instances by other cells.
     ObjectId generatedBy = 0;
+    // Schematic cell this layout was created from or manually linked to.
+    // LVS prefers this link over name inference and the GUI uses it for
+    // cross-probing.
+    ObjectId schematicCell = 0;
 };
 
 // A layout whose geometry is produced by a Python script. The generated

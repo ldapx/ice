@@ -2,6 +2,7 @@
 
 #include "agent_transcript.hpp"
 #include "icelib/core.hpp"
+#include "icelib/verification.hpp"
 
 #include <QAction>
 #include <QColor>
@@ -65,6 +66,18 @@ class ActivityPanel : public QWidget {
     void showDrcTab();
     void setLvsReport(const ice::LvsReport &report);
     void setOnLvsMismatchActivated(std::function<void(const ice::LvsMismatch &)> callback);
+    void setOnLvsObjectActivated(std::function<void(const ice::LvsObjectRef &)> callback) {
+        onLvsObjectActivated_ = std::move(callback);
+    }
+    void setOnLvsBindDevice(std::function<void(const ice::LvsDeviceMatch &)> callback) {
+        onLvsBindDevice_ = std::move(callback);
+    }
+    void setOnLvsUnbindDevice(std::function<void(const ice::LvsDeviceMatch &)> callback) {
+        onLvsUnbindDevice_ = std::move(callback);
+    }
+    void setOnLvsPromoteDevice(std::function<void(const ice::LvsDeviceMatch &)> callback) {
+        onLvsPromoteDevice_ = std::move(callback);
+    }
     void setLvsError(const QString &message);
     void showLvsTab();
     void setOnGenerateTimingReport(std::function<void()> callback) { onGenerateTimingReport_ = std::move(callback); }
@@ -178,12 +191,23 @@ class ActivityPanel : public QWidget {
     QPushButton *copyMessagesButton_ = nullptr;
     QLabel *lvsSummary_ = nullptr;
     QTableWidget *lvsTable_ = nullptr;
+    QTabWidget *lvsTabs_ = nullptr;
+    QTableWidget *lvsDevicesTable_ = nullptr;
+    QTableWidget *lvsNetsTable_ = nullptr;
+    QTableWidget *lvsPortsTable_ = nullptr;
     QTableWidget *timingTable_ = nullptr;
     QPlainTextEdit *timingReport_ = nullptr;
     std::vector<ice::DrcViolation> drcViolations_;
     std::vector<ice::LvsMismatch> lvsMismatches_;
+    std::vector<ice::LvsDeviceMatch> lvsDevices_;
+    std::vector<ice::LvsNetMatch> lvsNets_;
+    std::vector<ice::LvsPortMatch> lvsPorts_;
     std::function<void(const ice::DrcViolation &)> onDrcViolationActivated_;
     std::function<void(const ice::LvsMismatch &)> onLvsMismatchActivated_;
+    std::function<void(const ice::LvsObjectRef &)> onLvsObjectActivated_;
+    std::function<void(const ice::LvsDeviceMatch &)> onLvsBindDevice_;
+    std::function<void(const ice::LvsDeviceMatch &)> onLvsUnbindDevice_;
+    std::function<void(const ice::LvsDeviceMatch &)> onLvsPromoteDevice_;
     std::function<void()> onGenerateTimingReport_;
     QComboBox *reportSelector_ = nullptr;
     QStackedWidget *reportStack_ = nullptr;
@@ -376,8 +400,7 @@ class EmptyLayoutPanel : public QWidget {
     void setOnOpen(OpenCallback callback);
     // `layoutsExist` hides the create controls, which are only offered when
     // the project has no layout cells yet.
-    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates,
-                           bool layoutsExist = false);
+    void setOpenCandidates(const std::vector<std::pair<ice::ObjectId, QString>> &candidates, bool layoutsExist = false);
     void refreshPdks(const std::filesystem::path &installDirectory);
     void prepareForDisplay();
     // Fills the name field with the suggested default unless the user typed

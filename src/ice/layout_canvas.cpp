@@ -2801,7 +2801,7 @@ class LayoutCanvasImpl : public LayoutCanvas {
             // Empty canvas space: the host builds the tool/clipboard menu.
             auto *hit = itemAt(event->pos());
             const bool onTagged = hit && !hit->data(2).toString().isEmpty();
-            auto *figure = (!hit || onTagged) ? nullptr : layoutFigureOwner(hit);
+            auto *figure = layoutContextFigure(hit);
             if (!hit || (!figure && !onTagged)) {
                 emptyContextMenu_(event->globalPos());
                 event->accept();
@@ -2812,12 +2812,34 @@ class LayoutCanvasImpl : public LayoutCanvas {
             // Right-clicking a figure opens its menu. The press handler already
             // selected it; select here too so the menu never silently vanishes.
             auto *hit = itemAt(event->pos());
-            auto *figure = hit && hit->data(2).toString().isEmpty() ? layoutFigureOwner(hit) : nullptr;
+            auto *figure = hit ? layoutContextFigure(hit) : nullptr;
+            // Planned devices keep their device-specific menu in the host so
+            // Draw Manually / Place Device remain available next to the link
+            // actions.
+            if (figure && figure->data(2).toString() == QStringLiteral("planned-device"))
+                figure = nullptr;
             if (figure) {
                 const auto id = static_cast<ice::ObjectId>(figure->data(0).toULongLong());
                 if (id != 0) {
                     if (!figure->isSelected())
                         selectLayoutFigure(figure);
+                    if (figure->data(1).toString() == QStringLiteral("layout-instance")) {
+                        if (figureContextAction_) {
+                            QMenu menu(this);
+                            auto *locateAction = menu.addAction(QStringLiteral("Locate Schematic Counterpart"));
+                            auto *bindAction = menu.addAction(QStringLiteral("Bind to Schematic Device…"));
+                            auto *clearAction = menu.addAction(QStringLiteral("Clear Schematic Binding"));
+                            auto *chosen = menu.exec(event->globalPos());
+                            if (chosen == locateAction)
+                                figureContextAction_(id, FigureContextAction::locateSchematicCounterpart);
+                            else if (chosen == bindAction)
+                                figureContextAction_(id, FigureContextAction::bindToSchematicDevice);
+                            else if (chosen == clearAction)
+                                figureContextAction_(id, FigureContextAction::clearSchematicBinding);
+                            event->accept();
+                            return;
+                        }
+                    }
                     QMenu menu(this);
                     menu.addAction(QStringLiteral("Traced net"));
                     auto *rotateAction = menu.addAction(QStringLiteral("Rotate"));
@@ -2825,6 +2847,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
                     QAction *flattenAction = nullptr;
                     if (dynamic_cast<LayoutPathItem *>(figure))
                         flattenAction = menu.addAction(QStringLiteral("Flatten to Polygon"));
+                    QAction *locateSchematicAction = nullptr;
+                    QAction *bindSchematicAction = nullptr;
+                    QAction *clearSchematicAction = nullptr;
+                    if (figure->data(1).toString() == QStringLiteral("layout-instance") ||
+                        figure->data(2).toString() == QStringLiteral("planned-device")) {
+                        menu.addSeparator();
+                        locateSchematicAction = menu.addAction(QStringLiteral("Locate Schematic Counterpart"));
+                        bindSchematicAction = menu.addAction(QStringLiteral("Bind to Schematic Device…"));
+                        clearSchematicAction = menu.addAction(QStringLiteral("Clear Schematic Binding"));
+                    }
+                    menu.addSeparator();
                     auto *duplicateAction = menu.addAction(QStringLiteral("Duplicate"));
                     auto *arrayAction = menu.addAction(QStringLiteral("Create Array..."));
                     auto *arrangeMenu = menu.addMenu(QStringLiteral("Arrange"));
@@ -2865,6 +2898,12 @@ class LayoutCanvasImpl : public LayoutCanvas {
                         action = FigureContextAction::flip;
                     else if (flattenAction && chosen == flattenAction)
                         action = FigureContextAction::flattenPath;
+                    else if (locateSchematicAction && chosen == locateSchematicAction)
+                        action = FigureContextAction::locateSchematicCounterpart;
+                    else if (bindSchematicAction && chosen == bindSchematicAction)
+                        action = FigureContextAction::bindToSchematicDevice;
+                    else if (clearSchematicAction && chosen == clearSchematicAction)
+                        action = FigureContextAction::clearSchematicBinding;
                     else if (chosen == duplicateAction)
                         action = FigureContextAction::duplicate;
                     else if (chosen == arrayAction)
@@ -3312,6 +3351,17 @@ class LayoutCanvasImpl : public LayoutCanvas {
                 owner = cursor;
         }
         return owner;
+    }
+
+    QGraphicsItem *layoutContextFigure(QGraphicsItem *item) const {
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            if (cursor->data(1).toString() == QStringLiteral("layout-instance") ||
+                cursor->data(2).toString() == QStringLiteral("planned-device"))
+                return cursor;
+            if (!cursor->data(2).toString().isEmpty())
+                return nullptr;
+        }
+        return layoutFigureOwner(item);
     }
 
     // Figures stacked under one cursor position, topmost first. Repeated

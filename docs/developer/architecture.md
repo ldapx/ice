@@ -1598,6 +1598,18 @@ a topology fallback after `m=` multiplicity expansion. Behavioral
 SystemVerilog is rejected for LVS instead of being compared as ports only;
 gate-level module instances and primitives are compared device by device.
 
+LVS also returns the complete correspondence, not only failures. Device matches
+record whether they came from an authored link, a unique normalized name, or a
+terminal-topology match; pin and net maps, parameter comparisons, typed object
+references, and layout bounds are included. Authored links remain stored on
+layout instances and planned devices, so the report is derived and does not
+create a second source of truth. Manual bind/unbind operations edit those
+fields through `icelib`, and `Project::validate()` reports stale or duplicate
+links. A layout cell may also carry one cell-level link to a schematic cell;
+LVS prefers it over name inference, which lets separately authored schematic
+and layout cells be paired explicitly. Geometry-extracted device anchors and
+recursive hierarchical correspondence remain later extensions.
+
 ---
 
 ## 36. Parasitic Extraction

@@ -17,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <tuple>
 
 namespace ice {
 namespace {
@@ -1220,6 +1221,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
     const auto pdk = schematic.pdk.empty() ? std::string{genericPdkId} : schematic.pdk;
     const auto layoutId = createLayoutCell(project, layoutName, pdk, std::move(stack));
     auto &layout = project.layoutCells.at(layoutId);
+    layout.schematicCell = schematicId;
 
     std::vector<const SchematicInstance *> orderedInstances;
     orderedInstances.reserve(schematic.instances.size());
@@ -1363,6 +1365,23 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
         }
     }
     return layoutId;
+}
+
+void linkLayoutToSchematic(Project &project, ObjectId layoutCellId, ObjectId schematicCellId) {
+    auto &layout = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
+    if (layout.library || layout.readOnly)
+        throw ProjectError("layout.schematic_link", "Library and read-only layout cells cannot be edited");
+    const auto schematic = project.schematicCells.find(schematicCellId);
+    if (schematic == project.schematicCells.end())
+        throw ProjectError("schematic.cell", "Schematic cell does not exist");
+    layout.schematicCell = schematicCellId;
+}
+
+void unlinkLayoutFromSchematic(Project &project, ObjectId layoutCellId) {
+    auto &layout = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
+    if (layout.library || layout.readOnly)
+        throw ProjectError("layout.schematic_link", "Library and read-only layout cells cannot be edited");
+    layout.schematicCell = 0;
 }
 std::string nextShapeName(const LayoutCell &cell, const std::string &type) {
     std::set<std::string> names;
@@ -2114,6 +2133,111 @@ void arrangeLayoutShapes(Project &project, ObjectId cellId, const std::vector<Ob
         if (shape != cell.shapes.end())
             translateShapeGeometry(shape->second, offset.x, offset.y);
     }
+}
+
+std::vector<LayoutDeviceBinding> layoutDeviceBindings(const Project &project, ObjectId layoutCellId,
+                                                      ObjectId schematicCellId) {
+    const auto cell = project.layoutCells.find(layoutCellId);
+    if (cell == project.layoutCells.end())
+        throw ProjectError("layout.cell", "Layout cell does not exist");
+
+    std::map<ObjectId, std::pair<ObjectId, std::string>> schematicInstances;
+    for (const auto &[cellId, schematic] : project.schematicCells) {
+        for (const auto &[instanceId, instance] : schematic.instances)
+            schematicInstances.emplace(instanceId, std::make_pair(cellId, instance.name));
+    }
+
+    std::vector<LayoutDeviceBinding> bindings;
+    const auto add = [&](ObjectId objectId, LayoutDeviceKind kind, const std::string &layoutName,
+                         ObjectId schematicInstance) {
+        if (schematicInstance == 0)
+            return;
+        LayoutDeviceBinding binding;
+        binding.layoutCell = layoutCellId;
+        binding.layoutObject = objectId;
+        binding.kind = kind;
+        binding.layoutName = layoutName;
+        binding.schematicInstance = schematicInstance;
+        if (const auto found = schematicInstances.find(schematicInstance); found != schematicInstances.end()) {
+            binding.schematicCell = found->second.first;
+            binding.schematicName = found->second.second;
+            if (schematicCellId != 0 && binding.schematicCell != schematicCellId)
+                return;
+        } else {
+            binding.stale = true;
+            if (schematicCellId != 0)
+                return;
+        }
+        bindings.push_back(std::move(binding));
+    };
+    for (const auto &[id, instance] : cell->second.instances)
+        add(id, LayoutDeviceKind::instance, instance.name, instance.schematicInstance);
+    for (const auto &[id, device] : cell->second.plannedDevices)
+        add(id, LayoutDeviceKind::plannedDevice, device.name, device.schematicInstance);
+
+    using CountKey = std::tuple<LayoutDeviceKind, ObjectId, ObjectId>;
+    std::map<CountKey, int> counts;
+    for (const auto &binding : bindings) {
+        if (!binding.stale)
+            ++counts[{binding.kind, binding.schematicCell, binding.schematicInstance}];
+    }
+    for (auto &binding : bindings) {
+        if (!binding.stale)
+            binding.duplicate = counts[{binding.kind, binding.schematicCell, binding.schematicInstance}] > 1;
+    }
+    std::sort(bindings.begin(), bindings.end(), [](const LayoutDeviceBinding &left, const LayoutDeviceBinding &right) {
+        if (left.kind != right.kind)
+            return left.kind == LayoutDeviceKind::instance;
+        return left.layoutObject < right.layoutObject;
+    });
+    return bindings;
+}
+
+void bindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject, ObjectId schematicCellId,
+                      ObjectId schematicInstance) {
+    auto &cell = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
+    if (cell.library || cell.readOnly)
+        throw ProjectError("layout.device_link", "Library and read-only layout cells cannot be edited");
+    const auto schematic = project.schematicCells.find(schematicCellId);
+    if (schematic == project.schematicCells.end())
+        throw ProjectError("schematic.cell", "Schematic cell does not exist");
+    const auto schematicInstanceIt = schematic->second.instances.find(schematicInstance);
+    if (schematicInstanceIt == schematic->second.instances.end())
+        throw ProjectError("schematic.instance", "Schematic instance does not exist");
+    if (const auto symbol = schematic->second.symbols.find(schematicInstanceIt->second.symbol);
+        symbol != schematic->second.symbols.end()) {
+        const auto symbolName = symbol->second.name;
+        if (schematicPortKindForSymbol(symbolName) != SchematicPortKind::none)
+            throw ProjectError("schematic.device", "Schematic ports cannot be bound as layout devices");
+        const auto element = symbol->second.sourceCell != 0 ? 'X' : spiceElementForSymbol(symbolName);
+        if (element == 'V' || element == 'I' || element == 'G')
+            throw ProjectError("schematic.device", "Supply and ground instances cannot be bound as layout devices");
+    }
+
+    if (const auto instance = cell.instances.find(layoutObject); instance != cell.instances.end()) {
+        instance->second.schematicInstance = schematicInstance;
+        return;
+    }
+    if (const auto device = cell.plannedDevices.find(layoutObject); device != cell.plannedDevices.end()) {
+        device->second.schematicInstance = schematicInstance;
+        return;
+    }
+    throw ProjectError("layout.device", "Layout device does not exist");
+}
+
+void unbindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject) {
+    auto &cell = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
+    if (cell.library || cell.readOnly)
+        throw ProjectError("layout.device_link", "Library and read-only layout cells cannot be edited");
+    if (const auto instance = cell.instances.find(layoutObject); instance != cell.instances.end()) {
+        instance->second.schematicInstance = 0;
+        return;
+    }
+    if (const auto device = cell.plannedDevices.find(layoutObject); device != cell.plannedDevices.end()) {
+        device->second.schematicInstance = 0;
+        return;
+    }
+    throw ProjectError("layout.device", "Layout device does not exist");
 }
 
 namespace {
@@ -2995,6 +3119,10 @@ void removeSchematicCell(Project &project, ObjectId cellId) {
                            "Schematic '" + cell->second.name +
                                "' is used by hierarchical symbols: " + joinNames(symbols));
 
+    for (auto &[_, layout] : project.layoutCells) {
+        if (layout.schematicCell == cellId)
+            layout.schematicCell = 0;
+    }
     project.schematicCells.erase(cellId);
 }
 

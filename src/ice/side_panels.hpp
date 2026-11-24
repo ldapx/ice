@@ -27,6 +27,7 @@ class ProjectPanel : public QWidget {
     void setOnAddClicked(std::function<void()> callback);
     void setOnRemoveClicked(std::function<void(ice::ObjectId)> callback);
     void setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId)> callback);
+    void setOnLinkSchematicToLayout(std::function<void(ice::ObjectId)> callback);
     void setOnActivateSchematic(std::function<void(ice::ObjectId)> callback);
     void setOnActivateLayout(std::function<void(ice::ObjectId)> callback);
     using InstanceCallback = std::function<void(ice::ObjectId ownerCellId, ice::ObjectId instanceId)>;
@@ -40,6 +41,8 @@ class ProjectPanel : public QWidget {
     void setOnPortVisibilityChanged(PortVisibilityCallback callback);
     void setOnRegenerateProceduralLayout(std::function<void(ice::ObjectId)> callback);
     void setOnRunPex(std::function<void(ice::ObjectId)> callback);
+    void setOnLinkLayoutToSchematic(std::function<void(ice::ObjectId)> callback);
+    void setOnUnlinkLayoutFromSchematic(std::function<void(ice::ObjectId)> callback);
     using RenameCallback = std::function<void(ice::ObjectId id, const std::string &name)>;
     using RenameChildCallback = std::function<void(ice::ObjectId parentId, ice::ObjectId id, const std::string &name)>;
     void setOnRenameLayout(RenameCallback callback);
@@ -72,6 +75,7 @@ class ProjectPanel : public QWidget {
     std::function<void()> onAdd_;
     std::function<void(ice::ObjectId)> onRemove_;
     std::function<void(ice::ObjectId)> onMakeLayoutFromSchematic_;
+    std::function<void(ice::ObjectId)> onLinkSchematicToLayout_;
     std::function<void(ice::ObjectId)> onActivateSchematic_;
     std::function<void(ice::ObjectId)> onActivateLayout_;
     InstanceCallback onInstanceSelected_;
@@ -79,6 +83,8 @@ class ProjectPanel : public QWidget {
     PortVisibilityCallback onPortVisibilityChanged_;
     std::function<void(ice::ObjectId)> onRegenerateProceduralLayout_;
     std::function<void(ice::ObjectId)> onRunPex_;
+    std::function<void(ice::ObjectId)> onLinkLayoutToSchematic_;
+    std::function<void(ice::ObjectId)> onUnlinkLayoutFromSchematic_;
     RenameCallback onRenameLayout_;
     RenameCallback onRenameProceduralLayout_;
     RenameChildCallback onRenameInstance_;

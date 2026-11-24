@@ -806,9 +806,10 @@ json helpJson(const std::string &requestedTopic) {
         {"analog-layout",
          {{"summary", "Build compact procedural analog layouts with composition handles, constraints, and cell "
                       "generators, then verify area utilization, LVS, DRC, and PEX."},
-          {"tools",
-           json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate", "layout_get_script",
-                        "layout_info", "layout_review", "lvs_run", "drc_run", "pex_run"})},
+          {"tools", json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate",
+                                 "layout_get_script", "layout_info", "layout_review", "layout_link_schematic",
+                                 "layout_unlink_schematic", "layout_bind_device", "layout_unbind_device",
+                                 "layout_device_links", "lvs_run", "drc_run", "pex_run"})},
           {"steps",
            json::array({"Create or open the project and create a procedural layout with layout_create_procedural.",
                         "Declare layout.plan(devices=..., rows=..., target_utilization=..., max_gap_um=...) before "
@@ -889,11 +890,17 @@ json helpJson(const std::string &requestedTopic) {
                                  "standard-cell GDS decks and KLayout is installed."})}}},
         {"verification",
          {{"tools", json::array({"schematic_validate", "schematic_validate_hierarchy", "lvs_run", "drc_run", "pex_run",
-                                 "project_validate"})},
+                                 "layout_link_schematic", "layout_unlink_schematic", "layout_bind_device",
+                                 "layout_unbind_device", "layout_device_links", "project_validate"})},
           {"notes", json::array({"drc_run exports the layout, invokes gdscheck with the PDK process deck, and "
                                  "returns normalized violations.",
                                  "lvs_run compares a layout against a schematic; the schematic is inferred when "
                                  "omitted.",
+                                 "lvs_run includes devices, nets, and ports correspondence with match methods, "
+                                 "typed refs, candidates, and layout bounds.",
+                                 "layout_device_links exposes authored device links; bind and unbind edit them.",
+                                 "layout_link_schematic pairs existing layout and schematic cells so LVS does not "
+                                 "need name inference.",
                                  "Use implementation_log and implementation_status to inspect route DRC, antenna, "
                                  "timing, and power results from the physical flow."})}}},
         {"simulation",
@@ -1429,6 +1436,83 @@ ice::ObjectId resolveLayoutNet(const ice::LayoutCell &cell, const json &value) {
 
 ice::ObjectId resolveLayoutPort(const ice::LayoutCell &cell, const json &value) {
     return lookupByIdOrName(cell.ports, value, "layout port");
+}
+
+ice::ObjectId resolveLayoutDevice(const ice::LayoutCell &cell, const json &value) {
+    const auto lookup = [&](const std::string &text) -> std::optional<ice::ObjectId> {
+        if (text.starts_with("instance:")) {
+            const auto name = text.substr(std::string("instance:").size());
+            for (const auto &[id, instance] : cell.instances) {
+                if (instance.name == name)
+                    return id;
+            }
+            return std::nullopt;
+        }
+        if (text.starts_with("planned:")) {
+            const auto name = text.substr(std::string("planned:").size());
+            for (const auto &[id, device] : cell.plannedDevices) {
+                if (device.name == name)
+                    return id;
+            }
+            return std::nullopt;
+        }
+        return std::nullopt;
+    };
+    if (value.is_string()) {
+        const auto text = value.get<std::string>();
+        if (const auto id = lookup(text))
+            return *id;
+        std::size_t consumed = 0;
+        try {
+            const auto id = static_cast<ice::ObjectId>(std::stoull(text, &consumed));
+            if (consumed == text.size() && (cell.instances.contains(id) || cell.plannedDevices.contains(id)))
+                return id;
+        } catch (const std::exception &) {
+        }
+    }
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        const auto id = static_cast<ice::ObjectId>(value.get<std::uint64_t>());
+        if (cell.instances.contains(id) || cell.plannedDevices.contains(id))
+            return id;
+        throw ToolError("Unknown layout device id: " + std::to_string(id));
+    }
+    if (value.is_string()) {
+        const auto text = value.get<std::string>();
+        std::optional<ice::ObjectId> instance;
+        std::optional<ice::ObjectId> planned;
+        for (const auto &[id, entry] : cell.instances) {
+            if (entry.name == text)
+                instance = id;
+        }
+        for (const auto &[id, entry] : cell.plannedDevices) {
+            if (entry.name == text)
+                planned = id;
+        }
+        if (instance && planned)
+            throw ToolError("Layout device name is ambiguous; use instance:<name> or planned:<name>: " + text);
+        if (instance)
+            return *instance;
+        if (planned)
+            return *planned;
+    }
+    throw ToolError("Unknown layout device: " + value.dump());
+}
+
+json layoutDeviceBindingJson(const ice::Project &project, const ice::LayoutDeviceBinding &binding) {
+    json value{{"layout_cell", binding.layoutCell},
+               {"layout_object", binding.layoutObject},
+               {"layout_kind", binding.kind == ice::LayoutDeviceKind::instance ? "instance" : "planned_device"},
+               {"layout_name", binding.layoutName},
+               {"schematic_instance", binding.schematicInstance},
+               {"schematic_instance_name", binding.schematicName},
+               {"stale", binding.stale},
+               {"duplicate", binding.duplicate}};
+    if (binding.schematicCell != 0) {
+        value["schematic_cell"] = binding.schematicCell;
+        if (const auto cell = project.schematicCells.find(binding.schematicCell); cell != project.schematicCells.end())
+            value["schematic"] = cell->second.name;
+    }
+    return value;
 }
 
 std::vector<ice::ObjectId> resolveLayoutShapes(const ice::LayoutCell &cell, const json &value) {
@@ -4384,6 +4468,54 @@ class IceMcpServer {
                             [&](ice::Project &project) { ice::arrangeLayoutShapes(project, cell, shapes, operation); });
             return {{"cell", cell}, {"operation", requiredString(arguments, "operation")}, {"shapes", shapes}};
         }
+        if (name == "layout_bind_device") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto device =
+                resolveLayoutDevice(session.project().layoutCells.at(cell), requiredValue(arguments, "device"));
+            const auto schematic =
+                resolveSchematicArgument(session.project(), arguments, {"schematic", "schematic_cell"});
+            const auto schematicInstance =
+                lookupByIdOrName(session.project().schematicCells.at(schematic).instances,
+                                 requiredValue(arguments, "schematic_device"), "schematic instance");
+            session.execute("mcp layout-bind-device", [&](ice::Project &project) {
+                ice::bindLayoutDevice(project, cell, device, schematic, schematicInstance);
+            });
+            return {
+                {"cell", cell}, {"device", device}, {"schematic", schematic}, {"schematic_device", schematicInstance}};
+        }
+        if (name == "layout_unbind_device") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto device =
+                resolveLayoutDevice(session.project().layoutCells.at(cell), requiredValue(arguments, "device"));
+            session.execute("mcp layout-unbind-device",
+                            [&](ice::Project &project) { ice::unbindLayoutDevice(project, cell, device); });
+            return {{"cell", cell}, {"device", device}, {"unbound", true}};
+        }
+        if (name == "layout_device_links") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            ice::ObjectId schematic = 0;
+            const auto schematicValue = arguments.find("schematic");
+            if (schematicValue != arguments.end() && !schematicValue->is_null())
+                schematic = lookupByIdOrName(session.project().schematicCells, *schematicValue, "schematic");
+            json links = json::array();
+            for (const auto &binding : ice::layoutDeviceBindings(session.project(), cell, schematic))
+                links.push_back(layoutDeviceBindingJson(session.project(), binding));
+            return {{"cell", cell}, {"links", std::move(links)}};
+        }
+        if (name == "layout_link_schematic") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            const auto schematic =
+                resolveSchematicArgument(session.project(), arguments, {"schematic", "schematic_cell"});
+            session.execute("mcp layout-link-schematic",
+                            [&](ice::Project &project) { ice::linkLayoutToSchematic(project, cell, schematic); });
+            return {{"cell", cell}, {"schematic", schematic}};
+        }
+        if (name == "layout_unlink_schematic") {
+            const auto cell = resolveLayoutCell(session.project(), arguments);
+            session.execute("mcp layout-unlink-schematic",
+                            [&](ice::Project &project) { ice::unlinkLayoutFromSchematic(project, cell); });
+            return {{"cell", cell}, {"unlinked", true}};
+        }
         if (name == "schematic_wrap") {
             const auto cell = resolveSchematicArgument(session.project(), arguments, {"schematic", "cell"});
             const auto instances = resolveSchematicInstances(session.project().schematicCells.at(cell),
@@ -4539,6 +4671,15 @@ class IceMcpServer {
                     {"pdk", cell.pdk},
                     {"stack", cell.stack},
                     {"device", cell.device},
+                    {"schematic_cell", cell.schematicCell == 0 ? json(nullptr) : json(cell.schematicCell)},
+                    {"schematic",
+                     [&]() -> json {
+                         if (cell.schematicCell == 0)
+                             return nullptr;
+                         const auto schematic = session.project().schematicCells.find(cell.schematicCell);
+                         return schematic == session.project().schematicCells.end() ? json(nullptr)
+                                                                                    : json(schematic->second.name);
+                     }()},
                     {"library", cell.library},
                     {"read_only", cell.readOnly},
                     {"reference", cell.reference ? json{{"path", cell.reference->path},
@@ -5667,6 +5808,32 @@ class IceMcpServer {
                             .with_string_param("operation",
                                                "left, right, top, bottom, center-horizontal, center-vertical, "
                                                "distribute-horizontal, or distribute-vertical")
+                            .build());
+        tools.push_back(tool_builder("layout_bind_device")
+                            .with_description("Bind a planned device or layout instance to a schematic instance.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("device", "Layout instance or planned device name or id")
+                            .with_string_param("schematic", "Schematic cell name or id")
+                            .with_string_param("schematic_device", "Schematic instance name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_unbind_device")
+                            .with_description("Remove the schematic link from a planned device or layout instance.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("device", "Layout instance or planned device name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_device_links")
+                            .with_description("List authored schematic-to-layout device links and their status.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("schematic", "Optional schematic cell name or id", false)
+                            .build());
+        tools.push_back(tool_builder("layout_link_schematic")
+                            .with_description("Link an existing layout cell to an existing schematic cell.")
+                            .with_string_param("cell", "Layout cell name or id")
+                            .with_string_param("schematic", "Schematic cell name or id")
+                            .build());
+        tools.push_back(tool_builder("layout_unlink_schematic")
+                            .with_description("Remove the cell-level schematic link from a layout.")
+                            .with_string_param("cell", "Layout cell name or id")
                             .build());
         tools.push_back(tool_builder("layout_info")
                             .with_description("Read a layout or procedural layout's metadata and generated state.")

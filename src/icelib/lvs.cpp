@@ -439,6 +439,8 @@ struct LogicalDevice {
     ObjectId sourceCell = 0;
     ObjectId childCell = 0;
     ObjectId schematicInstance = 0;
+    LvsObjectKind kind = LvsObjectKind::device;
+    Rect bounds;
 };
 
 struct LogicalNet {
@@ -449,6 +451,8 @@ struct LogicalNet {
     // electrically meaningful.
     std::map<ObjectId, std::set<std::string>> terminals;
     ObjectId object = 0;
+    LvsObjectKind kind = LvsObjectKind::net;
+    Rect bounds;
 };
 
 struct LogicalPort {
@@ -456,6 +460,7 @@ struct LogicalPort {
     std::string name;
     std::string direction;
     std::string net;
+    Rect bounds;
 };
 
 struct LogicalSide {
@@ -867,6 +872,62 @@ LogicalSide collectSchematicSide(const Project &project, ObjectId cellId, std::v
     return side;
 }
 
+void includeBounds(Rect &target, const Rect &rectangle) {
+    if (!rectangle.valid())
+        return;
+    if (!target.valid()) {
+        target = rectangle;
+        return;
+    }
+    const auto maxX = std::max(target.x + target.width, rectangle.x + rectangle.width);
+    const auto maxY = std::max(target.y + target.height, rectangle.y + rectangle.height);
+    target.x = std::min(target.x, rectangle.x);
+    target.y = std::min(target.y, rectangle.y);
+    target.width = maxX - target.x;
+    target.height = maxY - target.y;
+}
+
+Rect layoutCellGeometryBounds(const LayoutCell &cell) {
+    Rect bounds;
+    for (const auto &[_, shape] : cell.shapes) {
+        if (shape.rectangle.valid()) {
+            includeBounds(bounds, shape.rectangle);
+            continue;
+        }
+        if (!shape.polygon.empty()) {
+            auto minX = shape.polygon.front().x;
+            auto minY = shape.polygon.front().y;
+            auto maxX = minX;
+            auto maxY = minY;
+            for (const auto &point : shape.polygon) {
+                minX = std::min(minX, point.x);
+                minY = std::min(minY, point.y);
+                maxX = std::max(maxX, point.x);
+                maxY = std::max(maxY, point.y);
+            }
+            includeBounds(bounds, Rect{minX, minY, maxX - minX, maxY - minY});
+            continue;
+        }
+        if (!shape.centerline.empty()) {
+            const auto expansion = std::max<Coordinate>(1, shape.width) / 2;
+            auto minX = shape.centerline.front().x - expansion;
+            auto minY = shape.centerline.front().y - expansion;
+            auto maxX = shape.centerline.front().x + expansion;
+            auto maxY = shape.centerline.front().y + expansion;
+            for (const auto &point : shape.centerline) {
+                minX = std::min(minX, point.x - expansion);
+                minY = std::min(minY, point.y - expansion);
+                maxX = std::max(maxX, point.x + expansion);
+                maxY = std::max(maxY, point.y + expansion);
+            }
+            includeBounds(bounds, Rect{minX, minY, maxX - minX, maxY - minY});
+        }
+    }
+    for (const auto &[_, port] : cell.ports)
+        includeBounds(bounds, port.rectangle);
+    return bounds;
+}
+
 LogicalDevice actualLayoutDevice(const LayoutInstance &instance, const LayoutCell &child) {
     LogicalDevice device;
     device.object = instance.id;
@@ -877,6 +938,9 @@ LogicalDevice actualLayoutDevice(const LayoutInstance &instance, const LayoutCel
     device.hasParameters = !child.parameters.empty();
     device.multiTerminal = child.ports.size() > 2 || isMultiTerminalType(device.type);
     device.schematicInstance = instance.schematicInstance;
+    device.kind = LvsObjectKind::instance;
+    device.bounds =
+        transformRectangle(layoutCellGeometryBounds(child), Transform{instance.x, instance.y, instance.orientation});
     return device;
 }
 
@@ -930,6 +994,13 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             element = elementForName(child->second.device);
         if (isSupply(element))
             continue;
+        if (instance.schematicInstance != 0 && !schematic.instances.contains(instance.schematicInstance) &&
+            !schematic.isTextSource()) {
+            mismatches.push_back(
+                {1, "layout-link",
+                 "Layout instance '" + instance.name + "' links to a schematic instance that is not in this schematic",
+                 std::nullopt, id, VerificationSeverity::warning});
+        }
         auto device = actualLayoutDevice(instance, child->second);
         if (instance.schematicInstance != 0 && schematic.instances.contains(instance.schematicInstance))
             device.type = instanceType(schematic, instance.schematicInstance);
@@ -960,12 +1031,17 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         LogicalDevice device;
         device.name = planned.name;
         device.schematicInstance = planned.schematicInstance;
+        device.kind = LvsObjectKind::plannedDevice;
+        device.bounds = Rect{planned.x, planned.y, planned.width, planned.height};
         if (actualId != 0) {
             const auto actual = std::find_if(actualDevices.begin(), actualDevices.end(),
                                              [actualId](const auto &entry) { return entry.instance == actualId; });
             if (actual != actualDevices.end())
                 device = actual->device;
-            device.schematicInstance = planned.schematicInstance;
+            const bool actualLinkValid =
+                device.schematicInstance != 0 && schematic.instances.contains(device.schematicInstance);
+            if (!actualLinkValid && planned.schematicInstance != 0)
+                device.schematicInstance = planned.schematicInstance;
         } else if (planned.schematicInstance != 0) {
             if (!schematic.instances.contains(planned.schematicInstance)) {
                 // A layout created from a drawn view may still carry links
@@ -1040,10 +1116,11 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         ObjectId object = 0;
         std::set<ObjectId> devices;
         std::map<ObjectId, std::set<std::string>> terminals;
+        Rect bounds;
     };
     std::map<std::string, NetAccumulator> nets;
     const auto addToNet = [&](const std::string &key, const std::string &name, ObjectId object, ObjectId device,
-                              const std::string &pin = {}) {
+                              const std::string &pin = {}, const Rect &bounds = {}) {
         if (key.empty() || !result.side.devices.contains(device))
             return;
         auto &net = nets[key];
@@ -1052,6 +1129,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         if (net.object == 0)
             net.object = object;
         net.devices.insert(device);
+        includeBounds(net.bounds, bounds);
         if (!pin.empty())
             net.terminals[device].insert(normalizedPinName(pin));
     };
@@ -1122,11 +1200,22 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
     for (std::size_t index = 0; index < geometryGroups.size(); ++index) {
         const auto &group = geometryGroups[index];
         for (const auto &alias : group.aliases) {
-            mismatches.push_back(
-                {1, "layout-short",
-                 "Layout net '" + groupName(index) + "' is shorted to '" + alias + "' through unlabeled geometry",
-                 group.net != 0 ? std::optional<ObjectId>(group.net) : std::nullopt, std::nullopt,
-                 VerificationSeverity::error});
+            LvsMismatch mismatch{1,
+                                 "layout-short",
+                                 "Layout net '" + groupName(index) + "' is shorted to '" + alias +
+                                     "' through unlabeled geometry",
+                                 std::nullopt,
+                                 group.net != 0 ? std::optional<ObjectId>(group.net) : std::nullopt,
+                                 VerificationSeverity::error};
+            LvsObjectRef ref;
+            ref.kind = group.net != 0 ? LvsObjectKind::net : LvsObjectKind::geometry;
+            ref.cell = cellId;
+            ref.id = group.net;
+            ref.name = groupName(index);
+            if (groupBounds[index].valid())
+                ref.bounds = groupBounds[index];
+            mismatch.layoutRef = ref;
+            mismatches.push_back(std::move(mismatch));
         }
         if (group.shapes.empty() && group.ports.empty())
             continue;
@@ -1136,7 +1225,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             for (const auto &[plannedId, planned] : cell.plannedDevices) {
                 for (const auto &[pin, netId] : planned.terminals) {
                     if (netId == group.net)
-                        addToNet(key, groupName(index), group.net, logicalId(plannedId), pin);
+                        addToNet(key, groupName(index), group.net, logicalId(plannedId), pin, groupBounds[index]);
                 }
             }
         }
@@ -1186,7 +1275,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
                 }
                 if (matched)
                     addToNet(groupKey(index), groupName(index), geometryGroups[index].net, logicalId(instanceId),
-                             childPort.name);
+                             childPort.name, groupBounds[index]);
             }
         }
     }
@@ -1199,7 +1288,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
             if (netId == 0)
                 continue;
             result.hasConnectivity = true;
-            addToNet(netKeyFor(netId), netNameFor(netId), netId, logicalId(plannedId), pin);
+            addToNet(netKeyFor(netId), netNameFor(netId), netId, logicalId(plannedId), pin,
+                     Rect{planned.x, planned.y, planned.width, planned.height});
         }
     }
 
@@ -1243,6 +1333,20 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         return std::string{};
     };
 
+    const auto endpointBounds = [&](ObjectId endpoint) -> Rect {
+        if (const auto planned = cell.plannedDevices.find(endpoint); planned != cell.plannedDevices.end())
+            return Rect{planned->second.x, planned->second.y, planned->second.width, planned->second.height};
+        if (const auto port = cell.ports.find(endpoint); port != cell.ports.end())
+            return port->second.rectangle;
+        if (const auto instance = cell.instances.find(endpoint); instance != cell.instances.end()) {
+            if (const auto child = project.layoutCells.find(instance->second.cell); child != project.layoutCells.end())
+                return transformRectangle(
+                    layoutCellGeometryBounds(child->second),
+                    Transform{instance->second.x, instance->second.y, instance->second.orientation});
+        }
+        return {};
+    };
+
     bool validConnection = false;
     std::set<ObjectId> unnamedMembers;
     std::map<ObjectId, ObjectId> unnamedObjects;
@@ -1258,9 +1362,10 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         validConnection = true;
         if (connection.net != 0) {
             addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.from),
-                     connectionPin(connection.from, connection.fromPort, connection.fromPin));
+                     connectionPin(connection.from, connection.fromPort, connection.fromPin),
+                     endpointBounds(connection.from));
             addToNet(netKeyFor(connection.net), netNameFor(connection.net), connection.net, logicalId(connection.to),
-                     connectionPin(connection.to, connection.toPort, connection.toPin));
+                     connectionPin(connection.to, connection.toPort, connection.toPin), endpointBounds(connection.to));
         } else {
             unite(connection.from, connection.to);
             unnamedMembers.insert(connection.from);
@@ -1288,6 +1393,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         net.name = "net " + std::to_string(*std::min_element(logicalMembers.begin(), logicalMembers.end()));
         net.object = unnamedObjects.contains(root) ? unnamedObjects.at(root) : 0;
         net.devices = std::move(logicalMembers);
+        for (const auto member : members)
+            includeBounds(net.bounds, endpointBounds(member));
     }
 
     for (auto &[_, net] : nets) {
@@ -1296,6 +1403,8 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         LogicalNet logicalNet;
         logicalNet.name = net.name.empty() ? "net" : net.name;
         logicalNet.object = net.object;
+        logicalNet.bounds = net.bounds;
+        logicalNet.kind = net.object == 0 ? LvsObjectKind::geometry : LvsObjectKind::net;
         logicalNet.devices = std::move(net.devices);
         logicalNet.terminals = std::move(net.terminals);
         result.side.nets.push_back(std::move(logicalNet));
@@ -1322,7 +1431,7 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         } else if (const auto group = groupByPort.find(port.id); group != groupByPort.end()) {
             netName = groupName(group->second);
         }
-        result.side.ports.push_back({port.id, port.name, portDirectionName(port.direction), netName});
+        result.side.ports.push_back({port.id, port.name, portDirectionName(port.direction), netName, port.rectangle});
     }
 
     return result;
@@ -1434,8 +1543,81 @@ std::string topologySignature(const LogicalSide &side, ObjectId deviceId) {
     return type + "|" + joinNames(netSignatures);
 }
 
+using TerminalNetMap = std::map<ObjectId, std::map<std::string, const LogicalNet *>>;
+
+TerminalNetMap terminalNetMap(const LogicalSide &side) {
+    TerminalNetMap map;
+    for (const auto &net : side.nets) {
+        for (const auto &[device, pins] : net.terminals) {
+            for (const auto &pin : pins)
+                map[device][pin] = &net;
+        }
+    }
+    return map;
+}
+
+LvsObjectRef deviceRef(const LogicalDevice &device, ObjectId cell) {
+    LvsObjectRef ref;
+    ref.kind = device.kind;
+    ref.cell = cell;
+    ref.id = device.object;
+    ref.name = device.name;
+    if (device.bounds.valid())
+        ref.bounds = device.bounds;
+    return ref;
+}
+
+double candidateScore(const LogicalDevice &target, const LogicalDevice &candidate, const LogicalSide &targetSide,
+                      const LogicalSide &candidateSide, ObjectId targetId, ObjectId candidateId, std::string &reason) {
+    double score = 0.0;
+    std::vector<std::string> reasons;
+    if (compatibleType(target.type, candidate.type)) {
+        score += 0.35;
+        reasons.push_back("same type");
+    }
+    if (!normalizedIdentifier(target.name).empty() &&
+        normalizedIdentifier(target.name) == normalizedIdentifier(candidate.name)) {
+        score += 0.35;
+        reasons.push_back("same name");
+    }
+    const auto targetSignature = topologySignature(targetSide, targetId);
+    const auto candidateSignature = topologySignature(candidateSide, candidateId);
+    if (!targetSignature.empty() && targetSignature == candidateSignature) {
+        score += 0.3;
+        reasons.push_back("same terminal topology");
+    }
+    reason = joinNames(reasons);
+    return std::min(1.0, score);
+}
+
+std::vector<LvsCandidate> deviceCandidates(const LogicalDevice &target, const LogicalSide &targetSide,
+                                           ObjectId targetId, const LogicalSide &candidateSide, ObjectId candidateCell,
+                                           bool candidatesAreLayout) {
+    std::vector<LvsCandidate> candidates;
+    for (const auto &[candidateId, candidate] : candidateSide.devices) {
+        std::string reason;
+        const auto score = candidateScore(target, candidate, targetSide, candidateSide, targetId, candidateId, reason);
+        if (score <= 0.0)
+            continue;
+        LvsCandidate entry;
+        entry.object = deviceRef(candidate, candidateCell);
+        entry.score = score;
+        entry.reason = reason.empty() ? (candidatesAreLayout ? "layout device" : "schematic device") : reason;
+        candidates.push_back(std::move(entry));
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const LvsCandidate &left, const LvsCandidate &right) {
+        if (left.score != right.score)
+            return left.score > right.score;
+        return left.object.id < right.object.id;
+    });
+    if (candidates.size() > 3)
+        candidates.resize(3);
+    return candidates;
+}
+
 void matchByTopology(const LogicalSide &schematic, const LogicalSide &layout,
-                     std::map<ObjectId, ObjectId> &schematicToLayout, std::map<ObjectId, ObjectId> &layoutToSchematic) {
+                     std::map<ObjectId, ObjectId> &schematicToLayout, std::map<ObjectId, ObjectId> &layoutToSchematic,
+                     std::map<ObjectId, LvsMatchMethod> &layoutMethods) {
     std::map<std::string, std::vector<ObjectId>> unmatchedLayout;
     for (const auto &[layoutId, _] : layout.devices) {
         if (layoutToSchematic.contains(layoutId))
@@ -1460,16 +1642,18 @@ void matchByTopology(const LogicalSide &schematic, const LogicalSide &layout,
                 continue;
             schematicToLayout.emplace(schematicId, layoutId);
             layoutToSchematic.emplace(layoutId, schematicId);
+            layoutMethods[layoutId] = LvsMatchMethod::topology;
             break;
         }
     }
 }
 
-void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layout, const LvsOptions &options,
-                     const std::map<ObjectId, ObjectId> &schematicToLayout,
-                     const std::map<ObjectId, ObjectId> &layoutToSchematic,
-                     std::map<ObjectId, std::string> &schematicKeys, std::map<ObjectId, std::string> &layoutKeys,
-                     std::map<std::string, std::string> &keyNames, std::vector<LvsMismatch> &mismatches) {
+void assignDeviceKeys(const LogicalSide &schematic, const LayoutLogicalSide &layout,
+                      const std::map<ObjectId, ObjectId> &schematicToLayout,
+                      const std::map<ObjectId, ObjectId> &layoutToSchematic,
+                      std::map<ObjectId, std::string> &schematicKeys, std::map<ObjectId, std::string> &layoutKeys,
+                      std::map<std::string, std::string> &keyNames, ObjectId schematicCellId, ObjectId layoutCellId,
+                      std::vector<LvsMismatch> &mismatches) {
     std::vector<std::pair<ObjectId, ObjectId>> pairs;
     pairs.reserve(schematicToLayout.size());
     for (const auto &[schematicId, layoutId] : schematicToLayout)
@@ -1489,29 +1673,164 @@ void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layo
         layoutKeys.emplace(pairs[index].second, key);
         keyNames.emplace(key, schematic.devices.at(pairs[index].first).name);
     }
-    for (const auto &[schematicId, _] : schematic.devices) {
-        if (!schematicToLayout.contains(schematicId)) {
-            schematicKeys.emplace(schematicId, "s" + std::to_string(schematicId));
-            keyNames.emplace("s" + std::to_string(schematicId), schematic.devices.at(schematicId).name);
-            mismatches.push_back(
-                {1, "missing-device",
-                 "Schematic device '" + schematic.devices.at(schematicId).name + "' has no matching layout device",
-                 schematicId, std::nullopt, VerificationSeverity::error});
-        }
+    for (const auto &[schematicId, device] : schematic.devices) {
+        if (schematicToLayout.contains(schematicId))
+            continue;
+        schematicKeys.emplace(schematicId, "s" + std::to_string(schematicId));
+        keyNames.emplace("s" + std::to_string(schematicId), device.name);
+        LvsMismatch mismatch{
+            1,           "missing-device", "Schematic device '" + device.name + "' has no matching layout device",
+            schematicId, std::nullopt,     VerificationSeverity::error};
+        mismatch.schematicRef = deviceRef(device, schematicCellId);
+        mismatch.candidates = deviceCandidates(device, schematic, schematicId, layout.side, layoutCellId, true);
+        if (!mismatch.candidates.empty())
+            mismatch.hint = "Closest layout candidate: " + mismatch.candidates.front().object.name;
+        mismatches.push_back(std::move(mismatch));
     }
     for (const auto &[layoutId, device] : layout.side.devices) {
-        if (!layoutToSchematic.contains(layoutId)) {
-            layoutKeys.emplace(layoutId, "l" + std::to_string(layoutId));
-            keyNames.emplace("l" + std::to_string(layoutId), device.name);
-            mismatches.push_back({1, "extra-device",
-                                  "Layout device '" + device.name + "' has no matching schematic device", std::nullopt,
-                                  layoutId, VerificationSeverity::error});
+        if (layoutToSchematic.contains(layoutId))
+            continue;
+        layoutKeys.emplace(layoutId, "l" + std::to_string(layoutId));
+        keyNames.emplace("l" + std::to_string(layoutId), device.name);
+        LvsMismatch mismatch{1,
+                             "extra-device",
+                             "Layout device '" + device.name + "' has no matching schematic device",
+                             std::nullopt,
+                             layoutId,
+                             VerificationSeverity::error};
+        mismatch.layoutRef = deviceRef(device, layoutCellId);
+        mismatch.candidates = deviceCandidates(device, layout.side, layoutId, schematic, schematicCellId, false);
+        if (!mismatch.candidates.empty())
+            mismatch.hint = "Closest schematic candidate: " + mismatch.candidates.front().object.name;
+        mismatches.push_back(std::move(mismatch));
+    }
+}
+
+bool netPairMatches(const LogicalNet *schematic, const LogicalNet *layout,
+                    const std::map<const LogicalNet *, const LogicalNet *> &netPairs) {
+    if (!schematic || !layout)
+        return false;
+    if (isGroundNetName(schematic->name) && isGroundNetName(layout->name))
+        return true;
+    const auto found = netPairs.find(schematic);
+    if (found != netPairs.end() && found->second == layout)
+        return true;
+    return portKey(schematic->name) == portKey(layout->name);
+}
+
+std::vector<LvsPinMatch> compareDevicePins(const LogicalDevice &schematicDevice, ObjectId schematicId,
+                                           const LogicalDevice &layoutDevice, ObjectId layoutId,
+                                           const TerminalNetMap &schematicTerminals,
+                                           const TerminalNetMap &layoutTerminals,
+                                           const std::map<const LogicalNet *, const LogicalNet *> &netPairs) {
+    const auto schematicPins = schematicTerminals.find(schematicId);
+    const auto layoutPins = layoutTerminals.find(layoutId);
+    if (schematicPins == schematicTerminals.end() || layoutPins == layoutTerminals.end())
+        return {};
+    if (schematicPins->second.empty() || layoutPins->second.empty())
+        return {};
+
+    const auto makeEntry = [&](const std::string &schematicPin, const std::string &layoutPin, bool swapped) {
+        LvsPinMatch entry;
+        entry.schematicPin = schematicPin;
+        entry.layoutPin = layoutPin;
+        if (const auto net = schematicPins->second.find(schematicPin); net != schematicPins->second.end()) {
+            entry.schematicNet = net->second->name;
+            if (const auto layoutNet = layoutPins->second.find(layoutPin); layoutNet != layoutPins->second.end()) {
+                entry.layoutNet = layoutNet->second->name;
+                entry.matched = netPairMatches(net->second, layoutNet->second, netPairs);
+            }
+        } else if (const auto layoutNet = layoutPins->second.find(layoutPin); layoutNet != layoutPins->second.end()) {
+            entry.layoutNet = layoutNet->second->name;
         }
+        entry.swapped = swapped;
+        return entry;
+    };
+
+    std::vector<LvsPinMatch> entries;
+    if (!schematicDevice.multiTerminal && !layoutDevice.multiTerminal && schematicPins->second.size() == 2 &&
+        layoutPins->second.size() == 2) {
+        std::vector<std::string> schematicNames;
+        std::vector<std::string> layoutNames;
+        for (const auto &[pin, _] : schematicPins->second)
+            schematicNames.push_back(pin);
+        for (const auto &[pin, _] : layoutPins->second)
+            layoutNames.push_back(pin);
+        std::sort(schematicNames.begin(), schematicNames.end());
+        std::sort(layoutNames.begin(), layoutNames.end());
+        bool straight = true;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto entry = makeEntry(schematicNames[index], layoutNames[index], false);
+            straight = straight && entry.matched;
+        }
+        bool reversed = true;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto entry = makeEntry(schematicNames[index], layoutNames[1 - index], false);
+            reversed = reversed && entry.matched;
+        }
+        if (reversed && !straight) {
+            for (std::size_t index = 0; index < 2; ++index)
+                entries.push_back(makeEntry(schematicNames[index], layoutNames[1 - index], true));
+            return entries;
+        }
+        for (std::size_t index = 0; index < 2; ++index)
+            entries.push_back(makeEntry(schematicNames[index], layoutNames[index], false));
+        return entries;
     }
 
-    for (const auto &[schematicId, layoutId] : schematicToLayout) {
+    std::set<std::string> usedLayoutPins;
+    for (const auto &[pin, _] : schematicPins->second) {
+        if (layoutPins->second.contains(pin)) {
+            entries.push_back(makeEntry(pin, pin, false));
+            usedLayoutPins.insert(pin);
+        } else {
+            entries.push_back(makeEntry(pin, {}, false));
+        }
+    }
+    for (const auto &[pin, _] : layoutPins->second) {
+        if (!usedLayoutPins.contains(pin))
+            entries.push_back(makeEntry({}, pin, false));
+    }
+    return entries;
+}
+
+LvsParameterMatch parameterMatch(const std::string &name, const std::string &schematicValue,
+                                 const std::string &layoutValue, bool matched) {
+    return {name, schematicValue, layoutValue, matched};
+}
+
+void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layout, const LvsOptions &options,
+                     const std::map<ObjectId, ObjectId> &schematicToLayout,
+                     const std::map<ObjectId, LvsMatchMethod> &layoutMethods, const TerminalNetMap &schematicTerminals,
+                     const TerminalNetMap &layoutTerminals,
+                     const std::map<const LogicalNet *, const LogicalNet *> &netPairs, ObjectId schematicCellId,
+                     ObjectId layoutCellId, std::vector<LvsMismatch> &mismatches,
+                     std::vector<LvsDeviceMatch> &matches) {
+    std::vector<std::pair<ObjectId, ObjectId>> pairs;
+    pairs.reserve(schematicToLayout.size());
+    for (const auto &[schematicId, layoutId] : schematicToLayout)
+        pairs.emplace_back(schematicId, layoutId);
+    std::sort(pairs.begin(), pairs.end(), [&](const auto &left, const auto &right) {
+        const auto &leftDevice = schematic.devices.at(left.first);
+        const auto &rightDevice = schematic.devices.at(right.first);
+        const auto leftName = normalizedIdentifier(leftDevice.name);
+        const auto rightName = normalizedIdentifier(rightDevice.name);
+        if (leftName != rightName)
+            return leftName < rightName;
+        return left.first < right.first;
+    });
+
+    for (const auto &[schematicId, layoutId] : pairs) {
         const auto &schematicDevice = schematic.devices.at(schematicId);
         const auto &layoutDevice = layout.side.devices.at(layoutId);
+        LvsDeviceMatch match;
+        match.schematic = deviceRef(schematicDevice, schematicCellId);
+        match.layout = deviceRef(layoutDevice, layoutCellId);
+        match.schematicType = schematicDevice.type;
+        match.layoutType = layoutDevice.type;
+        if (const auto method = layoutMethods.find(layoutId); method != layoutMethods.end())
+            match.method = method->second;
+        match.matched = true;
         const auto displayName = schematicDevice.name.empty() ? layoutDevice.name : schematicDevice.name;
         if (normalizedIdentifier(schematicDevice.name) != normalizedIdentifier(layoutDevice.name)) {
             mismatches.push_back(
@@ -1520,51 +1839,90 @@ void validateDevices(const LogicalSide &schematic, const LayoutLogicalSide &layo
                  schematicId, layoutId, VerificationSeverity::info});
         }
         if (!compatibleType(schematicDevice.type, layoutDevice.type)) {
+            match.matched = false;
             mismatches.push_back({1, "device-type",
                                   "Device '" + displayName + "' is '" + kindName(true, schematicDevice) +
                                       "' in the schematic but '" + kindName(false, layoutDevice) + "' in the layout",
                                   schematicId, layoutId, VerificationSeverity::error});
         }
-        if (!options.compareParameters)
-            continue;
-        if (schematicDevice.parameters.empty() && layoutDevice.parameters.empty())
-            continue;
-        if (!layoutDevice.hasParameters) {
-            mismatches.push_back({1, "parameter-unavailable",
-                                  "Layout device '" + displayName +
-                                      "' has no parameter metadata; schematic parameters were not compared",
-                                  schematicId, layoutId, VerificationSeverity::error});
-            continue;
-        }
-        for (const auto &[name, schematicValue] : schematicDevice.parameters) {
-            const auto normalizedName = normalizedIdentifier(name);
-            if (normalizedName == "model" || normalizedName == "spice_model" || normalizedName == "subckt" ||
-                normalizedName == "symbol" || normalizedName == "device" || normalizedName == "type" ||
-                normalizedName == "cell" || normalizedName == "name")
-                continue;
-            if ((normalizedName == "m" || normalizedName == "multiplicity" || normalizedName == "parallel" ||
-                 normalizedName == "mult") &&
-                parameterValuesEqual(schematicValue, "1"))
-                continue;
-            const auto layoutParameter = findParameter(layoutDevice.parameters, normalizedName);
-            if (!layoutParameter) {
-                mismatches.push_back(
-                    {1, "parameter-missing",
-                     "Device '" + displayName + "' parameter '" + name + "' is missing from the layout device",
-                     schematicId, layoutId, VerificationSeverity::error});
-                continue;
+
+        if (options.compareParameters) {
+            std::map<std::string, std::string> layoutParameters;
+            for (const auto &[name, value] : layoutDevice.parameters)
+                layoutParameters[normalizedIdentifier(name)] = value;
+            std::set<std::string> comparedNames;
+            for (const auto &[name, schematicValue] : schematicDevice.parameters) {
+                const auto normalizedName = normalizedIdentifier(name);
+                if (normalizedName == "model" || normalizedName == "spice_model" || normalizedName == "subckt" ||
+                    normalizedName == "symbol" || normalizedName == "device" || normalizedName == "type" ||
+                    normalizedName == "cell" || normalizedName == "name")
+                    continue;
+                if ((normalizedName == "m" || normalizedName == "multiplicity" || normalizedName == "parallel" ||
+                     normalizedName == "mult") &&
+                    parameterValuesEqual(schematicValue, "1"))
+                    continue;
+                comparedNames.insert(normalizedName);
+                match.parametersCompared = true;
+                if (!layoutDevice.hasParameters) {
+                    match.matched = false;
+                    match.parameters.push_back(parameterMatch(name, schematicValue, {}, false));
+                    continue;
+                }
+                const auto layoutValue = findParameter(layoutDevice.parameters, normalizedName);
+                if (!layoutValue) {
+                    match.matched = false;
+                    match.parameters.push_back(parameterMatch(name, schematicValue, {}, false));
+                    mismatches.push_back(
+                        {1, "parameter-missing",
+                         "Device '" + displayName + "' parameter '" + name + "' is missing from the layout device",
+                         schematicId, layoutId, VerificationSeverity::error});
+                    continue;
+                }
+                bool equal = parameterValuesEqual(schematicValue, *layoutValue);
+                if (!equal &&
+                    (normalizedName == "w" || normalizedName == "l" || normalizedName == "width" ||
+                     normalizedName == "length") &&
+                    lengthParameterValuesEqual(schematicValue, *layoutValue))
+                    equal = true;
+                match.parameters.push_back(parameterMatch(name, schematicValue, *layoutValue, equal));
+                if (!equal) {
+                    match.matched = false;
+                    mismatches.push_back({1, "parameter",
+                                          "Device '" + displayName + "' parameter '" + name + "' is '" +
+                                              schematicValue + "' in the schematic but '" + *layoutValue +
+                                              "' in the layout",
+                                          schematicId, layoutId, VerificationSeverity::error});
+                }
             }
-            if (parameterValuesEqual(schematicValue, *layoutParameter))
-                continue;
-            if ((normalizedName == "w" || normalizedName == "l" || normalizedName == "width" ||
-                 normalizedName == "length") &&
-                lengthParameterValuesEqual(schematicValue, *layoutParameter))
-                continue;
-            mismatches.push_back({1, "parameter",
-                                  "Device '" + displayName + "' parameter '" + name + "' is '" + schematicValue +
-                                      "' in the schematic but '" + *layoutParameter + "' in the layout",
-                                  schematicId, layoutId, VerificationSeverity::error});
+            if (!layoutDevice.hasParameters && match.parametersCompared) {
+                mismatches.push_back({1, "parameter-unavailable",
+                                      "Layout device '" + displayName +
+                                          "' has no parameter metadata; schematic parameters were not compared",
+                                      schematicId, layoutId, VerificationSeverity::error});
+            }
+            for (const auto &[name, value] : layoutDevice.parameters) {
+                const auto normalizedName = normalizedIdentifier(name);
+                if (comparedNames.contains(normalizedName))
+                    continue;
+                if (normalizedName == "model" || normalizedName == "spice_model" || normalizedName == "subckt" ||
+                    normalizedName == "symbol" || normalizedName == "device" || normalizedName == "type" ||
+                    normalizedName == "cell" || normalizedName == "name")
+                    continue;
+                match.parameters.push_back(parameterMatch(name, {}, value, true));
+            }
         }
+
+        match.pins = compareDevicePins(schematicDevice, schematicId, layoutDevice, layoutId, schematicTerminals,
+                                       layoutTerminals, netPairs);
+        for (const auto &pin : match.pins) {
+            if (!pin.matched)
+                match.matched = false;
+        }
+        if (!match.matched && !match.pins.empty() && match.schematic && match.layout) {
+            // Keep the type/parameter mismatch as the primary entry; pin
+            // failures are already covered by the net comparison.
+        }
+        matches.push_back(std::move(match));
     }
 }
 
@@ -1574,12 +1932,18 @@ struct NetRecord {
     NetSignature signature;
     std::string name;
     ObjectId object = 0;
+    const LogicalNet *net = nullptr;
+    LvsObjectKind kind = LvsObjectKind::net;
+    Rect bounds;
 };
 
 NetRecord netRecord(const LogicalNet &net, const LogicalSide &side, const std::map<ObjectId, std::string> &keys) {
     NetRecord record;
     record.name = net.name;
     record.object = net.object;
+    record.net = &net;
+    record.kind = net.kind;
+    record.bounds = net.bounds;
     for (const auto device : net.devices) {
         const auto key = keys.find(device);
         if (key == keys.end())
@@ -1605,17 +1969,104 @@ NetRecord netRecord(const LogicalNet &net, const LogicalSide &side, const std::m
     return record;
 }
 
-std::string signatureNames(const NetSignature &signature, const std::map<std::string, std::string> &keyNames) {
+std::vector<std::string> signatureConnectionList(const NetSignature &signature,
+                                                 const std::map<std::string, std::string> &keyNames) {
     std::vector<std::string> names;
     names.reserve(signature.size());
     for (const auto &key : signature) {
-        const auto name = keyNames.find(key);
-        names.push_back(name == keyNames.end() ? key : name->second);
+        const auto separator = key.find(':');
+        const auto base = separator == std::string::npos ? key : key.substr(0, separator);
+        const auto name = keyNames.find(base);
+        std::string text = name == keyNames.end() ? base : name->second;
+        if (separator != std::string::npos) {
+            const auto pin = key.substr(separator + 1);
+            if (!pin.empty())
+                text += ":" + pin;
+        }
+        names.push_back(std::move(text));
     }
-    return joinNames(names);
+    return names;
 }
 
-int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::vector<LvsMismatch> &mismatches) {
+std::string joinConnections(const std::vector<std::string> &names) { return joinNames(names); }
+
+std::string signatureNames(const NetSignature &signature, const std::map<std::string, std::string> &keyNames) {
+    return joinConnections(signatureConnectionList(signature, keyNames));
+}
+
+LvsObjectRef netRef(const NetRecord &record, ObjectId cell) {
+    LvsObjectRef ref;
+    ref.kind = record.kind;
+    ref.cell = cell;
+    ref.id = record.object;
+    ref.name = record.name;
+    if (record.bounds.valid())
+        ref.bounds = record.bounds;
+    return ref;
+}
+
+double signatureOverlap(const NetSignature &left, const NetSignature &right) {
+    if (left.empty() || right.empty())
+        return 0.0;
+    std::size_t intersection = 0;
+    std::size_t leftIndex = 0;
+    std::size_t rightIndex = 0;
+    while (leftIndex < left.size() && rightIndex < right.size()) {
+        if (left[leftIndex] == right[rightIndex]) {
+            ++intersection;
+            ++leftIndex;
+            ++rightIndex;
+        } else if (left[leftIndex] < right[rightIndex]) {
+            ++leftIndex;
+        } else {
+            ++rightIndex;
+        }
+    }
+    const auto unionSize = left.size() + right.size() - intersection;
+    return unionSize == 0 ? 0.0 : static_cast<double>(intersection) / static_cast<double>(unionSize);
+}
+
+std::vector<LvsCandidate> netCandidates(const NetRecord &target, const std::vector<NetRecord> &candidates,
+                                        ObjectId candidateCell) {
+    std::vector<LvsCandidate> result;
+    for (const auto &candidate : candidates) {
+        auto score = signatureOverlap(target.signature, candidate.signature);
+        std::size_t shared = 0;
+        std::size_t leftIndex = 0;
+        std::size_t rightIndex = 0;
+        while (leftIndex < target.signature.size() && rightIndex < candidate.signature.size()) {
+            if (target.signature[leftIndex] == candidate.signature[rightIndex]) {
+                ++shared;
+                ++leftIndex;
+                ++rightIndex;
+            } else if (target.signature[leftIndex] < candidate.signature[rightIndex]) {
+                ++leftIndex;
+            } else {
+                ++rightIndex;
+            }
+        }
+        if (portKey(target.name) == portKey(candidate.name))
+            score += 0.2;
+        if (score <= 0.0)
+            continue;
+        LvsCandidate entry;
+        entry.object = netRef(candidate, candidateCell);
+        entry.score = std::min(1.0, score);
+        entry.reason = "shares " + std::to_string(shared) + " device terminal(s)";
+        result.push_back(std::move(entry));
+    }
+    std::sort(result.begin(), result.end(), [](const LvsCandidate &left, const LvsCandidate &right) {
+        if (left.score != right.score)
+            return left.score > right.score;
+        return left.object.name < right.object.name;
+    });
+    if (result.size() > 3)
+        result.resize(3);
+    return result;
+}
+
+int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, ObjectId schematicCellId,
+                 ObjectId layoutCellId, std::vector<LvsMismatch> &mismatches, std::vector<LvsPortMatch> &matches) {
     if (schematic.ports.empty() && layout.ports.empty())
         return 0;
     std::map<std::string, LogicalPort> schematicPorts;
@@ -1631,42 +2082,61 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
         addPort(schematicPorts, port);
     for (const auto &port : layout.ports)
         addPort(layoutPorts, port);
+
     int matched = 0;
     for (const auto &[name, port] : schematicPorts) {
         const auto layoutPort = layoutPorts.find(name);
+        LvsPortMatch pair;
+        pair.schematic = LvsObjectRef{LvsObjectKind::port, schematicCellId, port.object, port.name, std::nullopt};
+        pair.schematicDirection = port.direction;
+        pair.schematicNet = port.net;
         if (layoutPort == layoutPorts.end()) {
+            pair.matched = false;
+            matches.push_back(std::move(pair));
             mismatches.push_back({1, "missing-port", "Schematic port '" + port.name + "' has no matching layout port",
                                   port.object, std::nullopt, VerificationSeverity::error});
             continue;
         }
+        pair.layout = LvsObjectRef{LvsObjectKind::port, layoutCellId, layoutPort->second.object,
+                                   layoutPort->second.name, layoutPort->second.bounds};
+        pair.layoutDirection = layoutPort->second.direction;
+        pair.layoutNet = layoutPort->second.net;
         ++matched;
+        pair.matched = true;
         const auto flexibleDirection = [](const std::string &direction) {
             return direction.empty() || direction == "ground" || direction == "power" || direction == "inout";
         };
-        if (!flexibleDirection(port.direction) && !flexibleDirection(layoutPort->second.direction) &&
-            port.direction != layoutPort->second.direction)
+        pair.directionMatched = flexibleDirection(port.direction) || flexibleDirection(layoutPort->second.direction) ||
+                                port.direction == layoutPort->second.direction;
+        if (!pair.directionMatched)
             mismatches.push_back({1, "port-direction",
                                   "Port '" + port.name + "' is '" + port.direction + "' in the schematic but '" +
                                       layoutPort->second.direction + "' in the layout",
                                   port.object, layoutPort->second.object, VerificationSeverity::warning});
         const bool schematicGround = isGroundNetName(port.net);
         const bool layoutGround = isGroundNetName(layoutPort->second.net);
-        if (!port.net.empty()) {
-            const bool mismatch = schematicGround != layoutGround ||
-                                  (!schematicGround && portKey(port.net) != portKey(layoutPort->second.net));
-            if (mismatch)
-                mismatches.push_back(
-                    {1, "port-net",
-                     "Port '" + port.name + "' is connected to net '" + port.net + "' in the schematic but '" +
-                         (layoutPort->second.net.empty() ? "an unassigned port" : layoutPort->second.net) +
-                         "' in the layout",
-                     port.object, layoutPort->second.object, VerificationSeverity::error});
-        }
+        pair.netMatched = port.net.empty() || (schematicGround && layoutGround) ||
+                          (!schematicGround && !layoutGround && portKey(port.net) == portKey(layoutPort->second.net));
+        if (!port.net.empty() && !pair.netMatched)
+            mismatches.push_back({1, "port-net",
+                                  "Port '" + port.name + "' is connected to net '" + port.net +
+                                      "' in the schematic but '" +
+                                      (layoutPort->second.net.empty() ? "an unassigned port" : layoutPort->second.net) +
+                                      "' in the layout",
+                                  port.object, layoutPort->second.object, VerificationSeverity::error});
+        matches.push_back(std::move(pair));
     }
     for (const auto &[name, port] : layoutPorts) {
-        if (!schematicPorts.contains(name))
-            mismatches.push_back({1, "extra-port", "Layout port '" + port.name + "' has no matching schematic port",
-                                  std::nullopt, port.object, VerificationSeverity::error});
+        if (schematicPorts.contains(name))
+            continue;
+        LvsPortMatch pair;
+        pair.layout = LvsObjectRef{LvsObjectKind::port, layoutCellId, port.object, port.name, port.bounds};
+        pair.layoutDirection = port.direction;
+        pair.layoutNet = port.net;
+        pair.matched = false;
+        matches.push_back(std::move(pair));
+        mismatches.push_back({1, "extra-port", "Layout port '" + port.name + "' has no matching schematic port",
+                              std::nullopt, port.object, VerificationSeverity::error});
     }
     return matched;
 }
@@ -1674,7 +2144,9 @@ int comparePorts(const LogicalSide &schematic, const LogicalSide &layout, std::v
 void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
                  const std::map<ObjectId, std::string> &schematicKeys,
                  const std::map<ObjectId, std::string> &layoutKeys, const std::map<std::string, std::string> &keyNames,
-                 std::vector<LvsMismatch> &mismatches) {
+                 ObjectId schematicCellId, ObjectId layoutCellId, std::vector<LvsMismatch> &mismatches,
+                 std::vector<LvsNetMatch> &matches, std::map<const LogicalNet *, const LogicalNet *> &schematicToLayout,
+                 std::map<const LogicalNet *, const LogicalNet *> &layoutToSchematic) {
     if (schematic.nets.empty()) {
         if (!schematic.devices.empty())
             mismatches.push_back({1, "schematic-netlist",
@@ -1709,36 +2181,92 @@ void compareNets(const LogicalSide &schematic, const LayoutLogicalSide &layout,
         if (isSignificantNet(net, layout.side))
             layoutNets.push_back(netRecord(net, layout.side, layoutKeys));
     }
+    std::sort(schematicNets.begin(), schematicNets.end(), [](const NetRecord &left, const NetRecord &right) {
+        if (left.signature != right.signature)
+            return left.signature < right.signature;
+        return left.object < right.object;
+    });
+    std::sort(layoutNets.begin(), layoutNets.end(), [](const NetRecord &left, const NetRecord &right) {
+        if (left.signature != right.signature)
+            return left.signature < right.signature;
+        return left.object < right.object;
+    });
 
-    std::map<NetSignature, int> layoutCounts;
-    for (const auto &record : layoutNets)
-        ++layoutCounts[record.signature];
-    for (const auto &record : schematicNets) {
-        auto &count = layoutCounts[record.signature];
-        if (count > 0) {
-            --count;
+    std::map<NetSignature, std::vector<std::size_t>> layoutBySignature;
+    for (std::size_t index = 0; index < layoutNets.size(); ++index)
+        layoutBySignature[layoutNets[index].signature].push_back(index);
+    std::set<std::size_t> pairedLayout;
+    std::set<std::size_t> pairedSchematic;
+
+    for (std::size_t schematicIndex = 0; schematicIndex < schematicNets.size(); ++schematicIndex) {
+        const auto &record = schematicNets[schematicIndex];
+        const auto found = layoutBySignature.find(record.signature);
+        if (found == layoutBySignature.end())
             continue;
+        for (const auto layoutIndex : found->second) {
+            if (pairedLayout.contains(layoutIndex))
+                continue;
+            pairedSchematic.insert(schematicIndex);
+            pairedLayout.insert(layoutIndex);
+            const auto &layoutRecord = layoutNets[layoutIndex];
+            schematicToLayout[record.net] = layoutRecord.net;
+            layoutToSchematic[layoutRecord.net] = record.net;
+            LvsNetMatch pair;
+            pair.schematic = netRef(record, schematicCellId);
+            pair.layout = netRef(layoutRecord, layoutCellId);
+            pair.schematicConnections = signatureConnectionList(record.signature, keyNames);
+            pair.layoutConnections = signatureConnectionList(layoutRecord.signature, keyNames);
+            pair.matched = true;
+            pair.ground = isGroundNetName(record.name) || isGroundNetName(layoutRecord.name);
+            matches.push_back(std::move(pair));
+            break;
         }
-        mismatches.push_back({1, "missing-connection",
-                              "Schematic net '" + record.name + "' connects " +
-                                  signatureNames(record.signature, keyNames) + " but no matching layout net was found",
-                              record.object, std::nullopt, VerificationSeverity::error});
     }
 
-    std::map<NetSignature, int> schematicCounts;
-    for (const auto &record : schematicNets)
-        ++schematicCounts[record.signature];
-    for (const auto &record : layoutNets) {
-        auto &count = schematicCounts[record.signature];
-        if (count > 0) {
-            --count;
+    for (std::size_t index = 0; index < schematicNets.size(); ++index) {
+        if (pairedSchematic.contains(index))
             continue;
-        }
-        mismatches.push_back({1, "extra-connection",
-                              "Layout net '" + record.name + "' connects " +
-                                  signatureNames(record.signature, keyNames) +
-                                  " but no matching schematic net was found",
-                              std::nullopt, record.object, VerificationSeverity::error});
+        const auto &record = schematicNets[index];
+        LvsMismatch mismatch{1,
+                             "missing-connection",
+                             "Schematic net '" + record.name + "' connects " +
+                                 signatureNames(record.signature, keyNames) + " but no matching layout net was found",
+                             record.object,
+                             std::nullopt,
+                             VerificationSeverity::error};
+        mismatch.schematicRef = netRef(record, schematicCellId);
+        mismatch.candidates = netCandidates(record, layoutNets, layoutCellId);
+        if (!mismatch.candidates.empty())
+            mismatch.hint = "Closest layout net: " + mismatch.candidates.front().object.name;
+        mismatches.push_back(std::move(mismatch));
+        LvsNetMatch pair;
+        pair.schematic = netRef(record, schematicCellId);
+        pair.schematicConnections = signatureConnectionList(record.signature, keyNames);
+        pair.matched = false;
+        matches.push_back(std::move(pair));
+    }
+
+    for (std::size_t index = 0; index < layoutNets.size(); ++index) {
+        if (pairedLayout.contains(index))
+            continue;
+        const auto &record = layoutNets[index];
+        LvsMismatch mismatch{1,
+                             "extra-connection",
+                             "Layout net '" + record.name + "' connects " + signatureNames(record.signature, keyNames) +
+                                 " but no matching schematic net was found",
+                             std::nullopt,
+                             record.object,
+                             VerificationSeverity::error};
+        mismatch.layoutRef = netRef(record, layoutCellId);
+        mismatch.candidates = netCandidates(record, schematicNets, schematicCellId);
+        if (!mismatch.candidates.empty())
+            mismatch.hint = "Closest schematic net: " + mismatch.candidates.front().object.name;
+        mismatches.push_back(std::move(mismatch));
+        LvsNetMatch pair;
+        pair.layout = netRef(record, layoutCellId);
+        pair.layoutConnections = signatureConnectionList(record.signature, keyNames);
+        pair.matched = false;
+        matches.push_back(std::move(pair));
     }
 }
 
@@ -1773,6 +2301,8 @@ ObjectId schematicForLayout(const Project &project, ObjectId layoutCellId) {
     const auto layout = project.layoutCells.find(layoutCellId);
     if (layout == project.layoutCells.end())
         return 0;
+    if (layout->second.schematicCell != 0 && project.schematicCells.contains(layout->second.schematicCell))
+        return layout->second.schematicCell;
 
     std::set<ObjectId> linkedInstances;
     for (const auto &[_, device] : layout->second.plannedDevices) {
@@ -1826,6 +2356,155 @@ ObjectId schematicForLayout(const Project &project, ObjectId layoutCellId) {
     return fallback.size() == 1 ? fallback.front() : 0;
 }
 
+void decorateMismatches(LvsReport &report, const LogicalSide &schematic, const LogicalSide &layout,
+                        ObjectId schematicCellId, ObjectId layoutCellId, const LayoutCell &layoutCell,
+                        const SchematicCell &schematicCell) {
+    const auto schematicDeviceRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        const auto found = schematic.devices.find(id);
+        return found == schematic.devices.end()
+                   ? std::nullopt
+                   : std::optional<LvsObjectRef>(deviceRef(found->second, schematicCellId));
+    };
+    const auto layoutDeviceRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        const auto found = layout.devices.find(id);
+        return found == layout.devices.end() ? std::nullopt
+                                             : std::optional<LvsObjectRef>(deviceRef(found->second, layoutCellId));
+    };
+    const auto schematicNetRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        for (const auto &net : schematic.nets) {
+            if (net.object == id)
+                return LvsObjectRef{LvsObjectKind::net, schematicCellId, net.object, net.name, std::nullopt};
+        }
+        return std::nullopt;
+    };
+    const auto layoutNetRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        for (const auto &net : layout.nets) {
+            if (net.object == id) {
+                LvsObjectRef ref{net.kind, layoutCellId, net.object, net.name, std::nullopt};
+                if (net.bounds.valid())
+                    ref.bounds = net.bounds;
+                return ref;
+            }
+        }
+        return std::nullopt;
+    };
+    const auto schematicPortRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        for (const auto &port : schematic.ports) {
+            if (port.object == id)
+                return LvsObjectRef{LvsObjectKind::port, schematicCellId, port.object, port.name, std::nullopt};
+        }
+        return std::nullopt;
+    };
+    const auto layoutPortRef = [&](ObjectId id) -> std::optional<LvsObjectRef> {
+        for (const auto &port : layout.ports) {
+            if (port.object == id) {
+                LvsObjectRef ref{LvsObjectKind::port, layoutCellId, port.object, port.name, std::nullopt};
+                if (port.bounds.valid())
+                    ref.bounds = port.bounds;
+                return ref;
+            }
+        }
+        return std::nullopt;
+    };
+
+    for (auto &mismatch : report.mismatches) {
+        const auto category = mismatch.category;
+        if (!mismatch.schematicRef && mismatch.schematicObject) {
+            const auto id = *mismatch.schematicObject;
+            if (category.find("port") != std::string::npos)
+                mismatch.schematicRef = schematicPortRef(id);
+            else if (category.find("connection") != std::string::npos || category.find("net") != std::string::npos ||
+                     category.find("short") != std::string::npos)
+                mismatch.schematicRef = schematicNetRef(id);
+            else
+                mismatch.schematicRef = schematicDeviceRef(id);
+            if (!mismatch.schematicRef)
+                mismatch.schematicRef = schematicNetRef(id);
+            if (!mismatch.schematicRef)
+                mismatch.schematicRef = schematicPortRef(id);
+            if (!mismatch.schematicRef) {
+                if (const auto instance = schematicCell.instances.find(id); instance != schematicCell.instances.end()) {
+                    LvsObjectRef ref;
+                    ref.kind = LvsObjectKind::device;
+                    ref.cell = schematicCellId;
+                    ref.id = id;
+                    ref.name = instance->second.name;
+                    mismatch.schematicRef = ref;
+                }
+            }
+        }
+        if (!mismatch.layoutRef && mismatch.layoutObject) {
+            const auto id = *mismatch.layoutObject;
+            if (category == "layout-connection") {
+                LvsObjectRef ref;
+                ref.kind = LvsObjectKind::connection;
+                ref.cell = layoutCellId;
+                ref.id = id;
+                ref.name = "Connection " + std::to_string(id);
+                mismatch.layoutRef = ref;
+            } else if (category.find("port") != std::string::npos) {
+                mismatch.layoutRef = layoutPortRef(id);
+            } else if (category.find("connection") != std::string::npos || category.find("net") != std::string::npos ||
+                       category.find("short") != std::string::npos) {
+                mismatch.layoutRef = layoutNetRef(id);
+            } else {
+                mismatch.layoutRef = layoutDeviceRef(id);
+            }
+            if (!mismatch.layoutRef) {
+                if (const auto instance = layoutCell.instances.find(id); instance != layoutCell.instances.end()) {
+                    LvsObjectRef ref;
+                    ref.kind = LvsObjectKind::instance;
+                    ref.cell = layoutCellId;
+                    ref.id = id;
+                    ref.name = instance->second.name;
+                    mismatch.layoutRef = ref;
+                } else if (const auto planned = layoutCell.plannedDevices.find(id);
+                           planned != layoutCell.plannedDevices.end()) {
+                    LvsObjectRef ref;
+                    ref.kind = LvsObjectKind::plannedDevice;
+                    ref.cell = layoutCellId;
+                    ref.id = id;
+                    ref.name = planned->second.name;
+                    ref.bounds =
+                        Rect{planned->second.x, planned->second.y, planned->second.width, planned->second.height};
+                    mismatch.layoutRef = ref;
+                }
+            }
+        }
+        if (mismatch.hint.empty() && !mismatch.candidates.empty()) {
+            mismatch.hint = "Closest candidate: " + mismatch.candidates.front().object.name;
+        }
+    }
+}
+
+void summarizeReport(LvsReport &report) {
+    report.summary = {};
+    for (const auto &match : report.devices) {
+        if (match.schematic && match.layout) {
+            if (match.matched)
+                ++report.summary.devicesMatched;
+            else
+                ++report.summary.devicesMismatched;
+        } else if (match.schematic) {
+            ++report.summary.devicesSchematicOnly;
+        } else if (match.layout) {
+            ++report.summary.devicesLayoutOnly;
+        }
+    }
+    for (const auto &match : report.nets) {
+        if (match.schematic && match.layout)
+            ++report.summary.netsMatched;
+        else if (match.schematic)
+            ++report.summary.netsSchematicOnly;
+        else if (match.layout)
+            ++report.summary.netsLayoutOnly;
+    }
+    for (const auto &match : report.ports) {
+        if (match.schematic && match.layout)
+            ++report.summary.portsMatched;
+    }
+}
+
 LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layoutCellId, const LvsOptions &options) {
     const auto schematicIt = project.schematicCells.find(schematicCellId);
     if (schematicIt == project.schematicCells.end())
@@ -1844,7 +2523,8 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
     auto layout = collectLayoutSide(project, layoutCellId, schematicIt->second, report.mismatches);
     expandMultiplicity(schematic);
     expandMultiplicity(layout.side);
-    report.portsMatched = comparePorts(schematic, layout.side, report.mismatches);
+    report.portsMatched =
+        comparePorts(schematic, layout.side, schematicCellId, layoutCellId, report.mismatches, report.ports);
 
     std::map<std::string, std::vector<ObjectId>> schematicByName;
     for (const auto &[id, device] : schematic.devices)
@@ -1859,9 +2539,12 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
 
     std::map<ObjectId, ObjectId> schematicToLayout;
     std::map<ObjectId, ObjectId> layoutToSchematic;
-    const auto match = [&](ObjectId schematicId, ObjectId layoutId) {
-        schematicToLayout.emplace(schematicId, layoutId);
+    std::map<ObjectId, LvsMatchMethod> layoutMethods;
+    const auto match = [&](ObjectId schematicId, ObjectId layoutId, LvsMatchMethod method) {
+        if (!schematicToLayout.emplace(schematicId, layoutId).second)
+            return;
         layoutToSchematic.emplace(layoutId, schematicId);
+        layoutMethods[layoutId] = method;
     };
 
     for (const auto &[layoutId, device] : layout.side.devices) {
@@ -1869,30 +2552,99 @@ LvsReport runLvs(const Project &project, ObjectId schematicCellId, ObjectId layo
             continue;
         if (layoutToSchematic.contains(layoutId) || schematicToLayout.contains(device.schematicInstance))
             continue;
-        match(device.schematicInstance, layoutId);
+        match(device.schematicInstance, layoutId, LvsMatchMethod::linked);
     }
     for (const auto &[layoutId, device] : layout.side.devices) {
         if (layoutToSchematic.contains(layoutId))
             continue;
-        const auto candidates = schematicByName.find(normalizedIdentifier(device.name));
-        if (candidates == schematicByName.end())
+        const auto name = normalizedIdentifier(device.name);
+        const auto candidates = schematicByName.find(name);
+        if (candidates == schematicByName.end() || candidates->second.size() != 1)
             continue;
-        for (const auto schematicId : candidates->second) {
-            if (schematicToLayout.contains(schematicId))
-                continue;
-            match(schematicId, layoutId);
-            break;
-        }
+        if (const auto peers = layoutByName.find(name); peers == layoutByName.end() || peers->second.size() != 1)
+            continue;
+        const auto schematicId = candidates->second.front();
+        if (schematicToLayout.contains(schematicId))
+            continue;
+        match(schematicId, layoutId, LvsMatchMethod::name);
     }
-    matchByTopology(schematic, layout.side, schematicToLayout, layoutToSchematic);
+    matchByTopology(schematic, layout.side, schematicToLayout, layoutToSchematic, layoutMethods);
 
     std::map<ObjectId, std::string> schematicKeys;
     std::map<ObjectId, std::string> layoutKeys;
     std::map<std::string, std::string> keyNames;
-    validateDevices(schematic, layout, options, schematicToLayout, layoutToSchematic, schematicKeys, layoutKeys,
-                    keyNames, report.mismatches);
-    compareNets(schematic, layout, schematicKeys, layoutKeys, keyNames, report.mismatches);
+    assignDeviceKeys(schematic, layout, schematicToLayout, layoutToSchematic, schematicKeys, layoutKeys, keyNames,
+                     schematicCellId, layoutCellId, report.mismatches);
+
+    const auto schematicTerminals = terminalNetMap(schematic);
+    const auto layoutTerminals = terminalNetMap(layout.side);
+    std::map<const LogicalNet *, const LogicalNet *> schematicNetToLayout;
+    std::map<const LogicalNet *, const LogicalNet *> layoutNetToSchematic;
+    compareNets(schematic, layout, schematicKeys, layoutKeys, keyNames, schematicCellId, layoutCellId,
+                report.mismatches, report.nets, schematicNetToLayout, layoutNetToSchematic);
+    validateDevices(schematic, layout, options, schematicToLayout, layoutMethods, schematicTerminals, layoutTerminals,
+                    schematicNetToLayout, schematicCellId, layoutCellId, report.mismatches, report.devices);
+
+    std::map<ObjectId, std::vector<ObjectId>> linkedLayoutDevices;
+    for (const auto &[layoutId, device] : layout.side.devices) {
+        if (device.schematicInstance != 0)
+            linkedLayoutDevices[device.schematicInstance].push_back(layoutId);
+    }
+    for (const auto &[schematicInstance, layoutDevices] : linkedLayoutDevices) {
+        if (layoutDevices.size() < 2 || !schematic.devices.contains(schematicInstance))
+            continue;
+        std::string names;
+        for (const auto layoutId : layoutDevices) {
+            if (!names.empty())
+                names += ", ";
+            names += layout.side.devices.at(layoutId).name;
+        }
+        report.mismatches.push_back({1, "duplicate-link",
+                                     "Schematic device '" + schematic.devices.at(schematicInstance).name +
+                                         "' is linked from multiple layout devices: " + names,
+                                     schematicInstance, std::nullopt, VerificationSeverity::info});
+    }
+
+    decorateMismatches(report, schematic, layout.side, schematicCellId, layoutCellId, layoutIt->second,
+                       schematicIt->second);
+    summarizeReport(report);
     return report;
+}
+
+const char *lvsObjectKindName(LvsObjectKind kind) {
+    switch (kind) {
+    case LvsObjectKind::device:
+        return "device";
+    case LvsObjectKind::net:
+        return "net";
+    case LvsObjectKind::port:
+        return "port";
+    case LvsObjectKind::plannedDevice:
+        return "planned_device";
+    case LvsObjectKind::instance:
+        return "instance";
+    case LvsObjectKind::shape:
+        return "shape";
+    case LvsObjectKind::connection:
+        return "connection";
+    case LvsObjectKind::geometry:
+        return "geometry";
+    }
+    return "device";
+}
+
+const char *lvsMatchMethodName(LvsMatchMethod method) {
+    switch (method) {
+    case LvsMatchMethod::none:
+        return "none";
+    case LvsMatchMethod::linked:
+        return "linked";
+    case LvsMatchMethod::name:
+        return "name";
+    case LvsMatchMethod::topology:
+        return "topology";
+    }
+    return "none";
 }
 
 std::string serializeLvsReport(const LvsReport &report) {
@@ -1901,15 +2653,108 @@ std::string serializeLvsReport(const LvsReport &report) {
                 {"layout", report.layout},
                 {"matched", report.matched()},
                 {"ports_matched", report.portsMatched},
+                {"summary",
+                 {{"devices_matched", report.summary.devicesMatched},
+                  {"devices_mismatched", report.summary.devicesMismatched},
+                  {"devices_schematic_only", report.summary.devicesSchematicOnly},
+                  {"devices_layout_only", report.summary.devicesLayoutOnly},
+                  {"nets_matched", report.summary.netsMatched},
+                  {"nets_schematic_only", report.summary.netsSchematicOnly},
+                  {"nets_layout_only", report.summary.netsLayoutOnly},
+                  {"ports_matched", report.summary.portsMatched}}},
+                {"devices", json::array()},
+                {"nets", json::array()},
+                {"ports", json::array()},
                 {"mismatches", json::array()}};
     const auto optionalId = [](std::optional<ObjectId> id) -> json { return id ? json(*id) : json(nullptr); };
+    const auto boundsJson = [](const Rect &bounds) -> json {
+        if (!bounds.valid())
+            return nullptr;
+        return json::array({bounds.x, bounds.y, bounds.width, bounds.height});
+    };
+    const auto refJson = [&](const LvsObjectRef &ref) {
+        json value{{"kind", lvsObjectKindName(ref.kind)}, {"cell", ref.cell}, {"id", ref.id}, {"name", ref.name}};
+        if (ref.bounds)
+            value["bounds"] = boundsJson(*ref.bounds);
+        return value;
+    };
+    const auto optionalRefJson = [&](const std::optional<LvsObjectRef> &ref) -> json {
+        return ref ? refJson(*ref) : json(nullptr);
+    };
+    const auto candidateJson = [&](const LvsCandidate &candidate) {
+        return json{{"object", refJson(candidate.object)}, {"score", candidate.score}, {"reason", candidate.reason}};
+    };
+
     for (const auto &mismatch : report.mismatches) {
-        output["mismatches"].push_back({{"schema_version", mismatch.schemaVersion},
-                                        {"severity", verificationSeverityName(mismatch.severity)},
-                                        {"category", mismatch.category},
-                                        {"message", mismatch.message},
-                                        {"schematic_object", optionalId(mismatch.schematicObject)},
-                                        {"layout_object", optionalId(mismatch.layoutObject)}});
+        json entry{{"schema_version", mismatch.schemaVersion},
+                   {"severity", verificationSeverityName(mismatch.severity)},
+                   {"category", mismatch.category},
+                   {"message", mismatch.message},
+                   {"schematic_object", optionalId(mismatch.schematicObject)},
+                   {"layout_object", optionalId(mismatch.layoutObject)},
+                   {"schematic_ref", optionalRefJson(mismatch.schematicRef)},
+                   {"layout_ref", optionalRefJson(mismatch.layoutRef)},
+                   {"hint", mismatch.hint},
+                   {"candidates", json::array()}};
+        for (const auto &candidate : mismatch.candidates)
+            entry["candidates"].push_back(candidateJson(candidate));
+        output["mismatches"].push_back(std::move(entry));
+    }
+
+    for (const auto &match : report.devices) {
+        const char *status = "matched";
+        if (!match.schematic && match.layout)
+            status = "layout_only";
+        else if (match.schematic && !match.layout)
+            status = "schematic_only";
+        else if (match.schematic && match.layout && !match.matched)
+            status = "mismatched";
+        json entry{{"status", status},
+                   {"method", lvsMatchMethodName(match.method)},
+                   {"matched", match.matched},
+                   {"schematic", optionalRefJson(match.schematic)},
+                   {"layout", optionalRefJson(match.layout)},
+                   {"schematic_type", match.schematicType},
+                   {"layout_type", match.layoutType},
+                   {"parameters_compared", match.parametersCompared},
+                   {"pins", json::array()},
+                   {"parameters", json::array()}};
+        for (const auto &pin : match.pins) {
+            entry["pins"].push_back({{"schematic_pin", pin.schematicPin},
+                                     {"layout_pin", pin.layoutPin},
+                                     {"schematic_net", pin.schematicNet},
+                                     {"layout_net", pin.layoutNet},
+                                     {"matched", pin.matched},
+                                     {"swapped", pin.swapped}});
+        }
+        for (const auto &parameter : match.parameters) {
+            entry["parameters"].push_back({{"name", parameter.name},
+                                           {"schematic", parameter.schematicValue},
+                                           {"layout", parameter.layoutValue},
+                                           {"matched", parameter.matched}});
+        }
+        output["devices"].push_back(std::move(entry));
+    }
+
+    for (const auto &match : report.nets) {
+        output["nets"].push_back({{"matched", match.matched},
+                                  {"ground", match.ground},
+                                  {"schematic", optionalRefJson(match.schematic)},
+                                  {"layout", optionalRefJson(match.layout)},
+                                  {"schematic_connections", match.schematicConnections},
+                                  {"layout_connections", match.layoutConnections}});
+    }
+
+    for (const auto &match : report.ports) {
+        output["ports"].push_back({{"matched", match.matched},
+                                   {"direction_matched", match.directionMatched},
+                                   {"net_matched", match.netMatched},
+                                   {"schematic", optionalRefJson(match.schematic)},
+                                   {"layout", optionalRefJson(match.layout)},
+                                   {"schematic_direction", match.schematicDirection},
+                                   {"layout_direction", match.layoutDirection},
+                                   {"schematic_net", match.schematicNet},
+                                   {"layout_net", match.layoutNet}});
     }
     return output.dump(2) + "\n";
 }

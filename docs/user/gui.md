@@ -858,8 +858,27 @@ matched to layout ports by name, including ports produced by **Convert to Port**
 missing ports, extra ports, direction changes, and net-binding changes are
 reported. Text SPICE schematics are parsed into logical devices and recursively
 flattened subcircuits; SystemVerilog cells are compared at module-port level.
-Results appear in the **Reports** tab with **LVS** selected, showing mismatch
-categories and schematic/layout object ids.
+Results appear in the **Reports** tab with **LVS** selected. The LVS view
+shows a summary and four tabs: **Mismatches**, **Devices**, **Nets**, and
+**Ports**. The Devices tab lists every matched, mismatched, schematic-only, and
+layout-only device, the match method (`linked`, `name`, or `topology`), type,
+and parameter differences. Nets and ports show their complete correspondence,
+including terminal lists and layout bounds. Double-click a schematic or layout
+cell, or use the context menu, to open and zoom the corresponding object. A
+device context menu can bind a layout device to a schematic instance, promote a
+name/topology match into a persistent binding, or clear the binding.
+
+The layout canvas also offers **Locate Schematic Counterpart**, **Bind to
+Schematic Device…**, and **Clear Schematic Binding** on planned devices and
+placed instances. Schematic symbol context menus offer **Locate Layout
+Counterpart**, **Bind to Layout Device…**, and **Clear Layout Binding**.
+Right-click a layout cell in **Hierarchy** and choose **Link to Schematic…** to
+associate two already-created cells, or **Unlink Schematic** to remove the
+cell-level link. The same actions are available from the empty-space layout
+canvas context menu. The Schematic hierarchy also offers **Link to Existing
+Layout…**. A stale LVS report is retained for
+inspection but object navigation validates that the reported object still
+exists; rerun LVS after editing the design.
 
 **Tools → Run PEX** (or right-clicking a layout cell and choosing
 **Extract Parasitics (PEX)**) extracts first-order parasitics from the active

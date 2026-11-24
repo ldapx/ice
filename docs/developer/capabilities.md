@@ -14,6 +14,8 @@ CLI invokes the same operations through `ProjectSession`.
 | Generate package PCell geometry | Yes | Devices panel | Core API | package `ihp_runtime.generate_cell`, `icepy.pcells.generate_package_geometry` |
 | Polygon Boolean/offset | Yes | Layout toolbar (Boolean) | Core API | Core API |
 | Layout-versus-schematic check | Yes | Tools → Run LVS | `ice-cli lvs` | `icepy.run_lvs` |
+| LVS device correspondence and binding | Yes | LVS report tabs + canvas context menus | `layout-device-links`, `layout-bind-device`, `layout-unbind-device` | `LayoutBuilder.device_links`, `bind_device`, `unbind_device` |
+| Link existing schematic and layout cells | Yes | Schematic and layout Hierarchy context menus + empty layout canvas | `layout-link-schematic`, `layout-unlink-schematic` | `LayoutBuilder.link_schematic`, `unlink_schematic` |
 | LVS against text SPICE or HDL | Yes | Tools → Run LVS | `ice-cli lvs` | Core API |
 | Mixed-signal HDL capture | Yes | Schematic + Simulation surfaces | `schematic-add-hdl-instance`, `simulation-run` | Core API |
 | Mixed-signal co-simulation | Yes | Mixed-signal simulator | `simulation-run` | Core API |

@@ -240,6 +240,10 @@ class SchematicCanvasImpl : public SchematicCanvas {
         emptyContextMenu_ = std::move(callback);
     }
 
+    void setSymbolContextMenuCallback(std::function<void(ice::ObjectId, const QPoint &globalPos)> callback) override {
+        symbolContextMenu_ = std::move(callback);
+    }
+
     void setPlaceSymbolPreview(const QByteArray &artwork) override {
         placeSymbolArtwork_ = artwork;
         viewport()->update();
@@ -275,6 +279,14 @@ class SchematicCanvasImpl : public SchematicCanvas {
     }
 
     void selectInstance(ice::ObjectId instanceId) override { selectSymbol(itemById(instanceId), false); }
+
+    void focusOnInstance(ice::ObjectId instanceId) override {
+        auto *item = itemById(instanceId);
+        if (!item)
+            return;
+        centerOn(item);
+        ensureVisible(item->sceneBoundingRect(), 48, 48);
+    }
 
     void deleteSelectedSymbols() override {
         std::vector<ice::ObjectId> ids;
@@ -694,6 +706,12 @@ class SchematicCanvasImpl : public SchematicCanvas {
             event->accept();
             return;
         }
+        if (auto *owner = schematicItemOwner(hit);
+            owner && owner->data(0).toString() == QStringLiteral("symbol") && symbolContextMenu_) {
+            symbolContextMenu_(owner->data(1).toULongLong(), event->globalPos());
+            event->accept();
+            return;
+        }
         QGraphicsView::contextMenuEvent(event);
     }
 
@@ -1058,6 +1076,7 @@ class SchematicCanvasImpl : public SchematicCanvas {
     std::function<void(int)> placeSymbolCycleRequested_;
     std::function<void()> toolEscapeRequested_;
     std::function<void(const QPoint &)> emptyContextMenu_;
+    std::function<void(ice::ObjectId, const QPoint &)> symbolContextMenu_;
     std::set<ice::ObjectId> selectedInstances_;
     ice::ObjectId hoveredInstanceId_ = 0;
     ice::ObjectId hoveredNetId_ = 0;

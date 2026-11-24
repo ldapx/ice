@@ -78,6 +78,131 @@ TEST_CASE("LVS matches a layout created from its schematic") {
     CHECK(ice::serializeLvsReport(report).find("\"matched\": true") != std::string::npos);
 }
 
+TEST_CASE("LVS report exposes device net and port correspondence") {
+    auto fixture = makeFixture();
+    const auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    REQUIRE(report.devices.size() == 2);
+    for (const auto &match : report.devices) {
+        REQUIRE(match.schematic.has_value());
+        REQUIRE(match.layout.has_value());
+        CHECK(match.method == ice::LvsMatchMethod::linked);
+        CHECK(match.matched);
+        CHECK(match.pins.size() == 2);
+        for (const auto &pin : match.pins)
+            CHECK(pin.matched);
+    }
+    CHECK(report.summary.devicesMatched == 2);
+    CHECK(report.summary.devicesMismatched == 0);
+    REQUIRE(report.nets.size() == 2);
+    for (const auto &match : report.nets) {
+        REQUIRE(match.schematic.has_value());
+        REQUIRE(match.layout.has_value());
+        CHECK(match.matched);
+        CHECK(match.layout->bounds.has_value());
+        CHECK(!match.schematicConnections.empty());
+    }
+    CHECK(report.summary.netsMatched == 2);
+    const auto serialized = ice::serializeLvsReport(report);
+    CHECK(serialized.find("\"schema_version\": 2") != std::string::npos);
+    CHECK(serialized.find("\"devices\"") != std::string::npos);
+    CHECK(serialized.find("\"method\": \"linked\"") != std::string::npos);
+}
+
+TEST_CASE("LVS correspondence reports name and topology match methods") {
+    auto fixture = makeFixture();
+    auto &layout = fixture.project.layoutCells.at(fixture.layout);
+    for (auto &[_, device] : layout.plannedDevices)
+        device.schematicInstance = 0;
+    auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(report.matched());
+    for (const auto &match : report.devices)
+        CHECK(match.method == ice::LvsMatchMethod::name);
+
+    auto &renamed = fixture.project.layoutCells.at(fixture.layout);
+    for (auto &[_, device] : renamed.plannedDevices)
+        device.name = device.name == "R1" ? "RA" : "CA";
+    report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    CHECK(report.matched());
+    for (const auto &match : report.devices)
+        CHECK(match.method == ice::LvsMatchMethod::topology);
+}
+
+TEST_CASE("LVS device mismatches carry typed refs and candidates") {
+    auto fixture = makeFixture();
+    auto &layout = fixture.project.layoutCells.at(fixture.layout);
+    const auto extraId = fixture.project.nextId();
+    layout.plannedDevices.emplace(extraId, ice::PlannedDevice{extraId, "resistor", 0, 0, 0, 1200, 700});
+    const auto report = ice::runLvs(fixture.project, fixture.schematic, fixture.layout);
+    const auto found = std::find_if(report.mismatches.begin(), report.mismatches.end(),
+                                    [](const auto &mismatch) { return mismatch.category == "extra-device"; });
+    REQUIRE(found != report.mismatches.end());
+    REQUIRE(found->layoutRef.has_value());
+    CHECK(found->layoutRef->kind == ice::LvsObjectKind::plannedDevice);
+    CHECK(found->layoutRef->name == "resistor");
+    CHECK(found->layoutRef->bounds.has_value());
+    CHECK(!found->candidates.empty());
+}
+
+TEST_CASE("layout device bindings can be authored queried and validated") {
+    ice::Project project;
+    project.identity = "layout-bindings";
+    project.name = "layout-bindings";
+    const auto schematic = ice::createSchematicCell(project, "top");
+    std::vector<ice::ObjectId> r1Pins;
+    std::vector<ice::ObjectId> r2Pins;
+    const auto r1 = addTwoPinDevice(project, schematic, "resistor", "R1", r1Pins);
+    const auto r2 = addTwoPinDevice(project, schematic, "resistor", "R2", r2Pins);
+    const auto layout = ice::createLayoutFromSchematic(project, schematic);
+    auto bindings = ice::layoutDeviceBindings(project, layout, schematic);
+    REQUIRE(bindings.size() == 2);
+    CHECK(std::none_of(bindings.begin(), bindings.end(),
+                       [](const auto &binding) { return binding.stale || binding.duplicate; }));
+
+    const auto r1Device = plannedDeviceId(project, layout, "R1");
+    const auto r2Device = plannedDeviceId(project, layout, "R2");
+    REQUIRE(r1Device != 0);
+    REQUIRE(r2Device != 0);
+    ice::unbindLayoutDevice(project, layout, r1Device);
+    CHECK(ice::layoutDeviceBindings(project, layout, schematic).size() == 1);
+    ice::bindLayoutDevice(project, layout, r1Device, schematic, r2);
+    bindings = ice::layoutDeviceBindings(project, layout, schematic);
+    REQUIRE(bindings.size() == 2);
+    CHECK(std::all_of(bindings.begin(), bindings.end(), [](const auto &binding) { return binding.duplicate; }));
+    CHECK(std::any_of(project.validate().begin(), project.validate().end(),
+                      [](const auto &diagnostic) { return diagnostic.code == "layout.device_link.duplicate"; }));
+
+    ice::unbindLayoutDevice(project, layout, r1Device);
+    project.schematicCells.at(schematic).instances.erase(r2);
+    bindings = ice::layoutDeviceBindings(project, layout);
+    CHECK(std::any_of(bindings.begin(), bindings.end(), [](const auto &binding) { return binding.stale; }));
+    CHECK_THROWS_AS(ice::bindLayoutDevice(project, layout, r1Device, schematic, r2), ice::ProjectError);
+    (void)r1;
+}
+
+TEST_CASE("layout cells can link to existing schematic cells") {
+    ice::Project project;
+    project.identity = "layout-schematic-link";
+    project.name = "layout-schematic-link";
+    const auto alpha = ice::createSchematicCell(project, "alpha");
+    const auto beta = ice::createSchematicCell(project, "beta");
+    const auto layout = ice::createLayoutCell(project, "top");
+    CHECK(project.layoutCells.at(layout).schematicCell == 0);
+    CHECK(ice::schematicForLayout(project, layout) == 0);
+    ice::linkLayoutToSchematic(project, layout, beta);
+    CHECK(project.layoutCells.at(layout).schematicCell == beta);
+    CHECK(ice::schematicForLayout(project, layout) == beta);
+    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    CHECK(roundTrip.layoutCells.at(layout).schematicCell == beta);
+    CHECK(ice::schematicForLayout(roundTrip, layout) == beta);
+    ice::unlinkLayoutFromSchematic(project, layout);
+    CHECK(project.layoutCells.at(layout).schematicCell == 0);
+    CHECK(ice::schematicForLayout(project, layout) == 0);
+    CHECK_THROWS_AS(ice::linkLayoutToSchematic(project, layout, project.nextId()), ice::ProjectError);
+
+    const auto projected = ice::createLayoutFromSchematic(project, alpha);
+    CHECK(project.layoutCells.at(projected).schematicCell == alpha);
+}
+
 TEST_CASE("LVS schematic inference prefers a DUT view") {
     auto fixture = makeFixture();
     const auto layout = ice::createLayoutCell(fixture.project, "block");

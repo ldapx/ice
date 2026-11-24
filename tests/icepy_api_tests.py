@@ -44,6 +44,28 @@ def main() -> int:
     layout.arrange([rectangle, second_rectangle], "left")
     assert len(layout.cell().shapes) == 7, layout.cell().shapes
 
+    projected = project.create_layout_from_schematic(schematic.id, "projected")
+    assert projected.cell().schematic_cell == schematic.id
+    projected.unlink_schematic()
+    assert projected.cell().schematic_cell == 0
+    projected.link_schematic(schematic.id)
+    assert projected.cell().schematic_cell == schematic.id
+    assert icepy.schematic_for_layout(project, projected.id) == schematic.id
+    links = projected.device_links()
+    assert len(links) == 2, links
+    assert all(not link.stale for link in links), links
+    first = links[0]
+    projected.unbind_device(first.layout_object)
+    assert len(projected.device_links()) == 1
+    projected.bind_device(first.layout_object, schematic.id, first.schematic_instance)
+    assert len(projected.device_links()) == 2
+    report = icepy.run_lvs(project, schematic.id, projected.id)
+    assert report.schema_version == 2, report.schema_version
+    assert report.summary.devices_matched == 2, report.summary
+    assert len(report.devices) == 2, report.devices
+    assert all(match.method == icepy.LvsMatchMethod.linked for match in report.devices)
+    assert any("devices" in line for line in [icepy.lvs_report_json(report)])
+
     wrapped = schematic.wrap([resistor, capacitor], "wrapped")
     assert wrapped.cell != 0, wrapped
     assert wrapped.instance != 0, wrapped

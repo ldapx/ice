@@ -37,6 +37,7 @@ class SchematicCanvas : public QGraphicsView {
     // Invoked when the user right-clicks empty canvas space. The host owns the
     // menu contents (the editor tools shown in the vertical toolbar).
     virtual void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) = 0;
+    virtual void setSymbolContextMenuCallback(std::function<void(ice::ObjectId, const QPoint &globalPos)> callback) = 0;
     virtual void setDeleteCallback(std::function<void(std::vector<ice::ObjectId>)> callback) = 0;
     virtual void setDisconnectCallback(std::function<void(ice::ObjectId)> callback) = 0;
     virtual void
@@ -48,6 +49,7 @@ class SchematicCanvas : public QGraphicsView {
     virtual std::vector<ice::ObjectId> selectedInstanceIds() const = 0;
     virtual void restoreSelection() = 0;
     virtual void selectInstance(ice::ObjectId instanceId) = 0;
+    virtual void focusOnInstance(ice::ObjectId instanceId) = 0;
     virtual void clearSelection() = 0;
     virtual void deleteSelectedSymbols() = 0;
     virtual void rotateSelectedSymbols() = 0;

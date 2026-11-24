@@ -138,6 +138,11 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `layout_duplicate` | Duplicate layout shapes with optional offsets while preserving path segments and vias. |
 | `layout_array` | Repeat layout shapes by row/column pitch. |
 | `layout_arrange` | Align or distribute layout shapes. |
+| `layout_bind_device` | Bind a planned device or layout instance to a schematic instance. |
+| `layout_unbind_device` | Clear a layout device's schematic link. |
+| `layout_device_links` | List authored schematic-to-layout device links, including stale and duplicate status. |
+| `layout_link_schematic` | Link an existing layout cell to an existing schematic cell. |
+| `layout_unlink_schematic` | Remove the cell-level schematic link from a layout. |
 | `layout_info` | Read a layout cell's ports, nets, instances, and shape count. |
 | `layout_connectivity` | Extract nets from explicit layout nets, same-layer geometry, and via/contact overlaps. |
 | `layout_export_gds` | Export a layout cell to GDSII or OASIS, including ports and labels. Instance hierarchy is preserved unless `flatten=true`; GDSII and OASIS are written natively. |
@@ -158,7 +163,7 @@ regenerating. Use `ice_help(topic="analog-layout")` for the full workflow.
 | `implementation_export_gds` | Stream the newest DEF plus standard-cell GDS decks to a merged final GDS through KLayout. |
 | `implementation_delete` | Delete a run and optionally purge its `build/impl/<run>` directory. |
 | `drc_run` | Export a layout, run the package DRC deck (KLayout or gdscheck), and return normalized DRC violations. |
-| `lvs_run` | Compare a layout against a drawn, text SPICE, or SystemVerilog schematic and return the LVS report, including top-level port matches. |
+| `lvs_run` | Compare a layout against a drawn, text SPICE, or SystemVerilog schematic and return device, net, and port correspondence plus mismatches. |
 | `pex_run` | Extract planned, placed, and PDK-rule polygon devices plus first-order parasitics, then create or update a text SPICE schematic named `<layout> PEX`. |
 | `simulation_create` | Create a simulation and its first graph; supports transient, DC, AC, OP, noise, transfer-function, mixed, and digital analyses. |
 | `simulation_update` | Update analysis fields, corners, sweeps, Monte Carlo settings, capture signals, and declarative measurements. |
@@ -210,6 +215,15 @@ SystemVerilog instances and primitives are compared device by device;
 behavioral RTL is rejected rather than compared as ports only. Layout
 connectivity combines planned metadata with shapes, routed paths, vias, and
 placed-device port overlaps, and `m=` multiplicity is expanded before matching.
+`lvs_run` returns `summary`, `devices`, `nets`, and `ports` arrays. Device
+matches report `linked`, `name`, or `topology`, include both typed object refs,
+parameter comparisons, and pin-to-net mappings. Mismatches carry typed
+`schematic_ref`/`layout_ref`, an optional `hint`, and up to three candidate
+objects. `layout_device_links` lists the authored links and marks stale or
+duplicate ones; `layout_bind_device` and `layout_unbind_device` edit them.
+`layout_link_schematic` associates an existing layout with an existing
+schematic cell and `layout_unlink_schematic` removes that cell-level link.
+`layout_info` reports the linked schematic as `schematic_cell` and `schematic`.
 `pex_run` accepts a layout plus optional coefficient overrides
 (`metal_sheet_resistance`, `poly_sheet_resistance`,
 `diffusion_sheet_resistance`, `via_resistance`, `area_capacitance`,

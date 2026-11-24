@@ -206,6 +206,65 @@ ice::ObjectId resolveLayoutShape(const ice::Project &project, ice::ObjectId cell
     argumentError("Unknown layout shape: " + text);
 }
 
+ice::ObjectId resolveLayoutDevice(const ice::Project &project, ice::ObjectId cellId, const std::string &text) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        argumentError("Unknown layout cell");
+    const auto findNamed = [&](const auto &objects) -> std::optional<ice::ObjectId> {
+        for (const auto &[id, object] : objects) {
+            if (object.name == text)
+                return id;
+        }
+        return std::nullopt;
+    };
+    if (text.starts_with("instance:")) {
+        const auto name = text.substr(std::string("instance:").size());
+        if (const auto id = parseUnsigned(name); id && cell->second.instances.contains(*id))
+            return *id;
+        if (const auto id = findNamed(cell->second.instances))
+            return *id;
+        argumentError("Unknown layout instance: " + name);
+    }
+    if (text.starts_with("planned:")) {
+        const auto name = text.substr(std::string("planned:").size());
+        if (const auto id = parseUnsigned(name); id && cell->second.plannedDevices.contains(*id))
+            return *id;
+        if (const auto id = findNamed(cell->second.plannedDevices))
+            return *id;
+        argumentError("Unknown planned device: " + name);
+    }
+    if (const auto id = parseUnsigned(text)) {
+        if (cell->second.instances.contains(*id) || cell->second.plannedDevices.contains(*id))
+            return *id;
+    }
+    const auto instance = findNamed(cell->second.instances);
+    const auto planned = findNamed(cell->second.plannedDevices);
+    if (instance && planned)
+        argumentError("Layout device name is ambiguous; use instance:<name> or planned:<name>: " + text);
+    if (instance)
+        return *instance;
+    if (planned)
+        return *planned;
+    argumentError("Unknown layout device: " + text);
+}
+
+json layoutDeviceBindingJson(const ice::Project &project, const ice::LayoutDeviceBinding &binding) {
+    json value{{"layout_cell", binding.layoutCell},
+               {"layout_object", binding.layoutObject},
+               {"layout_kind", binding.kind == ice::LayoutDeviceKind::instance ? "instance" : "planned_device"},
+               {"layout_name", binding.layoutName},
+               {"schematic_instance", binding.schematicInstance},
+               {"stale", binding.stale},
+               {"duplicate", binding.duplicate}};
+    if (binding.schematicCell != 0) {
+        value["schematic_cell"] = binding.schematicCell;
+        if (const auto cell = project.schematicCells.find(binding.schematicCell); cell != project.schematicCells.end())
+            value["schematic_name"] = cell->second.name;
+    }
+    value["schematic_instance_name"] = binding.schematicName;
+    return value;
+}
+
 ice::LayoutArrange parseLayoutArrange(const std::string &text) {
     if (text == "left")
         return ice::LayoutArrange::left;
@@ -1013,10 +1072,17 @@ json layoutInfo(const ice::Project &project, const ice::LayoutCell &cell) {
                    {"read_only", cell.readOnly},
                    {"device", cell.device},
                    {"generated_by", cell.generatedBy},
+                   {"schematic_cell", cell.schematicCell == 0 ? json(nullptr) : json(cell.schematicCell)},
                    {"shapes", json::array()},
                    {"ports", json::array()},
                    {"instances", json::array()},
                    {"planned_devices", json::array()}};
+    if (cell.schematicCell != 0) {
+        const auto schematic = project.schematicCells.find(cell.schematicCell);
+        result["schematic"] = schematic == project.schematicCells.end() ? json(nullptr) : json(schematic->second.name);
+    } else {
+        result["schematic"] = nullptr;
+    }
     if (cell.reference)
         result["reference"] = {
             {"path", cell.reference->path}, {"format", cell.reference->format}, {"top_cell", cell.reference->topCell}};
@@ -1337,6 +1403,11 @@ void printHelp() {
                  "[--x-pitch <n>] [--y-pitch <n>]\n"
               << "  layout-arrange <project> <cell> <left|right|top|bottom|center-horizontal|center-vertical|"
                  "distribute-horizontal|distribute-vertical> <shape> <shape> ...\n"
+              << "  layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>\n"
+              << "  layout-unbind-device <project> <layout> <layout-device>\n"
+              << "  layout-device-links <project> <layout> [--schematic <schematic>]\n"
+              << "  layout-link-schematic <project> <layout> <schematic>\n"
+              << "  layout-unlink-schematic <project> <layout>\n"
               << "  layout-connectivity <project> <cell>\n"
               << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
               << "  layout-export-lef <project> <cell> <output.lef>\n"
@@ -3234,6 +3305,81 @@ int main(int argc, char **argv) {
                             [&](ice::Project &p) { ice::arrangeLayoutShapes(p, cell, shapes, operation); });
             session.save(args[1]);
             printJson({{"cell", cell}, {"operation", args[3]}, {"shapes", shapes}});
+            return 0;
+        }
+
+        if (command == "layout-bind-device") {
+            expectArguments(args, 6, 6,
+                            "layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto layoutDevice = resolveLayoutDevice(project, layout, args[3]);
+            const auto schematic = resolveSchematic(project, args[4]);
+            const auto schematicDevice = resolveSchematicInstance(project, schematic, args[5]);
+            ice::ProjectSession session(project);
+            session.execute("layout-bind-device", [&](ice::Project &p) {
+                ice::bindLayoutDevice(p, layout, layoutDevice, schematic, schematicDevice);
+            });
+            session.save(args[1]);
+            printJson({{"layout", layout},
+                       {"layout_device", layoutDevice},
+                       {"schematic", schematic},
+                       {"schematic_device", schematicDevice}});
+            return 0;
+        }
+
+        if (command == "layout-unbind-device") {
+            expectArguments(args, 4, 4, "layout-unbind-device <project> <layout> <layout-device>");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto layoutDevice = resolveLayoutDevice(project, layout, args[3]);
+            ice::ProjectSession session(project);
+            session.execute("layout-unbind-device",
+                            [&](ice::Project &p) { ice::unbindLayoutDevice(p, layout, layoutDevice); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"layout_device", layoutDevice}, {"unbound", true}});
+            return 0;
+        }
+
+        if (command == "layout-device-links") {
+            expectArguments(args, 3, 5, "layout-device-links <project> <layout> [--schematic <schematic>]");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            ice::ObjectId schematic = 0;
+            if (args.size() > 3) {
+                if (args[3] != "--schematic" || args.size() != 5)
+                    argumentError("Usage: layout-device-links <project> <layout> [--schematic <schematic>]");
+                schematic = resolveSchematic(project, args[4]);
+            }
+            json links = json::array();
+            for (const auto &binding : ice::layoutDeviceBindings(project, layout, schematic))
+                links.push_back(layoutDeviceBindingJson(project, binding));
+            printJson({{"layout", layout}, {"links", std::move(links)}});
+            return 0;
+        }
+
+        if (command == "layout-link-schematic") {
+            expectArguments(args, 4, 4, "layout-link-schematic <project> <layout> <schematic>");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto schematic = resolveSchematic(project, args[3]);
+            ice::ProjectSession session(project);
+            session.execute("layout-link-schematic",
+                            [&](ice::Project &p) { ice::linkLayoutToSchematic(p, layout, schematic); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"schematic", schematic}});
+            return 0;
+        }
+
+        if (command == "layout-unlink-schematic") {
+            expectArguments(args, 3, 3, "layout-unlink-schematic <project> <layout>");
+            const auto project = ice::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            ice::ProjectSession session(project);
+            session.execute("layout-unlink-schematic",
+                            [&](ice::Project &p) { ice::unlinkLayoutFromSchematic(p, layout); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"unlinked", true}});
             return 0;
         }
 

@@ -118,6 +118,18 @@ std::string serializeVerificationReport(const VerificationReport &report) {
                 {"lvs", json::array()},
                 {"pex", json::array()}};
     const auto optionalId = [](std::optional<ObjectId> id) -> json { return id ? json(*id) : json(nullptr); };
+    const auto boundsJson = [](const Rect &bounds) -> json {
+        return bounds.valid() ? json::array({bounds.x, bounds.y, bounds.width, bounds.height}) : json(nullptr);
+    };
+    const auto refJson = [&](const LvsObjectRef &ref) {
+        json value{{"kind", lvsObjectKindName(ref.kind)}, {"cell", ref.cell}, {"id", ref.id}, {"name", ref.name}};
+        if (ref.bounds)
+            value["bounds"] = boundsJson(*ref.bounds);
+        return value;
+    };
+    const auto optionalRefJson = [&](const std::optional<LvsObjectRef> &ref) -> json {
+        return ref ? refJson(*ref) : json(nullptr);
+    };
     for (const auto &item : report.drc)
         output["drc"].push_back({{"schema_version", item.schemaVersion},
                                  {"severity", verificationSeverityName(item.severity)},
@@ -129,13 +141,23 @@ std::string serializeVerificationReport(const VerificationReport &report) {
                                  {"width", item.location.width},
                                  {"height", item.location.height},
                                  {"cell", item.cell}});
-    for (const auto &item : report.lvs)
-        output["lvs"].push_back({{"schema_version", item.schemaVersion},
-                                 {"severity", verificationSeverityName(item.severity)},
-                                 {"category", item.category},
-                                 {"message", item.message},
-                                 {"schematic_object", optionalId(item.schematicObject)},
-                                 {"layout_object", optionalId(item.layoutObject)}});
+    for (const auto &item : report.lvs) {
+        json entry{{"schema_version", item.schemaVersion},
+                   {"severity", verificationSeverityName(item.severity)},
+                   {"category", item.category},
+                   {"message", item.message},
+                   {"schematic_object", optionalId(item.schematicObject)},
+                   {"layout_object", optionalId(item.layoutObject)},
+                   {"schematic_ref", optionalRefJson(item.schematicRef)},
+                   {"layout_ref", optionalRefJson(item.layoutRef)},
+                   {"hint", item.hint},
+                   {"candidates", json::array()}};
+        for (const auto &candidate : item.candidates) {
+            entry["candidates"].push_back(
+                {{"object", refJson(candidate.object)}, {"score", candidate.score}, {"reason", candidate.reason}});
+        }
+        output["lvs"].push_back(std::move(entry));
+    }
     for (const auto &item : report.pex)
         output["pex"].push_back({{"schema_version", item.schemaVersion},
                                  {"net", item.net},

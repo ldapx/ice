@@ -21,6 +21,97 @@ struct DrcViolation {
     std::string cell;
 };
 
+// Identifies a schematic or layout object referenced by an LVS result. Layout
+// geometry groups and synthetic topology nets may have id 0 but still carry a
+// name and bounds so the GUI can navigate to them.
+enum class LvsObjectKind { device, net, port, plannedDevice, instance, shape, connection, geometry };
+
+// How a schematic device was paired with a layout device. `linked` comes from
+// an authored schematic_instance link, `name` from a unique normalized name,
+// and `topology` from a unique terminal signature.
+enum class LvsMatchMethod { none, linked, name, topology };
+
+const char *lvsObjectKindName(LvsObjectKind kind);
+const char *lvsMatchMethodName(LvsMatchMethod method);
+
+struct LvsObjectRef {
+    LvsObjectKind kind = LvsObjectKind::device;
+    ObjectId cell = 0;
+    ObjectId id = 0;
+    std::string name;
+    std::optional<Rect> bounds;
+};
+
+struct LvsPinMatch {
+    std::string schematicPin;
+    std::string layoutPin;
+    std::string schematicNet;
+    std::string layoutNet;
+    bool matched = false;
+    // True for two-terminal passives whose pins are connected in reverse
+    // order. This is electrically equivalent and is reported for inspection.
+    bool swapped = false;
+};
+
+struct LvsParameterMatch {
+    std::string name;
+    std::string schematicValue;
+    std::string layoutValue;
+    bool matched = false;
+};
+
+struct LvsDeviceMatch {
+    std::optional<LvsObjectRef> schematic;
+    std::optional<LvsObjectRef> layout;
+    std::string schematicType;
+    std::string layoutType;
+    LvsMatchMethod method = LvsMatchMethod::none;
+    // False for one-sided and mismatched pairs. A pair with a type or
+    // parameter mismatch still has both refs populated.
+    bool matched = false;
+    bool parametersCompared = false;
+    std::vector<LvsPinMatch> pins;
+    std::vector<LvsParameterMatch> parameters;
+};
+
+struct LvsNetMatch {
+    std::optional<LvsObjectRef> schematic;
+    std::optional<LvsObjectRef> layout;
+    std::vector<std::string> schematicConnections;
+    std::vector<std::string> layoutConnections;
+    bool matched = false;
+    bool ground = false;
+};
+
+struct LvsPortMatch {
+    std::optional<LvsObjectRef> schematic;
+    std::optional<LvsObjectRef> layout;
+    std::string schematicDirection;
+    std::string layoutDirection;
+    std::string schematicNet;
+    std::string layoutNet;
+    bool matched = false;
+    bool directionMatched = false;
+    bool netMatched = false;
+};
+
+struct LvsCandidate {
+    LvsObjectRef object;
+    double score = 0.0;
+    std::string reason;
+};
+
+struct LvsSummary {
+    int devicesMatched = 0;
+    int devicesMismatched = 0;
+    int devicesSchematicOnly = 0;
+    int devicesLayoutOnly = 0;
+    int netsMatched = 0;
+    int netsSchematicOnly = 0;
+    int netsLayoutOnly = 0;
+    int portsMatched = 0;
+};
+
 struct LvsMismatch {
     int schemaVersion = 1;
     std::string category;
@@ -28,6 +119,12 @@ struct LvsMismatch {
     std::optional<ObjectId> schematicObject;
     std::optional<ObjectId> layoutObject;
     VerificationSeverity severity = VerificationSeverity::error;
+    // Typed, descriptive counterparts of the raw object ids above. Populated
+    // for every mismatch when the object can be resolved.
+    std::optional<LvsObjectRef> schematicRef;
+    std::optional<LvsObjectRef> layoutRef;
+    std::string hint;
+    std::vector<LvsCandidate> candidates;
 };
 
 struct LvsOptions {
@@ -40,13 +137,22 @@ struct LvsOptions {
 // geometry-derived nets (shapes, routed paths, vias, and placed-device port
 // overlaps). Device identity is matched through schematic links, names, and a
 // topology fallback after multiplicity expansion.
+//
+// Mismatches describe failures. Devices, nets, and ports describe the complete
+// correspondence, including matched objects, match methods, terminal maps,
+// parameter values, and layout bounds. The correspondence is derived for each
+// run; authored links remain stored on layout instances and planned devices.
 struct LvsReport {
-    int schemaVersion = 1;
+    int schemaVersion = 2;
     std::string schematic;
     std::string layout;
     // Number of top-level ports matched by normalized name.
     int portsMatched = 0;
+    LvsSummary summary;
     std::vector<LvsMismatch> mismatches;
+    std::vector<LvsDeviceMatch> devices;
+    std::vector<LvsNetMatch> nets;
+    std::vector<LvsPortMatch> ports;
     bool matched() const;
 };
 

@@ -645,6 +645,8 @@ void removeSchematicCascade(Project &project, ObjectId cellId) {
         for (const auto &[instanceId, _] : cell->second.instances)
             instanceIds.insert(instanceId);
         for (auto &[_, layout] : project.layoutCells) {
+            if (layout.schematicCell == cellId)
+                layout.schematicCell = 0;
             for (auto &[__, device] : layout.plannedDevices) {
                 if (instanceIds.contains(device.schematicInstance))
                     device.schematicInstance = 0;

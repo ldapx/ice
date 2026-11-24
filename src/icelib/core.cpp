@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -238,13 +239,23 @@ std::vector<Diagnostic> Project::validate() const {
                        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
         return value;
     };
+    std::unordered_set<ObjectId> schematicInstanceIds;
+    for (const auto &[_, schematic] : schematicCells) {
+        for (const auto &[instanceId, __] : schematic.instances)
+            schematicInstanceIds.insert(instanceId);
+    }
     for (const auto &[cellId, cell] : layoutCells) {
         if (cell.name.empty())
             result.push_back({Diagnostic::Severity::error, "layout.name", "Layout name is required", cellId});
         else if (!layoutNames.insert(normalizedName(cell.name)).second)
             result.push_back({Diagnostic::Severity::error, "layout.name.duplicate",
                               "Layout name is listed more than once: " + cell.name, cellId});
+        if (cell.schematicCell != 0 && !schematicCells.contains(cell.schematicCell))
+            result.push_back({Diagnostic::Severity::warning, "layout.schematic_link.stale",
+                              "Layout links to a missing schematic cell", cellId});
         std::unordered_set<std::string> instanceNames;
+        std::unordered_map<ObjectId, int> instanceLinkCounts;
+        std::unordered_map<ObjectId, int> plannedLinkCounts;
         for (const auto &[instanceId, instance] : cell.instances) {
             if (instance.name.empty())
                 result.push_back({Diagnostic::Severity::error, "layout.instance.name",
@@ -258,6 +269,46 @@ std::vector<Diagnostic> Project::validate() const {
             else if (instance.cell == cellId)
                 result.push_back({Diagnostic::Severity::error, "layout.instance.cycle",
                                   "Layout cell cannot instantiate itself", instanceId});
+            if (instance.schematicInstance != 0) {
+                if (!schematicInstanceIds.contains(instance.schematicInstance))
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.stale",
+                                      "Layout instance '" + instance.name + "' links to a missing schematic instance",
+                                      instanceId});
+                else
+                    ++instanceLinkCounts[instance.schematicInstance];
+            }
+        }
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (device.schematicInstance != 0) {
+                if (!schematicInstanceIds.contains(device.schematicInstance))
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.stale",
+                                      "Planned device '" + device.name + "' links to a missing schematic instance",
+                                      deviceId});
+                else
+                    ++plannedLinkCounts[device.schematicInstance];
+            }
+        }
+        for (const auto &[schematicInstance, count] : instanceLinkCounts) {
+            if (count < 2)
+                continue;
+            for (const auto &[instanceId, instance] : cell.instances) {
+                if (instance.schematicInstance == schematicInstance)
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.duplicate",
+                                      "Layout instance '" + instance.name +
+                                          "' shares its schematic link with another layout instance",
+                                      instanceId});
+            }
+        }
+        for (const auto &[schematicInstance, count] : plannedLinkCounts) {
+            if (count < 2)
+                continue;
+            for (const auto &[deviceId, device] : cell.plannedDevices) {
+                if (device.schematicInstance == schematicInstance)
+                    result.push_back(
+                        {Diagnostic::Severity::warning, "layout.device_link.duplicate",
+                         "Planned device '" + device.name + "' shares its schematic link with another planned device",
+                         deviceId});
+            }
         }
         if (cell.reference) {
             if (cell.reference->path.empty())
@@ -589,6 +640,8 @@ std::string Project::serialize() const {
             c["device"] = cell.device;
         if (cell.generatedBy != 0)
             c["generated_by"] = cell.generatedBy;
+        if (cell.schematicCell != 0)
+            c["schematic_cell"] = cell.schematicCell;
         if (!cell.parameters.empty()) {
             c["parameters"] = json::array();
             for (const auto &parameter : cell.parameters) {
@@ -1158,6 +1211,7 @@ Project Project::deserialize(const std::string &text) {
             }
             cell.device = c.value("device", std::string{});
             cell.generatedBy = c.value("generated_by", ObjectId{0});
+            cell.schematicCell = c.value("schematic_cell", ObjectId{0});
             if (c.contains("parameters")) {
                 for (const auto &parameter : c.at("parameters"))
                     cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});

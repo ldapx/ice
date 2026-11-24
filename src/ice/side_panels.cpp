@@ -335,6 +335,10 @@ void ProjectPanel::setOnMakeLayoutFromSchematic(std::function<void(ice::ObjectId
     onMakeLayoutFromSchematic_ = std::move(callback);
 }
 
+void ProjectPanel::setOnLinkSchematicToLayout(std::function<void(ice::ObjectId)> callback) {
+    onLinkSchematicToLayout_ = std::move(callback);
+}
+
 void ProjectPanel::setOnActivateSchematic(std::function<void(ice::ObjectId)> callback) {
     onActivateSchematic_ = std::move(callback);
 }
@@ -383,6 +387,14 @@ void ProjectPanel::setOnRegenerateProceduralLayout(std::function<void(ice::Objec
 }
 
 void ProjectPanel::setOnRunPex(std::function<void(ice::ObjectId)> callback) { onRunPex_ = std::move(callback); }
+
+void ProjectPanel::setOnLinkLayoutToSchematic(std::function<void(ice::ObjectId)> callback) {
+    onLinkLayoutToSchematic_ = std::move(callback);
+}
+
+void ProjectPanel::setOnUnlinkLayoutFromSchematic(std::function<void(ice::ObjectId)> callback) {
+    onUnlinkLayoutFromSchematic_ = std::move(callback);
+}
 
 void ProjectPanel::setOnRenameLayout(RenameCallback callback) { onRenameLayout_ = std::move(callback); }
 
@@ -635,7 +647,13 @@ void ProjectPanel::rebuildTree() {
         cellItem->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
         cellItem->setData(0, kItemKindRole, static_cast<int>(HierarchyItemKind::layout));
         cellItem->setIcon(0, hierarchyIcon("notebook-pen"));
-        cellItem->setToolTip(0, QStringLiteral("Layout: %1").arg(cellLabel));
+        auto cellTooltip = QStringLiteral("Layout: %1").arg(cellLabel);
+        if (cell.schematicCell != 0) {
+            if (const auto schematic = project.schematicCells.find(cell.schematicCell);
+                schematic != project.schematicCells.end())
+                cellTooltip += QStringLiteral(" · Schematic: %1").arg(QString::fromStdString(schematic->second.name));
+        }
+        cellItem->setToolTip(0, cellTooltip);
         std::vector<ice::ObjectId> ancestors{id};
         addContents(cellItem, id, ancestors);
     }
@@ -653,17 +671,27 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
     if (!item)
         return;
     if (!showLayoutHierarchy_) {
-        if (!onMakeLayoutFromSchematic_ || !item->data(0, Qt::UserRole).isValid())
+        if ((!onMakeLayoutFromSchematic_ && !onLinkSchematicToLayout_) || !item->data(0, Qt::UserRole).isValid())
             return;
         const auto cellId = static_cast<ice::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
         const auto cell = project_->schematicCells.find(cellId);
-        if (cellId == 0 || cell == project_->schematicCells.end() || cell->second.isTextSource())
+        if (cellId == 0 || cell == project_->schematicCells.end())
             return;
         QMenu menu(this);
-        auto *makeLayoutAction = menu.addAction(QStringLiteral("Make Layout from Schematic"));
-        setLucideIcon(makeLayoutAction, QStringLiteral("notebook-pen"));
-        if (menu.exec(tree_->viewport()->mapToGlobal(pos)) == makeLayoutAction)
+        QAction *makeLayoutAction = nullptr;
+        if (!cell->second.isTextSource() && onMakeLayoutFromSchematic_) {
+            makeLayoutAction = menu.addAction(QStringLiteral("Make Layout from Schematic"));
+            setLucideIcon(makeLayoutAction, QStringLiteral("notebook-pen"));
+        }
+        auto *linkLayoutAction =
+            onLinkSchematicToLayout_ ? menu.addAction(QStringLiteral("Link to Existing Layout…")) : nullptr;
+        if (menu.actions().isEmpty())
+            return;
+        const auto chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+        if (chosen == makeLayoutAction && onMakeLayoutFromSchematic_)
             onMakeLayoutFromSchematic_(cellId);
+        else if (chosen == linkLayoutAction && onLinkSchematicToLayout_)
+            onLinkSchematicToLayout_(cellId);
         return;
     }
     const auto kind = item->data(0, kItemKindRole).toInt();
@@ -673,6 +701,8 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
     QAction *openAction = nullptr;
     QAction *flattenAction = nullptr;
     QAction *pexAction = nullptr;
+    QAction *linkSchematicAction = nullptr;
+    QAction *unlinkSchematicAction = nullptr;
     QAction *renameAction = nullptr;
     QString renameCurrentName;
     std::function<void(const std::string &)> renameHandler;
@@ -706,6 +736,10 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
             if (!cell.library && !cell.readOnly && onRenameLayout_)
                 addRename(QStringLiteral("Rename Layout…"), QString::fromStdString(cell.name),
                           [this, id](const std::string &name) { onRenameLayout_(id, name); });
+            if (!cell.library && !cell.readOnly && onLinkLayoutToSchematic_)
+                linkSchematicAction = menu.addAction(QStringLiteral("Link to Schematic…"));
+            if (!cell.library && !cell.readOnly && cell.schematicCell != 0 && onUnlinkLayoutFromSchematic_)
+                unlinkSchematicAction = menu.addAction(QStringLiteral("Unlink Schematic"));
         } else {
             const auto parentId = parent->data(0, Qt::UserRole).toULongLong();
             const auto instanceId = item->data(0, kInstanceIdRole).toULongLong();
@@ -769,6 +803,10 @@ void ProjectPanel::showContextMenu(const QPoint &pos) {
         rebuildTree();
     } else if (chosen == pexAction && onRunPex_) {
         onRunPex_(id);
+    } else if (chosen == linkSchematicAction && onLinkLayoutToSchematic_) {
+        onLinkLayoutToSchematic_(id);
+    } else if (chosen == unlinkSchematicAction && onUnlinkLayoutFromSchematic_) {
+        onUnlinkLayoutFromSchematic_(id);
     } else if (chosen == renameAction) {
         bool ok = false;
         const auto name = QInputDialog::getText(this, renameAction->text(), QStringLiteral("Name:"), QLineEdit::Normal,

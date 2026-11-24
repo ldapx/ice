@@ -27,8 +27,11 @@ is on `PYTHONPATH`.
 The bindings expose the canonical project objects:
 
 - `Project`, `LayoutCell`, `Layer`, `Shape`, `Port`, `LayoutInstance`
+- `LayoutDeviceBinding`, `LayoutDeviceKind`
 - `Parameter`, `Rect`, `LayoutPoint`, `DatabaseUnits`
 - `Diagnostic` and `Severity`
+- `LvsReport`, `LvsDeviceMatch`, `LvsNetMatch`, `LvsPortMatch`, `LvsMismatch`,
+  `LvsObjectRef`, `LvsSummary`, `LvsCandidate`
 
 `Project.layout_cells` and `Project.layers` are read-only snapshots. Use a
 `LayoutBuilder` for mutation so IDs, layer lookup, and validation stay
@@ -79,6 +82,18 @@ copies. `arrange` accepts `left`, `right`, `top`, `bottom`,
 `center-horizontal`, `center-vertical`, `distribute-horizontal`, or
 `distribute-vertical`.
 
+`Project.create_layout_from_schematic(schematic, name="", stack="")` projects a
+drawn schematic into a layout and returns a `LayoutBuilder`. The builder exposes
+the cell-level link through `link_schematic(schematic_cell)` and
+`unlink_schematic()`, and the layout cell exposes `schematic_cell`.
+The builder also exposes the authored device links through
+`device_links(schematic_cell=0)`, and
+`bind_device(layout_device, schematic_cell, schematic_instance)` /
+`unbind_device(layout_device)` edit them. Bindings are normal project
+mutations, so they participate in undo and serialization. `LayoutDeviceBinding`
+reports the layout object, its kind (`planned_device` or `instance`), the
+resolved schematic cell and instance names, and `stale`/`duplicate` status.
+
 `Project.save()` and `Project.load()` use the split project-directory
 format. The root contains `project.icepro`, `sch/*.icesch`,
 `lay/*.icelay`, `sim/*.icesim`, `scripts/`, `build/`, `.gitignore`, and
@@ -87,11 +102,13 @@ format. The root contains `project.icepro`, `sch/*.icesch`,
 ## Layout versus schematic
 
 `icepy.run_lvs(project, schematic, layout)` compares a drawn schematic against a
-layout and returns an `LvsReport` with `matched`, `schematic`, `layout`, and
-`mismatches`. Each mismatch exposes its `category`, `message`, `severity`, and
-optional schematic/layout object ids. `schematic_for_layout(project, layout)`
-applies the same source-schematic inference used by the GUI and CLI, and
-`lvs_report_json(report)` serializes the report.
+layout and returns an `LvsReport` with `matched`, `schematic`, `layout`,
+`summary`, `devices`, `nets`, `ports`, and `mismatches`. Each mismatch exposes
+its `category`, `message`, `severity`, optional schematic/layout object ids,
+typed `schematic_ref`/`layout_ref`, a `hint`, and candidate objects.
+`schematic_for_layout(project, layout)` applies the same source-schematic
+inference used by the GUI and CLI, and `lvs_report_json(report)` serializes the
+report.
 
 ```python
 import icepy
@@ -99,7 +116,9 @@ import icepy
 report = icepy.run_lvs_named(project, "top", "top_layout")
 if not report.matched:
     for mismatch in report.mismatches:
-        print(mismatch.category, mismatch.message)
+        print(mismatch.category, mismatch.message, mismatch.hint)
+for match in report.devices:
+    print(match.schematic.name, match.layout.name, match.method, match.matched)
 ```
 
 Use `run_lvs(project, schematic_id, layout_id)` when object ids are already

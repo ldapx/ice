@@ -190,6 +190,11 @@ ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientati
 ice-cli layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]
 ice-cli layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> [--x-pitch <n>] [--y-pitch <n>]
 ice-cli layout-arrange <project> <cell> <operation> <shape> <shape> ...
+ice-cli layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>
+ice-cli layout-unbind-device <project> <layout> <layout-device>
+ice-cli layout-device-links <project> <layout> [--schematic <schematic>]
+ice-cli layout-link-schematic <project> <layout> <schematic>
+ice-cli layout-unlink-schematic <project> <layout>
 ice-cli layout-connectivity <project> <cell>
 ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
 ice-cli layout-export-lef <project> <cell> <output.lef>
@@ -213,6 +218,23 @@ extent plus one grid step. `layout-arrange` accepts `left`, `right`, `top`,
 `bottom`, `center-horizontal`, `center-vertical`, `distribute-horizontal`, or
 `distribute-vertical`. These operations are also available in the GUI and
 Python, and are transactional when invoked through the CLI session.
+
+`layout-device-links` lists the authored schematic-to-layout device links in a
+layout cell. A link may be `stale` when its schematic instance no longer exists,
+or `duplicate` when another device of the same kind in the cell points at the
+same schematic instance. `layout-bind-device` sets the link of a planned device
+or placed layout instance; `layout-unbind-device` clears it. Bind is a normal
+transaction and is undoable. The layout device argument accepts a name or id;
+use `instance:<name>` or `planned:<name>` when both kinds share a name. Bindings
+must target a real schematic device: input/output/pin symbols and supply or
+ground instances are rejected.
+
+`layout-link-schematic` associates an existing layout cell with an existing
+schematic cell. This is a cell-level link, separate from per-device bindings.
+LVS and `lvs-auto` prefer it over name matching and planned-device inference,
+and the GUI shows the linked schematic in the layout hierarchy tooltip.
+`layout-unlink-schematic` removes it. The link is persisted in the `.icelay`
+cell file.
 
 `layout-get-script` and `layout-set-script` read and replace a procedural
 layout's Python source without regenerating it. `layout-remove` accepts either
@@ -405,11 +427,15 @@ testbench named after the block does not hide its DUT view.
 Both commands exit with status `0` for a match and `1` when the report contains
 errors or warnings. The comparison covers device presence, reference names,
 device types, shared device parameters including parameters missing from the
-layout, net topology from planned metadata plus shapes/routed paths/vias, and
-top-level ports matched by name, direction, and bound net. `m=` multiplicity is
-expanded, and renamed devices are matched by a topology fallback. The JSON report
-includes `ports_matched` and the `missing-port`, `extra-port`, `port-direction`,
-and `port-net` mismatch categories.
+layout, net topology, and top-level ports. The report also contains `devices`,
+`nets`, and `ports` correspondence arrays with match methods (`linked`, `name`,
+`topology`), typed object references, layout bounds, parameter comparisons, and
+per-terminal net mappings. Mismatches include `schematic_ref`, `layout_ref`,
+`hint`, and up to three candidate objects to make debugging easier.
+Device matching expands `m=` multiplicity and falls back to topology when names
+change. Port results include direction and net status. The JSON report includes
+`summary`, `ports_matched`, and the `missing-port`, `extra-port`,
+`port-direction`, and `port-net` mismatch categories.
 
 `drc` exports the layout to a temporary GDS and runs the DRC deck declared by
 the layout's PDK package. A package `technology/drc.json` can select a KLayout

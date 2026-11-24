@@ -3868,7 +3868,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     void activateLayoutPlannedDevice(ice::ObjectId deviceId) {
-        if (!project_ || !layoutDevicesPanel_ || deviceId == 0)
+        if (!project_ || deviceId == 0)
             return;
         const auto cellIt = project_->project().layoutCells.find(activeLayoutId_);
         if (cellIt == project_->project().layoutCells.end() || cellIt->second.library)
@@ -3878,20 +3878,41 @@ class DocumentWindow : public QMainWindow {
             return;
 
         const auto element = plannedDeviceSpiceElement(project_->project(), planned->second);
-        if (element == 'V' || element == 'I' || element == 'G' || element == 'P') {
-            QMenu portMenu(this);
-            auto *convert = portMenu.addAction(QStringLiteral("Convert to Port"));
-            auto *chosen = portMenu.exec(QCursor::pos());
-            if (chosen == convert)
-                convertPlannedDeviceToPort(deviceId);
+        const bool supplyOrPort = element == 'V' || element == 'I' || element == 'G' || element == 'P';
+        QMenu menu(this);
+        QAction *convert = nullptr;
+        QAction *manual = nullptr;
+        QAction *place = nullptr;
+        if (supplyOrPort) {
+            convert = menu.addAction(QStringLiteral("Convert to Port"));
+        } else {
+            manual = menu.addAction(QStringLiteral("Draw Layout Manually"));
+            place = menu.addAction(QStringLiteral("Place Layout Device…"));
+            place->setEnabled(layoutDevicesPanel_ && !layoutDevicesPanel_->library().cells.empty());
+        }
+        menu.addSeparator();
+        auto *locateAction = menu.addAction(QStringLiteral("Locate Schematic Counterpart"));
+        auto *bindAction = supplyOrPort ? nullptr : menu.addAction(QStringLiteral("Bind to Schematic Device…"));
+        auto *clearAction = menu.addAction(QStringLiteral("Clear Schematic Binding"));
+        auto *chosen = menu.exec(QCursor::pos());
+        if (!chosen)
+            return;
+        if (chosen == convert) {
+            convertPlannedDeviceToPort(deviceId);
             return;
         }
-
-        QMenu menu(this);
-        auto *manual = menu.addAction(QStringLiteral("Draw Layout Manually"));
-        auto *place = menu.addAction(QStringLiteral("Place Layout Device…"));
-        place->setEnabled(!layoutDevicesPanel_->library().cells.empty());
-        auto *chosen = menu.exec(QCursor::pos());
+        if (chosen == locateAction) {
+            locateSchematicCounterpart(deviceId);
+            return;
+        }
+        if (chosen == bindAction) {
+            bindLayoutDeviceInteractively(deviceId);
+            return;
+        }
+        if (chosen == clearAction) {
+            clearLayoutDeviceBinding(deviceId);
+            return;
+        }
         if (chosen == manual) {
             const auto name = planned->second.name;
             project_->execute("remove planned device", [&](ice::Project &project) {
@@ -6081,6 +6102,144 @@ class DocumentWindow : public QMainWindow {
         statusBar()->showMessage(QStringLiteral("Layout cell '%1' removed").arg(name));
     }
 
+    void linkSchematicToLayoutDialog(ice::ObjectId schematicId) {
+        if (!project_ || schematicId == 0)
+            return;
+        auto &project = project_->project();
+        const auto schematic = project.schematicCells.find(schematicId);
+        if (schematic == project.schematicCells.end())
+            return;
+        struct Choice {
+            ice::ObjectId id = 0;
+            QString label;
+        };
+        std::vector<Choice> choices;
+        for (const auto &[id, cell] : project.layoutCells) {
+            if (cell.library || cell.readOnly)
+                continue;
+            choices.push_back({id, QString::fromStdString(cell.name)});
+        }
+        if (choices.empty()) {
+            QMessageBox::information(this, QStringLiteral("Link Schematic to Layout"),
+                                     QStringLiteral("Create a layout cell first."));
+            return;
+        }
+        std::sort(choices.begin(), choices.end(),
+                  [](const Choice &left, const Choice &right) { return left.label < right.label; });
+        QStringList labels;
+        int current = 0;
+        for (std::size_t index = 0; index < choices.size(); ++index) {
+            labels << choices[index].label;
+            if (project.layoutCells.at(choices[index].id).schematicCell == schematicId)
+                current = static_cast<int>(index);
+        }
+        bool accepted = false;
+        const auto selected =
+            QInputDialog::getItem(this, QStringLiteral("Link Schematic to Layout"),
+                                  QStringLiteral("Layout for %1:").arg(QString::fromStdString(schematic->second.name)),
+                                  labels, current, false, &accepted);
+        if (!accepted)
+            return;
+        const auto choiceIndex = labels.indexOf(selected);
+        if (choiceIndex < 0 || choiceIndex >= static_cast<int>(choices.size()))
+            return;
+        const auto layoutId = choices[static_cast<std::size_t>(choiceIndex)].id;
+        const auto layoutName = choices[static_cast<std::size_t>(choiceIndex)].label;
+        const auto schematicName = QString::fromStdString(schematic->second.name);
+        try {
+            project_->execute("link schematic to layout",
+                              [&](ice::Project &p) { ice::linkLayoutToSchematic(p, layoutId, schematicId); });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Link Schematic to Layout"),
+                                  QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Linked schematic to layout");
+        refreshProject();
+        statusBar()->showMessage(
+            QStringLiteral("Linked schematic '%1' to layout '%2'.").arg(schematicName, layoutName));
+    }
+
+    void linkLayoutToSchematicDialog(ice::ObjectId layoutId) {
+        if (!project_ || layoutId == 0)
+            return;
+        auto &project = project_->project();
+        const auto layout = project.layoutCells.find(layoutId);
+        if (layout == project.layoutCells.end() || layout->second.library || layout->second.readOnly)
+            return;
+        struct Choice {
+            ice::ObjectId id = 0;
+            QString label;
+        };
+        std::vector<Choice> choices;
+        for (const auto &[id, cell] : project.schematicCells) {
+            auto kind = QStringLiteral("drawn");
+            if (cell.systemVerilogSchematic)
+                kind = QStringLiteral("SystemVerilog");
+            else if (cell.textSchematic)
+                kind = QStringLiteral("SPICE");
+            choices.push_back({id, QStringLiteral("%1 — %2").arg(QString::fromStdString(cell.name), kind)});
+        }
+        if (choices.empty()) {
+            QMessageBox::information(this, QStringLiteral("Link Layout to Schematic"),
+                                     QStringLiteral("Create a schematic cell first."));
+            return;
+        }
+        std::sort(choices.begin(), choices.end(),
+                  [](const Choice &left, const Choice &right) { return left.label < right.label; });
+        QStringList labels;
+        int current = 0;
+        for (std::size_t index = 0; index < choices.size(); ++index) {
+            labels << choices[index].label;
+            if (choices[index].id == layout->second.schematicCell)
+                current = static_cast<int>(index);
+        }
+        bool accepted = false;
+        const auto selected =
+            QInputDialog::getItem(this, QStringLiteral("Link Layout to Schematic"),
+                                  QStringLiteral("Schematic for %1:").arg(QString::fromStdString(layout->second.name)),
+                                  labels, current, false, &accepted);
+        if (!accepted)
+            return;
+        const auto choiceIndex = labels.indexOf(selected);
+        if (choiceIndex < 0 || choiceIndex >= static_cast<int>(choices.size()))
+            return;
+        const auto layoutName = QString::fromStdString(layout->second.name);
+        const auto schematicLabel = choices[static_cast<std::size_t>(choiceIndex)].label;
+        try {
+            project_->execute("link layout to schematic", [&](ice::Project &p) {
+                ice::linkLayoutToSchematic(p, layoutId, choices[static_cast<std::size_t>(choiceIndex)].id);
+            });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Link Layout to Schematic"),
+                                  QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Linked layout to schematic");
+        refreshProject();
+        statusBar()->showMessage(
+            QStringLiteral("Linked layout '%1' to schematic '%2'.").arg(layoutName, schematicLabel));
+    }
+
+    void unlinkLayoutSchematic(ice::ObjectId layoutId) {
+        if (!project_ || layoutId == 0)
+            return;
+        const auto layout = project_->project().layoutCells.find(layoutId);
+        if (layout == project_->project().layoutCells.end() || layout->second.library || layout->second.readOnly)
+            return;
+        const auto layoutName = QString::fromStdString(layout->second.name);
+        try {
+            project_->execute("unlink layout from schematic",
+                              [&](ice::Project &p) { ice::unlinkLayoutFromSchematic(p, layoutId); });
+        } catch (const ice::ProjectError &error) {
+            QMessageBox::critical(this, QStringLiteral("Unlink Schematic"), QString::fromStdString(error.what()));
+            return;
+        }
+        project_->setLastHistoryLabel("Unlinked layout from schematic");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Removed the schematic link from layout '%1'.").arg(layoutName));
+    }
+
     void removeLayoutItem(ice::ObjectId id) {
         if (!project_ || id == 0)
             return;
@@ -6852,6 +7011,22 @@ class DocumentWindow : public QMainWindow {
         auto *pasteAction = menu.addAction(QStringLiteral("Paste"));
         pasteAction->setEnabled(!layoutShapeClipboard_.empty());
         connect(pasteAction, &QAction::triggered, this, [this] { pasteLayoutShapes(); });
+        if (project_ && activeLayoutId_ != 0) {
+            if (const auto cell = project_->project().layoutCells.find(activeLayoutId_);
+                cell != project_->project().layoutCells.end() && !cell->second.library && !cell->second.readOnly) {
+                menu.addSeparator();
+                auto *linkAction =
+                    menu.addAction(cell->second.schematicCell == 0 ? QStringLiteral("Link to Schematic…")
+                                                                   : QStringLiteral("Change Schematic Link…"));
+                connect(linkAction, &QAction::triggered, this,
+                        [this] { linkLayoutToSchematicDialog(activeLayoutId_); });
+                if (cell->second.schematicCell != 0) {
+                    auto *unlinkAction = menu.addAction(QStringLiteral("Unlink Schematic"));
+                    connect(unlinkAction, &QAction::triggered, this,
+                            [this] { unlinkLayoutSchematic(activeLayoutId_); });
+                }
+            }
+        }
         menu.addSeparator();
         const auto addToolEntry = [&](QAction *action) {
             if (!action)
@@ -6910,6 +7085,15 @@ class DocumentWindow : public QMainWindow {
             return;
         case LayoutCanvas::FigureContextAction::flattenPath:
             flattenLayoutPath(id);
+            return;
+        case LayoutCanvas::FigureContextAction::locateSchematicCounterpart:
+            locateSchematicCounterpart(id);
+            return;
+        case LayoutCanvas::FigureContextAction::bindToSchematicDevice:
+            bindLayoutDeviceInteractively(id);
+            return;
+        case LayoutCanvas::FigureContextAction::clearSchematicBinding:
+            clearLayoutDeviceBinding(id);
             return;
         case LayoutCanvas::FigureContextAction::duplicate:
             duplicateSelectedLayoutShapes();
@@ -11039,50 +11223,512 @@ class DocumentWindow : public QMainWindow {
                                                    : QStringLiteral("DRC %1: %2").arg(rule, message));
     }
 
-    void focusLvsMismatch(const ice::LvsMismatch &mismatch) {
+    void focusLvsObject(const ice::LvsObjectRef &ref) {
         if (!project_)
             return;
         const auto &project = project_->project();
-        if (mismatch.layoutObject && project.layoutCells.contains(lvsLayoutId_)) {
-            const auto id = *mismatch.layoutObject;
-            openLayoutFile(lvsLayoutId_);
-            const auto &cell = project.layoutCells.at(lvsLayoutId_);
-            if (layoutCanvas_)
+        if (ref.cell != 0 && project.layoutCells.contains(ref.cell)) {
+            openLayoutFile(ref.cell);
+            const auto &cell = project.layoutCells.at(ref.cell);
+            if (layoutCanvas_) {
                 layoutCanvas_->setTool(LayoutCanvas::Tool::select);
-            if (cell.instances.contains(id)) {
-                if (layoutCanvas_) {
-                    layoutCanvas_->selectLayoutInstance(id);
-                    layoutCanvas_->setFocus();
+                if (ref.kind == ice::LvsObjectKind::instance && cell.instances.contains(ref.id)) {
+                    layoutCanvas_->selectLayoutInstance(ref.id);
+                } else if (ref.kind == ice::LvsObjectKind::plannedDevice || ref.kind == ice::LvsObjectKind::shape ||
+                           ref.kind == ice::LvsObjectKind::port) {
+                    selectLayoutShapeItem(ref.id);
+                } else if (ref.id != 0 && (cell.shapes.contains(ref.id) || cell.ports.contains(ref.id))) {
+                    selectLayoutShapeItem(ref.id);
                 }
-            } else {
-                selectLayoutShapeItem(id);
+                if (ref.bounds)
+                    layoutCanvas_->focusOnLayoutRect(*ref.bounds);
+                layoutCanvas_->setFocus();
             }
             if (activityDock_)
                 activityDock_->show();
-            statusBar()->showMessage(
-                QStringLiteral("LVS [%1]: %2")
-                    .arg(QString::fromStdString(mismatch.category), QString::fromStdString(mismatch.message)));
+            statusBar()->showMessage(QStringLiteral("LVS layout object: %1")
+                                         .arg(QString::fromStdString(ref.name.empty() ? "object" : ref.name)));
             return;
         }
-        if (mismatch.schematicObject && project.schematicCells.contains(lvsSchematicId_)) {
-            const auto id = *mismatch.schematicObject;
-            openSchematicFile(lvsSchematicId_);
-            const auto &cell = project.schematicCells.at(lvsSchematicId_);
+        if (ref.cell != 0 && project.schematicCells.contains(ref.cell)) {
+            openSchematicFile(ref.cell);
+            const auto &cell = project.schematicCells.at(ref.cell);
             if (schematicCanvas_) {
-                if (cell.instances.contains(id))
-                    schematicCanvas_->selectInstance(id);
-                else
+                if (cell.instances.contains(ref.id)) {
+                    schematicCanvas_->selectInstance(ref.id);
+                    schematicCanvas_->focusOnInstance(ref.id);
+                } else {
                     schematicCanvas_->clearSelection();
+                }
                 schematicCanvas_->setFocus();
             }
             if (activityDock_)
                 activityDock_->show();
-            statusBar()->showMessage(
-                QStringLiteral("LVS [%1]: %2")
-                    .arg(QString::fromStdString(mismatch.category), QString::fromStdString(mismatch.message)));
+            statusBar()->showMessage(QStringLiteral("LVS schematic object: %1")
+                                         .arg(QString::fromStdString(ref.name.empty() ? "object" : ref.name)));
             return;
         }
         statusBar()->showMessage(QStringLiteral("LVS object is not available in the compared cells"));
+    }
+
+    std::optional<ice::ObjectId> lvsSchematicForBinding(const ice::LvsDeviceMatch &match) {
+        if (!project_)
+            return std::nullopt;
+        const auto &project = project_->project();
+        if (match.schematic && match.schematic->cell != 0 && project.schematicCells.contains(match.schematic->cell))
+            return match.schematic->cell;
+        if (lvsSchematicId_ != 0 && project.schematicCells.contains(lvsSchematicId_))
+            return lvsSchematicId_;
+        ice::ObjectId layoutId = lvsLayoutId_;
+        if (match.layout && match.layout->cell != 0 && project.layoutCells.contains(match.layout->cell))
+            layoutId = match.layout->cell;
+        if (layoutId != 0) {
+            const auto inferred = ice::schematicForLayout(project, layoutId);
+            if (inferred != 0 && project.schematicCells.contains(inferred))
+                return inferred;
+        }
+        return std::nullopt;
+    }
+
+    void bindLvsDevice(const ice::LvsDeviceMatch &match) {
+        if (!project_ || !match.layout)
+            return;
+        auto &project = project_->project();
+        const auto layoutCellId = match.layout->cell != 0 ? match.layout->cell : lvsLayoutId_;
+        if (!project.layoutCells.contains(layoutCellId)) {
+            statusBar()->showMessage(QStringLiteral("The compared layout cell is no longer available."));
+            return;
+        }
+        const auto schematicCellId = lvsSchematicForBinding(match);
+        if (!schematicCellId) {
+            statusBar()->showMessage(QStringLiteral("Unable to infer a schematic for this layout device."));
+            return;
+        }
+        const auto &schematic = project.schematicCells.at(*schematicCellId);
+        const auto &layout = project.layoutCells.at(layoutCellId);
+        const auto existingLink = [&]() -> ice::ObjectId {
+            if (const auto instance = layout.instances.find(match.layout->id); instance != layout.instances.end())
+                return instance->second.schematicInstance;
+            if (const auto planned = layout.plannedDevices.find(match.layout->id);
+                planned != layout.plannedDevices.end())
+                return planned->second.schematicInstance;
+            return 0;
+        }();
+        struct Choice {
+            ice::ObjectId id = 0;
+            QString label;
+        };
+        std::vector<Choice> choices;
+        for (const auto &[id, instance] : schematic.instances) {
+            auto type = QStringLiteral("device");
+            if (const auto symbol = schematic.symbols.find(instance.symbol); symbol != schematic.symbols.end()) {
+                const auto symbolName = symbol->second.name;
+                if (ice::schematicPortKindForSymbol(symbolName) != ice::SchematicPortKind::none)
+                    continue;
+                const auto element = symbol->second.sourceCell != 0 ? 'X' : ice::spiceElementForSymbol(symbolName);
+                if (element == 'V' || element == 'I' || element == 'G')
+                    continue;
+                type = QString::fromStdString(symbolName);
+            }
+            choices.push_back({id, QStringLiteral("%1 — %2").arg(QString::fromStdString(instance.name), type)});
+        }
+        if (choices.empty()) {
+            statusBar()->showMessage(QStringLiteral("The schematic has no devices to bind."));
+            return;
+        }
+        std::sort(choices.begin(), choices.end(),
+                  [](const Choice &left, const Choice &right) { return left.label < right.label; });
+        QStringList labels;
+        int current = 0;
+        for (std::size_t index = 0; index < choices.size(); ++index) {
+            labels << choices[index].label;
+            if (choices[index].id == existingLink)
+                current = static_cast<int>(index);
+        }
+        bool accepted = false;
+        const auto selected = QInputDialog::getItem(
+            this, QStringLiteral("Bind Layout Device"),
+            QStringLiteral("Schematic device for %1:").arg(QString::fromStdString(match.layout->name)), labels, current,
+            false, &accepted);
+        if (!accepted)
+            return;
+        const auto choiceIndex = labels.indexOf(selected);
+        if (choiceIndex < 0 || choiceIndex >= static_cast<int>(choices.size()))
+            return;
+        const auto schematicInstance = choices[static_cast<std::size_t>(choiceIndex)].id;
+        const auto targetName = QString::fromStdString(schematic.instances.at(schematicInstance).name);
+        const auto layoutName = QString::fromStdString(match.layout->name);
+        try {
+            project_->execute("bind layout device", [&](ice::Project &p) {
+                ice::bindLayoutDevice(p, layoutCellId, match.layout->id, *schematicCellId, schematicInstance);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Bind failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Bound layout device " + match.layout->name);
+        refreshProject();
+        statusBar()->showMessage(
+            QStringLiteral("Bound %1 to %2. Run LVS again to refresh the report.").arg(layoutName, targetName));
+    }
+
+    void unbindLvsDevice(const ice::LvsDeviceMatch &match) {
+        if (!project_ || !match.layout)
+            return;
+        auto &project = project_->project();
+        const auto layoutCellId = match.layout->cell != 0 ? match.layout->cell : lvsLayoutId_;
+        if (!project.layoutCells.contains(layoutCellId))
+            return;
+        try {
+            project_->execute("unbind layout device",
+                              [&](ice::Project &p) { ice::unbindLayoutDevice(p, layoutCellId, match.layout->id); });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Clear binding failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Cleared layout device binding");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Cleared the binding for %1. Run LVS again to refresh the report.")
+                                     .arg(QString::fromStdString(match.layout->name)));
+    }
+
+    void promoteLvsDevice(const ice::LvsDeviceMatch &match) {
+        if (!project_ || !match.schematic || !match.layout)
+            return;
+        const auto schematicCellId = lvsSchematicForBinding(match);
+        if (!schematicCellId) {
+            statusBar()->showMessage(QStringLiteral("Unable to infer the schematic for this match."));
+            return;
+        }
+        auto &project = project_->project();
+        const auto layoutCellId = match.layout->cell != 0 ? match.layout->cell : lvsLayoutId_;
+        if (!project.layoutCells.contains(layoutCellId))
+            return;
+        try {
+            project_->execute("promote lvs match", [&](ice::Project &p) {
+                ice::bindLayoutDevice(p, layoutCellId, match.layout->id, *schematicCellId, match.schematic->id);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Promote match failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Promoted LVS match to a binding");
+        refreshProject();
+        statusBar()->showMessage(
+            QStringLiteral("Promoted %1 → %2 to a persistent device binding.")
+                .arg(QString::fromStdString(match.schematic->name), QString::fromStdString(match.layout->name)));
+    }
+
+    std::optional<ice::LvsObjectRef> lvsLayoutObjectRef(ice::ObjectId layoutCellId, ice::ObjectId objectId) {
+        if (!project_)
+            return std::nullopt;
+        const auto cell = project_->project().layoutCells.find(layoutCellId);
+        if (cell == project_->project().layoutCells.end())
+            return std::nullopt;
+        if (const auto instance = cell->second.instances.find(objectId); instance != cell->second.instances.end()) {
+            ice::LvsObjectRef ref;
+            ref.kind = ice::LvsObjectKind::instance;
+            ref.cell = layoutCellId;
+            ref.id = objectId;
+            ref.name = instance->second.name;
+            return ref;
+        }
+        if (const auto planned = cell->second.plannedDevices.find(objectId);
+            planned != cell->second.plannedDevices.end()) {
+            ice::LvsObjectRef ref;
+            ref.kind = ice::LvsObjectKind::plannedDevice;
+            ref.cell = layoutCellId;
+            ref.id = objectId;
+            ref.name = planned->second.name;
+            ref.bounds = ice::Rect{planned->second.x, planned->second.y, planned->second.width, planned->second.height};
+            return ref;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<ice::LvsDeviceMatch> lvsMatchForLayoutObject(ice::ObjectId layoutCellId, ice::ObjectId objectId) {
+        if (!lastLvsReport_)
+            return std::nullopt;
+        for (const auto &match : lastLvsReport_->devices) {
+            if (match.layout && match.layout->id == objectId &&
+                (match.layout->cell == layoutCellId || match.layout->cell == 0))
+                return match;
+        }
+        return std::nullopt;
+    }
+
+    void locateSchematicCounterpart(ice::ObjectId layoutObject) {
+        if (!project_)
+            return;
+        const auto layoutCellId = activeLayoutId_;
+        if (const auto match = lvsMatchForLayoutObject(layoutCellId, layoutObject); match && match->schematic) {
+            focusLvsObject(*match->schematic);
+            return;
+        }
+        for (const auto &binding : ice::layoutDeviceBindings(project_->project(), layoutCellId)) {
+            if (binding.layoutObject != layoutObject || binding.schematicCell == 0)
+                continue;
+            ice::LvsObjectRef ref;
+            ref.kind = ice::LvsObjectKind::device;
+            ref.cell = binding.schematicCell;
+            ref.id = binding.schematicInstance;
+            ref.name = binding.schematicName;
+            focusLvsObject(ref);
+            return;
+        }
+        statusBar()->showMessage(
+            QStringLiteral("No schematic counterpart for this layout device. Run LVS or bind it."));
+    }
+
+    void bindLayoutDeviceInteractively(ice::ObjectId layoutObject) {
+        if (!project_)
+            return;
+        auto match = lvsMatchForLayoutObject(activeLayoutId_, layoutObject);
+        if (!match) {
+            const auto ref = lvsLayoutObjectRef(activeLayoutId_, layoutObject);
+            if (!ref)
+                return;
+            ice::LvsDeviceMatch fallback;
+            fallback.layout = *ref;
+            match = std::move(fallback);
+        }
+        bindLvsDevice(*match);
+    }
+
+    void clearLayoutDeviceBinding(ice::ObjectId layoutObject) {
+        if (!project_)
+            return;
+        auto match = lvsMatchForLayoutObject(activeLayoutId_, layoutObject);
+        if (!match) {
+            const auto ref = lvsLayoutObjectRef(activeLayoutId_, layoutObject);
+            if (!ref)
+                return;
+            ice::LvsDeviceMatch fallback;
+            fallback.layout = *ref;
+            match = std::move(fallback);
+        }
+        unbindLvsDevice(*match);
+    }
+
+    std::optional<ice::LayoutDeviceBinding> bindingForSchematicInstance(ice::ObjectId schematicInstance,
+                                                                        ice::ObjectId &layoutCell) {
+        if (!project_)
+            return std::nullopt;
+        for (const auto &[layoutId, __] : project_->project().layoutCells) {
+            for (const auto &binding : ice::layoutDeviceBindings(project_->project(), layoutId, activeSchematicId_)) {
+                if (binding.schematicInstance == schematicInstance) {
+                    layoutCell = layoutId;
+                    return binding;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    void locateLayoutCounterpart(ice::ObjectId schematicInstance) {
+        if (!project_)
+            return;
+        if (lastLvsReport_) {
+            for (const auto &match : lastLvsReport_->devices) {
+                if (match.schematic && match.schematic->id == schematicInstance && match.layout) {
+                    focusLvsObject(*match.layout);
+                    return;
+                }
+            }
+        }
+        ice::ObjectId layoutCell = 0;
+        if (const auto binding = bindingForSchematicInstance(schematicInstance, layoutCell);
+            binding && binding->schematicCell != 0) {
+            const auto &cell = project_->project().layoutCells.at(layoutCell);
+            ice::LvsObjectRef ref;
+            ref.kind = binding->kind == ice::LayoutDeviceKind::instance ? ice::LvsObjectKind::instance
+                                                                        : ice::LvsObjectKind::plannedDevice;
+            ref.cell = layoutCell;
+            ref.id = binding->layoutObject;
+            ref.name = binding->layoutName;
+            if (binding->kind == ice::LayoutDeviceKind::plannedDevice) {
+                if (const auto planned = cell.plannedDevices.find(binding->layoutObject);
+                    planned != cell.plannedDevices.end())
+                    ref.bounds =
+                        ice::Rect{planned->second.x, planned->second.y, planned->second.width, planned->second.height};
+            }
+            focusLvsObject(ref);
+            return;
+        }
+        statusBar()->showMessage(
+            QStringLiteral("No layout counterpart for this schematic device. Run LVS or bind it."));
+    }
+
+    void clearSchematicLayoutBinding(ice::ObjectId schematicInstance) {
+        if (!project_)
+            return;
+        ice::ObjectId layoutCell = 0;
+        const auto binding = bindingForSchematicInstance(schematicInstance, layoutCell);
+        if (!binding) {
+            statusBar()->showMessage(QStringLiteral("This schematic device has no layout binding."));
+            return;
+        }
+        try {
+            project_->execute("clear layout device link",
+                              [&](ice::Project &p) { ice::unbindLayoutDevice(p, layoutCell, binding->layoutObject); });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(
+                QStringLiteral("Clear binding failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Cleared layout device binding");
+        refreshProject();
+        statusBar()->showMessage(
+            QStringLiteral("Cleared the layout binding for %1. Run LVS again to refresh the report.")
+                .arg(QString::fromStdString(binding->schematicName)));
+    }
+
+    void bindSchematicDeviceInteractively(ice::ObjectId schematicInstance) {
+        if (!project_ || !project_->project().schematicCells.contains(activeSchematicId_))
+            return;
+        auto &project = project_->project();
+        if (!project.schematicCells.at(activeSchematicId_).instances.contains(schematicInstance))
+            return;
+        ice::ObjectId layoutCell = 0;
+        if (lvsLayoutId_ != 0 && project.layoutCells.contains(lvsLayoutId_) &&
+            !project.layoutCells.at(lvsLayoutId_).library && !project.layoutCells.at(lvsLayoutId_).readOnly) {
+            layoutCell = lvsLayoutId_;
+        } else if (activeLayoutId_ != 0 && project.layoutCells.contains(activeLayoutId_) &&
+                   !project.layoutCells.at(activeLayoutId_).library &&
+                   !project.layoutCells.at(activeLayoutId_).readOnly) {
+            layoutCell = activeLayoutId_;
+        } else {
+            for (const auto &[id, cell] : project.layoutCells) {
+                if (!cell.library && !cell.readOnly) {
+                    layoutCell = id;
+                    break;
+                }
+            }
+        }
+        if (layoutCell == 0) {
+            statusBar()->showMessage(QStringLiteral("Create a layout cell before binding a schematic device."));
+            return;
+        }
+        const auto &cell = project.layoutCells.at(layoutCell);
+        struct Choice {
+            ice::ObjectId id = 0;
+            QString label;
+        };
+        std::vector<Choice> choices;
+        for (const auto &[id, instance] : cell.instances)
+            choices.push_back({id, QStringLiteral("instance: %1").arg(QString::fromStdString(instance.name))});
+        for (const auto &[id, device] : cell.plannedDevices)
+            choices.push_back({id, QStringLiteral("planned: %1").arg(QString::fromStdString(device.name))});
+        if (choices.empty()) {
+            statusBar()->showMessage(QStringLiteral("The layout has no devices to bind."));
+            return;
+        }
+        std::sort(choices.begin(), choices.end(),
+                  [](const Choice &left, const Choice &right) { return left.label < right.label; });
+        QStringList labels;
+        for (const auto &choice : choices)
+            labels << choice.label;
+        bool accepted = false;
+        const auto selected = QInputDialog::getItem(
+            this, QStringLiteral("Bind Schematic Device"),
+            QStringLiteral("Layout device for %1:")
+                .arg(QString::fromStdString(
+                    project.schematicCells.at(activeSchematicId_).instances.at(schematicInstance).name)),
+            labels, 0, false, &accepted);
+        if (!accepted)
+            return;
+        const auto index = labels.indexOf(selected);
+        if (index < 0 || index >= static_cast<int>(choices.size()))
+            return;
+        try {
+            project_->execute("bind schematic device", [&](ice::Project &p) {
+                ice::bindLayoutDevice(p, layoutCell, choices[static_cast<std::size_t>(index)].id, activeSchematicId_,
+                                      schematicInstance);
+            });
+        } catch (const ice::ProjectError &error) {
+            statusBar()->showMessage(QStringLiteral("Bind failed: %1").arg(QString::fromStdString(error.what())), 5000);
+            return;
+        }
+        project_->setLastHistoryLabel("Bound schematic device to layout device");
+        refreshProject();
+        statusBar()->showMessage(QStringLiteral("Bound the schematic device to the selected layout device. "
+                                                "Run LVS again to refresh the report."));
+    }
+
+    void showSchematicSymbolContextMenu(ice::ObjectId schematicInstance, const QPoint &globalPos) {
+        if (!project_ || schematicInstance == 0)
+            return;
+        ice::ObjectId layoutCell = 0;
+        const auto binding = bindingForSchematicInstance(schematicInstance, layoutCell);
+        const auto hasReportMatch = [&] {
+            if (!lastLvsReport_)
+                return false;
+            return std::any_of(lastLvsReport_->devices.begin(), lastLvsReport_->devices.end(),
+                               [&](const ice::LvsDeviceMatch &match) {
+                                   return match.schematic && match.schematic->id == schematicInstance && match.layout;
+                               });
+        }();
+        QMenu menu(this);
+        auto *locate = menu.addAction(QStringLiteral("Locate Layout Counterpart"));
+        locate->setEnabled(binding.has_value() || hasReportMatch);
+        auto *bind = menu.addAction(QStringLiteral("Bind to Layout Device…"));
+        auto *clear = menu.addAction(QStringLiteral("Clear Layout Binding"));
+        clear->setEnabled(binding.has_value());
+        auto *chosen = menu.exec(globalPos);
+        if (chosen == locate)
+            locateLayoutCounterpart(schematicInstance);
+        else if (chosen == bind)
+            bindSchematicDeviceInteractively(schematicInstance);
+        else if (chosen == clear)
+            clearSchematicLayoutBinding(schematicInstance);
+    }
+
+    void focusLvsMismatch(const ice::LvsMismatch &mismatch) {
+        if (!project_)
+            return;
+        if (mismatch.layoutRef) {
+            focusLvsObject(*mismatch.layoutRef);
+        } else if (mismatch.schematicRef) {
+            focusLvsObject(*mismatch.schematicRef);
+        } else {
+            const auto &project = project_->project();
+            if (mismatch.layoutObject && project.layoutCells.contains(lvsLayoutId_)) {
+                if (layoutCanvas_)
+                    layoutCanvas_->setTool(LayoutCanvas::Tool::select);
+                openLayoutFile(lvsLayoutId_);
+                const auto &cell = project.layoutCells.at(lvsLayoutId_);
+                if (cell.instances.contains(*mismatch.layoutObject)) {
+                    if (layoutCanvas_) {
+                        layoutCanvas_->selectLayoutInstance(*mismatch.layoutObject);
+                        layoutCanvas_->setFocus();
+                    }
+                } else {
+                    selectLayoutShapeItem(*mismatch.layoutObject);
+                }
+            } else if (mismatch.schematicObject && project.schematicCells.contains(lvsSchematicId_)) {
+                openSchematicFile(lvsSchematicId_);
+                const auto &cell = project.schematicCells.at(lvsSchematicId_);
+                if (schematicCanvas_) {
+                    if (cell.instances.contains(*mismatch.schematicObject)) {
+                        schematicCanvas_->selectInstance(*mismatch.schematicObject);
+                        schematicCanvas_->focusOnInstance(*mismatch.schematicObject);
+                    } else {
+                        schematicCanvas_->clearSelection();
+                    }
+                    schematicCanvas_->setFocus();
+                }
+            } else {
+                statusBar()->showMessage(QStringLiteral("LVS object is not available in the compared cells"));
+                return;
+            }
+        }
+        if (activityDock_)
+            activityDock_->show();
+        statusBar()->showMessage(
+            QStringLiteral("LVS [%1]: %2")
+                .arg(QString::fromStdString(mismatch.category), QString::fromStdString(mismatch.message)));
     }
 
     void runLvs() {
@@ -11139,6 +11785,7 @@ class DocumentWindow : public QMainWindow {
             const auto report = ice::runLvs(project, schematicId, layoutId);
             lvsSchematicId_ = schematicId;
             lvsLayoutId_ = layoutId;
+            lastLvsReport_ = report;
             if (activityPanel_)
                 activityPanel_->setLvsReport(report);
             if (activityDock_)
@@ -13018,6 +13665,10 @@ class DocumentWindow : public QMainWindow {
             [this](const ice::DrcViolation &violation) { focusDrcViolation(violation); });
         activityPanel_->setOnLvsMismatchActivated(
             [this](const ice::LvsMismatch &mismatch) { focusLvsMismatch(mismatch); });
+        activityPanel_->setOnLvsObjectActivated([this](const ice::LvsObjectRef &ref) { focusLvsObject(ref); });
+        activityPanel_->setOnLvsBindDevice([this](const ice::LvsDeviceMatch &match) { bindLvsDevice(match); });
+        activityPanel_->setOnLvsUnbindDevice([this](const ice::LvsDeviceMatch &match) { unbindLvsDevice(match); });
+        activityPanel_->setOnLvsPromoteDevice([this](const ice::LvsDeviceMatch &match) { promoteLvsDevice(match); });
         activityPanel_->setOnGenerateTimingReport([this] {
             if (!implementationController_ || !physicalDesignPage_)
                 return;
@@ -13311,6 +13962,7 @@ class DocumentWindow : public QMainWindow {
         schematicHierarchy_->setOnAddClicked([this] { showAddSchematicMenu(); });
         schematicHierarchy_->setOnRemoveClicked([this](ice::ObjectId id) { removeSchematic(id); });
         schematicHierarchy_->setOnMakeLayoutFromSchematic([this](ice::ObjectId id) { makeLayoutFromSchematic(id); });
+        schematicHierarchy_->setOnLinkSchematicToLayout([this](ice::ObjectId id) { linkSchematicToLayoutDialog(id); });
         schematicHierarchy_->setOnActivateSchematic([this](ice::ObjectId id) { selectSchematicTab(id); });
         schematicSymbolsPanel_ = new SymbolsPanel;
         schematicSymbolsPanel_->setOnSelectionChanged([this] {
@@ -13441,6 +14093,8 @@ class DocumentWindow : public QMainWindow {
             activeLayoutId_ = id;
             runPex();
         });
+        layoutHierarchy_->setOnLinkLayoutToSchematic([this](ice::ObjectId id) { linkLayoutToSchematicDialog(id); });
+        layoutHierarchy_->setOnUnlinkLayoutFromSchematic([this](ice::ObjectId id) { unlinkLayoutSchematic(id); });
         layoutHierarchy_->setOnInstanceSelected([this](ice::ObjectId ownerId, ice::ObjectId instanceId) {
             selectLayoutInstanceFromHierarchy(ownerId, instanceId);
         });
@@ -14829,6 +15483,8 @@ class DocumentWindow : public QMainWindow {
             schematicCanvas_->setToolEscapeCallback([this] { selectSchematicTool(); });
             schematicCanvas_->setEmptyContextMenuCallback(
                 [this](const QPoint &globalPos) { showSchematicEmptyContextMenu(globalPos); });
+            schematicCanvas_->setSymbolContextMenuCallback(
+                [this](ice::ObjectId id, const QPoint &globalPos) { showSchematicSymbolContextMenu(id, globalPos); });
             schematicCanvas_->setSignalPickedCallback(
                 [this](ice::ObjectId netId) { finishSimulationSignalPick(netId); });
             schematicCanvas_->setSignalPickCancelledCallback([this] { cancelSimulationSignalPick(); });
@@ -14874,6 +15530,20 @@ class DocumentWindow : public QMainWindow {
                                 it = cell.nets.erase(it);
                             else
                                 ++it;
+                    }
+                    for (auto &[_, layout] : project.layoutCells) {
+                        const auto removed = [&](ice::ObjectId link) {
+                            return link != 0 && std::find(ids.begin(), ids.end(), link) != ids.end();
+                        };
+                        for (auto &[__, device] : layout.plannedDevices)
+                            if (removed(device.schematicInstance))
+                                device.schematicInstance = 0;
+                        for (auto &[__, instance] : layout.instances)
+                            if (removed(instance.schematicInstance))
+                                instance.schematicInstance = 0;
+                        for (auto &[__, port] : layout.ports)
+                            if (removed(port.schematicInstance))
+                                port.schematicInstance = 0;
                     }
                 });
                 if (deletedNames.size() == 1)
@@ -15750,6 +16420,7 @@ class DocumentWindow : public QMainWindow {
     ice::ObjectId drcLayoutId_ = 0;
     ice::ObjectId lvsSchematicId_ = 0;
     ice::ObjectId lvsLayoutId_ = 0;
+    std::optional<ice::LvsReport> lastLvsReport_;
     bool drcReportFromPhysicalPreview_ = false;
     QTabWidget *documents_ = nullptr;
     QWidget *schematicPage_ = nullptr;

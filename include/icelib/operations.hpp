@@ -93,6 +93,12 @@ ObjectId createProceduralLayout(Project &project, std::string name, std::string 
 // the new layout cell id.
 ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::string name = {},
                                    std::string stack = {});
+// Links an existing layout cell to an existing schematic cell. LVS prefers
+// this explicit link over planned-device inference and name matching. The link
+// is persisted in the layout cell and is independent of device-level
+// schematic_instance bindings.
+void linkLayoutToSchematic(Project &project, ObjectId layoutCellId, ObjectId schematicCellId);
+void unlinkLayoutFromSchematic(Project &project, ObjectId layoutCellId);
 ObjectId addLayer(Project &project, std::string name, int number, ObjectId layout = 0, std::string pdk = {},
                   int datatype = 0, std::string stack = {}, Coordinate minimumWidth = 0);
 std::string nextShapeName(const LayoutCell &cell, const std::string &type);
@@ -159,6 +165,41 @@ enum class LayoutArrange {
 // at least three shapes. Routed paths and text-polygon members are ignored.
 void arrangeLayoutShapes(Project &project, ObjectId cellId, const std::vector<ObjectId> &shapeIds,
                          LayoutArrange operation);
+
+// Authored schematic-to-layout device links. The persisted source of truth is
+// the schematic_instance field on layout instances and planned devices. These
+// helpers expose it as one queryable relation, support manual binding from the
+// editor and scripts, and report dangling or duplicate links without changing
+// the layout file format.
+enum class LayoutDeviceKind { plannedDevice, instance };
+
+struct LayoutDeviceBinding {
+    ObjectId layoutCell = 0;
+    ObjectId layoutObject = 0;
+    LayoutDeviceKind kind = LayoutDeviceKind::plannedDevice;
+    std::string layoutName;
+    // Zero when the linked schematic instance no longer exists.
+    ObjectId schematicCell = 0;
+    ObjectId schematicInstance = 0;
+    std::string schematicName;
+    bool stale = false;
+    // True when more than one layout object in the same cell points at this
+    // schematic instance. Duplicate links are allowed but reported.
+    bool duplicate = false;
+};
+
+// Returns active, stale, and duplicate bindings in deterministic order. When
+// schematicCellId is non-zero, only links into that schematic are returned.
+std::vector<LayoutDeviceBinding> layoutDeviceBindings(const Project &project, ObjectId layoutCellId,
+                                                      ObjectId schematicCellId = 0);
+
+// Sets or clears the schematic link of a planned device or layout instance.
+// Binding is a normal project mutation and is therefore undoable through
+// ProjectSession. Duplicate links are allowed; validate them with
+// layoutDeviceBindings() or Project::validate().
+void bindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject, ObjectId schematicCellId,
+                      ObjectId schematicInstance);
+void unbindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject);
 
 // Removes a project item after checking references that would become invalid.
 // These throw ProjectError with a descriptive code when removal is unsafe.

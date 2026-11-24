@@ -153,6 +153,11 @@ def main() -> int:
                 "layout_duplicate",
                 "layout_array",
                 "layout_arrange",
+                "layout_bind_device",
+                "layout_unbind_device",
+                "layout_device_links",
+                "layout_link_schematic",
+                "layout_unlink_schematic",
                 "layout_create_procedural",
                 "layout_regenerate",
                 "layout_get_script",
@@ -304,6 +309,53 @@ def main() -> int:
                 shapes=f"{arrange_rect['id']},{arrange_rect2['id']}",
                 operation="left",
             )
+
+            mcp.tool("schematic_create", name="bind_test")
+            bind_component = mcp.tool(
+                "schematic_add_component",
+                cell="bind_test",
+                type="resistor",
+                name="R1",
+                x=0,
+                y=0,
+            )
+            bind_layout = mcp.tool(
+                "layout_create_from_schematic",
+                schematic="bind_test",
+                name="bind_layout",
+            )
+            bind_links = mcp.tool("layout_device_links", cell="bind_layout")
+            assert len(bind_links["links"]) == 1, bind_links
+            first_link = bind_links["links"][0]
+            mcp.tool(
+                "layout_unbind_device",
+                cell="bind_layout",
+                device=str(first_link["layout_object"]),
+            )
+            assert not mcp.tool("layout_device_links", cell="bind_layout")["links"]
+            mcp.tool(
+                "layout_bind_device",
+                cell="bind_layout",
+                device=str(first_link["layout_object"]),
+                schematic="bind_test",
+                schematic_device=str(bind_component["instance"]),
+            )
+            assert len(mcp.tool("layout_device_links", cell="bind_layout")["links"]) == 1
+            bind_report = mcp.tool(
+                "lvs_run",
+                layout="bind_layout",
+                schematic="bind_test",
+            )
+            assert bind_report["schema_version"] == 2, bind_report
+            assert bind_report["devices"], bind_report
+            assert bind_report["devices"][0]["method"] == "linked", bind_report
+            bind_layout_info = mcp.tool("layout_info", cell="bind_layout")
+            assert bind_layout_info["schematic"] == "bind_test", bind_layout_info
+            mcp.tool("layout_unlink_schematic", cell="bind_layout")
+            assert mcp.tool("layout_info", cell="bind_layout")["schematic"] is None
+            mcp.tool("layout_link_schematic", cell="bind_layout", schematic="bind_test")
+            assert mcp.tool("layout_info", cell="bind_layout")["schematic"] == "bind_test"
+
             procedural = mcp.tool("layout_create_procedural", name="proc_test")
             assert procedural["generated"], procedural
             assert procedural["generated_cell"], procedural

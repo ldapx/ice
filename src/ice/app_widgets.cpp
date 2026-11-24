@@ -34,6 +34,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPaintEvent>
@@ -595,25 +596,28 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
     lvsHeader->addWidget(lvsSummary_, 1);
     auto *copyLvsButton = new QPushButton;
     copyLvsButton->setAccessibleName(QStringLiteral("Copy LVS report"));
-    copyLvsButton->setToolTip(QStringLiteral("Copy LVS report"));
+    copyLvsButton->setToolTip(QStringLiteral("Copy the active LVS table"));
     setLucideIcon(copyLvsButton, QStringLiteral("copy"), 14);
     copyLvsButton->setFixedSize(24, 24);
     lvsHeader->addWidget(copyLvsButton, 0, Qt::AlignTop);
     lvsLayout->addLayout(lvsHeader);
+
+    const auto configureTable = [](QTableWidget *table, const QStringList &headers) {
+        table->setHorizontalHeaderLabels(headers);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setAlternatingRowColors(true);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setStretchLastSection(true);
+        for (int column = 0; column + 1 < headers.size(); ++column)
+            table->horizontalHeader()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+    };
+
     lvsTable_ = new QTableWidget(0, 5);
     lvsTable_->setAccessibleName(QStringLiteral("LVS mismatches"));
-    lvsTable_->setHorizontalHeaderLabels({QStringLiteral("Severity"), QStringLiteral("Category"),
-                                          QStringLiteral("Message"), QStringLiteral("Schematic object"),
-                                          QStringLiteral("Layout object")});
-    lvsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    lvsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    lvsTable_->setAlternatingRowColors(true);
-    lvsTable_->verticalHeader()->setVisible(false);
-    lvsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    lvsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    configureTable(lvsTable_, {QStringLiteral("Severity"), QStringLiteral("Category"), QStringLiteral("Message"),
+                               QStringLiteral("Schematic"), QStringLiteral("Layout")});
     lvsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    lvsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    lvsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     connect(lvsTable_, &QTableWidget::cellClicked, this, [this](int row, int) {
         if (!onLvsMismatchActivated_)
             return;
@@ -625,15 +629,160 @@ ActivityPanel::ActivityPanel(QWidget *parent) : QWidget(parent), agentBackend_(s
             return;
         onLvsMismatchActivated_(lvsMismatches_[static_cast<std::size_t>(index)]);
     });
-    lvsLayout->addWidget(lvsTable_, 1);
+
+    lvsDevicesTable_ = new QTableWidget(0, 6);
+    lvsDevicesTable_->setAccessibleName(QStringLiteral("LVS device correspondence"));
+    configureTable(lvsDevicesTable_,
+                   {QStringLiteral("Status"), QStringLiteral("Schematic"), QStringLiteral("Layout"),
+                    QStringLiteral("Type"), QStringLiteral("Matched by"), QStringLiteral("Parameters")});
+    lvsDevicesTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
+    connect(lvsDevicesTable_, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        if (column != 1 && column != 2)
+            return;
+        if (!onLvsObjectActivated_)
+            return;
+        const auto *item = lvsDevicesTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= static_cast<int>(lvsDevices_.size()))
+            return;
+        const auto &match = lvsDevices_[static_cast<std::size_t>(index)];
+        const auto &ref = column == 1 ? match.schematic : match.layout;
+        if (ref)
+            onLvsObjectActivated_(*ref);
+    });
+
+    lvsNetsTable_ = new QTableWidget(0, 4);
+    lvsNetsTable_->setAccessibleName(QStringLiteral("LVS net correspondence"));
+    configureTable(lvsNetsTable_, {QStringLiteral("Status"), QStringLiteral("Schematic"), QStringLiteral("Layout"),
+                                   QStringLiteral("Connections")});
+    connect(lvsNetsTable_, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        if (column != 1 && column != 2)
+            return;
+        if (!onLvsObjectActivated_)
+            return;
+        const auto *item = lvsNetsTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= static_cast<int>(lvsNets_.size()))
+            return;
+        const auto &match = lvsNets_[static_cast<std::size_t>(index)];
+        const auto &ref = column == 1 ? match.schematic : match.layout;
+        if (ref)
+            onLvsObjectActivated_(*ref);
+    });
+
+    lvsPortsTable_ = new QTableWidget(0, 6);
+    lvsPortsTable_->setAccessibleName(QStringLiteral("LVS port correspondence"));
+    configureTable(lvsPortsTable_,
+                   {QStringLiteral("Status"), QStringLiteral("Schematic"), QStringLiteral("Layout"),
+                    QStringLiteral("Direction"), QStringLiteral("Schematic net"), QStringLiteral("Layout net")});
+    connect(lvsPortsTable_, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        if (column != 1 && column != 2)
+            return;
+        if (!onLvsObjectActivated_)
+            return;
+        const auto *item = lvsPortsTable_->item(row, 0);
+        if (!item)
+            return;
+        const auto index = item->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= static_cast<int>(lvsPorts_.size()))
+            return;
+        const auto &match = lvsPorts_[static_cast<std::size_t>(index)];
+        const auto &ref = column == 1 ? match.schematic : match.layout;
+        if (ref)
+            onLvsObjectActivated_(*ref);
+    });
+
+    const auto addDeviceContextMenu = [this](const QPoint &position) {
+        const auto *item = lvsDevicesTable_->itemAt(position);
+        if (!item || !lvsDevicesTable_)
+            return;
+        const auto *indexItem = lvsDevicesTable_->item(item->row(), 0);
+        if (!indexItem)
+            return;
+        const auto index = indexItem->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= static_cast<int>(lvsDevices_.size()))
+            return;
+        const auto &match = lvsDevices_[static_cast<std::size_t>(index)];
+        QMenu menu(this);
+        auto *locateSchematic = match.schematic ? menu.addAction(QStringLiteral("Locate in Schematic")) : nullptr;
+        auto *locateLayout = match.layout ? menu.addAction(QStringLiteral("Locate in Layout")) : nullptr;
+        menu.addSeparator();
+        auto *bind =
+            match.layout && onLvsBindDevice_ ? menu.addAction(QStringLiteral("Bind to Schematic Device…")) : nullptr;
+        auto *promote =
+            match.layout && match.schematic && match.method != ice::LvsMatchMethod::linked && onLvsPromoteDevice_
+                ? menu.addAction(QStringLiteral("Promote Match to Binding"))
+                : nullptr;
+        auto *unbind = match.layout && onLvsUnbindDevice_ ? menu.addAction(QStringLiteral("Clear Binding")) : nullptr;
+        auto *chosen = menu.exec(lvsDevicesTable_->viewport()->mapToGlobal(position));
+        if (!chosen)
+            return;
+        if (chosen == locateSchematic && match.schematic)
+            onLvsObjectActivated_(*match.schematic);
+        else if (chosen == locateLayout && match.layout)
+            onLvsObjectActivated_(*match.layout);
+        else if (chosen == bind)
+            onLvsBindDevice_(match);
+        else if (chosen == promote)
+            onLvsPromoteDevice_(match);
+        else if (chosen == unbind)
+            onLvsUnbindDevice_(match);
+    };
+    for (auto *table : {lvsNetsTable_, lvsPortsTable_}) {
+        connect(table, &QTableWidget::customContextMenuRequested, this, [this, table](const QPoint &position) {
+            const auto *item = table->itemAt(position);
+            if (!item || !onLvsObjectActivated_)
+                return;
+            const auto isNet = table == lvsNetsTable_;
+            const auto *indexItem = table->item(item->row(), 0);
+            if (!indexItem)
+                return;
+            const auto index = indexItem->data(Qt::UserRole).toInt();
+            QMenu menu(this);
+            std::optional<ice::LvsObjectRef> schematic;
+            std::optional<ice::LvsObjectRef> layout;
+            if (isNet && index >= 0 && index < static_cast<int>(lvsNets_.size())) {
+                schematic = lvsNets_[static_cast<std::size_t>(index)].schematic;
+                layout = lvsNets_[static_cast<std::size_t>(index)].layout;
+            } else if (!isNet && index >= 0 && index < static_cast<int>(lvsPorts_.size())) {
+                schematic = lvsPorts_[static_cast<std::size_t>(index)].schematic;
+                layout = lvsPorts_[static_cast<std::size_t>(index)].layout;
+            }
+            auto *locateSchematic = schematic ? menu.addAction(QStringLiteral("Locate in Schematic")) : nullptr;
+            auto *locateLayout = layout ? menu.addAction(QStringLiteral("Locate in Layout")) : nullptr;
+            auto *chosen = menu.exec(table->viewport()->mapToGlobal(position));
+            if (chosen == locateSchematic && schematic)
+                onLvsObjectActivated_(*schematic);
+            else if (chosen == locateLayout && layout)
+                onLvsObjectActivated_(*layout);
+        });
+    }
+    lvsDevicesTable_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(lvsDevicesTable_, &QTableWidget::customContextMenuRequested, this, addDeviceContextMenu);
+    for (auto *table : {lvsNetsTable_, lvsPortsTable_})
+        table->setContextMenuPolicy(Qt::CustomContextMenu);
+
+    lvsTabs_ = new QTabWidget;
+    lvsTabs_->setAccessibleName(QStringLiteral("LVS correspondence"));
+    lvsTabs_->addTab(lvsTable_, QStringLiteral("Mismatches"));
+    lvsTabs_->addTab(lvsDevicesTable_, QStringLiteral("Devices"));
+    lvsTabs_->addTab(lvsNetsTable_, QStringLiteral("Nets"));
+    lvsTabs_->addTab(lvsPortsTable_, QStringLiteral("Ports"));
+    lvsLayout->addWidget(lvsTabs_, 1);
+
     connect(copyLvsButton, &QPushButton::clicked, this, [this] {
-        if (!lvsTable_)
+        auto *table = lvsTabs_ ? qobject_cast<QTableWidget *>(lvsTabs_->currentWidget()) : nullptr;
+        if (!table)
             return;
         QStringList lines;
-        for (int row = 0; row < lvsTable_->rowCount(); ++row) {
+        for (int row = 0; row < table->rowCount(); ++row) {
             QStringList fields;
-            for (int column = 0; column < lvsTable_->columnCount(); ++column) {
-                const auto *item = lvsTable_->item(row, column);
+            for (int column = 0; column < table->columnCount(); ++column) {
+                const auto *item = table->item(row, column);
                 fields.push_back(item ? item->text() : QString());
             }
             lines.push_back(fields.join(QLatin1Char('\t')));
@@ -2511,14 +2660,18 @@ void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
     if (!lvsTable_)
         return;
     lvsTable_->setRowCount(0);
-    lvsMismatches_.clear();
-    lvsMismatches_.reserve(report.mismatches.size());
+    lvsDevicesTable_->setRowCount(0);
+    lvsNetsTable_->setRowCount(0);
+    lvsPortsTable_->setRowCount(0);
+    lvsMismatches_ = report.mismatches;
+    lvsDevices_ = report.devices;
+    lvsNets_ = report.nets;
+    lvsPorts_ = report.ports;
     int errors = 0;
     int warnings = 0;
     int infos = 0;
-    for (const auto &mismatch : report.mismatches) {
-        const auto index = static_cast<int>(lvsMismatches_.size());
-        lvsMismatches_.push_back(mismatch);
+    for (std::size_t index = 0; index < lvsMismatches_.size(); ++index) {
+        const auto &mismatch = lvsMismatches_[index];
         switch (mismatch.severity) {
         case ice::VerificationSeverity::error:
             ++errors;
@@ -2533,29 +2686,184 @@ void ActivityPanel::setLvsReport(const ice::LvsReport &report) {
         const int row = lvsTable_->rowCount();
         lvsTable_->insertRow(row);
         auto *severity = new QTableWidgetItem(drcSeverityLabel(mismatch.severity));
-        severity->setData(kLvsMismatchIndexRole, index);
+        severity->setData(kLvsMismatchIndexRole, static_cast<int>(index));
         lvsTable_->setItem(row, 0, severity);
         lvsTable_->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(mismatch.category)));
         lvsTable_->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(mismatch.message)));
-        lvsTable_->setItem(
-            row, 3,
-            new QTableWidgetItem(mismatch.schematicObject ? QString::number(*mismatch.schematicObject) : QString()));
-        lvsTable_->setItem(
-            row, 4, new QTableWidgetItem(mismatch.layoutObject ? QString::number(*mismatch.layoutObject) : QString()));
+        const auto refText = [](const std::optional<ice::LvsObjectRef> &ref) {
+            return ref ? QString::fromStdString(ref->name) : QString();
+        };
+        lvsTable_->setItem(row, 3, new QTableWidgetItem(refText(mismatch.schematicRef)));
+        lvsTable_->setItem(row, 4, new QTableWidgetItem(refText(mismatch.layoutRef)));
+        if (!mismatch.hint.empty() || !mismatch.candidates.empty()) {
+            QString details = QString::fromStdString(mismatch.hint);
+            for (const auto &candidate : mismatch.candidates) {
+                if (!details.isEmpty())
+                    details += QLatin1Char('\n');
+                details += QStringLiteral("Candidate: %1 (%2%) — %3")
+                               .arg(QString::fromStdString(candidate.object.name))
+                               .arg(static_cast<int>(candidate.score * 100.0))
+                               .arg(QString::fromStdString(candidate.reason));
+            }
+            if (auto *messageItem = lvsTable_->item(row, 2))
+                messageItem->setToolTip(details);
+        }
     }
+
+    const auto methodText = [](ice::LvsMatchMethod method) {
+        switch (method) {
+        case ice::LvsMatchMethod::linked:
+            return QStringLiteral("linked");
+        case ice::LvsMatchMethod::name:
+            return QStringLiteral("name");
+        case ice::LvsMatchMethod::topology:
+            return QStringLiteral("topology");
+        case ice::LvsMatchMethod::none:
+            return QStringLiteral("—");
+        }
+        return QStringLiteral("—");
+    };
+    for (std::size_t index = 0; index < lvsDevices_.size(); ++index) {
+        const auto &match = lvsDevices_[index];
+        const int row = lvsDevicesTable_->rowCount();
+        lvsDevicesTable_->insertRow(row);
+        QString status = QStringLiteral("matched");
+        if (!match.schematic && match.layout)
+            status = QStringLiteral("layout only");
+        else if (match.schematic && !match.layout)
+            status = QStringLiteral("schematic only");
+        else if (match.schematic && match.layout && !match.matched)
+            status = QStringLiteral("mismatched");
+        auto *statusItem = new QTableWidgetItem(status);
+        statusItem->setData(Qt::UserRole, static_cast<int>(index));
+        lvsDevicesTable_->setItem(row, 0, statusItem);
+        lvsDevicesTable_->setItem(
+            row, 1, new QTableWidgetItem(match.schematic ? QString::fromStdString(match.schematic->name) : QString()));
+        lvsDevicesTable_->setItem(
+            row, 2, new QTableWidgetItem(match.layout ? QString::fromStdString(match.layout->name) : QString()));
+        auto type = QString::fromStdString(match.schematicType);
+        if (type.isEmpty())
+            type = QString::fromStdString(match.layoutType);
+        else if (!match.layoutType.empty() && match.layoutType != match.schematicType)
+            type += QStringLiteral(" → %1").arg(QString::fromStdString(match.layoutType));
+        lvsDevicesTable_->setItem(row, 3, new QTableWidgetItem(type));
+        lvsDevicesTable_->setItem(row, 4, new QTableWidgetItem(methodText(match.method)));
+        QString parameterText;
+        int mismatchedParameters = 0;
+        for (const auto &parameter : match.parameters) {
+            if (parameter.matched)
+                continue;
+            ++mismatchedParameters;
+            if (!parameterText.isEmpty())
+                parameterText += QStringLiteral("; ");
+            parameterText +=
+                QStringLiteral("%1 %2→%3")
+                    .arg(QString::fromStdString(parameter.name), QString::fromStdString(parameter.schematicValue),
+                         QString::fromStdString(parameter.layoutValue));
+        }
+        if (mismatchedParameters == 0 && !match.parameters.empty())
+            parameterText = QStringLiteral("%1 matched").arg(match.parameters.size());
+        if (!match.parametersCompared && !match.parameters.empty())
+            parameterText = QStringLiteral("%1 not compared").arg(match.parameters.size());
+        lvsDevicesTable_->setItem(row, 5, new QTableWidgetItem(parameterText));
+        QString details;
+        for (const auto &pin : match.pins) {
+            if (!details.isEmpty())
+                details += QLatin1Char('\n');
+            details += QStringLiteral("%1 → %2: %3 → %4 %5")
+                           .arg(QString::fromStdString(pin.schematicPin), QString::fromStdString(pin.layoutPin),
+                                QString::fromStdString(pin.schematicNet), QString::fromStdString(pin.layoutNet),
+                                pin.matched ? QStringLiteral("[ok]") : QStringLiteral("[mismatch]"));
+        }
+        if (!details.isEmpty()) {
+            for (int column = 1; column <= 5; ++column) {
+                if (auto *item = lvsDevicesTable_->item(row, column))
+                    item->setToolTip(details);
+            }
+        }
+    }
+
+    for (std::size_t index = 0; index < lvsNets_.size(); ++index) {
+        const auto &match = lvsNets_[index];
+        const int row = lvsNetsTable_->rowCount();
+        lvsNetsTable_->insertRow(row);
+        QString status = QStringLiteral("matched");
+        if (!match.schematic && match.layout)
+            status = QStringLiteral("layout only");
+        else if (match.schematic && !match.layout)
+            status = QStringLiteral("schematic only");
+        else if (!match.matched)
+            status = QStringLiteral("mismatched");
+        if (match.ground)
+            status += QStringLiteral(" (ground)");
+        auto *statusItem = new QTableWidgetItem(status);
+        statusItem->setData(Qt::UserRole, static_cast<int>(index));
+        lvsNetsTable_->setItem(row, 0, statusItem);
+        lvsNetsTable_->setItem(
+            row, 1, new QTableWidgetItem(match.schematic ? QString::fromStdString(match.schematic->name) : QString()));
+        lvsNetsTable_->setItem(
+            row, 2, new QTableWidgetItem(match.layout ? QString::fromStdString(match.layout->name) : QString()));
+        const auto &connections =
+            match.schematicConnections.empty() ? match.layoutConnections : match.schematicConnections;
+        QStringList connectionTexts;
+        for (const auto &connection : connections)
+            connectionTexts << QString::fromStdString(connection);
+        lvsNetsTable_->setItem(row, 3, new QTableWidgetItem(connectionTexts.join(QStringLiteral(", "))));
+        if (!connectionTexts.isEmpty()) {
+            for (int column = 1; column <= 3; ++column) {
+                if (auto *item = lvsNetsTable_->item(row, column))
+                    item->setToolTip(connectionTexts.join(QStringLiteral("\n")));
+            }
+        }
+    }
+
+    for (std::size_t index = 0; index < lvsPorts_.size(); ++index) {
+        const auto &match = lvsPorts_[index];
+        const int row = lvsPortsTable_->rowCount();
+        lvsPortsTable_->insertRow(row);
+        QString status = match.matched ? QStringLiteral("matched") : QStringLiteral("unmatched");
+        if (match.matched && (!match.directionMatched || !match.netMatched))
+            status = QStringLiteral("mismatched");
+        auto *statusItem = new QTableWidgetItem(status);
+        statusItem->setData(Qt::UserRole, static_cast<int>(index));
+        lvsPortsTable_->setItem(row, 0, statusItem);
+        lvsPortsTable_->setItem(
+            row, 1, new QTableWidgetItem(match.schematic ? QString::fromStdString(match.schematic->name) : QString()));
+        lvsPortsTable_->setItem(
+            row, 2, new QTableWidgetItem(match.layout ? QString::fromStdString(match.layout->name) : QString()));
+        QString direction = QString::fromStdString(match.schematicDirection);
+        if (!match.layoutDirection.empty() && match.layoutDirection != match.schematicDirection)
+            direction += QStringLiteral(" → %1").arg(QString::fromStdString(match.layoutDirection));
+        lvsPortsTable_->setItem(row, 3, new QTableWidgetItem(direction));
+        lvsPortsTable_->setItem(row, 4, new QTableWidgetItem(QString::fromStdString(match.schematicNet)));
+        lvsPortsTable_->setItem(row, 5, new QTableWidgetItem(QString::fromStdString(match.layoutNet)));
+    }
+
     QString summary;
     if (lvsSummary_) {
-        if (report.mismatches.empty()) {
-            summary = QStringLiteral("LVS matched. Schematic: %1 · Layout: %2")
-                          .arg(QString::fromStdString(report.schematic), QString::fromStdString(report.layout));
-        } else {
-            summary = QStringLiteral("LVS found %1 error(s), %2 warning(s), %3 info item(s). "
-                                     "Select a row to focus its schematic or layout object.")
-                          .arg(errors)
-                          .arg(warnings)
-                          .arg(infos);
-        }
+        summary = QStringLiteral("%1 device(s) matched, %2 mismatched, %3 schematic-only, %4 layout-only · "
+                                 "%5 net(s) matched · %6 port(s) matched")
+                      .arg(report.summary.devicesMatched)
+                      .arg(report.summary.devicesMismatched)
+                      .arg(report.summary.devicesSchematicOnly)
+                      .arg(report.summary.devicesLayoutOnly)
+                      .arg(report.summary.netsMatched)
+                      .arg(report.summary.portsMatched);
+        if (!report.mismatches.empty())
+            summary +=
+                QStringLiteral(" · %1 error(s), %2 warning(s), %3 info item(s)").arg(errors).arg(warnings).arg(infos);
+        summary += QStringLiteral(". Double-click a device, net, or port row to cross-probe.");
         lvsSummary_->setText(summary);
+    }
+    if (lvsTabs_) {
+        if (!report.mismatches.empty())
+            lvsTabs_->setCurrentIndex(0);
+        else if (!report.devices.empty())
+            lvsTabs_->setCurrentIndex(1);
+        else if (!report.nets.empty())
+            lvsTabs_->setCurrentIndex(2);
+        else if (!report.ports.empty())
+            lvsTabs_->setCurrentIndex(3);
     }
     if (auto logger = spdlog::get(ice::logging::lvs)) {
         logger->log(errors > 0 ? spdlog::level::warn : spdlog::level::info, "{}", summary.toStdString());
@@ -2579,7 +2887,16 @@ void ActivityPanel::setLvsError(const QString &message) {
     if (!lvsTable_)
         return;
     lvsTable_->setRowCount(0);
+    if (lvsDevicesTable_)
+        lvsDevicesTable_->setRowCount(0);
+    if (lvsNetsTable_)
+        lvsNetsTable_->setRowCount(0);
+    if (lvsPortsTable_)
+        lvsPortsTable_->setRowCount(0);
     lvsMismatches_.clear();
+    lvsDevices_.clear();
+    lvsNets_.clear();
+    lvsPorts_.clear();
     if (lvsSummary_)
         lvsSummary_->setText(message);
     if (auto logger = spdlog::get(ice::logging::lvs))

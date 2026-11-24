@@ -215,6 +215,20 @@ class LayoutBuilder {
         ice::arrangeLayoutShapes(*project_, cellId_, shapes, parseLayoutArrange(operation));
     }
 
+    std::vector<LayoutDeviceBinding> device_links(ObjectId schematicCell = 0) const {
+        return ice::layoutDeviceBindings(*project_, cellId_, schematicCell);
+    }
+
+    void link_schematic(ObjectId schematicCell) { ice::linkLayoutToSchematic(*project_, cellId_, schematicCell); }
+
+    void unlink_schematic() { ice::unlinkLayoutFromSchematic(*project_, cellId_); }
+
+    void bind_device(ObjectId layoutDevice, ObjectId schematicCell, ObjectId schematicInstance) {
+        ice::bindLayoutDevice(*project_, cellId_, layoutDevice, schematicCell, schematicInstance);
+    }
+
+    void unbind_device(ObjectId layoutDevice) { ice::unbindLayoutDevice(*project_, cellId_, layoutDevice); }
+
     LayoutCell cell() const {
         const auto it = project_->layoutCells.find(cellId_);
         if (it == project_->layoutCells.end())
@@ -577,7 +591,24 @@ NB_MODULE(icepy, module) {
         .def_rw("name", &LayoutInstance::name)
         .def_rw("x", &LayoutInstance::x)
         .def_rw("y", &LayoutInstance::y)
-        .def_rw("orientation", &LayoutInstance::orientation);
+        .def_rw("orientation", &LayoutInstance::orientation)
+        .def_rw("schematic_instance", &LayoutInstance::schematicInstance);
+
+    nb::enum_<LayoutDeviceKind>(module, "LayoutDeviceKind")
+        .value("planned_device", LayoutDeviceKind::plannedDevice)
+        .value("instance", LayoutDeviceKind::instance);
+
+    nb::class_<LayoutDeviceBinding>(module, "LayoutDeviceBinding")
+        .def(nb::init<>())
+        .def_ro("layout_cell", &LayoutDeviceBinding::layoutCell)
+        .def_ro("layout_object", &LayoutDeviceBinding::layoutObject)
+        .def_ro("kind", &LayoutDeviceBinding::kind)
+        .def_ro("layout_name", &LayoutDeviceBinding::layoutName)
+        .def_ro("schematic_cell", &LayoutDeviceBinding::schematicCell)
+        .def_ro("schematic_instance", &LayoutDeviceBinding::schematicInstance)
+        .def_ro("schematic_name", &LayoutDeviceBinding::schematicName)
+        .def_ro("stale", &LayoutDeviceBinding::stale)
+        .def_ro("duplicate", &LayoutDeviceBinding::duplicate);
 
     nb::enum_<ImplementationStage>(module, "ImplementationStage")
         .value("created", ImplementationStage::created)
@@ -714,6 +745,7 @@ NB_MODULE(icepy, module) {
             "read_only", [](const LayoutCell &cell) { return cell.readOnly; },
             [](LayoutCell &cell, bool readOnly) { cell.readOnly = readOnly; })
         .def_prop_ro("generated_by", [](const LayoutCell &cell) { return cell.generatedBy; })
+        .def_prop_ro("schematic_cell", [](const LayoutCell &cell) { return cell.schematicCell; })
         .def_prop_ro("parameters", [](const LayoutCell &cell) { return cell.parameters; })
         .def_prop_ro("shapes",
                      [](const LayoutCell &cell) {
@@ -801,6 +833,12 @@ NB_MODULE(icepy, module) {
         .def("array", &LayoutBuilder::array, nb::arg("shapes"), nb::arg("rows"), nb::arg("columns"),
              nb::arg("x_pitch") = 0, nb::arg("y_pitch") = 0)
         .def("arrange", &LayoutBuilder::arrange, nb::arg("shapes"), nb::arg("operation"))
+        .def("device_links", &LayoutBuilder::device_links, nb::arg("schematic_cell") = 0)
+        .def("link_schematic", &LayoutBuilder::link_schematic, nb::arg("schematic_cell"))
+        .def("unlink_schematic", &LayoutBuilder::unlink_schematic)
+        .def("bind_device", &LayoutBuilder::bind_device, nb::arg("layout_device"), nb::arg("schematic_cell"),
+             nb::arg("schematic_instance"))
+        .def("unbind_device", &LayoutBuilder::unbind_device, nb::arg("layout_device"))
         .def("set_library", &LayoutBuilder::set_library, nb::arg("library"))
         .def("set_device", &LayoutBuilder::set_device, nb::arg("device"))
         .def("cell", &LayoutBuilder::cell);
@@ -1410,6 +1448,17 @@ NB_MODULE(icepy, module) {
             },
             nb::arg("name"), nb::arg("pdk") = genericPdkId, nb::arg("stack") = "", nb::keep_alive<0, 1>())
         .def(
+            "create_layout_from_schematic",
+            [](Project &project, ObjectId schematic, const std::string &name, const std::string &stack) {
+                const auto cell = project.schematicCells.find(schematic);
+                if (cell == project.schematicCells.end())
+                    throw ProjectError("icepy.schematic", "Schematic cell does not exist");
+                const auto id = ice::createLayoutFromSchematic(project, schematic, name,
+                                                               resolveLayoutStack(cell->second.pdk, stack));
+                return LayoutBuilder(project, id);
+            },
+            nb::arg("schematic"), nb::arg("name") = "", nb::arg("stack") = "", nb::keep_alive<0, 1>())
+        .def(
             "edit_layout_cell",
             [](Project &project, ObjectId id) {
                 if (!project.layoutCells.contains(id))
@@ -1492,6 +1541,96 @@ NB_MODULE(icepy, module) {
         .value("warning", VerificationSeverity::warning)
         .value("error", VerificationSeverity::error);
 
+    nb::enum_<LvsObjectKind>(module, "LvsObjectKind")
+        .value("device", LvsObjectKind::device)
+        .value("net", LvsObjectKind::net)
+        .value("port", LvsObjectKind::port)
+        .value("planned_device", LvsObjectKind::plannedDevice)
+        .value("instance", LvsObjectKind::instance)
+        .value("shape", LvsObjectKind::shape)
+        .value("connection", LvsObjectKind::connection)
+        .value("geometry", LvsObjectKind::geometry);
+
+    nb::enum_<LvsMatchMethod>(module, "LvsMatchMethod")
+        .value("none", LvsMatchMethod::none)
+        .value("linked", LvsMatchMethod::linked)
+        .value("name", LvsMatchMethod::name)
+        .value("topology", LvsMatchMethod::topology);
+
+    nb::class_<LvsObjectRef>(module, "LvsObjectRef")
+        .def(nb::init<>())
+        .def_rw("kind", &LvsObjectRef::kind)
+        .def_rw("cell", &LvsObjectRef::cell)
+        .def_rw("id", &LvsObjectRef::id)
+        .def_rw("name", &LvsObjectRef::name)
+        .def_rw("bounds", &LvsObjectRef::bounds);
+
+    nb::class_<LvsPinMatch>(module, "LvsPinMatch")
+        .def(nb::init<>())
+        .def_rw("schematic_pin", &LvsPinMatch::schematicPin)
+        .def_rw("layout_pin", &LvsPinMatch::layoutPin)
+        .def_rw("schematic_net", &LvsPinMatch::schematicNet)
+        .def_rw("layout_net", &LvsPinMatch::layoutNet)
+        .def_rw("matched", &LvsPinMatch::matched)
+        .def_rw("swapped", &LvsPinMatch::swapped);
+
+    nb::class_<LvsParameterMatch>(module, "LvsParameterMatch")
+        .def(nb::init<>())
+        .def_rw("name", &LvsParameterMatch::name)
+        .def_rw("schematic_value", &LvsParameterMatch::schematicValue)
+        .def_rw("layout_value", &LvsParameterMatch::layoutValue)
+        .def_rw("matched", &LvsParameterMatch::matched);
+
+    nb::class_<LvsCandidate>(module, "LvsCandidate")
+        .def(nb::init<>())
+        .def_rw("object", &LvsCandidate::object)
+        .def_rw("score", &LvsCandidate::score)
+        .def_rw("reason", &LvsCandidate::reason);
+
+    nb::class_<LvsDeviceMatch>(module, "LvsDeviceMatch")
+        .def(nb::init<>())
+        .def_rw("schematic", &LvsDeviceMatch::schematic)
+        .def_rw("layout", &LvsDeviceMatch::layout)
+        .def_rw("schematic_type", &LvsDeviceMatch::schematicType)
+        .def_rw("layout_type", &LvsDeviceMatch::layoutType)
+        .def_rw("method", &LvsDeviceMatch::method)
+        .def_rw("matched", &LvsDeviceMatch::matched)
+        .def_rw("parameters_compared", &LvsDeviceMatch::parametersCompared)
+        .def_rw("pins", &LvsDeviceMatch::pins)
+        .def_rw("parameters", &LvsDeviceMatch::parameters);
+
+    nb::class_<LvsNetMatch>(module, "LvsNetMatch")
+        .def(nb::init<>())
+        .def_rw("schematic", &LvsNetMatch::schematic)
+        .def_rw("layout", &LvsNetMatch::layout)
+        .def_rw("schematic_connections", &LvsNetMatch::schematicConnections)
+        .def_rw("layout_connections", &LvsNetMatch::layoutConnections)
+        .def_rw("matched", &LvsNetMatch::matched)
+        .def_rw("ground", &LvsNetMatch::ground);
+
+    nb::class_<LvsPortMatch>(module, "LvsPortMatch")
+        .def(nb::init<>())
+        .def_rw("schematic", &LvsPortMatch::schematic)
+        .def_rw("layout", &LvsPortMatch::layout)
+        .def_rw("schematic_direction", &LvsPortMatch::schematicDirection)
+        .def_rw("layout_direction", &LvsPortMatch::layoutDirection)
+        .def_rw("schematic_net", &LvsPortMatch::schematicNet)
+        .def_rw("layout_net", &LvsPortMatch::layoutNet)
+        .def_rw("matched", &LvsPortMatch::matched)
+        .def_rw("direction_matched", &LvsPortMatch::directionMatched)
+        .def_rw("net_matched", &LvsPortMatch::netMatched);
+
+    nb::class_<LvsSummary>(module, "LvsSummary")
+        .def(nb::init<>())
+        .def_rw("devices_matched", &LvsSummary::devicesMatched)
+        .def_rw("devices_mismatched", &LvsSummary::devicesMismatched)
+        .def_rw("devices_schematic_only", &LvsSummary::devicesSchematicOnly)
+        .def_rw("devices_layout_only", &LvsSummary::devicesLayoutOnly)
+        .def_rw("nets_matched", &LvsSummary::netsMatched)
+        .def_rw("nets_schematic_only", &LvsSummary::netsSchematicOnly)
+        .def_rw("nets_layout_only", &LvsSummary::netsLayoutOnly)
+        .def_rw("ports_matched", &LvsSummary::portsMatched);
+
     nb::class_<LvsMismatch>(module, "LvsMismatch")
         .def(nb::init<>())
         .def_rw("schema_version", &LvsMismatch::schemaVersion)
@@ -1499,7 +1638,11 @@ NB_MODULE(icepy, module) {
         .def_rw("message", &LvsMismatch::message)
         .def_rw("severity", &LvsMismatch::severity)
         .def_rw("schematic_object", &LvsMismatch::schematicObject)
-        .def_rw("layout_object", &LvsMismatch::layoutObject);
+        .def_rw("layout_object", &LvsMismatch::layoutObject)
+        .def_rw("schematic_ref", &LvsMismatch::schematicRef)
+        .def_rw("layout_ref", &LvsMismatch::layoutRef)
+        .def_rw("hint", &LvsMismatch::hint)
+        .def_rw("candidates", &LvsMismatch::candidates);
 
     nb::class_<LvsOptions>(module, "LvsOptions")
         .def(nb::init<>())
@@ -1510,7 +1653,12 @@ NB_MODULE(icepy, module) {
         .def_rw("schema_version", &LvsReport::schemaVersion)
         .def_rw("schematic", &LvsReport::schematic)
         .def_rw("layout", &LvsReport::layout)
+        .def_rw("ports_matched", &LvsReport::portsMatched)
+        .def_rw("summary", &LvsReport::summary)
         .def_rw("mismatches", &LvsReport::mismatches)
+        .def_rw("devices", &LvsReport::devices)
+        .def_rw("nets", &LvsReport::nets)
+        .def_rw("ports", &LvsReport::ports)
         .def_prop_ro("matched", &LvsReport::matched);
 
     nb::class_<PexOptions>(module, "PexOptions")
