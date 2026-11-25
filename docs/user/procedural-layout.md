@@ -138,6 +138,11 @@ split larger values into parallel units in both the schematic and the layout
 planned `R`/`C` values that differ from `Rspec*l/w` or `Cspec*w*l` by more than
 10%.
 
+PEX parasitics and finite buffer/op-amp gain typically lower the measured
+bandwidth by several percent. For a bandwidth target, aim for the upper half of
+the allowed tolerance band or add about 5% design margin, then check the PEX
+re-simulation.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |
