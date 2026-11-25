@@ -546,6 +546,170 @@ def test_device_composition():
     assert sparse_report["warnings"]
 
 
+def test_layout_api_manifest_and_filters():
+    runner = load_runner()
+    manifest = runner.layout_api_manifest(include_examples=True)
+    assert manifest["api_version"] == runner.LAYOUT_API_VERSION
+    classes = {item["name"] for item in manifest["classes"]}
+    for name in (
+        "Layout",
+        "Group",
+        "Row",
+        "Column",
+        "Grid",
+        "Stack",
+        "Repeat",
+        "Layer",
+        "Shape",
+        "DevicePlacement",
+        "LayoutInstancePlacement",
+        "Route",
+    ):
+        assert name in classes, name
+    qualnames = {item["qualname"] for item in manifest["methods"]}
+    for name in (
+        "Layout.plan",
+        "Layout.finish_placement",
+        "Layout.device",
+        "Layout.row",
+        "Row.add",
+        "Layer.rectangle",
+    ):
+        assert name in qualnames, name
+    assert not any(item["name"].startswith("_") for item in manifest["methods"])
+    device = next(
+        item for item in manifest["methods"] if item["qualname"] == "Layout.device"
+    )
+    assert "device_name" in device["signature"], device
+    assert any(
+        parameter["name"] == "device_name" for parameter in device["parameters"]
+    ), device
+
+    index = runner.layout_api_lookup()
+    assert index["api_version"] == runner.LAYOUT_API_VERSION
+    assert any(item["name"] == "device" for item in index["methods"]), index
+    assert "canonical_example" in index, index
+
+    detail = runner.layout_api_lookup(name="device")
+    assert detail["method"]["qualname"] == "Layout.device", detail
+    assert detail["method"]["example"], detail
+
+    search = runner.layout_api_lookup(query="route")
+    assert any(item["name"] == "route" for item in search["methods"]), search
+
+    class_view = runner.layout_api_lookup(class_name="Layout", limit=5)
+    assert class_view["total"] > 5, class_view
+    assert len(class_view["methods"]) == 5, class_view
+
+    with tempfile.TemporaryDirectory(prefix="ice-layout-api-") as directory:
+        pdk_root = Path(directory) / "fake-pdk"
+        devices = pdk_root / "layout" / "devices"
+        devices.mkdir(parents=True)
+        (devices / "index.json").write_text(
+            json.dumps(
+                {
+                    "cells": [
+                        {
+                            "name": "nfet",
+                            "parameters": [
+                                {"name": "model", "value": "nfet_01v8"},
+                                {"name": "w", "value": "1u"},
+                                {"name": "l", "value": "0.15u"},
+                            ],
+                        },
+                        {
+                            "name": "pfet",
+                            "parameters": [
+                                {"name": "model", "value": "pfet_01v8"},
+                                {"name": "w", "value": "1u"},
+                                {"name": "l", "value": "0.15u"},
+                            ],
+                        },
+                    ]
+                }
+            )
+        )
+        pdk_manifest = runner.layout_api_manifest(
+            pdk="sky130A", pdk_root=pdk_root, include_examples=True
+        )
+        assert pdk_manifest["devices"]["names"] == ["nfet", "pfet"], pdk_manifest
+        assert 'layout.device("nfet"' in pdk_manifest["canonical_example"], pdk_manifest
+
+
+def test_layout_validate_script():
+    runner = load_runner()
+    canonical = runner.layout_api_manifest()["canonical_example"]
+    result = runner.validate_layout_script(canonical)
+    assert result["ok"], result
+
+    bad_add = (
+        'layout.plan(devices=["X1"], rows=1)\n'
+        'X1 = layout.add("X1", "nmos", w=20, l=0.13)\n'
+        "layout.finish_placement()\n"
+    )
+    result = runner.validate_layout_script(bad_add)
+    assert not result["ok"], result
+    diagnostics = {item["code"]: item for item in result["diagnostics"]}
+    assert "layout.api.device_constructor_misuse" in diagnostics, diagnostics
+    assert (
+        "layout.device"
+        in diagnostics["layout.api.device_constructor_misuse"]["suggestion"]
+    )
+
+    missing_device = (
+        'layout.plan(devices=["M1", "M2"], rows=1)\n'
+        'M1 = layout.device("nmos", name="M1")\n'
+        "layout.add(M1)\n"
+        "layout.finish_placement()\n"
+    )
+    result = runner.validate_layout_script(missing_device)
+    codes = {item["code"] for item in result["diagnostics"]}
+    assert "layout.contract.missing_device" in codes, result
+
+    unadded_device = (
+        'layout.plan(devices=["M1", "M2"], rows=1)\n'
+        'M1 = layout.device("nmos", name="M1")\n'
+        'M2 = layout.device("nmos", name="M2")\n'
+        "layout.add(M2)\n"
+        "layout.finish_placement()\n"
+    )
+    result = runner.validate_layout_script(unadded_device)
+    codes = {item["code"] for item in result["diagnostics"]}
+    assert "layout.contract.unadded_device" in codes, result
+
+    grouped = (
+        'layout.plan(devices=["M1", "M2"], rows=1)\n'
+        'M1 = layout.device("nmos", name="M1")\n'
+        'M2 = layout.device("nmos", name="M2")\n'
+        "row = layout.row([M1, M2], gap=0)\n"
+        "layout.add(row)\n"
+        "layout.finish_placement()\n"
+    )
+    assert runner.validate_layout_script(grouped)["ok"]
+
+    missing_finish = (
+        'layout.plan(devices=["M1"], rows=1)\n'
+        'M1 = layout.device("nmos", name="M1")\n'
+        "layout.add(M1)\n"
+    )
+    result = runner.validate_layout_script(missing_finish)
+    codes = {item["code"] for item in result["diagnostics"]}
+    assert "layout.contract.missing_finish" in codes, result
+
+    unknown_method = (
+        "layout.plan(devices=[])\nlayout.rwo()\nlayout.finish_placement()\n"
+    )
+    result = runner.validate_layout_script(unknown_method)
+    diagnostics = {item["code"]: item for item in result["diagnostics"]}
+    assert "layout.api.unknown_method" in diagnostics, diagnostics
+    assert "row" in diagnostics["layout.api.unknown_method"]["suggestion"]
+
+    syntax_error = "layout.plan(devices=[]\n"
+    result = runner.validate_layout_script(syntax_error)
+    assert not result["ok"], result
+    assert result["diagnostics"][0]["code"] == "layout.syntax", result
+
+
 def test_output_metadata_and_determinism():
     runner = load_runner()
 
@@ -585,6 +749,8 @@ def main():
         test_layout_instance_composition,
         test_layout_instance_connect,
         test_device_composition,
+        test_layout_api_manifest_and_filters,
+        test_layout_validate_script,
         test_output_metadata_and_determinism,
     ]
     for test in tests:

@@ -32,6 +32,32 @@ Create and regenerate the layout from the GUI (**+** in the Layout
 child is read-only; edit the script or parameter form and regenerate instead of
 drawing over it.
 
+## Discover and validate the live API
+
+Do not guess the script API. The MCP tools `layout_api` and
+`layout_validate_script` are generated from the running Python runner:
+
+```text
+layout_api(pdk="sky130A")                 # classes + key methods + device names
+layout_api(name="device")                 # exact signature, parameters, example
+layout_api(class_name="Layout")           # every public Layout method
+layout_api(query="route")                 # search methods, parameters, devices
+layout_validate_script(script=..., pdk="sky130A", layout="ota")
+```
+
+`layout_api` reports `api_version`, public classes, method signatures,
+parameter descriptions, return types, and minimal examples. When `pdk` is
+given it also lists the PDK's layout device names, so a script can use the
+right cell name (for example `nfet` instead of a guessed `nmos`).
+
+`layout_validate_script` parses the Python AST without executing package code.
+It reports Python syntax errors, unknown `layout.*` methods, wrong keywords or
+argument counts, missing `layout.plan(...)` or
+`layout.finish_placement()`, `layout.add(... w=..., l=...)` misuse, and planned
+devices that are never created or never added. It is advisory, but call it
+before `layout_regenerate` and fix every error: a lint error is much cheaper
+than a failed regeneration.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |

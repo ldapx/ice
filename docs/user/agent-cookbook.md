@@ -121,7 +121,17 @@ A top-level cell parameter becomes `.param name=value`. CLI equivalents are
 ## Compact analog procedural layout
 
 Use composition and constraints rather than manual `move` loops with fixed
-gaps. A compact two-row floorplan looks like this:
+gaps. First inspect the live API and the PDK device names, then validate the
+script before regeneration:
+
+```text
+layout_api(pdk="sky130A")
+layout_api(name="device")
+layout_api(class_name="Layout")
+layout_validate_script(script="...", pdk="sky130A", layout="ota")
+```
+
+A compact two-row floorplan looks like this:
 
 ```text
 layout_create_procedural(name="ota", pdk="sky130A")

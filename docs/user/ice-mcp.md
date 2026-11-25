@@ -106,6 +106,8 @@ and ask the user to rebuild/restart ICE.
 | `schematic_add_hdl_instance` | Generate a symbol from a SystemVerilog module's ports and place it. Use `bus_mode="flatten"` for buses. |
 | `schematic_set_parameter` | Set or create an instance parameter such as `resistance` or `value`. |
 | `schematic_validate_hierarchy` | Validate HDL instances, pin/port mapping, nets, buses, and mixed-signal support. |
+| `layout_api` | Introspect the live Python layout API: classes, methods, signatures, docs, examples, and PDK device names. |
+| `layout_validate_script` | Preflight-validate a procedural script without executing package code; reports API and workflow errors. |
 | `layout_create` | Create a static layout cell; accepts optional `pdk` and `stack`. |
 | `layout_create_procedural` | Create a procedural layout and optionally generate it immediately. |
 | `layout_regenerate` | Run a procedural layout script and replace its read-only generated child. |

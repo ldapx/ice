@@ -22,9 +22,12 @@ internals.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
+import difflib
 import heapq
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -38,6 +41,50 @@ import traceback
 
 SCHEMA_VERSION = 2
 BUILDER_VERSION = 4
+LAYOUT_API_VERSION = 1
+
+# Public script-facing classes. The manifest is generated from these classes by
+# introspection so documentation cannot drift from the implementation.
+LAYOUT_API_CLASSES = (
+    "Layout",
+    "Group",
+    "Row",
+    "Column",
+    "Grid",
+    "Stack",
+    "Repeat",
+    "Layer",
+    "Shape",
+    "DevicePlacement",
+    "LayoutInstancePlacement",
+    "Route",
+)
+
+# Methods shown in the compact index. Targeted lookups expose every method.
+LAYOUT_API_INDEX_METHODS = (
+    "plan",
+    "finish_placement",
+    "device",
+    "layer",
+    "rectangle",
+    "port",
+    "add",
+    "group",
+    "row",
+    "column",
+    "grid",
+    "stack",
+    "repeat",
+    "spacer",
+    "constraint",
+    "route",
+    "connect",
+    "instance",
+    "parameter",
+    "generate",
+    "report",
+    "review",
+)
 
 
 class LayoutQualityError(RuntimeError):
@@ -5669,6 +5716,7 @@ class Layout:
             "format": "ice-procedural-layout",
             "schema_version": SCHEMA_VERSION,
             "builder_version": BUILDER_VERSION,
+            "layout_api_version": LAYOUT_API_VERSION,
             "db_unit_nm": self.db_unit_nm,
             "grid": self.grid,
             "generator_metadata": self.generator_metadata,
@@ -6327,6 +6375,1117 @@ def _apply_dummy_fill_requests(layout):
         handler(layout, **request)
 
 
+LAYOUT_API_EXAMPLES = {
+    "Layout.plan": 'layout.plan(devices=["M1", "M2"], rows=1, target_utilization=0.2, max_gap_um=5)',
+    "Layout.finish_placement": "layout.finish_placement()",
+    "Layout.compact": "layout.compact()",
+    "Layout.add": "layout.add(row)  # place an existing device or composition",
+    "Layout.layer": 'metal1 = layout.layer("Metal1")',
+    "Layout.rectangle": 'metal1.rectangle(layout.um(0), layout.um(0), layout.um(4), layout.um(0.6), net="VDD")',
+    "Layout.polygon": 'layout.polygon("Metal1", [(0, 0), (1000, 0), (1000, 500), (0, 500)])',
+    "Layout.path": 'layout.path("Metal1", [(0, 0), (4000, 0)], width=400, net="VDD")',
+    "Layout.port": 'layout.port("VOUT", "Metal1", 0, 0, 1000, 1000, direction="output")',
+    "Layout.row": "row = layout.row([M1, M2], gap=0)",
+    "Layout.column": "column = layout.column([row_a, row_b], gap=0)",
+    "Layout.grid": "grid = layout.grid([M1, M2, M3, M4], columns=2, x_gap=0, y_gap=0)",
+    "Layout.stack": "stack = layout.stack([metal1, metal2])",
+    "Layout.repeat": 'bank = layout.repeat(unit=M1, count=4, axis="x", pitch="abut")',
+    "Layout.group": 'group = layout.group("input_pair")',
+    "Layout.spacer": "row.add(layout.spacer(layout.um(1)))",
+    "Layout.constraint": 'layout.constraint("Order", items=[M1, M2], direction="left_to_right", abut=True)',
+    "Layout.align": 'layout.align(M1, M2, line="h_center")',
+    "Layout.route": 'layout.route((0, 0), (4000, 0), layer="Metal1", width=400, net="VDD")',
+    "Layout.connect": 'layout.connect(M1, "D", M2, "D", layer="Metal1", width=400, net="OUT")',
+    "Layout.device": 'M1 = layout.device("nmos", name="M1", model="sg13_lv_nmos", w="1u", l="0.13u", nets={"G": "g", "D": "d", "S": "0", "B": "0"})',
+    "Layout.instance": 'layout.instance("other_cell", 0, 0, name="I1")',
+    "Layout.parameter": 'width = layout.parameter("width", "4", "Metal width in micrometers")',
+    "Layout.generate": 'layout.generate("mos_pair", name="pair", w="1u", l="0.15u")',
+    "Layout.add_dummy_fill": 'layout.add_dummy_fill(layers=["Metal1", "Metal2"], density=50, deviation=10)',
+    "Layout.report": "layout.report(print_report=True)",
+    "Layout.review": "layout.review(require_plan=True)",
+    "Layout.extents": "box = layout.extents(M1, M2)",
+    "Layout.measure": "gap = layout.measure(M1, M2)",
+    "Layer.rectangle": 'metal1.rectangle(0, 0, 4000, 600, name="M1", net="VDD")',
+    "Layer.path": 'metal1.path([(0, 0), (4000, 0)], width=400, net="VDD")',
+    "Layer.polygon": 'metal1.polygon([(0, 0), (4000, 0), (4000, 600), (0, 600)], name="M1")',
+    "Layer.port": 'metal1.port("VOUT", 0, 0, 1000, 1000, direction="output")',
+    "DevicePlacement.pin": 'gate = M1.pin("G")',
+    "DevicePlacement.anchor": 'center = M1.anchor("center")',
+    "Shape.move": "shape.move(100, 0)",
+    "Shape.mirror": 'shape.mirror("y")',
+    "Row.add": "row.add(M1)",
+    "Column.add": "column.add(row)",
+}
+
+
+def _layout_api_doc_summary(documentation):
+    text = inspect.cleandoc(documentation or "")
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if lines:
+                break
+            continue
+        if stripped.startswith(":"):
+            break
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def _layout_api_doc_fields(documentation):
+    text = inspect.cleandoc(documentation or "")
+    parameters = {}
+    for match in re.finditer(
+        r":param\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)"
+        r"(?=\n\s*:(?:param|returns?|raises?|ivar)\b|\Z)",
+        text,
+        re.S,
+    ):
+        parameters[match.group(1)] = " ".join(match.group(2).split())
+    returns = ""
+    match = re.search(
+        r":returns?\s*:\s*(.*?)(?=\n\s*:(?:param|returns?|raises?|ivar)\b|\Z)",
+        text,
+        re.S,
+    )
+    if match:
+        returns = " ".join(match.group(1).split())
+    return parameters, returns
+
+
+def _layout_api_parameter_kind(parameter):
+    if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+        return "var_positional"
+    if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+        return "var_keyword"
+    if parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+        return "keyword_only"
+    if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+        return "positional_only"
+    return "positional_or_keyword"
+
+
+def _layout_api_signature(attribute):
+    if isinstance(attribute, property):
+        return None
+    try:
+        signature = inspect.signature(attribute)
+    except (TypeError, ValueError):
+        return None
+    parameters = list(signature.parameters.values())
+    if parameters and parameters[0].name in {"self", "cls"}:
+        parameters = parameters[1:]
+    return signature.replace(parameters=parameters)
+
+
+def _layout_api_method_info(owner, name, attribute):
+    if isinstance(attribute, property):
+        documentation = getattr(attribute.fget, "__doc__", "") or ""
+        _, returns = _layout_api_doc_fields(documentation)
+        return {
+            "name": name,
+            "qualname": f"{owner}.{name}",
+            "owner": owner,
+            "kind": "property",
+            "signature": name,
+            "summary": _layout_api_doc_summary(documentation),
+            "parameters": [],
+            "returns": returns or "property",
+        }
+    documentation = getattr(attribute, "__doc__", "") or ""
+    parameter_docs, returns = _layout_api_doc_fields(documentation)
+    signature = _layout_api_signature(attribute)
+    if signature is None:
+        signature_text = f"{name}(...)"
+        parameters = []
+    else:
+        signature_text = f"{name}{signature}"
+        parameters = [
+            {
+                "name": parameter.name,
+                "kind": _layout_api_parameter_kind(parameter),
+                "required": parameter.default is inspect.Parameter.empty,
+                "default": (
+                    ""
+                    if parameter.default is inspect.Parameter.empty
+                    else repr(parameter.default)
+                ),
+                "description": parameter_docs.get(parameter.name, ""),
+            }
+            for parameter in signature.parameters.values()
+        ]
+    return {
+        "name": name,
+        "qualname": f"{owner}.{name}",
+        "owner": owner,
+        "kind": "method",
+        "signature": signature_text,
+        "summary": _layout_api_doc_summary(documentation),
+        "parameters": parameters,
+        "returns": returns,
+    }
+
+
+def _layout_api_public_members(cls):
+    members = []
+    seen = set()
+    for base in cls.__mro__:
+        if base is object:
+            continue
+        for name in base.__dict__:
+            if name.startswith("_") or name in seen:
+                continue
+            seen.add(name)
+            try:
+                attribute = getattr(cls, name)
+            except Exception:  # noqa: BLE001 - introspecting optional properties
+                continue
+            if isinstance(attribute, property) or callable(attribute):
+                members.append((name, attribute))
+    return members
+
+
+def _layout_api_device_cells(pdk_root):
+    if not pdk_root:
+        return []
+    path = Path(pdk_root) / "layout" / "devices" / "index.json"
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    cells = document.get("cells") if isinstance(document, dict) else None
+    return [
+        cell
+        for cell in cells or []
+        if isinstance(cell, dict) and str(cell.get("name", "")).strip()
+    ]
+
+
+def _layout_api_pick_device(cells, needles):
+    normalized = [(str(cell.get("name", "")), cell) for cell in cells]
+    for needle in needles:
+        for name, cell in normalized:
+            if name.lower() == needle:
+                return cell
+    for needle in needles:
+        for name, cell in normalized:
+            if needle in name.lower():
+                return cell
+    return None
+
+
+def _layout_api_device_call(variable, cell):
+    name = str(cell.get("name", ""))
+    parameters = {
+        str(parameter.get("name", "")): str(parameter.get("value", ""))
+        for parameter in cell.get("parameters", [])
+        if isinstance(parameter, dict)
+    }
+    model = parameters.get("model") or name
+    width = parameters.get("w") or parameters.get("W") or "1u"
+    length = parameters.get("l") or parameters.get("L") or "0.15u"
+    return (
+        f'{variable} = layout.device("{name}", name="{variable}", '
+        f'model="{model}", w="{width}", l="{length}", '
+        'nets={"G": "g", "D": "d", "S": "0", "B": "0"})'
+    )
+
+
+def _layout_api_canonical_example(pdk_root=None):
+    cells = _layout_api_device_cells(pdk_root)
+    nmos = _layout_api_pick_device(cells, ("nmos", "nfet", "nch", "nmos_"))
+    pmos = _layout_api_pick_device(cells, ("pmos", "pfet", "pch", "pmos_"))
+    if nmos is None:
+        return "\n".join(
+            [
+                'layout.plan(devices=["M1", "M2"], rows=1, target_utilization=0.2, max_gap_um=5)',
+                'M1 = layout.device("<device-name>", name="M1", model="<model>", '
+                'w="1u", l="0.15u", nets={"G": "g", "D": "d", "S": "0", "B": "0"})',
+                'M2 = layout.device("<device-name>", name="M2", model="<model>", '
+                'w="1u", l="0.15u", nets={"G": "g", "D": "d", "S": "0", "B": "0"})',
+                "row = layout.row([M1, M2], gap=0)",
+                "layout.add(row)",
+                "layout.finish_placement()",
+            ]
+        )
+    return "\n".join(
+        [
+            'layout.plan(devices=["M1", "M2"], rows=1, target_utilization=0.2, max_gap_um=5)',
+            _layout_api_device_call("M1", nmos),
+            _layout_api_device_call("M2", pmos or nmos),
+            "row = layout.row([M1, M2], gap=0)",
+            "layout.add(row)",
+            "layout.finish_placement()",
+        ]
+    )
+
+
+def _layout_api_devices(pdk, pdk_root, detailed=False):
+    cells = _layout_api_device_cells(pdk_root)
+    if not cells:
+        return None
+    entries = []
+    for cell in cells:
+        parameters = {
+            str(parameter.get("name", "")): str(parameter.get("value", ""))
+            for parameter in cell.get("parameters", [])
+            if isinstance(parameter, dict)
+        }
+        entry = {"name": str(cell.get("name", ""))}
+        if detailed:
+            entry["model"] = parameters.get("model", "")
+            entry["parameters"] = parameters
+        entries.append(entry)
+    return {
+        "pdk": pdk or "",
+        "count": len(entries),
+        "names": [entry["name"] for entry in entries],
+        "entries": entries if detailed else None,
+    }
+
+
+def _layout_api_example(qualname, pdk_root=None):
+    if qualname in {"Layout.device", "Group.device"} and pdk_root:
+        cells = _layout_api_device_cells(pdk_root)
+        nmos = _layout_api_pick_device(cells, ("nmos", "nfet", "nch", "nmos_"))
+        if nmos is not None:
+            return _layout_api_device_call("M1", nmos)
+    return LAYOUT_API_EXAMPLES.get(qualname, "")
+
+
+def layout_api_manifest(*, pdk=None, pdk_root=None, include_examples=True):
+    """Return the full machine-readable layout API manifest.
+
+    The manifest is built from live Python introspection. It is the single
+    source of truth for ``layout_api`` and ``layout_validate_script``.
+    """
+    classes = []
+    methods = []
+    for class_name in LAYOUT_API_CLASSES:
+        cls = globals().get(class_name)
+        if cls is None:
+            continue
+        class_methods = []
+        for name, attribute in _layout_api_public_members(cls):
+            info = _layout_api_method_info(class_name, name, attribute)
+            if include_examples:
+                example = _layout_api_example(info["qualname"], pdk_root)
+                if example:
+                    info["example"] = example
+            methods.append(info)
+            class_methods.append(name)
+        if class_name in {"Layout", "Group"} and "grid" not in class_methods:
+            info = _layout_api_method_info(class_name, "grid", Layout._grid)
+            if include_examples:
+                example = _layout_api_example(info["qualname"], pdk_root)
+                if example:
+                    info["example"] = example
+            methods.append(info)
+            class_methods.append("grid")
+        classes.append(
+            {
+                "name": class_name,
+                "summary": _layout_api_doc_summary(cls.__doc__),
+                "method_count": len(class_methods),
+                "methods": class_methods,
+            }
+        )
+    canonical = _layout_api_canonical_example(pdk_root)
+    document = {
+        "api_version": LAYOUT_API_VERSION,
+        "classes": classes,
+        "methods": methods,
+        "canonical_example": canonical,
+        "examples": [{"name": "canonical", "script": canonical}]
+        if include_examples
+        else [],
+    }
+    devices = _layout_api_devices(pdk, pdk_root)
+    if devices:
+        document["devices"] = devices
+    return document
+
+
+def _layout_api_compact(info, include_examples=False):
+    compact = {
+        key: info.get(key, "")
+        for key in ("name", "qualname", "owner", "kind", "signature", "summary")
+    }
+    if include_examples and info.get("example"):
+        compact["example"] = info["example"]
+    return compact
+
+
+def _layout_api_page(items, limit, offset):
+    total = len(items)
+    start = max(0, int(offset or 0))
+    requested = int(limit or 0)
+    if requested <= 0:
+        requested = 25 if total > 25 else max(total, 1)
+    end = min(total, start + requested)
+    return items[start:end], total, start, requested
+
+
+def layout_api_lookup(
+    *,
+    query="",
+    name="",
+    class_name="",
+    include_examples=False,
+    limit=0,
+    offset=0,
+    pdk=None,
+    pdk_root=None,
+):
+    """Return a compact, paginated view of the layout API manifest."""
+    manifest = layout_api_manifest(
+        pdk=pdk, pdk_root=pdk_root, include_examples=include_examples
+    )
+    methods = manifest["methods"]
+    devices = manifest.get("devices")
+    if name:
+        normalized = str(name).strip().lower()
+        target = None
+        for info in methods:
+            if (
+                info["qualname"].lower() == normalized
+                or info["name"].lower() == normalized
+            ):
+                target = info
+                break
+        if target is not None and not target.get("example"):
+            example = _layout_api_example(target["qualname"], pdk_root)
+            if example:
+                target["example"] = example
+        result = {"api_version": LAYOUT_API_VERSION, "method": target}
+        if target is None:
+            result["error"] = f"Unknown layout API name: {name}"
+            result["suggestions"] = difflib.get_close_matches(
+                str(name), [info["name"] for info in methods], n=5
+            )
+        if devices:
+            result["devices"] = devices
+        return result
+    if class_name:
+        normalized = str(class_name).strip().lower()
+        target_class = next(
+            (
+                item
+                for item in manifest["classes"]
+                if item["name"].lower() == normalized
+            ),
+            None,
+        )
+        if target_class is None:
+            return {
+                "api_version": LAYOUT_API_VERSION,
+                "error": f"Unknown layout API class: {class_name}",
+                "classes": [item["name"] for item in manifest["classes"]],
+            }
+        class_methods = [
+            info for info in methods if info["owner"] == target_class["name"]
+        ]
+        page, total, start, requested = _layout_api_page(class_methods, limit, offset)
+        result = {
+            "api_version": LAYOUT_API_VERSION,
+            "class": target_class,
+            "methods": [_layout_api_compact(info, include_examples) for info in page],
+            "total": total,
+            "offset": start,
+            "limit": requested,
+        }
+        if devices:
+            result["devices"] = devices
+        return result
+    if query:
+        needle = str(query).strip().lower()
+        matches = []
+        for info in methods:
+            searchable = " ".join(
+                [
+                    info.get("name", ""),
+                    info.get("qualname", ""),
+                    info.get("summary", ""),
+                    " ".join(
+                        str(parameter.get("name", ""))
+                        + " "
+                        + str(parameter.get("description", ""))
+                        for parameter in info.get("parameters", [])
+                    ),
+                ]
+            ).lower()
+            if needle in searchable:
+                matches.append(info)
+        page, total, start, requested = _layout_api_page(matches, limit, offset)
+        result = {
+            "api_version": LAYOUT_API_VERSION,
+            "query": query,
+            "methods": [_layout_api_compact(info, include_examples) for info in page],
+            "total": total,
+            "offset": start,
+            "limit": requested,
+        }
+        if devices:
+            device_matches = [
+                name for name in devices["names"] if needle in name.lower()
+            ]
+            if device_matches:
+                result["devices"] = {
+                    "pdk": devices.get("pdk", ""),
+                    "count": len(device_matches),
+                    "names": device_matches,
+                }
+        return result
+    by_qualname = {
+        info["qualname"]: info for info in methods if info["owner"] == "Layout"
+    }
+    index_methods = []
+    for method_name in LAYOUT_API_INDEX_METHODS:
+        info = by_qualname.get(f"Layout.{method_name}")
+        if info is not None:
+            index_methods.append(_layout_api_compact(info, include_examples))
+    result = {
+        "api_version": LAYOUT_API_VERSION,
+        "classes": [
+            {
+                "name": item["name"],
+                "summary": item["summary"],
+                "method_count": item["method_count"],
+            }
+            for item in manifest["classes"]
+        ],
+        "methods": index_methods,
+        "canonical_example": manifest["canonical_example"],
+        "hint": (
+            "Call layout_api(name='device') for full documentation, "
+            "layout_api(class_name='Layout') for all Layout methods, or "
+            "layout_api(query='route') to search. Pass pdk=... to list device names."
+        ),
+    }
+    if devices:
+        result["devices"] = devices
+    return result
+
+
+_LAYOUT_CALL_RETURN_TYPES = {
+    "layer": "Layer",
+    "row": "Row",
+    "column": "Column",
+    "grid": "Grid",
+    "stack": "Stack",
+    "repeat": "Repeat",
+    "group": "Group",
+    "device": "DevicePlacement",
+    "route": "Route",
+    "connect": "Route",
+    "instance": "LayoutInstancePlacement",
+    "rectangle": "Shape",
+    "polygon": "Shape",
+    "path": "Shape",
+    "text": "Shape",
+    "via": "Shape",
+    "boolean": "Shape",
+    "union": "Shape",
+    "intersection": "Shape",
+    "subtract": "Shape",
+    "xor": "Shape",
+}
+
+_LAYOUT_DEVICE_KEYWORDS = {
+    "model",
+    "w",
+    "l",
+    "nf",
+    "m",
+    "nets",
+    "ng",
+    "ws",
+    "ad",
+    "as",
+    "pd",
+    "ps",
+}
+
+
+def _layout_constant(node):
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def _layout_name_list(node):
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+    names = []
+    for item in node.elts:
+        value = _layout_constant(item)
+        if isinstance(value, str):
+            names.append(value)
+    return names
+
+
+def _layout_call_name(call):
+    return call.func.attr if isinstance(call.func, ast.Attribute) else ""
+
+
+def _layout_receiver_name(call):
+    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+        return call.func.value.id
+    return ""
+
+
+def _layout_is_layout_call(call, method):
+    return _layout_call_name(call) == method and _layout_receiver_name(call) == "layout"
+
+
+def _layout_receiver_type(expression, receiver_types):
+    if isinstance(expression, ast.Name):
+        return receiver_types.get(expression.id)
+    if isinstance(expression, ast.Call):
+        return _LAYOUT_CALL_RETURN_TYPES.get(_layout_call_name(expression))
+    return None
+
+
+def _layout_callable_map(class_name):
+    cls = globals().get(class_name)
+    mapping = {}
+    if cls is None:
+        return mapping
+    for name, attribute in _layout_api_public_members(cls):
+        mapping[name] = attribute
+    if class_name in {"Layout", "Group"}:
+        mapping["grid"] = Layout._grid
+    return mapping
+
+
+def _layout_items_from_call(call):
+    items = set()
+    if call.args:
+        first = call.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            for item in first.elts:
+                if isinstance(item, ast.Name):
+                    items.add(item.id)
+        elif isinstance(first, ast.Name):
+            items.add(first.id)
+    for keyword in call.keywords:
+        if keyword.arg == "unit" and isinstance(keyword.value, ast.Name):
+            items.add(keyword.value.id)
+    return items
+
+
+def _layout_device_name(call, fallback):
+    for keyword in call.keywords:
+        if keyword.arg != "name":
+            continue
+        value = _layout_constant(keyword.value)
+        if isinstance(value, str) and value.strip():
+            return value.strip(), True
+        return fallback, False
+    return fallback, False
+
+
+def _layout_plan_devices(call):
+    node = call.args[0] if call.args else None
+    for keyword in call.keywords:
+        if keyword.arg == "devices":
+            node = keyword.value
+    if node is None:
+        return None, "none"
+    value = _layout_constant(node)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value, "count"
+    names = _layout_name_list(node)
+    if names is not None:
+        return names, "names"
+    return None, "unknown"
+
+
+def validate_layout_script(
+    source,
+    *,
+    pdk=None,
+    pdk_root=None,
+    require_plan=True,
+    require_finish=True,
+):
+    """Validate a layout script without executing package code.
+
+    The result is a JSON-compatible diagnostics document. Only syntax, API
+    signatures, required workflow calls, and planned-device consistency are
+    checked; simulation and DRC/LVS/PEX remain the authoritative gate.
+    """
+    diagnostics = []
+    seen = set()
+
+    def add(
+        severity,
+        code,
+        message,
+        node=None,
+        *,
+        line=None,
+        column=None,
+        suggestion="",
+        signature="",
+    ):
+        line_value = (
+            line
+            if line is not None
+            else getattr(node, "lineno", 1)
+            if node is not None
+            else 1
+        )
+        column_value = (
+            column
+            if column is not None
+            else (getattr(node, "col_offset", 0) + 1)
+            if node is not None
+            else 1
+        )
+        key = (code, line_value, column_value, message)
+        if key in seen:
+            return
+        seen.add(key)
+        diagnostics.append(
+            {
+                "severity": severity,
+                "line": line_value,
+                "column": column_value,
+                "code": code,
+                "message": message,
+                "suggestion": suggestion,
+                "signature": signature,
+            }
+        )
+
+    try:
+        tree = ast.parse(source or "", filename="<layout-script>")
+    except SyntaxError as error:
+        add(
+            "error",
+            "layout.syntax",
+            f"Python syntax error: {error.msg}",
+            line=error.lineno or 1,
+            column=error.offset or 1,
+            suggestion="Fix the syntax error before regenerating the layout.",
+        )
+        return {
+            "ok": False,
+            "api_version": LAYOUT_API_VERSION,
+            "pdk": pdk or "",
+            "diagnostics": diagnostics,
+            "summary": {
+                "errors": 1,
+                "warnings": 0,
+                "calls": 0,
+                "devices_created": 0,
+                "devices_added": 0,
+                "plan_declared": False,
+                "finish_placement": False,
+            },
+        }
+
+    nodes = sorted(
+        ast.walk(tree),
+        key=lambda item: (
+            getattr(item, "lineno", 0),
+            getattr(item, "col_offset", 0),
+        ),
+    )
+    calls = [item for item in nodes if isinstance(item, ast.Call)]
+    device_calls = {}
+    created_names = []
+    device_name_explicit = []
+    device_index = 0
+    for call in calls:
+        if not _layout_is_layout_call(call, "device"):
+            continue
+        device_index += 1
+        name, explicit = _layout_device_name(call, f"device_{device_index}")
+        device_calls[id(call)] = name
+        created_names.append(name)
+        device_name_explicit.append(explicit)
+
+    device_library = _layout_api_device_cells(pdk_root)
+    device_library_names = [str(cell.get("name", "")) for cell in device_library]
+
+    receiver_types = {"layout": "Layout"}
+    device_vars = {}
+    container_vars = {}
+    container_items = {}
+    container_direct = {}
+    added_device_names = set()
+    added_container_vars = set()
+    plan_declared = False
+    plan_devices = None
+    plan_kind = "none"
+    finish_lines = []
+    add_lines = []
+    processed = set()
+
+    for node in nodes:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
+                call = node.value
+                result_type = _layout_receiver_type(call, receiver_types)
+                if result_type:
+                    receiver_types[target.id] = result_type
+                if _layout_is_layout_call(call, "device"):
+                    name = device_calls.get(id(call))
+                    if name:
+                        device_vars[target.id] = name
+                method_name = _layout_call_name(call)
+                if method_name in {
+                    "row",
+                    "column",
+                    "grid",
+                    "stack",
+                    "repeat",
+                    "group",
+                }:
+                    container_vars[target.id] = method_name
+                    container_items.setdefault(target.id, set()).update(
+                        _layout_items_from_call(call)
+                    )
+
+        if not isinstance(node, ast.Call) or id(node) in processed:
+            continue
+        processed.add(id(node))
+        method_name = _layout_call_name(node)
+        receiver_expression = (
+            node.func.value if isinstance(node.func, ast.Attribute) else None
+        )
+        receiver_name = (
+            receiver_expression.id if isinstance(receiver_expression, ast.Name) else ""
+        )
+        receiver_type = (
+            _layout_receiver_type(receiver_expression, receiver_types)
+            if receiver_expression is not None
+            else None
+        )
+
+        if receiver_type:
+            method_map = _layout_callable_map(receiver_type)
+            attribute = method_map.get(method_name)
+            if attribute is None:
+                suggestions = difflib.get_close_matches(
+                    method_name, sorted(method_map), n=5
+                )
+                add(
+                    "error",
+                    "layout.api.unknown_method",
+                    f"{receiver_type}.{method_name}() is not part of the layout API.",
+                    node,
+                    suggestion=(
+                        "Did you mean: " + ", ".join(suggestions)
+                        if suggestions
+                        else "Call layout_api() to inspect the available methods."
+                    ),
+                )
+            elif isinstance(attribute, property):
+                add(
+                    "error",
+                    "layout.api.property_call",
+                    f"{receiver_type}.{method_name} is a property and cannot be called.",
+                    node,
+                    suggestion=f"Use {receiver_name}.{method_name} without parentheses.",
+                )
+            else:
+                signature = _layout_api_signature(attribute)
+                signature_text = (
+                    f"{method_name}{signature}" if signature is not None else ""
+                )
+                keyword_names = {
+                    keyword.arg for keyword in node.keywords if keyword.arg is not None
+                }
+                misuse = False
+                if receiver_type == "Layout" and method_name == "add":
+                    bad_keywords = sorted(keyword_names & _LAYOUT_DEVICE_KEYWORDS)
+                    string_pair = (
+                        len(node.args) >= 2
+                        and isinstance(_layout_constant(node.args[0]), str)
+                        and isinstance(_layout_constant(node.args[1]), str)
+                    )
+                    if bad_keywords or string_pair:
+                        misuse = True
+                        add(
+                            "error",
+                            "layout.api.device_constructor_misuse",
+                            "layout.add() places an existing object; it does not "
+                            "create a device and does not accept device parameters"
+                            + (
+                                " such as " + ", ".join(bad_keywords)
+                                if bad_keywords
+                                else ""
+                            )
+                            + ".",
+                            node,
+                            suggestion=(
+                                "Create the device first: M1 = layout.device("
+                                '"<device-name>", name="M1", model="<model>", '
+                                'w="1u", l="0.15u", nets={"G": "g", "D": "d", '
+                                '"S": "0", "B": "0"}); then layout.add(M1).'
+                            ),
+                            signature=signature_text,
+                        )
+                if not misuse and signature is not None:
+                    has_star = any(
+                        isinstance(argument, ast.Starred) for argument in node.args
+                    )
+                    has_keyword_star = any(
+                        keyword.arg is None for keyword in node.keywords
+                    )
+                    accepts_keyword_star = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in signature.parameters.values()
+                    )
+                    unknown_keyword_found = False
+                    if not accepts_keyword_star:
+                        for keyword_name in keyword_names:
+                            if keyword_name not in signature.parameters:
+                                unknown_keyword_found = True
+                                add(
+                                    "error",
+                                    "layout.api.unknown_keyword",
+                                    f"{receiver_type}.{method_name}() does not "
+                                    f"accept keyword '{keyword_name}'.",
+                                    node,
+                                    suggestion=(
+                                        f"Valid signature: "
+                                        f"{receiver_type}.{signature_text}"
+                                    ),
+                                    signature=signature_text,
+                                )
+                    if (
+                        not unknown_keyword_found
+                        and not has_keyword_star
+                        and not has_star
+                    ):
+                        positional = [object() for _ in node.args]
+                        keywords = {
+                            keyword.arg: object()
+                            for keyword in node.keywords
+                            if keyword.arg is not None
+                        }
+                        try:
+                            signature.bind(*positional, **keywords)
+                        except TypeError as error:
+                            message = str(error)
+                            lowered = message.lower()
+                            if "unexpected keyword" in lowered:
+                                code = "layout.api.unknown_keyword"
+                            elif "missing a required" in lowered:
+                                code = "layout.api.missing_argument"
+                            elif "too many positional" in lowered:
+                                code = "layout.api.too_many_arguments"
+                            elif "multiple values" in lowered:
+                                code = "layout.api.duplicate_argument"
+                            else:
+                                code = "layout.api.invalid_arguments"
+                            add(
+                                "error",
+                                code,
+                                f"{receiver_type}.{method_name}() call is invalid: "
+                                f"{message}.",
+                                node,
+                                suggestion=(
+                                    f"Valid signature: {receiver_type}.{signature_text}"
+                                ),
+                                signature=signature_text,
+                            )
+
+        if receiver_name == "layout" and method_name == "plan":
+            plan_declared = True
+            plan_devices, plan_kind = _layout_plan_devices(node)
+        if receiver_name == "layout" and method_name in {
+            "finish_placement",
+            "compact",
+        }:
+            finish_lines.append(node.lineno)
+        if receiver_name == "layout" and method_name == "add":
+            add_lines.append(node.lineno)
+            for argument in node.args:
+                if isinstance(argument, ast.Name):
+                    if argument.id in device_vars:
+                        added_device_names.add(device_vars[argument.id])
+                    elif argument.id in container_items:
+                        added_container_vars.add(argument.id)
+                elif isinstance(argument, ast.Call):
+                    direct_name = device_calls.get(id(argument))
+                    if direct_name:
+                        added_device_names.add(direct_name)
+                    else:
+                        for item in _layout_items_from_call(argument):
+                            if item in device_vars:
+                                added_device_names.add(device_vars[item])
+                            elif item in container_items:
+                                added_container_vars.add(item)
+        if receiver_name in container_vars and method_name == "add":
+            for argument in node.args:
+                if isinstance(argument, ast.Name):
+                    container_items.setdefault(receiver_name, set()).add(argument.id)
+                elif isinstance(argument, ast.Call):
+                    direct_name = device_calls.get(id(argument))
+                    if direct_name:
+                        container_direct.setdefault(receiver_name, set()).add(
+                            direct_name
+                        )
+                    else:
+                        container_items.setdefault(receiver_name, set()).update(
+                            _layout_items_from_call(argument)
+                        )
+
+        if (
+            receiver_name == "layout"
+            and method_name == "device"
+            and device_library_names
+            and node.args
+        ):
+            requested = _layout_constant(node.args[0])
+            if isinstance(requested, str) and requested.strip():
+                normalized = requested.lower()
+                matched = any(
+                    normalized in name.lower() for name in device_library_names
+                )
+                if not matched:
+                    suggestions = difflib.get_close_matches(
+                        requested, device_library_names, n=5
+                    )
+                    add(
+                        "error",
+                        "layout.device.unknown_device",
+                        f"Unknown layout device '{requested}' for this PDK.",
+                        node,
+                        suggestion=(
+                            "Available devices include: "
+                            + ", ".join(suggestions or device_library_names[:8])
+                            + ". Call layout_api(pdk=...) for the full list."
+                        ),
+                    )
+
+    def resolve_container(container_name, seen_names=None):
+        seen_names = seen_names or set()
+        if container_name in seen_names:
+            return set()
+        seen_names.add(container_name)
+        names = set(container_direct.get(container_name, ()))
+        for item in container_items.get(container_name, ()):
+            if item in device_vars:
+                names.add(device_vars[item])
+            elif item in container_items:
+                names |= resolve_container(item, seen_names)
+        return names
+
+    added_names = set(added_device_names)
+    for container_name in added_container_vars:
+        added_names |= resolve_container(container_name)
+
+    if require_plan and not plan_declared:
+        add(
+            "error",
+            "layout.contract.missing_plan",
+            "layout.plan(...) is required before placing devices.",
+            line=1,
+            column=1,
+            suggestion=(
+                "Start the script with layout.plan(devices=[...], rows=..., "
+                "target_utilization=..., max_gap_um=...)."
+            ),
+        )
+    if require_finish and not finish_lines:
+        add(
+            "error",
+            "layout.contract.missing_finish",
+            "layout.finish_placement() (or layout.compact()) is required after placement.",
+            line=1,
+            column=1,
+            suggestion=(
+                "Call layout.finish_placement() after every planned device has "
+                "been added and before layout_regenerate."
+            ),
+        )
+    if finish_lines and add_lines and max(add_lines) > max(finish_lines):
+        add(
+            "error",
+            "layout.contract.finish_order",
+            "layout.finish_placement() is called before the last layout.add(...).",
+            line=max(finish_lines),
+            column=1,
+            suggestion=(
+                "Move layout.finish_placement() after all layout.add(...) calls."
+            ),
+        )
+
+    uncertain_names = any(not explicit for explicit in device_name_explicit)
+    if plan_kind == "count" and isinstance(plan_devices, int):
+        if len(created_names) < plan_devices:
+            add(
+                "warning" if uncertain_names else "error",
+                "layout.contract.missing_devices",
+                f"layout.plan declares {plan_devices} device(s) but only "
+                f"{len(created_names)} layout.device(...) call(s) exist.",
+                line=1,
+                column=1,
+                suggestion="Add the missing layout.device(...) calls.",
+            )
+    elif plan_kind == "names" and isinstance(plan_devices, list):
+        created = set(created_names)
+        for planned in plan_devices:
+            if planned not in created:
+                add(
+                    "warning" if uncertain_names else "error",
+                    "layout.contract.missing_device",
+                    f"Planned device '{planned}' is not created with "
+                    f"layout.device(name='{planned}').",
+                    line=1,
+                    column=1,
+                    suggestion=(
+                        f"Create it with layout.device(..., name='{planned}') "
+                        "before layout.finish_placement()."
+                    ),
+                )
+            elif planned not in added_names:
+                add(
+                    "error",
+                    "layout.contract.unadded_device",
+                    f"Planned device '{planned}' is created but never added to "
+                    "the layout.",
+                    line=1,
+                    column=1,
+                    suggestion=(
+                        f"Add it with layout.add({planned}) or place it inside a "
+                        "row/column that is added with layout.add(row)."
+                    ),
+                )
+
+    errors = sum(1 for item in diagnostics if item["severity"] == "error")
+    warnings = sum(1 for item in diagnostics if item["severity"] == "warning")
+    return {
+        "ok": errors == 0,
+        "api_version": LAYOUT_API_VERSION,
+        "pdk": pdk or "",
+        "diagnostics": diagnostics,
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "calls": len(calls),
+            "devices_created": len(created_names),
+            "devices_added": len(added_names),
+            "plan_declared": plan_declared,
+            "finish_placement": bool(finish_lines),
+        },
+    }
+
+
+def _write_json_document(document, output):
+    text = json.dumps(document, indent=2)
+    if output:
+        Path(output).write_text(text + "\n", encoding="utf-8")
+    else:
+        sys.stdout.write(text + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--script", help="Procedural layout Python script")
@@ -6335,6 +7494,58 @@ def main():
         "--list-generators",
         action="store_true",
         help="Print built-in generator metadata as JSON and exit",
+    )
+    parser.add_argument(
+        "--describe-api",
+        action="store_true",
+        help="Print the machine-readable layout API manifest and exit",
+    )
+    parser.add_argument(
+        "--api-query",
+        default="",
+        help="Search the layout API by method, class, parameter, or summary text",
+    )
+    parser.add_argument(
+        "--api-name",
+        default="",
+        help="Return one full layout API method or class entry",
+    )
+    parser.add_argument(
+        "--api-class",
+        default="",
+        help="Return all public methods of one layout API class",
+    )
+    parser.add_argument(
+        "--api-examples",
+        action="store_true",
+        help="Include minimal examples in layout API entries",
+    )
+    parser.add_argument(
+        "--api-limit",
+        type=int,
+        default=0,
+        help="Maximum layout API entries to return (0 = default page size)",
+    )
+    parser.add_argument(
+        "--api-offset",
+        type=int,
+        default=0,
+        help="Layout API entry offset for pagination",
+    )
+    parser.add_argument(
+        "--validate-script",
+        default="",
+        help="Validate a procedural layout script and print JSON diagnostics",
+    )
+    parser.add_argument(
+        "--no-require-plan",
+        action="store_true",
+        help="Do not require layout.plan(...) during --validate-script",
+    )
+    parser.add_argument(
+        "--no-require-finish",
+        action="store_true",
+        help="Do not require layout.finish_placement() during --validate-script",
     )
     parser.add_argument(
         "--params-file", help="Optional procedural parameter values (JSON object)"
@@ -6370,9 +7581,43 @@ def main():
         sys.stdout.write("\n")
         return
 
+    if args.describe_api:
+        _write_json_document(
+            layout_api_lookup(
+                query=args.api_query,
+                name=args.api_name,
+                class_name=args.api_class,
+                include_examples=args.api_examples,
+                limit=args.api_limit,
+                offset=args.api_offset,
+                pdk=args.pdk,
+                pdk_root=args.pdk_root,
+            ),
+            args.output,
+        )
+        return
+
+    if args.validate_script:
+        try:
+            source = Path(args.validate_script).read_text(encoding="utf-8")
+        except OSError as error:
+            raise RuntimeError(f"Unable to read the layout script: {error}") from error
+        _write_json_document(
+            validate_layout_script(
+                source,
+                pdk=args.pdk,
+                pdk_root=args.pdk_root,
+                require_plan=not args.no_require_plan,
+                require_finish=not args.no_require_finish,
+            ),
+            args.output,
+        )
+        return
+
     if not args.script or not args.output:
         parser.error(
-            "--script and --output are required unless --list-generators is used"
+            "--script and --output are required unless --list-generators, "
+            "--describe-api, or --validate-script is used"
         )
 
     parameters = {}

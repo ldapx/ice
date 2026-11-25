@@ -153,6 +153,90 @@ std::string readTextFile(const std::filesystem::path &path) {
     return std::string((std::istreambuf_iterator<char>(input)), {});
 }
 
+ProceduralLayoutJsonResult runProceduralRunnerJson(std::vector<std::string> arguments,
+                                                   const std::string &script,
+                                                   const std::filesystem::path &executablePath,
+                                                   int timeoutSeconds) {
+    ProceduralLayoutJsonResult result;
+    const auto runner = proceduralRunnerScriptPath(executablePath);
+    if (runner.empty()) {
+        result.error = "The procedural layout runner script was not found.";
+        return result;
+    }
+    const auto python = proceduralPythonExecutable();
+    if (python.empty()) {
+        result.error = "Python 3 was not found. Set ICE_PYTHON to the interpreter path.";
+        return result;
+    }
+
+    std::random_device random;
+    std::uniform_int_distribution<std::uint64_t> distribution;
+    std::ostringstream stem;
+    stem << "ice-layout-contract-" << std::hex << distribution(random);
+    const auto directory = std::filesystem::temp_directory_path() / stem.str();
+    std::error_code status;
+    std::filesystem::create_directories(directory, status);
+    if (status) {
+        result.error = "Unable to create a temporary directory for the layout contract tool.";
+        return result;
+    }
+    const auto cleanup = [&] {
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+    };
+    const auto outputPath = directory / "result.json";
+    const auto logPath = directory / "runner.log";
+    if (!script.empty()) {
+        const auto scriptPath = directory / "layout.py";
+        std::ofstream scriptFile(scriptPath, std::ios::binary | std::ios::trunc);
+        if (!scriptFile) {
+            result.error = "Unable to write the layout script for validation.";
+            cleanup();
+            return result;
+        }
+        scriptFile << script;
+        scriptFile.close();
+        arguments.push_back("--validate-script");
+        arguments.push_back(scriptPath.string());
+    }
+    arguments.push_back("--output");
+    arguments.push_back(outputPath.string());
+
+    ProcessOptions options;
+    options.arguments.push_back(python);
+    options.arguments.push_back(runner.string());
+    options.arguments.insert(options.arguments.end(), arguments.begin(), arguments.end());
+    options.environment["ICE_ALLOW_PACKAGE_CODE"] = "0";
+    options.workingDirectory = directory;
+    options.logPath = logPath;
+    options.timeoutSeconds = std::max(0, timeoutSeconds);
+    const auto process = runProcess(options);
+    result.log = process.logTail;
+    if (!process.succeeded()) {
+        if (process.timedOut)
+            result.error = "The layout contract tool timed out.";
+        else if (process.cancelled)
+            result.error = "The layout contract tool was cancelled.";
+        else if (!process.error.empty())
+            result.error = process.error;
+        else
+            result.error = "The layout contract tool failed.";
+        if (!process.logTail.empty())
+            result.error += "\n" + process.logTail;
+        cleanup();
+        return result;
+    }
+    result.json = readTextFile(outputPath);
+    if (result.json.empty()) {
+        result.error = "The layout contract tool did not produce a JSON result.";
+        cleanup();
+        return result;
+    }
+    result.ok = true;
+    cleanup();
+    return result;
+}
+
 std::string stringField(const json &object, const char *key, std::string fallback = {}, std::string *error = nullptr) {
     const auto field = object.find(key);
     if (field == object.end() || field->is_null())
@@ -1415,6 +1499,43 @@ ProceduralLayoutRunResult regenerateProceduralLayout(Project &project, ObjectId 
     result.ok = true;
     cleanup();
     return result;
+}
+
+ProceduralLayoutJsonResult describeProceduralLayoutApi(
+    const std::string &pdk, const std::filesystem::path &pdkRoot,
+    const std::vector<std::string> &options, const std::filesystem::path &executablePath,
+    int timeoutSeconds) {
+    std::vector<std::string> arguments{"--describe-api"};
+    if (!pdk.empty()) {
+        arguments.push_back("--pdk");
+        arguments.push_back(pdk);
+    }
+    if (!pdkRoot.empty()) {
+        arguments.push_back("--pdk-root");
+        arguments.push_back(pdkRoot.string());
+    }
+    arguments.insert(arguments.end(), options.begin(), options.end());
+    return runProceduralRunnerJson(std::move(arguments), {}, executablePath, timeoutSeconds);
+}
+
+ProceduralLayoutJsonResult validateProceduralLayoutScript(
+    const std::string &script, const std::string &pdk, const std::filesystem::path &pdkRoot,
+    bool requirePlan, bool requireFinish, const std::filesystem::path &executablePath,
+    int timeoutSeconds) {
+    std::vector<std::string> arguments;
+    if (!pdk.empty()) {
+        arguments.push_back("--pdk");
+        arguments.push_back(pdk);
+    }
+    if (!pdkRoot.empty()) {
+        arguments.push_back("--pdk-root");
+        arguments.push_back(pdkRoot.string());
+    }
+    if (!requirePlan)
+        arguments.push_back("--no-require-plan");
+    if (!requireFinish)
+        arguments.push_back("--no-require-finish");
+    return runProceduralRunnerJson(std::move(arguments), script, executablePath, timeoutSeconds);
 }
 
 } // namespace ice

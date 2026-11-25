@@ -828,22 +828,26 @@ json helpJson(const std::string &requestedTopic) {
         {"analog-layout",
          {{"summary", "Build compact procedural analog layouts with composition handles, constraints, and cell "
                       "generators, then verify area utilization, LVS, DRC, and PEX."},
-          {"tools", json::array({"layout_create_procedural", "layout_set_script", "layout_regenerate",
-                                 "layout_get_script", "layout_info", "layout_review", "layout_link_schematic",
-                                 "layout_unlink_schematic", "layout_bind_device", "layout_unbind_device",
-                                 "layout_device_links", "lvs_run", "drc_run", "pex_run"})},
+          {"tools", json::array({"layout_api", "layout_validate_script", "layout_create_procedural",
+                                 "layout_set_script", "layout_regenerate", "layout_get_script", "layout_info",
+                                 "layout_review", "layout_link_schematic", "layout_unlink_schematic",
+                                 "layout_bind_device", "layout_unbind_device", "layout_device_links", "lvs_run",
+                                 "drc_run", "pex_run"})},
           {"steps",
-           json::array({"Create or open the project and create a procedural layout with layout_create_procedural.",
+           json::array({"Call layout_api(pdk=...) to list device names, then layout_api(name=\"device\") and "
+                        "layout_api(class_name=\"Layout\") to inspect exact signatures and documentation.",
+                        "Create or open the project and create a procedural layout with layout_create_procedural.",
                         "Declare layout.plan(devices=..., rows=..., target_utilization=..., max_gap_um=...) before "
                         "placing devices.",
-                        "Build devices, then pack them with layout.row/column/grid/repeat and gap=0 instead of "
+                        "Create each device with layout.device(...). layout.add(...) only places an existing "
+                        "device or composition; it does not create a device.",
+                        "Build devices, then pack them with layout.row([...], gap=0)/column/grid/repeat instead of "
                         "move loops with large fixed gaps.",
-                        "Use layout.constraint(\"Order\", ..., abut=True), layout.align, layout.symmetric, and "
-                        "layout.boundary for placement intent.",
-                        "Use layout.generate for mos_pair/resistor_bank/cap_array/guard_ring/rail/route_bundle, or "
-                        "@layout.generator for reusable blocks.",
-                        "Call layout.finish_placement() or layout.compact() before routing. The plan gate blocks "
-                        "route/connect until utilization and row-gap targets pass.",
+                        "Add every planned device with layout.add(...), then call layout.finish_placement() or "
+                        "layout.compact(). The plan gate blocks route/connect until utilization and row-gap "
+                        "targets pass.",
+                        "Call layout_validate_script(script=..., pdk=..., layout=...) before layout_regenerate and "
+                        "fix every error it reports.",
                         "Run layout_regenerate, then inspect structured layout_quality and layout_plan fields; use "
                         "layout_review for the separate review step.",
                         "Only after the quality gate and review pass should you run LVS, DRC, and PEX."})},
@@ -857,6 +861,11 @@ json helpJson(const std::string &requestedTopic) {
                         "layout.plan(...)+layout.finish_placement() is a hard gate: routing is blocked until the "
                         "declared compaction target passes.",
                         "layout_review checks the stored quality, plan, and review metadata against optional targets.",
+                        "layout_api is generated from live Python introspection; use it instead of guessing method "
+                        "signatures or device names.",
+                        "layout_validate_script parses the script without executing package code and reports unknown "
+                        "methods, bad keywords, missing plan/finish_placement, and planned devices that were never "
+                        "created or added.",
                         "If a procedural layout name already exists, reuse it with layout_set_script and "
                         "layout_regenerate; do not create a duplicate.",
                         "layout.finish_placement() or layout.compact() is required before output; a missing call "
@@ -1428,6 +1437,23 @@ ice::ObjectId resolveProceduralLayout(const ice::Project &project, const json &v
         throw ToolError("Unknown procedural layout: " + name);
     }
     throw ToolError("Expected a procedural layout name or id.");
+}
+
+std::string layoutGenerationHint(const std::string &error) {
+    if (error.find("Layout.add()") != std::string::npos && error.find("TypeError") != std::string::npos)
+        return "layout.add() only places an existing device or composition. Create the device with "
+               "layout.device(...) first, then call layout.add(device).";
+    if (error.find("TypeError") != std::string::npos)
+        return "Call layout_api(name=...) for the exact signature and layout_validate_script(...) before "
+               "layout_regenerate.";
+    if (error.find("compaction gate") != std::string::npos)
+        return "Create and add every planned device, use compact rows, and call layout.finish_placement() after "
+               "all layout.add(...) calls.";
+    if (error.find("timed out") != std::string::npos)
+        return "Inspect the generation log; increase timeout_seconds only when the script is genuinely slow.";
+    if (error.find("Unknown layout device") != std::string::npos)
+        return "Call layout_api(pdk=...) to list valid device names for this PDK.";
+    return {};
 }
 
 ice::ObjectId resolveLayoutItem(const ice::Project &project, const json &value) {
@@ -2396,6 +2422,9 @@ class IceMcpServer {
             result["features"].push_back("simulation_corner_defaults");
             result["features"].push_back("waveform_analysis");
             result["features"].push_back("pdk_info");
+            result["features"].push_back("layout_api");
+            result["features"].push_back("layout_script_validation");
+            result["layout_api_version"] = 1;
             if (!startupWarning_.empty())
                 result["startup_warning"] = startupWarning_;
             return result;
@@ -2451,6 +2480,115 @@ class IceMcpServer {
                     {"compiler", result.compiler},
                     {"osdi_dir", result.osdiDir.string()},
                     {"log", result.log}};
+        }
+
+        if (name == "layout_api") {
+            auto pdk = optionalString(arguments, "pdk");
+            if (pdk.empty() && session_) {
+                const auto &project = session_->project();
+                if (!project.proceduralLayouts.empty())
+                    pdk = project.proceduralLayouts.begin()->second.pdk;
+                else if (!project.layoutCells.empty())
+                    pdk = project.layoutCells.begin()->second.pdk;
+                else if (!project.schematicCells.empty())
+                    pdk = project.schematicCells.begin()->second.pdk;
+            }
+            std::filesystem::path pdkRoot;
+            if (!pdk.empty() && pdk != ice::genericPdkId) {
+                const auto pdks = ice::findPdks(pdk);
+                if (!pdks.empty())
+                    pdkRoot = pdks.front().packageRoot;
+            }
+            std::vector<std::string> options;
+            const auto query = optionalString(arguments, "query");
+            const auto methodName = optionalString(arguments, "name");
+            const auto className = optionalString(arguments, "class_name");
+            if (!query.empty()) {
+                options.push_back("--api-query");
+                options.push_back(query);
+            }
+            if (!methodName.empty()) {
+                options.push_back("--api-name");
+                options.push_back(methodName);
+            }
+            if (!className.empty()) {
+                options.push_back("--api-class");
+                options.push_back(className);
+            }
+            if (optionalBoolean(arguments, "include_examples", false))
+                options.push_back("--api-examples");
+            if (const auto limit = optionalInteger(arguments, "limit"); limit && *limit > 0) {
+                options.push_back("--api-limit");
+                options.push_back(std::to_string(*limit));
+            }
+            if (const auto offset = optionalInteger(arguments, "offset"); offset && *offset > 0) {
+                options.push_back("--api-offset");
+                options.push_back(std::to_string(*offset));
+            }
+            const auto described = ice::describeProceduralLayoutApi(pdk, pdkRoot, options, executablePath_);
+            if (!described.ok)
+                throw ToolError(described.error);
+            auto result = json::parse(described.json, nullptr, false);
+            if (result.is_discarded())
+                throw ToolError("The layout API manifest was not valid JSON.");
+            return result;
+        }
+
+        if (name == "layout_validate_script") {
+            const auto script = requiredStringAllowEmpty(arguments, "script");
+            auto pdk = optionalString(arguments, "pdk");
+            if (pdk.empty() && session_) {
+                const auto &project = session_->project();
+                if (!project.proceduralLayouts.empty())
+                    pdk = project.proceduralLayouts.begin()->second.pdk;
+                else if (!project.layoutCells.empty())
+                    pdk = project.layoutCells.begin()->second.pdk;
+                else if (!project.schematicCells.empty())
+                    pdk = project.schematicCells.begin()->second.pdk;
+            }
+            std::filesystem::path pdkRoot;
+            if (!pdk.empty() && pdk != ice::genericPdkId) {
+                const auto pdks = ice::findPdks(pdk);
+                if (!pdks.empty())
+                    pdkRoot = pdks.front().packageRoot;
+            }
+            const auto validated = ice::validateProceduralLayoutScript(
+                script, pdk, pdkRoot, optionalBoolean(arguments, "require_plan", true),
+                optionalBoolean(arguments, "require_finish", true), executablePath_);
+            if (!validated.ok)
+                throw ToolError(validated.error);
+            auto result = json::parse(validated.json, nullptr, false);
+            if (result.is_discarded())
+                throw ToolError("The layout validation result was not valid JSON.");
+            const auto layoutName = optionalString(arguments, "layout");
+            if (!layoutName.empty() && session_) {
+                bool exists = false;
+                for (const auto &[id, procedural] : session_->project().proceduralLayouts) {
+                    (void)id;
+                    if (procedural.name == layoutName) {
+                        exists = true;
+                        break;
+                    }
+                }
+                result["existing_layout"] = exists;
+                if (exists) {
+                    if (!result.contains("diagnostics") || !result["diagnostics"].is_array())
+                        result["diagnostics"] = json::array();
+                    result["diagnostics"].push_back(
+                        {{"severity", "info"},
+                         {"line", 1},
+                         {"column", 1},
+                         {"code", "layout.contract.existing_layout"},
+                         {"message",
+                          "A procedural layout named '" + layoutName +
+                              "' already exists. Update it instead of creating a duplicate."},
+                         {"suggestion",
+                          "Call layout_set_script(layout=\"" + layoutName +
+                              "\", script=...) then layout_regenerate(layout=\"" + layoutName + "\")."},
+                         {"signature", "layout_set_script(layout, script) then layout_regenerate(layout)"}});
+                }
+            }
+            return result;
         }
 
         if (name == "project_create") {
@@ -4144,6 +4282,8 @@ class IceMcpServer {
                     {"layout_plan", parsedMetadata(run.layoutPlan)},
                     {"layout_review", parsedMetadata(run.layoutReview)},
                     {"generation_error", run.ok || !shouldRegenerate ? json(nullptr) : json(run.error)},
+                    {"generation_hint",
+                     run.ok || !shouldRegenerate ? std::string{} : layoutGenerationHint(run.error)},
                     {"needs_regeneration",
                      ice::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))}};
         }
@@ -4151,11 +4291,14 @@ class IceMcpServer {
             const auto id = resolveProceduralLayout(session.project(), requiredValue(arguments, "layout"));
             const auto timeout = static_cast<int>(optionalInteger(arguments, "timeout_seconds").value_or(60));
             ice::ProceduralLayoutRunResult run;
-            session.execute("mcp layout-regenerate", [&](ice::Project &project) {
-                run = ice::regenerateProceduralLayout(project, id, executablePath_, timeout);
-                if (!run.ok)
-                    throw ToolError(run.error);
-            });
+            session.execute("mcp layout-regenerate",
+                            [&](ice::Project &project) {
+                                run = ice::regenerateProceduralLayout(project, id, executablePath_, timeout);
+                            });
+            if (!run.ok) {
+                const auto hint = layoutGenerationHint(run.error);
+                throw ToolError(run.error + (hint.empty() ? "" : "\nSuggested fix: " + hint));
+            }
             return {{"id", id},
                     {"ok", true},
                     {"script_hash", run.scriptHash},
@@ -5709,6 +5852,30 @@ class IceMcpServer {
                             .with_string_param("name", "Layout name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("stack", "Optional PDK stack identifier", false)
+                            .build());
+        tools.push_back(tool_builder("layout_api")
+                            .with_description("Introspect the live Python layout API: public classes, methods, "
+                                              "signatures, documentation, examples, and PDK device names. Start "
+                                              "with layout_api(pdk=...) and layout_api(name=\"device\").")
+                            .with_string_param("query", "Search methods, parameters, summaries, and device names", false)
+                            .with_string_param("name", "Return one full method or class entry", false)
+                            .with_string_param("class_name", "Return the public methods of one class", false)
+                            .with_string_param("pdk", "Optional PDK identifier for device listing", false)
+                            .with_boolean_param("include_examples", "Include minimal examples", false)
+                            .with_integer_param("limit", "Maximum entries to return", false)
+                            .with_integer_param("offset", "Entry offset for pagination", false)
+                            .build());
+        tools.push_back(tool_builder("layout_validate_script")
+                            .with_description("Preflight a procedural Python layout script without executing package "
+                                              "code. Reports syntax errors, unknown methods, bad keywords, missing "
+                                              "plan/finish_placement, and planned devices that were not created or "
+                                              "added.")
+                            .with_string_param("script", "Procedural layout Python script")
+                            .with_string_param("pdk", "Optional PDK identifier for device checks", false)
+                            .with_string_param("layout", "Optional existing procedural layout name", false)
+                            .with_boolean_param("require_plan", "Require layout.plan(...) (default true)", false)
+                            .with_boolean_param("require_finish", "Require layout.finish_placement() (default true)",
+                                                false)
                             .build());
         tools.push_back(tool_builder("layout_create_procedural")
                             .with_description("Create a procedural layout and generate its static child. If the "

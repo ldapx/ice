@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace ice {
 
@@ -35,6 +36,32 @@ struct ProceduralLayoutRunResult {
     std::string layoutPlan;
     std::string layoutReview;
 };
+
+// JSON result from the Python layout contract tools (API manifest or script
+// validation). The payload is produced by procedural_runner.py.
+struct ProceduralLayoutJsonResult {
+    bool ok = false;
+    std::string error;
+    std::string log;
+    std::string json;
+};
+
+// Describe the live Python layout API. `options` are extra runner arguments,
+// for example {"--api-name", "device"}.
+ProceduralLayoutJsonResult describeProceduralLayoutApi(const std::string &pdk,
+                                                       const std::filesystem::path &pdkRoot,
+                                                       const std::vector<std::string> &options = {},
+                                                       const std::filesystem::path &executablePath = {},
+                                                       int timeoutSeconds = 30);
+
+// Validate a layout script without executing package code.
+ProceduralLayoutJsonResult validateProceduralLayoutScript(const std::string &script,
+                                                          const std::string &pdk,
+                                                          const std::filesystem::path &pdkRoot,
+                                                          bool requirePlan = true,
+                                                          bool requireFinish = true,
+                                                          const std::filesystem::path &executablePath = {},
+                                                          int timeoutSeconds = 30);
 
 // Runs the procedural layout script in a subprocess and replaces its generated
 // static layout cell. The project is left unchanged when generation fails.

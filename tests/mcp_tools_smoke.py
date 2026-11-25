@@ -159,6 +159,8 @@ def main() -> int:
                 "layout_device_links",
                 "layout_link_schematic",
                 "layout_unlink_schematic",
+                "layout_api",
+                "layout_validate_script",
                 "layout_create_procedural",
                 "layout_regenerate",
                 "layout_get_script",
@@ -239,6 +241,44 @@ def main() -> int:
                     second_layout,
                 )
                 assert second_layout["updated"] is True, second_layout
+
+                api = mcp.tool("layout_api", pdk=pdk["id"])
+                assert api["api_version"] == 1, api
+                assert any(item["name"] == "Layout" for item in api["classes"]), api
+                assert api.get("devices", {}).get("names"), api
+                detail = mcp.tool("layout_api", name="device")
+                assert "device_name" in detail["method"]["signature"], detail
+                assert detail["method"]["example"], detail
+                search = mcp.tool("layout_api", query="route")
+                assert any(item["name"] == "route" for item in search["methods"]), (
+                    search
+                )
+                canonical = api["canonical_example"]
+                validated = mcp.tool(
+                    "layout_validate_script", script=canonical, pdk=pdk["id"]
+                )
+                assert validated["ok"], validated
+                bad_script = (
+                    'layout.plan(devices=["X1"], rows=1)\n'
+                    'X1 = layout.add("X1", "sg13_lv_nmos", w=20, l=0.13)\n'
+                    "layout.finish_placement()\n"
+                )
+                rejected = mcp.tool(
+                    "layout_validate_script", script=bad_script, pdk=pdk["id"]
+                )
+                codes = {item["code"] for item in rejected["diagnostics"]}
+                assert "layout.api.device_constructor_misuse" in codes, rejected
+                missing_finish = mcp.tool(
+                    "layout_validate_script",
+                    script=(
+                        'layout.plan(devices=["M1"], rows=1)\n'
+                        'M1 = layout.device("nmos", name="M1")\n'
+                        "layout.add(M1)\n"
+                    ),
+                    pdk=pdk["id"],
+                )
+                codes = {item["code"] for item in missing_finish["diagnostics"]}
+                assert "layout.contract.missing_finish" in codes, missing_finish
             assert "polygon_device_extraction" in version.get("features", []), version
             assert "systemverilog_cells" in version.get("features", []), version
             assert "digital_hdl" in version.get("features", []), version
