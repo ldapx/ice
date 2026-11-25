@@ -881,7 +881,8 @@ json helpJson(const std::string &requestedTopic) {
                         "layout.add_dummy_fill queues a PDK metal-fill pass after the script. It does not fill "
                         "Activ, GatPoly, passivation, or fix PCell-level DRC.",
                         "IHP standard nmos/pmos are core-clean except latch-up. Add ptap/ntap ties or use the "
-                        "guard-ring rfnmos/rfpmos variants; rhigh/rppd/cmim are core-clean.",
+                        "guard-ring rfnmos/rfpmos variants; rhigh/rppd/cmim are core-clean. Bind RF variants to "
+                        "their schematic MOS with layout_bind_device when LVS reports a type mismatch.",
                         "If a procedural layout name already exists, reuse it with layout_set_script and "
                         "layout_regenerate; do not create a duplicate.",
                         "layout.finish_placement() or layout.compact() is required before output; a missing call "

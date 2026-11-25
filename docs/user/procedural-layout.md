@@ -95,7 +95,9 @@ The IHP `nmos`, `pmos`, `rhigh`, `rppd`, and `cmim` PCells are core-clean once
 their stream layers are preserved. Standalone MOS devices still need a
 well/substrate tie for latch-up: place `ptap` near NMOS, `ntap` near PMOS, or
 use the guard-ring `rfnmos`/`rfpmos` variants. Without a tie, `core` reports
-`LU.a`/`LU.b` even though the device geometry is otherwise clean.
+`LU.a`/`LU.b` even though the device geometry is otherwise clean. If an RF
+guard-ring variant is used, bind it to the schematic MOS device with
+`layout_bind_device` so LVS type matching succeeds.
 
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
