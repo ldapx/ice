@@ -90,6 +90,18 @@ def test_group_row_and_column():
     assert layout.bounds() == (100, 200, 300, 310), layout.bounds()
 
 
+def test_row_and_column_accept_immediate_items():
+    runner = load_runner()
+    layout = runner.Layout()
+    first = rectangle(layout, 0, 0, 100, 50, "first")
+    second = rectangle(layout, 0, 0, 100, 80, "second")
+    row = layout.row([first, second], gap=0, align="bottom")
+    assert row.bounds == (0, 0, 200, 80), row.bounds
+    third = rectangle(layout, 0, 0, 40, 20, "third")
+    column = layout.column([row, third], gap=10, align="left")
+    assert column.bounds == (0, 0, 200, 110), column.bounds
+
+
 def test_nested_composition_and_measurement():
     runner = load_runner()
     layout = runner.Layout()

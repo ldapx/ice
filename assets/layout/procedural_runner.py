@@ -4184,7 +4184,9 @@ class Layout:
             if not layer_a or not layer_b:
                 raise ValueError("connect ports need layer metadata for a layer stack")
             if layer_a not in layer_names or layer_b not in layer_names:
-                raise ValueError("both port layers must be included in the layers stack")
+                raise ValueError(
+                    "both port layers must be included in the layers stack"
+                )
             start_layer_name = layer_a
             end_layer_name = layer_b
         start_net = info_a.get("net")
@@ -4195,7 +4197,9 @@ class Layout:
             net = start_net or end_net
         else:
             if start_net and start_net != net:
-                raise ValueError(f"start port belongs to net '{start_net}', not '{net}'")
+                raise ValueError(
+                    f"start port belongs to net '{start_net}', not '{net}'"
+                )
             if end_net and end_net != net:
                 raise ValueError(f"end port belongs to net '{end_net}', not '{net}'")
         if width is None:
@@ -4351,19 +4355,41 @@ class Layout:
         self._note_composition("group")
         return Group(self, name=name)
 
-    def row(self, gap=0, align="bottom", distribute="fixed", width=None, name=None):
-        """Create a horizontal composition."""
+    def row(
+        self,
+        items=None,
+        gap=0,
+        align="bottom",
+        distribute="fixed",
+        width=None,
+        name=None,
+    ):
+        """Create a horizontal composition, optionally adding items immediately."""
         self._note_composition("row")
-        return Row(
+        row = Row(
             self, gap=gap, align=align, distribute=distribute, width=width, name=name
         )
+        for item in items or []:
+            row.add(item)
+        return row
 
-    def column(self, gap=0, align="left", distribute="fixed", height=None, name=None):
-        """Create a vertical composition."""
+    def column(
+        self,
+        items=None,
+        gap=0,
+        align="left",
+        distribute="fixed",
+        height=None,
+        name=None,
+    ):
+        """Create a vertical composition, optionally adding items immediately."""
         self._note_composition("column")
-        return Column(
+        column = Column(
             self, gap=gap, align=align, distribute=distribute, height=height, name=name
         )
+        for item in items or []:
+            column.add(item)
+        return column
 
     def _grid(self, items=None, columns=1, x_gap=0, y_gap=0, align="center", name=None):
         """Create a fixed-column grid composition."""
