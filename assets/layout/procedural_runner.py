@@ -82,6 +82,7 @@ LAYOUT_API_INDEX_METHODS = (
     "instance",
     "parameter",
     "generate",
+    "add_dummy_fill",
     "report",
     "review",
 )

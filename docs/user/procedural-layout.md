@@ -59,6 +59,38 @@ devices that are never created or never added. It is advisory, but call it
 before `layout_regenerate` and fix every error: a lint error is much cheaper
 than a failed regeneration.
 
+## Metal fill and block-level DRC
+
+Metal density can be handled with the PDK fill provider:
+
+```python
+layout.add_dummy_fill(
+    layers=["Metal1", "Metal2", "Metal3", "Metal4", "Metal5",
+            "TopMetal1", "TopMetal2"],
+    density=50,
+    deviation=10,
+)
+```
+
+The request runs after the script finishes, so the fill sees the complete
+layout. IHP's provider supports those metal layers only; it does not fill
+Activ, GatPoly, or passivation and does not repair PCell geometry.
+
+For gdscheck PDKs, `drc_run` exposes gdscheck suites:
+
+```text
+main       full DRC, including full-chip density and antenna
+core       geometric DRC: main minus antenna and density/fill
+precheck   IHP open-source precheck subset
+density    density/fill checks only
+antenna    antenna checks only
+```
+
+Use `suite="core"` for a bare block that is not yet dummy-filled; use
+`suite="density"` separately as an advisory check. `suite="main"` is the
+full-chip signoff deck and is not a fair block-level gate without filler and
+seal-ring integration.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |

@@ -852,7 +852,12 @@ json helpJson(const std::string &requestedTopic) {
                         "fix every error it reports.",
                         "Run layout_regenerate, then inspect structured layout_quality and layout_plan fields; use "
                         "layout_review for the separate review step.",
-                        "Only after the quality gate and review pass should you run LVS, DRC, and PEX."})},
+                        "For block-level DRC on gdscheck PDKs use drc_run(suite=\"core\"); suite=\"main\" adds "
+                        "full-chip density and antenna rules. Use suite=\"density\" only as an advisory check.",
+                        "For metal density call layout.add_dummy_fill(layers=..., density=..., deviation=...); "
+                        "IHP supports Metal1-5 and TopMetal1-2, not Activ.",
+                        "Only after the quality gate and configured DRC suite pass should you run LVS, DRC, and "
+                        "PEX."})},
           {"example", {{"tool", "layout_regenerate"}, {"arguments", {{"layout", "MillerOTA_pcell"}}}}},
           {"notes",
            json::array({"Start with the smallest DRC-safe gap. gap=0 is only for isolated devices with no DRC "
@@ -871,6 +876,10 @@ json helpJson(const std::string &requestedTopic) {
                         "layout_validate_script parses the script without executing package code and reports unknown "
                         "methods, bad keywords, missing plan/finish_placement, and planned devices that were never "
                         "created or added.",
+                        "drc_run(suite=\"core\") is the block-level geometric deck on IHP/GF180; it excludes "
+                        "full-chip density/fill/antenna. drc_run(suite=\"density\") reports fill density separately.",
+                        "layout.add_dummy_fill queues a PDK metal-fill pass after the script. It does not fill "
+                        "Activ, GatPoly, passivation, or fix PCell-level DRC.",
                         "If a procedural layout name already exists, reuse it with layout_set_script and "
                         "layout_regenerate; do not create a duplicate.",
                         "layout.finish_placement() or layout.compact() is required before output; a missing call "

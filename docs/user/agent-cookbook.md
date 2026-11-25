@@ -132,6 +132,22 @@ layout_api(class_name="Layout")
 layout_validate_script(script="...", pdk="sky130A", layout="ota")
 ```
 
+For IHP/GF180 block DRC, use the geometric suite and keep density advisory:
+
+```text
+drc_run(layout="ota", suite="core")
+drc_run(layout="ota", suite="density")
+```
+
+For metal density, add fill after placement:
+
+```python
+layout.add_dummy_fill(layers=["Metal1", "Metal2", "TopMetal1", "TopMetal2"],
+                      density=50, deviation=10)
+```
+
+IHP fill supports metal layers only; it does not fill Activ or fix PCell geometry.
+
 A compact two-row floorplan looks like this:
 
 ```text
