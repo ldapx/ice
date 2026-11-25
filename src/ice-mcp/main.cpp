@@ -867,7 +867,8 @@ json helpJson(const std::string &requestedTopic) {
                         "Use the device port names reported by layout_api(name=...) in nets (MOS D/G/S/B; "
                         "rhigh/rppd/cmim PLUS/MINUS). IHP rhigh/rppd geometry is controlled by w/l; R/Calculate are "
                         "CDF-only. Use l = target_R * w / Rspec on the 5 nm grid, compute cmim C = Cspec*w*l, and "
-                        "also pass R (or C) so planned-device PEX metadata matches; verify the PEX value.",
+                        "also pass R (or C) so planned-device PEX metadata matches; verify the PEX value. MIM.g "
+                        "limits one cmim to 5625 um^2; split larger values into parallel units.",
                         "layout.report groups devices into rows before measuring gaps, so a tall passive is not "
                         "compared with every small device.",
                         "layout_quality includes utilization, row_count, rows, large_gaps, composition_used, "
@@ -885,8 +886,10 @@ json helpJson(const std::string &requestedTopic) {
                         "layout.add_dummy_fill queues a PDK metal-fill pass after the script. It does not fill "
                         "Activ, GatPoly, passivation, or fix PCell-level DRC.",
                         "IHP standard nmos/pmos are core-clean except latch-up. Add ptap/ntap ties or use the "
-                        "guard-ring rfnmos/rfpmos variants; rhigh/rppd/cmim are core-clean. Bind RF variants to "
-                        "their schematic MOS with layout_bind_device when LVS reports a type mismatch.",
+                        "guard-ring rfnmos/rfpmos variants; rhigh/rppd/cmim are core-clean. After the final "
+                        "layout_regenerate, bind every PCell whose model differs from the schematic device type "
+                        "with layout_bind_device (rhigh, rppd, cmim, and RF guard-ring MOS); regeneration clears "
+                        "bindings, so bind last and re-run LVS.",
                         "If a procedural layout name already exists, reuse it with layout_set_script and "
                         "layout_regenerate; do not create a duplicate.",
                         "layout.finish_placement() or layout.compact() is required before output; a missing call "

@@ -59,10 +59,12 @@ std::string spiceIdentifier(std::string text) {
     }
     if (result.empty())
         result = "n";
+    // Node 0 is the SPICE global ground. Preserve it so a PEX deck and its
+    // testbench share the same reference instead of producing a floating n_0.
+    if (result == "0")
+        return result;
     if (std::isdigit(static_cast<unsigned char>(result.front())))
         result.insert(result.begin(), 'n');
-    if (result == "0")
-        result = "n_0";
     return result;
 }
 
@@ -2394,9 +2396,11 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
         if (!terminals.empty()) {
             // For multiple pins, split the extracted net resistance so the
             // path between any two pins is approximately the extracted value.
+            // Very small values are numerical noise from an ideal tie; keep a
+            // stable floor so SPICE does not clamp them and distort AC results.
             auto branchResistance = terminals.size() == 1 ? net.resistance : net.resistance / 2.0;
-            if (branchResistance <= 0.0)
-                branchResistance = 1.0e-6;
+            if (branchResistance < 1.0e-3)
+                branchResistance = 1.0e-3;
             for (const auto &terminal : terminals)
                 text << "RPEX" << resistorIndex++ << " " << terminal << " " << net.node << " "
                      << formatNumber(branchResistance) << "\n";
@@ -2410,8 +2414,9 @@ PexReport runPex(Project &project, ObjectId layoutCellId, const PexOptions &opti
             // series current. Model the extracted resistance in series with
             // the net capacitance to ground instead of leaving an open stub.
             const auto rcNode = names.unique("PEXRC" + std::to_string(internalNodeIndex++));
-            text << "RPEX" << resistorIndex++ << " " << net.node << " " << rcNode << " " << formatNumber(net.resistance)
-                 << "\n";
+            const auto branchResistance = std::max(net.resistance, 1.0e-3);
+            text << "RPEX" << resistorIndex++ << " " << net.node << " " << rcNode << " "
+                 << formatNumber(branchResistance) << "\n";
             text << "CPEX" << capacitorIndex++ << " " << rcNode << " 0 " << formatNumber(net.capacitance) << "f\n";
         } else {
             if (net.resistance > 0.0)

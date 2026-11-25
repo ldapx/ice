@@ -1059,10 +1059,18 @@ LayoutLogicalSide collectLayoutSide(const Project &project, ObjectId cellId, con
         }
 
         if (actualId == 0) {
-            if (!planned.model.empty())
-                device.type = planned.model;
-            else if (device.type.empty() && !planned.device.empty())
-                device.type = planned.device;
+            // An explicit schematic-instance binding is authoritative for the
+            // device type. The planned model describes the PCell that was
+            // drawn; it must not override a binding to a compatible schematic
+            // device (for example, an RF guard-ring PMOS bound to a PMOS).
+            const bool linked =
+                planned.schematicInstance != 0 && schematic.instances.contains(planned.schematicInstance);
+            if (!linked) {
+                if (!planned.model.empty())
+                    device.type = planned.model;
+                else if (device.type.empty() && !planned.device.empty())
+                    device.type = planned.device;
+            }
             if (!planned.parameters.empty()) {
                 device.parameters = parameterMap(planned.parameters);
                 device.hasParameters = true;

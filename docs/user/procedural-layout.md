@@ -95,9 +95,11 @@ The IHP `nmos`, `pmos`, `rhigh`, `rppd`, and `cmim` PCells are core-clean once
 their stream layers are preserved. Standalone MOS devices still need a
 well/substrate tie for latch-up: place `ptap` near NMOS, `ntap` near PMOS, or
 use the guard-ring `rfnmos`/`rfpmos` variants. Without a tie, `core` reports
-`LU.a`/`LU.b` even though the device geometry is otherwise clean. If an RF
-guard-ring variant is used, bind it to the schematic MOS device with
-`layout_bind_device` so LVS type matching succeeds.
+`LU.a`/`LU.b` even though the device geometry is otherwise clean. After the
+final `layout_regenerate`, bind every PCell whose model differs from the
+schematic device type with `layout_bind_device`: `rhigh`, `rppd`, `cmim`, and
+RF guard-ring MOS. Regeneration rebuilds the generated cell and clears the
+bindings, so bind last and re-run LVS.
 
 ### Passive ports and IHP resistor extraction
 
@@ -126,7 +128,9 @@ geometry. IHP ignores those fields when drawing, but the planned-device
 metadata is what PEX prefers when both planned and polygon devices exist.
 Round passive dimensions to the 5 nm grid; off-grid PCell edges trigger
 off-grid DRC. For `cmim`, `C = Cspec * w * l`; the `m` parameter multiplies the
-netlist value but does not draw additional capacitor area.
+netlist value but does not draw additional capacitor area. IHP `MIM.g` limits a
+single `cmim` to 5625 um^2, so split larger values into parallel units in both
+the schematic and the layout (for example, 10 pF as two 5 pF capacitors).
 
 | Entry point | Create | Regenerate |
 | --- | --- | --- |

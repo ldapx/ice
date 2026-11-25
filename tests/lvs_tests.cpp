@@ -179,6 +179,39 @@ TEST_CASE("layout device bindings can be authored queried and validated") {
     (void)r1;
 }
 
+TEST_CASE("generated procedural layout cells accept device bindings") {
+    ice::Project project;
+    project.identity = "layout-generated-bindings";
+    project.name = "layout-generated-bindings";
+    const auto schematic = ice::createSchematicCell(project, "top");
+    std::vector<ice::ObjectId> pins;
+    const auto instance = addTwoPinDevice(project, schematic, "resistor", "R1", pins);
+    const auto procedural = ice::createProceduralLayout(project, "top_pcell");
+    const auto generated = project.proceduralLayouts.at(procedural).generatedCell;
+    auto &cell = project.layoutCells.at(generated);
+    CHECK(cell.readOnly);
+    const auto device = project.nextId();
+    cell.plannedDevices.emplace(device, ice::PlannedDevice{device, "R1", 0, 0, 0, 1000, 1000});
+
+    bool bound = true;
+    try {
+        ice::bindLayoutDevice(project, generated, device, schematic, instance);
+    } catch (const std::exception &) {
+        bound = false;
+    }
+    CHECK(bound);
+    CHECK(cell.plannedDevices.at(device).schematicInstance == instance);
+
+    bool unbound = true;
+    try {
+        ice::unbindLayoutDevice(project, generated, device);
+    } catch (const std::exception &) {
+        unbound = false;
+    }
+    CHECK(unbound);
+    CHECK(cell.plannedDevices.at(device).schematicInstance == 0);
+}
+
 TEST_CASE("layout cells can link to existing schematic cells") {
     ice::Project project;
     project.identity = "layout-schematic-link";

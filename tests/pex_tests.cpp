@@ -451,6 +451,21 @@ TEST_CASE("PEX extracts polygon capacitors from PDK rules") {
     CHECK(report.devices.front().spiceLine == "C1 A B 2f");
 }
 
+TEST_CASE("PEX keeps the layout ground net as SPICE node zero") {
+    ice::Project project;
+    project.identity = "pex-ground";
+    project.name = "pex-ground";
+    const auto metal = ice::addLayer(project, "Metal1", 8);
+    const auto cell = ice::createLayoutCell(project, "top");
+    const auto ground = ice::createLayoutNet(project, cell, "0");
+    ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, ground);
+
+    const auto report = ice::runPex(project, cell);
+
+    CHECK(report.spiceText.find("n_0") == std::string::npos);
+    CHECK(report.spiceText.find("* Net 0") != std::string::npos);
+}
+
 TEST_CASE("PEX extracts polygon resistors from PDK rules") {
     ice::Project project;
     project.identity = "pex-polygon-res";

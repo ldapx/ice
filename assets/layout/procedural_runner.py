@@ -3178,6 +3178,19 @@ class Layout:
             if net is None or str(net).strip() == "":
                 continue
             net_map[str(pin)] = str(net).strip()
+        # RF guard-ring PCells expose a TIE port in addition to D/G/S/B.
+        # Unless the script connects it explicitly, tie the guard ring to the
+        # bulk net so extraction does not leave a floating conductor. The TIE
+        # port remains a layout port but is not an LVS device terminal.
+        auto_tied_ports = set()
+        geometry_ports = {
+            str(port.get("name", "")) for port in geometry.get("ports", [])
+        }
+        if "TIE" in geometry_ports and "TIE" not in net_map:
+            tie_net = net_map.get("B")
+            if tie_net:
+                net_map["TIE"] = tie_net
+                auto_tied_ports.add("TIE")
         shapes = []
         shape_points = []
         for source in geometry.get("shapes", []):
@@ -3335,7 +3348,11 @@ class Layout:
                 {"name": str(key), "value": str(value)} for key, value in values.items()
             ],
             "bounds": bounds,
-            "ports": port_records,
+            "ports": [
+                record
+                for record in port_records
+                if record.get("name") not in auto_tied_ports
+            ],
             "port_info": port_info,
         }
         self.devices.append(device_record)

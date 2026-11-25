@@ -1369,7 +1369,7 @@ ObjectId createLayoutFromSchematic(Project &project, ObjectId schematicId, std::
 
 void linkLayoutToSchematic(Project &project, ObjectId layoutCellId, ObjectId schematicCellId) {
     auto &layout = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
-    if (layout.library || layout.readOnly)
+    if (layout.library || (layout.readOnly && layout.generatedBy == 0))
         throw ProjectError("layout.schematic_link", "Library and read-only layout cells cannot be edited");
     const auto schematic = project.schematicCells.find(schematicCellId);
     if (schematic == project.schematicCells.end())
@@ -1379,7 +1379,7 @@ void linkLayoutToSchematic(Project &project, ObjectId layoutCellId, ObjectId sch
 
 void unlinkLayoutFromSchematic(Project &project, ObjectId layoutCellId) {
     auto &layout = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
-    if (layout.library || layout.readOnly)
+    if (layout.library || (layout.readOnly && layout.generatedBy == 0))
         throw ProjectError("layout.schematic_link", "Library and read-only layout cells cannot be edited");
     layout.schematicCell = 0;
 }
@@ -2196,7 +2196,7 @@ std::vector<LayoutDeviceBinding> layoutDeviceBindings(const Project &project, Ob
 void bindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject, ObjectId schematicCellId,
                       ObjectId schematicInstance) {
     auto &cell = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
-    if (cell.library || cell.readOnly)
+    if (cell.library || (cell.readOnly && cell.generatedBy == 0))
         throw ProjectError("layout.device_link", "Library and read-only layout cells cannot be edited");
     const auto schematic = project.schematicCells.find(schematicCellId);
     if (schematic == project.schematicCells.end())
@@ -2227,7 +2227,7 @@ void bindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutOb
 
 void unbindLayoutDevice(Project &project, ObjectId layoutCellId, ObjectId layoutObject) {
     auto &cell = require(project.layoutCells, layoutCellId, "layout.cell", "Layout cell does not exist");
-    if (cell.library || cell.readOnly)
+    if (cell.library || (cell.readOnly && cell.generatedBy == 0))
         throw ProjectError("layout.device_link", "Library and read-only layout cells cannot be edited");
     if (const auto instance = cell.instances.find(layoutObject); instance != cell.instances.end()) {
         instance->second.schematicInstance = 0;
