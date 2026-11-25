@@ -91,6 +91,12 @@ Use `suite="core"` for a bare block that is not yet dummy-filled; use
 full-chip signoff deck and is not a fair block-level gate without filler and
 seal-ring integration.
 
+The IHP `nmos`, `pmos`, `rhigh`, `rppd`, and `cmim` PCells are core-clean once
+their stream layers are preserved. Standalone MOS devices still need a
+well/substrate tie for latch-up: place `ptap` near NMOS, `ntap` near PMOS, or
+use the guard-ring `rfnmos`/`rfpmos` variants. Without a tie, `core` reports
+`LU.a`/`LU.b` even though the device geometry is otherwise clean.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |

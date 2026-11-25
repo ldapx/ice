@@ -880,6 +880,8 @@ json helpJson(const std::string &requestedTopic) {
                         "full-chip density/fill/antenna. drc_run(suite=\"density\") reports fill density separately.",
                         "layout.add_dummy_fill queues a PDK metal-fill pass after the script. It does not fill "
                         "Activ, GatPoly, passivation, or fix PCell-level DRC.",
+                        "IHP standard nmos/pmos are core-clean except latch-up. Add ptap/ntap ties or use the "
+                        "guard-ring rfnmos/rfpmos variants; rhigh/rppd/cmim are core-clean.",
                         "If a procedural layout name already exists, reuse it with layout_set_script and "
                         "layout_regenerate; do not create a duplicate.",
                         "layout.finish_placement() or layout.compact() is required before output; a missing call "
