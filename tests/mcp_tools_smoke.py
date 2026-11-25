@@ -218,6 +218,27 @@ def main() -> int:
                     "project_set_package_trust", package=pdk["id"], trusted=False
                 )
                 assert package not in untrusted["trusted_packages"], untrusted
+
+                script = "layout.plan(devices=[], rows=1)\n"
+                first_layout = mcp.tool(
+                    "layout_create_procedural",
+                    name="idempotent_layout",
+                    pdk=pdk["id"],
+                    script=script,
+                    regenerate=False,
+                )
+                second_layout = mcp.tool(
+                    "layout_create_procedural",
+                    name="idempotent_layout",
+                    pdk=pdk["id"],
+                    script=script + "# updated\n",
+                    regenerate=False,
+                )
+                assert first_layout["id"] == second_layout["id"], (
+                    first_layout,
+                    second_layout,
+                )
+                assert second_layout["updated"] is True, second_layout
             assert "polygon_device_extraction" in version.get("features", []), version
             assert "systemverilog_cells" in version.get("features", []), version
             assert "digital_hdl" in version.get("features", []), version
