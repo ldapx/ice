@@ -866,7 +866,8 @@ json helpJson(const std::string &requestedTopic) {
                         "sources; LVS needs a matching layout device for each.",
                         "Use the device port names reported by layout_api(name=...) in nets (MOS D/G/S/B; "
                         "rhigh/rppd/cmim PLUS/MINUS). IHP rhigh/rppd geometry is controlled by w/l; R/Calculate are "
-                        "CDF-only. Use l = target_R * w / Rspec and verify the PEX value.",
+                        "CDF-only. Use l = target_R * w / Rspec on the 5 nm grid, compute cmim C = Cspec*w*l, and "
+                        "also pass R (or C) so planned-device PEX metadata matches; verify the PEX value.",
                         "layout.report groups devices into rows before measuring gaps, so a tall passive is not "
                         "compared with every small device.",
                         "layout_quality includes utilization, row_count, rows, large_gaps, composition_used, "

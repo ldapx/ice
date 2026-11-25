@@ -121,6 +121,13 @@ require the `pSD` implant, and distinguish high-res by `nSD`. PEX reports
 Both formulas are first-order and ignore contact resistance, so very small
 resistors should be checked against PEX.
 
+Pass the target value as `R` (or `C` for capacitors) in addition to the
+geometry. IHP ignores those fields when drawing, but the planned-device
+metadata is what PEX prefers when both planned and polygon devices exist.
+Round passive dimensions to the 5 nm grid; off-grid PCell edges trigger
+off-grid DRC. For `cmim`, `C = Cspec * w * l`; the `m` parameter multiplies the
+netlist value but does not draw additional capacitor area.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |
