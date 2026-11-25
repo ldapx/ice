@@ -861,14 +861,17 @@ json helpJson(const std::string &requestedTopic) {
           {"example", {{"tool", "layout_regenerate"}, {"arguments", {{"layout", "MillerOTA_pcell"}}}}},
           {"notes",
            json::array({"Start with the smallest DRC-safe gap. gap=0 is only for isolated devices with no DRC "
-                        "interaction; between active devices and guard rings use about 0.5 um or the PDK minimum.",
+                        "interaction; standard MOS can use about 0.5 um or the PDK minimum. RF guard-ring "
+                        "rfnmos/rfpmos devices need at least 3.5 um between adjacent devices for NWell/nBuLay spacing.",
                         "layout.plan must list every schematic device, including resistors, capacitors, and current "
                         "sources; LVS needs a matching layout device for each.",
                         "Use the device port names reported by layout_api(name=...) in nets (MOS D/G/S/B; "
                         "rhigh/rppd/cmim PLUS/MINUS). IHP rhigh/rppd geometry is controlled by w/l; R/Calculate are "
                         "CDF-only. Use l = target_R * w / Rspec on the 5 nm grid, compute cmim C = Cspec*w*l, and "
-                        "also pass R (or C) so planned-device PEX metadata matches; verify the PEX value. MIM.g "
-                        "limits one cmim to 5625 um^2; split larger values into parallel units.",
+                        "also pass R (or C) so planned-device PEX metadata matches; verify the PEX value. IHP MIM "
+                        "is about 1.5 fF/um^2, so use pF caps with MOhm resistors for 10 kHz, not nF caps. MIM.g "
+                        "limits one cmim to 5625 um^2; split larger values into parallel units. The runner rejects "
+                        "planned R/C values that differ from geometry by more than 10%.",
                         "layout.report groups devices into rows before measuring gaps, so a tall passive is not "
                         "compared with every small device.",
                         "layout_quality includes utilization, row_count, rows, large_gaps, composition_used, "

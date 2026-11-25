@@ -3119,6 +3119,65 @@ class Layout:
             return {"left": "right", "right": "left"}.get(side, side)
         return side
 
+    @staticmethod
+    def _spice_scalar(value):
+        """Parse a SPICE-style scalar such as ``1.5m``, ``5p``, or ``1070k``."""
+        text = str(value).strip().lower()
+        for suffix, scale in (
+            ("meg", 1e6),
+            ("t", 1e12),
+            ("g", 1e9),
+            ("k", 1e3),
+            ("m", 1e-3),
+            ("u", 1e-6),
+            ("n", 1e-9),
+            ("p", 1e-12),
+            ("f", 1e-15),
+        ):
+            if text.endswith(suffix):
+                return float(text[: -len(suffix)]) * scale
+        return float(text)
+
+    def _validate_passive_metadata(self, cell, values, explicit):
+        """Reject planned R/C values that the drawn PCell geometry cannot realize."""
+        cell_name = str(cell.get("name", "")).lower()
+        model = str(values.get("model", cell.get("model", ""))).lower()
+        if not {"w", "l"} <= set(values):
+            return
+        try:
+            w_m = self.length(values["w"]) * self.db_unit_nm * 1.0e-9
+            l_m = self.length(values["l"]) * self.db_unit_nm * 1.0e-9
+        except (TypeError, ValueError):
+            return
+        if w_m <= 0.0 or l_m <= 0.0:
+            return
+        if cell_name in {"cmim", "rfcmim"} or model in {"cap_cmim", "cap_rfcmim"}:
+            if "C" not in explicit or not str(values.get("C", "")).strip():
+                return
+            expected = self._spice_scalar(values.get("Cspec", "1.5m")) * w_m * l_m
+            target = self._spice_scalar(values["C"])
+            if expected > 0.0 and abs(target - expected) > 0.10 * expected:
+                raise ValueError(
+                    f"{cell_name} C={values['C']} does not match w={values['w']} "
+                    f"l={values['l']} (Cspec*w*l={expected:.6g} F). "
+                    "Split large capacitors into parallel units or correct the geometry."
+                )
+        if cell_name in {"rhigh", "rppd", "rsil"} or model in {
+            "res_rhigh",
+            "res_rppd",
+            "res_rsil",
+        }:
+            if "R" not in explicit or not str(values.get("R", "")).strip():
+                return
+            expected = self._spice_scalar(values.get("Rspec", "1300.0")) * l_m / w_m
+            target = self._spice_scalar(values["R"])
+            if expected > 0.0 and abs(target - expected) > 0.10 * expected:
+                raise ValueError(
+                    f"{cell_name} R={values['R']} does not match w={values['w']} "
+                    f"l={values['l']} (Rspec*l/w={expected:.6g} ohm). "
+                    "Correct the geometry or the planned R value."
+                )
+
     def device(
         self,
         device_name,
@@ -3164,6 +3223,7 @@ class Layout:
         values = dict(defaults)
         for key, value in parameters.items():
             values[str(key)] = "" if value is None else str(value)
+        self._validate_passive_metadata(cell, values, {str(key) for key in parameters})
         geometry = self._device_geometry(cell, values)
         self._device_count += 1
         instance_name = (

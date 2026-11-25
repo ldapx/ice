@@ -572,12 +572,20 @@ LayoutDrcResult runLayoutDrc(const Project &project, ObjectId layoutCellId, cons
         result.engine = "gdscheck";
     }
 
-    const auto workDirectory =
+    auto workDirectory =
         options.workDirectory.empty()
             ? (std::filesystem::temp_directory_path() /
                ("ice-drc-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
             : options.workDirectory;
     std::error_code status;
+    // The DRC process runs with workDirectory as its cwd, so a relative
+    // workDirectory would make the exported GDS path relative to itself and
+    // gdscheck would not find it.
+    workDirectory = std::filesystem::absolute(workDirectory, status);
+    if (status) {
+        result.error = "Unable to resolve DRC work directory: " + status.message();
+        return result;
+    }
     std::filesystem::create_directories(workDirectory, status);
     if (status) {
         result.error = "Unable to create DRC work directory: " + status.message();
