@@ -6582,12 +6582,14 @@ def _layout_api_device_call(variable, cell):
         for parameter in cell.get("parameters", [])
         if isinstance(parameter, dict)
     }
-    model = parameters.get("model") or name
+    model = parameters.get("model", "")
     width = parameters.get("w") or parameters.get("W") or "1u"
     length = parameters.get("l") or parameters.get("L") or "0.15u"
+    model_argument = f'model="{model}", ' if model else ""
     return (
         f'{variable} = layout.device("{name}", name="{variable}", '
-        f'model="{model}", w="{width}", l="{length}", '
+        f"{model_argument}"
+        f'w="{width}", l="{length}", '
         'nets={"G": "g", "D": "d", "S": "0", "B": "0"})'
     )
 
