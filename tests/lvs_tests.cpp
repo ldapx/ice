@@ -351,6 +351,52 @@ TEST_CASE("LVS compares text SPICE netlists and rejects read-only layout cells")
     CHECK_THROWS_AS(ice::runLvs(fixture.project, drawn, fixture.layout), ice::ProjectError);
 }
 
+TEST_CASE("LVS matches text X MOSFETs and PDK passive parameter names") {
+    ice::Project project;
+    project.identity = "lvs-text-pdk";
+    project.name = "lvs-text-pdk";
+    const auto layout = ice::createLayoutCell(project, "top");
+    const auto inNet = ice::createLayoutNet(project, layout, "in");
+    const auto outNet = ice::createLayoutNet(project, layout, "out");
+    const auto groundNet = ice::createLayoutNet(project, layout, "0");
+    auto &layoutCell = project.layoutCells.at(layout);
+
+    ice::PlannedDevice resistor;
+    resistor.id = project.nextId();
+    resistor.name = "R1";
+    resistor.model = "res_rhigh";
+    resistor.parameters.push_back({project.nextId(), "R", "1k"});
+    resistor.terminals = {{"PLUS", inNet}, {"MINUS", outNet}};
+    resistor.placeholder = false;
+    layoutCell.plannedDevices.emplace(resistor.id, resistor);
+
+    ice::PlannedDevice capacitor;
+    capacitor.id = project.nextId();
+    capacitor.name = "C1";
+    capacitor.model = "cap_cmim";
+    capacitor.parameters.push_back({project.nextId(), "C", "1n"});
+    capacitor.terminals = {{"PLUS", outNet}, {"MINUS", groundNet}};
+    capacitor.placeholder = false;
+    layoutCell.plannedDevices.emplace(capacitor.id, capacitor);
+
+    ice::PlannedDevice transistor;
+    transistor.id = project.nextId();
+    transistor.name = "X1";
+    transistor.model = "sg13_lv_nmos";
+    transistor.parameters.push_back({project.nextId(), "w", "1u"});
+    transistor.parameters.push_back({project.nextId(), "l", "0.13u"});
+    transistor.terminals = {{"D", outNet}, {"G", inNet}, {"S", groundNet}, {"B", groundNet}};
+    transistor.placeholder = false;
+    layoutCell.plannedDevices.emplace(transistor.id, transistor);
+
+    const auto schematic = ice::createTextSchematicCell(
+        project, "text_top", ice::genericPdkId,
+        "R1 in out 1k\nC1 out 0 1n\nX1 out in 0 0 sg13_lv_nmos w=1u l=0.13u\n");
+    const auto report = ice::runLvs(project, schematic, layout);
+    CHECK(report.matched());
+    CHECK(report.mismatches.empty());
+}
+
 TEST_CASE("LVS compares device parameters from a text SPICE netlist") {
     auto fixture = makeFixture();
     for (auto &[_, device] : fixture.project.layoutCells.at(fixture.layout).plannedDevices) {

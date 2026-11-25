@@ -132,6 +132,17 @@ std::vector<std::string> elementPinNames(const SpiceElement &element) {
                                          : std::vector<std::string>{"C", "B", "E"};
     case 'j':
         return {"D", "G", "S"};
+    case 'x':
+        // PDK MOSFETs are commonly instantiated as `X d g s b model ...`.
+        // Without pin labels the text side cannot match a layout net that
+        // records `X1:d`, `X1:g`, and so on.
+        if (isMultiTerminalType(element.model)) {
+            if (element.nodes.size() >= 4)
+                return {"D", "G", "S", "B"};
+            if (element.nodes.size() == 3)
+                return {"D", "G", "S"};
+        }
+        return {};
     default:
         return {};
     }
@@ -374,7 +385,7 @@ std::optional<std::string> findParameter(const std::map<std::string, std::string
         return exact->second;
     static const std::map<std::string, std::vector<std::string>> aliases = {
         {"resistance", {"resistance", "value", "r"}},
-        {"value", {"value", "resistance", "capacitance", "inductance"}},
+        {"value", {"value", "resistance", "capacitance", "inductance", "r", "c", "l"}},
         {"capacitance", {"capacitance", "value", "c"}},
         {"inductance", {"inductance", "value", "l"}},
         {"w", {"w", "width"}},
@@ -1470,7 +1481,18 @@ bool compatibleType(const std::string &left, const std::string &right) {
         return true;
     // PDK device names commonly extend a primitive name (nmos ->
     // nmos_lowvt). Treat that as the same device class.
-    return a.starts_with(b + "_") || b.starts_with(a + "_");
+    if (a.starts_with(b + "_") || b.starts_with(a + "_"))
+        return true;
+    const auto resistor = [](const std::string &type) {
+        return type == "res" || type == "resistor" || type.starts_with("res_") ||
+               type.ends_with("_res") || type.find("resistor") != std::string::npos;
+    };
+    const auto capacitor = [](const std::string &type) {
+        return type == "cap" || type == "capacitor" || type.starts_with("cap_") ||
+               type.ends_with("_cap") || type.find("capacitor") != std::string::npos ||
+               type.find("cap_") != std::string::npos;
+    };
+    return (resistor(a) && resistor(b)) || (capacitor(a) && capacitor(b));
 }
 
 int deviceMultiplicity(const LogicalDevice &device) {
