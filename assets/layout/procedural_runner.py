@@ -6744,8 +6744,8 @@ def _layout_api_page(items, limit, offset):
     start = max(0, int(offset or 0))
     requested = int(limit or 0)
     if requested <= 0:
-        requested = 25 if total > 25 else max(total, 1)
-    end = min(total, start + requested)
+        requested = 25 if total > 25 else total
+    end = min(total, start + requested) if requested > 0 else start
     return items[start:end], total, start, requested
 
 
