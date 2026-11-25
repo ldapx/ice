@@ -40,6 +40,7 @@ Do not guess the script API. The MCP tools `layout_api` and
 ```text
 layout_api(pdk="sky130A")                 # classes + key methods + device names
 layout_api(name="device")                 # exact signature, parameters, example
+layout_api(name="nfet")                   # device parameters and defaults
 layout_api(class_name="Layout")           # every public Layout method
 layout_api(query="route")                 # search methods, parameters, devices
 layout_validate_script(script=..., pdk="sky130A", layout="ota")

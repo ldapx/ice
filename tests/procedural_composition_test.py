@@ -634,6 +634,18 @@ def test_layout_api_manifest_and_filters():
         )
         assert pdk_manifest["devices"]["names"] == ["nfet", "pfet"], pdk_manifest
         assert 'layout.device("nfet"' in pdk_manifest["canonical_example"], pdk_manifest
+        device_detail = runner.layout_api_lookup(
+            name="nfet", pdk="sky130A", pdk_root=pdk_root
+        )
+        assert device_detail["device"]["name"] == "nfet", device_detail
+        assert any(
+            parameter["name"] == "model"
+            for parameter in device_detail["device"]["parameters"]
+        ), device_detail
+        device_search = runner.layout_api_lookup(
+            query="nfet", pdk="sky130A", pdk_root=pdk_root
+        )
+        assert device_search["devices"]["entries"][0]["name"] == "nfet", device_search
 
 
 def test_layout_validate_script():

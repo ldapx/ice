@@ -249,6 +249,14 @@ def main() -> int:
                 detail = mcp.tool("layout_api", name="device")
                 assert "device_name" in detail["method"]["signature"], detail
                 assert detail["method"]["example"], detail
+                method_names = {item["name"] for item in api["methods"]}
+                device_name = next(
+                    name for name in api["devices"]["names"] if name not in method_names
+                )
+                device_detail = mcp.tool("layout_api", name=device_name, pdk=pdk["id"])
+                assert "device" in device_detail or "devices" in device_detail, (
+                    device_detail
+                )
                 search = mcp.tool("layout_api", query="route")
                 assert any(item["name"] == "route" for item in search["methods"]), (
                     search

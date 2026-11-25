@@ -835,7 +835,8 @@ json helpJson(const std::string &requestedTopic) {
                                  "drc_run", "pex_run"})},
           {"steps",
            json::array({"Call layout_api(pdk=...) to list device names, then layout_api(name=\"device\") and "
-                        "layout_api(class_name=\"Layout\") to inspect exact signatures and documentation.",
+                        "layout_api(class_name=\"Layout\") to inspect exact signatures and documentation. Use "
+                        "layout_api(name=\"<device>\") to inspect a device's parameters and defaults.",
                         "Create or open the project and create a procedural layout with layout_create_procedural.",
                         "Declare layout.plan(devices=..., rows=..., target_utilization=..., max_gap_um=...) before "
                         "placing devices.",
@@ -5858,7 +5859,7 @@ class IceMcpServer {
                                               "signatures, documentation, examples, and PDK device names. Start "
                                               "with layout_api(pdk=...) and layout_api(name=\"device\").")
                             .with_string_param("query", "Search methods, parameters, summaries, and device names", false)
-                            .with_string_param("name", "Return one full method or class entry", false)
+                            .with_string_param("name", "Return one full method, class, or device entry", false)
                             .with_string_param("class_name", "Return the public methods of one class", false)
                             .with_string_param("pdk", "Optional PDK identifier for device listing", false)
                             .with_boolean_param("include_examples", "Include minimal examples", false)

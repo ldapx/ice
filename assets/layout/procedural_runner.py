@@ -6623,22 +6623,42 @@ def _layout_api_canonical_example(pdk_root=None):
     )
 
 
-def _layout_api_devices(pdk, pdk_root, detailed=False):
-    cells = _layout_api_device_cells(pdk_root)
-    if not cells:
-        return None
+def _layout_api_device_details(pdk_root):
     entries = []
-    for cell in cells:
-        parameters = {
-            str(parameter.get("name", "")): str(parameter.get("value", ""))
-            for parameter in cell.get("parameters", [])
-            if isinstance(parameter, dict)
-        }
-        entry = {"name": str(cell.get("name", ""))}
-        if detailed:
-            entry["model"] = parameters.get("model", "")
-            entry["parameters"] = parameters
-        entries.append(entry)
+    for cell in _layout_api_device_cells(pdk_root):
+        parameters = []
+        for parameter in cell.get("parameters", []):
+            if not isinstance(parameter, dict):
+                continue
+            parameters.append(
+                {
+                    "name": str(parameter.get("name", "")),
+                    "default": str(parameter.get("value", "")),
+                    "description": str(parameter.get("description", "")),
+                }
+            )
+        model = next(
+            (
+                parameter["default"]
+                for parameter in parameters
+                if parameter["name"] == "model"
+            ),
+            "",
+        )
+        entries.append(
+            {
+                "name": str(cell.get("name", "")),
+                "model": model,
+                "parameters": parameters,
+            }
+        )
+    return entries
+
+
+def _layout_api_devices(pdk, pdk_root, detailed=False):
+    entries = _layout_api_device_details(pdk_root)
+    if not entries:
+        return None
     return {
         "pdk": pdk or "",
         "count": len(entries),
@@ -6756,18 +6776,45 @@ def layout_api_lookup(
             ):
                 target = info
                 break
-        if target is not None and not target.get("example"):
-            example = _layout_api_example(target["qualname"], pdk_root)
-            if example:
-                target["example"] = example
-        result = {"api_version": LAYOUT_API_VERSION, "method": target}
-        if target is None:
-            result["error"] = f"Unknown layout API name: {name}"
-            result["suggestions"] = difflib.get_close_matches(
-                str(name), [info["name"] for info in methods], n=5
-            )
-        if devices:
-            result["devices"] = devices
+        if target is not None:
+            if not target.get("example"):
+                example = _layout_api_example(target["qualname"], pdk_root)
+                if example:
+                    target["example"] = example
+            return {"api_version": LAYOUT_API_VERSION, "method": target}
+        device_entries = _layout_api_device_details(pdk_root)
+        exact_devices = [
+            entry for entry in device_entries if entry["name"].lower() == normalized
+        ]
+        if exact_devices:
+            return {
+                "api_version": LAYOUT_API_VERSION,
+                "pdk": pdk or "",
+                "device": exact_devices[0],
+            }
+        matching_devices = [
+            entry for entry in device_entries if normalized in entry["name"].lower()
+        ]
+        if matching_devices:
+            return {
+                "api_version": LAYOUT_API_VERSION,
+                "pdk": pdk or "",
+                "devices": {
+                    "count": len(matching_devices),
+                    "entries": matching_devices[:10],
+                    "truncated": len(matching_devices) > 10,
+                },
+            }
+        result = {
+            "api_version": LAYOUT_API_VERSION,
+            "error": f"Unknown layout API name or device: {name}",
+            "suggestions": difflib.get_close_matches(
+                str(name),
+                [info["name"] for info in methods]
+                + [entry["name"] for entry in device_entries],
+                n=5,
+            ),
+        }
         return result
     if class_name:
         normalized = str(class_name).strip().lower()
@@ -6802,6 +6849,7 @@ def layout_api_lookup(
         return result
     if query:
         needle = str(query).strip().lower()
+        query_tokens = [token for token in re.split(r"\s+", needle) if token]
         matches = []
         for info in methods:
             searchable = " ".join(
@@ -6817,7 +6865,7 @@ def layout_api_lookup(
                     ),
                 ]
             ).lower()
-            if needle in searchable:
+            if query_tokens and all(token in searchable for token in query_tokens):
                 matches.append(info)
         page, total, start, requested = _layout_api_page(matches, limit, offset)
         result = {
@@ -6830,13 +6878,22 @@ def layout_api_lookup(
         }
         if devices:
             device_matches = [
-                name for name in devices["names"] if needle in name.lower()
+                name
+                for name in devices["names"]
+                if all(token in name.lower() for token in query_tokens)
             ]
             if device_matches:
+                details = [
+                    entry
+                    for entry in _layout_api_device_details(pdk_root)
+                    if entry["name"] in device_matches
+                ]
                 result["devices"] = {
                     "pdk": devices.get("pdk", ""),
                     "count": len(device_matches),
                     "names": device_matches,
+                    "entries": details[:10],
+                    "truncated": len(details) > 10,
                 }
         return result
     by_qualname = {
@@ -6860,7 +6917,8 @@ def layout_api_lookup(
         "methods": index_methods,
         "canonical_example": manifest["canonical_example"],
         "hint": (
-            "Call layout_api(name='device') for full documentation, "
+            "Call layout_api(name='device') for full method documentation, "
+            "layout_api(name='<device>') for that device's parameters, "
             "layout_api(class_name='Layout') for all Layout methods, or "
             "layout_api(query='route') to search. Pass pdk=... to list device names."
         ),

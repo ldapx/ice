@@ -127,6 +127,7 @@ script before regeneration:
 ```text
 layout_api(pdk="sky130A")
 layout_api(name="device")
+layout_api(name="nfet")
 layout_api(class_name="Layout")
 layout_validate_script(script="...", pdk="sky130A", layout="ota")
 ```
