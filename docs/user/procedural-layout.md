@@ -99,6 +99,28 @@ use the guard-ring `rfnmos`/`rfpmos` variants. Without a tie, `core` reports
 guard-ring variant is used, bind it to the schematic MOS device with
 `layout_bind_device` so LVS type matching succeeds.
 
+### Passive ports and IHP resistor extraction
+
+Use the device port names reported by `layout_api(name=...)` in the `nets`
+mapping: MOS devices use `D/G/S/B`; IHP `rhigh`, `rppd`, and `cmim` use
+`PLUS/MINUS`.
+
+IHP resistor geometry is controlled by `w` and `l`. The `R` and `Calculate`
+parameters are CDF-only and do not resize the PCell, so set the body length
+explicitly:
+
+```python
+# rhigh: Rspec = 1300 ohm/sq, rppd: Rspec = 260 ohm/sq
+R1 = layout.device("rhigh", name="R1", w="1u", l="153.846u",
+                   nets={"PLUS": "in", "MINUS": "n1"})
+```
+
+The IHP extraction rules recognize `rhigh` and `rppd` from the `PolyRes` body,
+require the `pSD` implant, and distinguish high-res by `nSD`. PEX reports
+`R = Rspec * L / W`; verify the extracted value against the schematic value.
+Both formulas are first-order and ignore contact resistance, so very small
+resistors should be checked against PEX.
+
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |

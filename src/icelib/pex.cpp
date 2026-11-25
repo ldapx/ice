@@ -990,7 +990,8 @@ struct TerminalHit {
 std::vector<TerminalHit> terminalHits(const ExtractionGeometry &geometry, const std::vector<std::string> &keys,
                                       const MultiPolygon &region, const DatabaseUnits &units,
                                       const std::vector<PexNet> &nets,
-                                      const std::map<ObjectId, std::string> &netNodeById, Clipper2Adapter &kernel) {
+                                      const std::map<ObjectId, std::string> &netNodeById, Clipper2Adapter &kernel,
+                                      bool allowTouch = false) {
     std::map<std::string, TerminalHit> byNode;
     const auto regionBounds = multiBounds(region);
     for (const auto &key : keys) {
@@ -1003,7 +1004,7 @@ std::vector<TerminalHit> terminalHits(const ExtractionGeometry &geometry, const 
                 continue;
             const auto intersection = kernel.intersection({shape.polygon}, region);
             const auto area = multiAreaUm2(intersection, units);
-            if (area <= 0.0)
+            if (area <= 0.0 && !(allowTouch && rectanglesOverlapOrTouch(shape.bounds, regionBounds)))
                 continue;
             const auto node = netNodeForShape(shape, nets, netNodeById);
             if (node.empty())
@@ -1408,8 +1409,9 @@ std::vector<PexDevice> extractPolygonDevices(const Project &project, const Layou
                 const auto &body = geometry.shapes[bodyIndex];
                 if (!matchesRequiredLayers(geometry, requireKeys, excludeKeys, body.polygon, kernel))
                     continue;
-                const auto hits =
-                    terminalHits(geometry, terminalKeys, {body.polygon}, project.units, nets, netNodeById, kernel);
+                const auto hits = terminalHits(geometry, terminalKeys, {body.polygon}, project.units, nets,
+                                               netNodeById, kernel,
+                                               lowerCopy(rule.terminalOverlap) == "touch");
                 if (hits.size() < 2) {
                     if (!terminalWarning) {
                         notes.push_back("Resistor rule '" + rule.name +

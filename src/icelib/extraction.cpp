@@ -66,6 +66,7 @@ DeviceExtractionRule parseRule(const json &entry) {
     rule.body = readString(entry, "body");
     rule.plates = readStringArray(entry, "plates");
     rule.sheetResistance = readNumber(entry, "sheet_resistance");
+    rule.terminalOverlap = readString(entry, "terminal_overlap", "area");
     rule.capacitancePerArea = readNumber(entry, "capacitance_per_area");
     rule.value = readString(entry, "value");
 

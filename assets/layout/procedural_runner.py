@@ -6668,6 +6668,7 @@ def _layout_api_device_details(pdk_root):
             {
                 "name": str(cell.get("name", "")),
                 "model": model,
+                "ports": [str(port) for port in cell.get("ports") or [] if str(port)],
                 "parameters": parameters,
             }
         )

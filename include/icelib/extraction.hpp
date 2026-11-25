@@ -39,6 +39,9 @@ struct DeviceExtractionRule {
     std::vector<std::string> plates;
     // Resistor sheet resistance in ohm/square.
     double sheetResistance = 0.0;
+    // Resistor terminal detection: "area" (default) requires positive overlap;
+    // "touch" also accepts terminals that only touch the body boundary.
+    std::string terminalOverlap;
     // Capacitor density in fF/um^2.
     double capacitancePerArea = 0.0;
     // Optional fixed value for a two-terminal device.

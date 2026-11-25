@@ -495,6 +495,51 @@ TEST_CASE("PEX extracts polygon resistors from PDK rules") {
     CHECK(report.devices.front().spiceLine == "R1 A B 4000");
 }
 
+TEST_CASE("PEX resistor rules can accept terminals that touch the body") {
+    ice::Project project;
+    project.identity = "pex-touch-res";
+    project.name = "pex-touch-res";
+    const auto body = ice::addLayer(project, "PolyRes", 128);
+    const auto terminals = ice::addLayer(project, "GatPoly", 5);
+    const auto cell = ice::createLayoutCell(project, "top", "test.pdk");
+    const auto firstNet = ice::createLayoutNet(project, cell, "A");
+    const auto secondNet = ice::createLayoutNet(project, cell, "B");
+    ice::addRectangle(project, cell, body, {0, 0, 2000, 500});
+    ice::addRectangle(project, cell, terminals, {-500, 0, 500, 500}, firstNet);
+    ice::addRectangle(project, cell, terminals, {2000, 0, 500, 500}, secondNet);
+
+    const auto rulesPath = std::filesystem::temp_directory_path() / "ice-pex-touch-res-rules.json";
+    std::ofstream(rulesPath) << R"({
+      "format": "ice-device-extraction",
+      "schema_version": 1,
+      "devices": [
+        {
+          "name": "poly_res",
+          "type": "resistor",
+          "model": "RES_TEST",
+          "element": "R",
+          "body": "PolyRes",
+          "terminal_layers": ["GatPoly"],
+          "sheet_resistance": 1000.0,
+          "terminal_overlap": "touch"
+        }
+      ]
+    })";
+
+    ice::PexOptions options;
+    options.extractionRulesPath = rulesPath;
+    options.includeLinkedSchematic = false;
+    const auto report = ice::runPex(project, cell, options);
+    std::filesystem::remove(rulesPath);
+
+    CHECK(report.devices.size() == 1);
+    if (report.devices.size() != 1)
+        return;
+    CHECK(report.devices.front().type == "resistor");
+    CHECK(report.devices.front().model == "RES_TEST");
+    CHECK(report.devices.front().spiceLine == "R1 A B 4000");
+}
+
 TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
     ice::Project project;
     project.identity = "pex-planned";
