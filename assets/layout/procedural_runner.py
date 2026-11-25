@@ -2972,6 +2972,18 @@ class Layout:
             )
         return name
 
+    def _register_device_layer(self, name, number, datatype):
+        """Pin a device layer to its real stream so the parser cannot infer one.
+
+        Package manifests do not list every purpose layer. Without an explicit
+        number/datatype, ICE would assign the next free layer number and can
+        collide with another PDK layer (for example Substrate -> PEmWind).
+        """
+        self.layers[str(name)] = {
+            "number": int(number),
+            "datatype": int(datatype),
+        }
+
     def _device_cell(self, device_name):
         library = self._load_device_library()
         cells = library.get("cells", [])
@@ -3191,6 +3203,9 @@ class Layout:
             layer_name = self._device_layer_name(
                 source.get("layer", 0), source.get("datatype", 0)
             )
+            self._register_device_layer(
+                layer_name, source.get("layer", 0), source.get("datatype", 0)
+            )
             record = {"layer": layer_name, "polygon": points}
             source_name = source.get("name", "")
             if source_name:
@@ -3236,6 +3251,9 @@ class Layout:
             net = net_map.get(pin)
             layer_name = self._device_layer_name(
                 source.get("layer", 0), source.get("datatype", 0)
+            )
+            self._register_device_layer(
+                layer_name, source.get("layer", 0), source.get("datatype", 0)
             )
             side = self._device_side(str(source.get("side", "left")), orientation)
             direction = str(source.get("direction", "inout"))

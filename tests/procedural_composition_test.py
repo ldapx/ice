@@ -546,6 +546,71 @@ def test_device_composition():
     assert sparse_report["warnings"]
 
 
+def test_device_layers_keep_real_stream_numbers():
+    runner = load_runner()
+    layout = runner.Layout()
+    layer_names = {
+        (40, 0): "Substrate",
+        (5, 2): "GatPoly.pin",
+        (51, 0): "HeatTrans",
+    }
+    layout._device_cell = lambda name: {
+        "name": str(name),
+        "model": str(name),
+        "parameters": [],
+    }
+    layout._device_geometry = lambda cell, values: {
+        "shapes": [
+            {
+                "layer": 40,
+                "datatype": 0,
+                "points": [
+                    {"x": 0, "y": 0},
+                    {"x": 100, "y": 0},
+                    {"x": 100, "y": 100},
+                ],
+            },
+            {
+                "layer": 5,
+                "datatype": 2,
+                "points": [
+                    {"x": 0, "y": 0},
+                    {"x": 20, "y": 0},
+                    {"x": 20, "y": 20},
+                ],
+            },
+            {
+                "layer": 51,
+                "datatype": 0,
+                "points": [
+                    {"x": 0, "y": 0},
+                    {"x": 30, "y": 0},
+                    {"x": 30, "y": 30},
+                ],
+            },
+        ],
+        "ports": [
+            {
+                "name": "B",
+                "layer": 40,
+                "datatype": 0,
+                "rectangle": {"x": 0, "y": 0, "width": 10, "height": 10},
+                "side": "bottom",
+                "direction": "input",
+            }
+        ],
+    }
+    layout._device_layer_name = lambda number, datatype: layer_names[
+        (int(number), int(datatype))
+    ]
+    layout._device_side = lambda side, orientation: side
+
+    layout.device("nmos", name="M1")
+    assert layout.layers["Substrate"] == {"number": 40, "datatype": 0}
+    assert layout.layers["GatPoly.pin"] == {"number": 5, "datatype": 2}
+    assert layout.layers["HeatTrans"] == {"number": 51, "datatype": 0}
+
+
 def test_layout_api_manifest_and_filters():
     runner = load_runner()
     manifest = runner.layout_api_manifest(include_examples=True)
@@ -761,6 +826,7 @@ def main():
         test_layout_instance_composition,
         test_layout_instance_connect,
         test_device_composition,
+        test_device_layers_keep_real_stream_numbers,
         test_layout_api_manifest_and_filters,
         test_layout_validate_script,
         test_output_metadata_and_determinism,
