@@ -857,6 +857,10 @@ json helpJson(const std::string &requestedTopic) {
                         "layout.plan(...)+layout.finish_placement() is a hard gate: routing is blocked until the "
                         "declared compaction target passes.",
                         "layout_review checks the stored quality, plan, and review metadata against optional targets.",
+                        "If a procedural layout name already exists, reuse it with layout_set_script and "
+                        "layout_regenerate; do not create a duplicate.",
+                        "layout.finish_placement() or layout.compact() is required before output; a missing call "
+                        "fails the regeneration gate.",
                         "A fixed 30-60 um gap between every device or one large routing channel for all devices "
                         "usually wastes most of the cell area."})}}},
         {"mixed-signal",
@@ -4098,12 +4102,29 @@ class IceMcpServer {
         if (name == "layout_create_procedural") {
             ice::ObjectId id = 0;
             ice::ObjectId generatedCell = 0;
+            bool updated = false;
             const auto pdk = optionalString(arguments, "pdk", ice::genericPdkId);
             const auto stack = resolveLayoutStack(pdk, optionalString(arguments, "stack"));
             const auto cellName = requiredString(arguments, "name");
             const auto script = optionalString(arguments, "script", ice::defaultProceduralLayoutScript());
             session.execute("mcp layout-create-procedural", [&](ice::Project &project) {
                 ice::applyPdkDefaultGrid(project, pdk);
+                for (const auto &[existingId, existing] : project.proceduralLayouts) {
+                    if (existing.name != cellName)
+                        continue;
+                    if (!existing.pdk.empty() && existing.pdk != pdk)
+                        throw ToolError("Procedural layout '" + cellName + "' already exists with PDK '" +
+                                        existing.pdk + "', not '" + pdk + "'.");
+                    id = existingId;
+                    updated = true;
+                    auto &layout = project.proceduralLayouts.at(id);
+                    if (arguments.contains("script"))
+                        layout.script = script;
+                    if (arguments.contains("stack"))
+                        layout.stack = stack;
+                    generatedCell = layout.generatedCell;
+                    return;
+                }
                 id = ice::createProceduralLayout(project, cellName, pdk, script, stack);
                 generatedCell = project.proceduralLayouts.at(id).generatedCell;
             });
@@ -4115,6 +4136,7 @@ class IceMcpServer {
                     {"name", cellName},
                     {"pdk", pdk},
                     {"stack", stack},
+                    {"updated", updated},
                     {"generated_cell", generatedCell},
                     {"generated", run.ok},
                     {"generation_log", run.log},
@@ -5689,7 +5711,8 @@ class IceMcpServer {
                             .with_string_param("stack", "Optional PDK stack identifier", false)
                             .build());
         tools.push_back(tool_builder("layout_create_procedural")
-                            .with_description("Create a procedural layout and generate its static child.")
+                            .with_description("Create a procedural layout and generate its static child. If the "
+                                              "name already exists, reuse and update that layout instead of failing.")
                             .with_string_param("name", "Procedural layout name")
                             .with_string_param("pdk", "Optional PDK identifier", false)
                             .with_string_param("stack", "Optional PDK stack identifier", false)
