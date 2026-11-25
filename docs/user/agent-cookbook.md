@@ -150,11 +150,11 @@ M3 = layout.device("pfet", name="M3", w="5u", l="2u",
 M4 = layout.device("pfet", name="M4", w="5u", l="2u",
                    nets={"G": "N1", "D": "N2", "S": "VDD", "B": "VDD"})
 
-top = layout.row(gap=0, align="bottom")
+top = layout.row(gap=layout.um(0.5), align="bottom")
 top.add(M3)
 top.add(M4)
 
-bottom = layout.row(gap=0, align="top")
+bottom = layout.row(gap=layout.um(0.5), align="top")
 bottom.add(M1)
 bottom.add(M2)
 

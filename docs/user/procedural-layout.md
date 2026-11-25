@@ -431,9 +431,11 @@ metadata as JSON.
 
 ## Area quality check
 
-A layout that routes correctly can still waste most of its area. Start composed
-rows and columns with `gap=0` and add spacing only where routing or DRC needs
-it. Prefer one shared routing channel over fixed padding between every device.
+A layout that routes correctly can still waste most of its area. Use the
+smallest DRC-safe gap: `gap=0` is only for isolated devices with no DRC
+interaction, while abutting active devices, wells, and guard rings usually need
+about 0.5 um or the PDK minimum. Prefer one shared routing channel over fixed
+padding between every device.
 
 ### Planning and the compaction gate
 

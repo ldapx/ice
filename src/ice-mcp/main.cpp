@@ -842,8 +842,9 @@ json helpJson(const std::string &requestedTopic) {
                         "placing devices.",
                         "Create each device with layout.device(...). layout.add(...) only places an existing "
                         "device or composition; it does not create a device.",
-                        "Build devices, then pack them with layout.row([...], gap=0)/column/grid/repeat instead of "
-                        "move loops with large fixed gaps.",
+                        "Build devices, then pack them with layout.row([...], gap=...)/column/grid/repeat instead of "
+                        "move loops with large fixed gaps. Use the smallest DRC-safe gap; zero gap between active "
+                        "devices can trigger contact/NBL spacing errors.",
                         "Add every planned device with layout.add(...), then call layout.finish_placement() or "
                         "layout.compact(). The plan gate blocks route/connect until utilization and row-gap "
                         "targets pass.",
@@ -854,7 +855,10 @@ json helpJson(const std::string &requestedTopic) {
                         "Only after the quality gate and review pass should you run LVS, DRC, and PEX."})},
           {"example", {{"tool", "layout_regenerate"}, {"arguments", {{"layout", "MillerOTA_pcell"}}}}},
           {"notes",
-           json::array({"Start rows and columns with gap=0; add spacing only where routing or DRC requires it.",
+           json::array({"Start with the smallest DRC-safe gap. gap=0 is only for isolated devices with no DRC "
+                        "interaction; between active devices and guard rings use about 0.5 um or the PDK minimum.",
+                        "layout.plan must list every schematic device, including resistors, capacitors, and current "
+                        "sources; LVS needs a matching layout device for each.",
                         "layout.report groups devices into rows before measuring gaps, so a tall passive is not "
                         "compared with every small device.",
                         "layout_quality includes utilization, row_count, rows, large_gaps, composition_used, "
