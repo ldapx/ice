@@ -143,7 +143,7 @@ fetch_openroad_source() {
     # Let the normal submodule URL work first, then fall back to a separate
     # pinned OpenSTA checkout. The fallback also handles relative submodule
     # URLs that cannot be resolved from a fetched commit.
-    if ! git -C "$temporary" -c protocol.file.allow=always submodule update --init --recursive; then
+    if ! git -C "$temporary" -c protocol.file.allow=always submodule update --init --recursive >&2; then
         info "OpenROAD submodule update failed; fetching OpenSTA directly"
     fi
     if [[ ! -f "$temporary/src/sta/BUILD.bazel" ]]; then
@@ -169,7 +169,7 @@ resolve_openroad_source() {
     local destination="$cache_root/OpenROAD-${OPENROAD_PIN:0:12}"
     if [[ "$refresh" -eq 1 || ! -d "$destination" ]]; then
         rm -rf "$destination"
-        fetch_openroad_source "$destination"
+        fetch_openroad_source "$destination" >&2
     fi
     [[ -f "$destination/BUILD.bazel" ]] || die "cached OpenROAD source is incomplete; rerun with --refresh"
     [[ -f "$destination/src/sta/BUILD.bazel" ]] ||
