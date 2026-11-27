@@ -22,7 +22,7 @@ struct LvsFixture {
 };
 
 openvlsi::ObjectId addTwoPinDevice(openvlsi::Project &project, openvlsi::ObjectId cell, const std::string &type,
-                              const std::string &name, std::vector<openvlsi::ObjectId> &pins) {
+                                   const std::string &name, std::vector<openvlsi::ObjectId> &pins) {
     const auto symbol = openvlsi::addSymbol(project, cell, type);
     auto &symbolEntry = project.schematicCells.at(cell).symbols.at(symbol);
     pins.clear();
@@ -58,7 +58,8 @@ bool hasCategory(const openvlsi::LvsReport &report, const std::string &category)
                        [&](const openvlsi::LvsMismatch &mismatch) { return mismatch.category == category; });
 }
 
-openvlsi::ObjectId plannedDeviceId(const openvlsi::Project &project, openvlsi::ObjectId layout, const std::string &name) {
+openvlsi::ObjectId plannedDeviceId(const openvlsi::Project &project, openvlsi::ObjectId layout,
+                                   const std::string &name) {
     for (const auto &[id, device] : project.layoutCells.at(layout).plannedDevices) {
         if (device.name == name)
             return id;
@@ -168,7 +169,8 @@ TEST_CASE("layout device bindings can be authored queried and validated") {
     bindings = openvlsi::layoutDeviceBindings(project, layout, schematic);
     REQUIRE(bindings.size() == 2);
     CHECK(std::all_of(bindings.begin(), bindings.end(), [](const auto &binding) { return binding.duplicate; }));
-    CHECK(std::any_of(project.validate().begin(), project.validate().end(),
+    const auto diagnostics = project.validate();
+    CHECK(std::any_of(diagnostics.begin(), diagnostics.end(),
                       [](const auto &diagnostic) { return diagnostic.code == "layout.device_link.duplicate"; }));
 
     openvlsi::unbindLayoutDevice(project, layout, r1Device);
@@ -302,8 +304,8 @@ TEST_CASE("LVS warns when layout connectivity metadata is missing") {
     for (const auto &[_, planned] : fixture.project.layoutCells.at(fixture.layout).plannedDevices) {
         const auto id = fixture.project.nextId();
         fixture.project.layoutCells.at(layout).plannedDevices.emplace(
-            id, openvlsi::PlannedDevice{id, planned.name, planned.schematicInstance, planned.x, planned.y, planned.width,
-                                   planned.height});
+            id, openvlsi::PlannedDevice{id, planned.name, planned.schematicInstance, planned.x, planned.y,
+                                        planned.width, planned.height});
     }
 
     const auto report = openvlsi::runLvs(fixture.project, fixture.schematic, layout);
@@ -340,8 +342,8 @@ TEST_CASE("LVS uses planned device model and terminal metadata") {
 
 TEST_CASE("LVS compares text SPICE netlists and rejects read-only layout cells") {
     auto fixture = makeFixture();
-    const auto text =
-        openvlsi::createTextSchematicCell(fixture.project, "top_text", openvlsi::genericPdkId, "R1 in out 1k\nC1 in out 1n\n");
+    const auto text = openvlsi::createTextSchematicCell(fixture.project, "top_text", openvlsi::genericPdkId,
+                                                        "R1 in out 1k\nC1 in out 1n\n");
     const auto report = openvlsi::runLvs(fixture.project, text, fixture.layout);
     CHECK(report.matched());
     CHECK(report.mismatches.empty());
@@ -389,9 +391,9 @@ TEST_CASE("LVS matches text X MOSFETs and PDK passive parameter names") {
     transistor.placeholder = false;
     layoutCell.plannedDevices.emplace(transistor.id, transistor);
 
-    const auto schematic = openvlsi::createTextSchematicCell(
-        project, "text_top", openvlsi::genericPdkId,
-        "R1 in out 1k\nC1 out 0 1n\nX1 out in 0 0 sg13_lv_nmos w=1u l=0.13u\n");
+    const auto schematic =
+        openvlsi::createTextSchematicCell(project, "text_top", openvlsi::genericPdkId,
+                                          "R1 in out 1k\nC1 out 0 1n\nX1 out in 0 0 sg13_lv_nmos w=1u l=0.13u\n");
     const auto report = openvlsi::runLvs(project, schematic, layout);
     CHECK(report.matched());
     CHECK(report.mismatches.empty());
@@ -404,7 +406,7 @@ TEST_CASE("LVS compares device parameters from a text SPICE netlist") {
             device.parameters.push_back({fixture.project.nextId(), "resistance", "2k"});
     }
     const auto matching = openvlsi::createTextSchematicCell(fixture.project, "spice_params", openvlsi::genericPdkId,
-                                                       "R1 in out 2k\nC1 in out 1n\n");
+                                                            "R1 in out 2k\nC1 in out 1n\n");
     CHECK(openvlsi::runLvs(fixture.project, matching, fixture.layout).matched());
 
     auto &text = fixture.project.schematicCells.at(matching);
@@ -431,8 +433,8 @@ TEST_CASE("LVS resolves numeric SPICE parameter expressions") {
     resistor.placeholder = false;
     layoutCell.plannedDevices.emplace(resistor.id, resistor);
 
-    const auto schematic =
-        openvlsi::createTextSchematicCell(project, "expression", openvlsi::genericPdkId, ".param BASE=1k\nR1 IN OUT {BASE*2}\n");
+    const auto schematic = openvlsi::createTextSchematicCell(project, "expression", openvlsi::genericPdkId,
+                                                             ".param BASE=1k\nR1 IN OUT {BASE*2}\n");
     const auto report = openvlsi::runLvs(project, schematic, layout);
     CHECK(report.matched());
     CHECK(!hasCategory(report, "parameter"));
@@ -464,8 +466,8 @@ TEST_CASE("LVS distinguishes multi-terminal pin assignments") {
     second.placeholder = false;
     layoutCell.plannedDevices.emplace(second.id, second);
 
-    const auto schematic =
-        openvlsi::createTextSchematicCell(project, "terminal_top", openvlsi::genericPdkId, "M1 D G S B nmos\nM2 D G S B nmos\n");
+    const auto schematic = openvlsi::createTextSchematicCell(project, "terminal_top", openvlsi::genericPdkId,
+                                                             "M1 D G S B nmos\nM2 D G S B nmos\n");
     CHECK(openvlsi::runLvs(project, schematic, layout).matched());
 
     auto &planned = project.layoutCells.at(layout).plannedDevices.at(transistor.id);
@@ -503,7 +505,8 @@ TEST_CASE("LVS expands multiplicity and matches renamed devices by topology") {
         resistor.placeholder = false;
         cell.plannedDevices.emplace(resistor.id, resistor);
     }
-    const auto spice = openvlsi::createTextSchematicCell(project, "top_spice", openvlsi::genericPdkId, "R1 in out 1k m=4\n");
+    const auto spice =
+        openvlsi::createTextSchematicCell(project, "top_spice", openvlsi::genericPdkId, "R1 in out 1k m=4\n");
     const auto report = openvlsi::runLvs(project, spice, layout);
     CHECK(report.matched());
     CHECK(std::none_of(report.mismatches.begin(), report.mismatches.end(), [](const openvlsi::LvsMismatch &mismatch) {
@@ -537,8 +540,10 @@ TEST_CASE("LVS derives layout connectivity from geometry, not planned links") {
     auto &childCell = project.layoutCells.at(child);
     childCell.library = true;
     childCell.device = "resistor";
-    openvlsi::addPort(project, child, "A", layer, {0, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::left);
-    openvlsi::addPort(project, child, "B", layer, {1000, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::right);
+    openvlsi::addPort(project, child, "A", layer, {0, 0, 200, 200}, openvlsi::PortDirection::inout,
+                      openvlsi::PortSide::left);
+    openvlsi::addPort(project, child, "B", layer, {1000, 0, 200, 200}, openvlsi::PortDirection::inout,
+                      openvlsi::PortSide::right);
 
     const auto layout = openvlsi::createLayoutCell(project, "top");
     openvlsi::addLayoutInstance(project, layout, child, "R1", 0, 0);
@@ -576,12 +581,12 @@ TEST_CASE("LVS parses gate-level SystemVerilog and rejects behavioral modules") 
     const auto aNet = openvlsi::createLayoutNet(project, layout, "a");
     const auto bNet = openvlsi::createLayoutNet(project, layout, "b");
     const auto yNet = openvlsi::createLayoutNet(project, layout, "y");
-    openvlsi::addPort(project, layout, "a", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, aNet,
-                 "a");
-    openvlsi::addPort(project, layout, "b", layer, {0, 200, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, bNet,
-                 "b");
-    openvlsi::addPort(project, layout, "y", layer, {800, 100, 100, 100}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
-                 yNet, "y");
+    openvlsi::addPort(project, layout, "a", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, aNet, "a");
+    openvlsi::addPort(project, layout, "b", layer, {0, 200, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, bNet, "b");
+    openvlsi::addPort(project, layout, "y", layer, {800, 100, 100, 100}, openvlsi::PortDirection::output,
+                      openvlsi::PortSide::right, yNet, "y");
     auto &layoutCell = project.layoutCells.at(layout);
     openvlsi::PlannedDevice gate;
     gate.id = project.nextId();
@@ -628,13 +633,14 @@ TEST_CASE("LVS flattens text SPICE subcircuits and compares top-level ports") {
     const auto layer = openvlsi::addLayer(project, "Metal1", 10);
     const auto inNet = openvlsi::createLayoutNet(project, layout, "IN");
     const auto outNet = openvlsi::createLayoutNet(project, layout, "OUT");
-    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet,
-                 "IN");
-    openvlsi::addPort(project, layout, "OUT", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
-                 outNet, "OUT");
+    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, inNet, "IN");
+    openvlsi::addPort(project, layout, "OUT", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output,
+                      openvlsi::PortSide::right, outNet, "OUT");
 
-    const auto text = openvlsi::createTextSchematicCell(
-        project, "filter", openvlsi::genericPdkId, ".subckt filter IN OUT\nR1 IN MID 1k\nC1 MID OUT 1n\n.ends filter\n");
+    const auto text =
+        openvlsi::createTextSchematicCell(project, "filter", openvlsi::genericPdkId,
+                                          ".subckt filter IN OUT\nR1 IN MID 1k\nC1 MID OUT 1n\n.ends filter\n");
     const auto report = openvlsi::runLvs(project, text, layout);
     CHECK(report.matched());
     CHECK(report.portsMatched == 2);
@@ -663,17 +669,17 @@ TEST_CASE("LVS resolves SPICE includes against the source file") {
     const auto layer = openvlsi::addLayer(project, "Metal1", 10);
     const auto inNet = openvlsi::createLayoutNet(project, layout, "IN");
     const auto outNet = openvlsi::createLayoutNet(project, layout, "OUT");
-    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet,
-                 "IN");
-    openvlsi::addPort(project, layout, "OUT", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
-                 outNet, "OUT");
+    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, inNet, "IN");
+    openvlsi::addPort(project, layout, "OUT", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output,
+                      openvlsi::PortSide::right, outNet, "OUT");
 
     const auto root = std::filesystem::temp_directory_path() / "openvlsi-lvs-include-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     std::ofstream(root / "filter.inc") << ".subckt filter IN OUT\nR1 IN MID 1k\nC1 MID OUT 1n\n.ends filter\n";
-    const auto text = openvlsi::createTextSchematicCell(project, "filter", openvlsi::genericPdkId, ".include \"filter.inc\"\n",
-                                                   (root / "top.sp").string());
+    const auto text = openvlsi::createTextSchematicCell(project, "filter", openvlsi::genericPdkId,
+                                                        ".include \"filter.inc\"\n", (root / "top.sp").string());
     auto report = openvlsi::runLvs(project, text, layout);
     CHECK(report.matched());
     CHECK(report.portsMatched == 2);
@@ -706,9 +712,9 @@ TEST_CASE("LVS flattens nested text SPICE subcircuit instances") {
     const auto layout = openvlsi::createLayoutFromSchematic(project, drawn, "nested_layout");
 
     const auto text = openvlsi::createTextSchematicCell(project, "nested_top", openvlsi::genericPdkId,
-                                                   ".subckt leaf_a A B\nR1 A B 1k\n.ends leaf_a\n"
-                                                   ".subckt leaf_b B C\nR2 B C 1k\n.ends leaf_b\n"
-                                                   "X1 IN MID leaf_a\nX2 MID OUT leaf_b\n");
+                                                        ".subckt leaf_a A B\nR1 A B 1k\n.ends leaf_a\n"
+                                                        ".subckt leaf_b B C\nR2 B C 1k\n.ends leaf_b\n"
+                                                        "X1 IN MID leaf_a\nX2 MID OUT leaf_b\n");
     const auto report = openvlsi::runLvs(project, text, layout);
     CHECK(report.matched());
     CHECK(report.mismatches.empty());
@@ -724,12 +730,12 @@ TEST_CASE("LVS merges SPICE global nets across subcircuit instances") {
     const auto midNet = openvlsi::createLayoutNet(project, layout, "MID");
     const auto outNet = openvlsi::createLayoutNet(project, layout, "OUT");
     const auto vddNet = openvlsi::createLayoutNet(project, layout, "VDD");
-    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet,
-                 "IN");
-    openvlsi::addPort(project, layout, "OUT", layer, {900, 0, 100, 100}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
-                 outNet, "OUT");
-    openvlsi::addPort(project, layout, "MID", layer, {450, 0, 100, 100}, openvlsi::PortDirection::inout, openvlsi::PortSide::left,
-                 midNet, "MID");
+    openvlsi::addPort(project, layout, "IN", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, inNet, "IN");
+    openvlsi::addPort(project, layout, "OUT", layer, {900, 0, 100, 100}, openvlsi::PortDirection::output,
+                      openvlsi::PortSide::right, outNet, "OUT");
+    openvlsi::addPort(project, layout, "MID", layer, {450, 0, 100, 100}, openvlsi::PortDirection::inout,
+                      openvlsi::PortSide::left, midNet, "MID");
     struct Planned {
         const char *name;
         const char *value;
@@ -751,15 +757,15 @@ TEST_CASE("LVS merges SPICE global nets across subcircuit instances") {
         project.layoutCells.at(layout).plannedDevices.emplace(device.id, device);
     }
     const auto schematic = openvlsi::createTextSchematicCell(project, "top", openvlsi::genericPdkId,
-                                                        ".global VDD\n"
-                                                        ".subckt leaf A B\n"
-                                                        "R1 A VDD 1k\n"
-                                                        "R2 B VDD 2k\n"
-                                                        ".ends leaf\n"
-                                                        ".subckt top IN MID OUT\n"
-                                                        "X1 IN MID leaf\n"
-                                                        "X2 MID OUT leaf\n"
-                                                        ".ends top\n");
+                                                             ".global VDD\n"
+                                                             ".subckt leaf A B\n"
+                                                             "R1 A VDD 1k\n"
+                                                             "R2 B VDD 2k\n"
+                                                             ".ends leaf\n"
+                                                             ".subckt top IN MID OUT\n"
+                                                             "X1 IN MID leaf\n"
+                                                             "X2 MID OUT leaf\n"
+                                                             ".ends top\n");
     const auto report = openvlsi::runLvs(project, schematic, layout);
     CHECK(report.matched());
 }
@@ -768,17 +774,17 @@ TEST_CASE("LVS compares SystemVerilog module ports") {
     openvlsi::Project project;
     project.identity = "lvs-hdl";
     project.name = "lvs-hdl";
-    const auto source =
-        openvlsi::createSystemVerilogCell(project, "buffer", openvlsi::genericPdkId,
-                                     "module buffer(input logic in, output logic out);\nassign out = in;\nendmodule\n");
+    const auto source = openvlsi::createSystemVerilogCell(
+        project, "buffer", openvlsi::genericPdkId,
+        "module buffer(input logic in, output logic out);\nassign out = in;\nendmodule\n");
     const auto layout = openvlsi::createLayoutCell(project, "buffer_layout");
     const auto layer = openvlsi::addLayer(project, "Metal1", 10);
     const auto inNet = openvlsi::createLayoutNet(project, layout, "in");
     const auto outNet = openvlsi::createLayoutNet(project, layout, "out");
-    openvlsi::addPort(project, layout, "in", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet,
-                 "in");
-    openvlsi::addPort(project, layout, "out", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
-                 outNet, "out");
+    openvlsi::addPort(project, layout, "in", layer, {0, 0, 100, 100}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, inNet, "in");
+    openvlsi::addPort(project, layout, "out", layer, {0, 0, 100, 100}, openvlsi::PortDirection::output,
+                      openvlsi::PortSide::right, outNet, "out");
     const auto report = openvlsi::runLvs(project, source, layout);
     CHECK(report.matched());
     CHECK(report.portsMatched == 2);
@@ -787,7 +793,7 @@ TEST_CASE("LVS compares SystemVerilog module ports") {
 
 namespace {
 openvlsi::ObjectId addSchematicPort(openvlsi::Project &project, openvlsi::ObjectId cell, const std::string &type,
-                               const std::string &name, const std::string &netName) {
+                                    const std::string &name, const std::string &netName) {
     const auto symbol = openvlsi::addSymbol(project, cell, type);
     auto &symbolEntry = project.schematicCells.at(cell).symbols.at(symbol);
     const auto pin = project.nextId();
@@ -810,7 +816,8 @@ openvlsi::ObjectId layoutNetNamed(const openvlsi::Project &project, openvlsi::Ob
     return 0;
 }
 
-openvlsi::ObjectId schematicInstanceNamed(const openvlsi::Project &project, openvlsi::ObjectId cell, const std::string &name) {
+openvlsi::ObjectId schematicInstanceNamed(const openvlsi::Project &project, openvlsi::ObjectId cell,
+                                          const std::string &name) {
     for (const auto &[id, instance] : project.schematicCells.at(cell).instances) {
         if (instance.name == name)
             return id;
@@ -834,9 +841,9 @@ TEST_CASE("LVS matches top-level schematic ports to layout ports") {
     if (inNet == 0 || outNet == 0)
         return;
     const auto input = openvlsi::addPort(fixture.project, fixture.layout, "A", layer, {0, 0, 400, 400},
-                                    openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet, "A");
+                                         openvlsi::PortDirection::input, openvlsi::PortSide::left, inNet, "A");
     const auto output = openvlsi::addPort(fixture.project, fixture.layout, "B", layer, {800, 0, 400, 400},
-                                     openvlsi::PortDirection::output, openvlsi::PortSide::right, outNet, "B");
+                                          openvlsi::PortDirection::output, openvlsi::PortSide::right, outNet, "B");
     CHECK(input != 0);
 
     // Ports produced by Convert to Pin carry the schematic-instance link.
@@ -875,7 +882,7 @@ TEST_CASE("LVS matches top-level schematic ports to layout ports") {
     CHECK(hasCategory(report, "missing-port"));
 
     const auto extra = openvlsi::addPort(fixture.project, fixture.layout, "C", layer, {0, 800, 400, 400},
-                                    openvlsi::PortDirection::inout, openvlsi::PortSide::top, 0, "C");
+                                         openvlsi::PortDirection::inout, openvlsi::PortSide::top, 0, "C");
     CHECK(extra != 0);
     report = openvlsi::runLvs(fixture.project, fixture.schematic, fixture.layout);
     CHECK(hasCategory(report, "missing-port"));
